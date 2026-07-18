@@ -104,7 +104,7 @@ dev.bat open       浏览器打开前端
 
 - 迁移文件在 `backend/migrations/`，纯 SQL，按文件名序号执行；
 - `npm run dev` / `npm start` / 构建前都会先自动执行 `scripts/embed-migrations.js`，把 SQL 内嵌进 `src/embedded-migrations.js`；
-- 服务启动时自动比对 `schema_migrations` 表，只执行未应用过的迁移（含 checksum 校验，改过的旧迁移会报错而不是悄悄重跑）；
+- 服务启动时自动比对 `schema_migrations` 表，只执行未应用过的迁移（含 checksum 校验，按 LF 行尾归一化计算；已应用迁移内容漂移会警告跳过，设 `MIGRATION_STRICT=1` 可改为报错）；
 - 手工执行迁移：`cd backend && npm run migrate`。
 
 **新增迁移的流程**：在 `migrations/` 新建 `0XX_描述.sql`（序号递增）→ 重启后端即可，无需其他操作。
