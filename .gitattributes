@@ -1,0 +1,2 @@
+# SQL 迁移文件统一用 LF 检出，避免 Windows autocrlf 导致云端/本地校验和不一致
+*.sql text eol=lf
