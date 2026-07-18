@@ -1,0 +1,46 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - '.github/workflows/build-exe.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: build-exe
+  cancel-in-progress: true
+
+jobs:
+  build-exe:
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 安装后端依赖
+        working-directory: backend
+        run: npm ci
+
+      - name: 安装前端依赖
+        working-directory: frontend
+        run: npm ci
+
+      - name: 构建 exe（自动嵌入迁移 + 构建前端 + pkg 打包）
+        working-directory: backend
+        run: npm run build:exe
+
+      - name: 上传 xgpy.exe 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: xgpy-exe-${{ github.run_number }}
+          path: backend/dist/xgpy.exe
+          retention-days: 30
+          if-no-files-found: error
