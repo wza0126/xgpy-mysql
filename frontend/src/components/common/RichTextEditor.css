@@ -1,0 +1,102 @@
+.rich-text-editor-wrapper {
+  border: 1px solid #d1d5db;
+  border-radius: 0.5rem;
+  overflow: hidden;
+  background: white;
+}
+
+.rich-text-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 6px 8px;
+  border-bottom: 1px solid #e5e7eb;
+  background: #f9fafb;
+}
+
+.toolbar-btn {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  color: #374151;
+  font-size: 14px;
+  transition: all 0.15s;
+}
+
+.toolbar-btn:hover:not(:disabled) {
+  background: #e5e7eb;
+}
+
+.toolbar-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.toolbar-btn.is-active {
+  background: #e0e7ff;
+  color: #4f46e5;
+}
+
+.toolbar-divider {
+  width: 1px;
+  height: 20px;
+  background: #d1d5db;
+  margin: 0 4px;
+  align-self: center;
+}
+
+.rich-text-content {
+  padding: 12px 16px;
+}
+
+.rich-text-content .ProseMirror {
+  outline: none;
+  min-height: 100%;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.rich-text-content .ProseMirror p {
+  margin: 0.5em 0;
+  white-space: pre-wrap;
+}
+
+.rich-text-content .ProseMirror p:first-child {
+  margin-top: 0;
+}
+
+.rich-text-content .ProseMirror p:last-child {
+  margin-bottom: 0;
+}
+
+.rich-text-content .ProseMirror ul,
+.rich-text-content .ProseMirror ol {
+  padding-left: 1.5em;
+  margin: 0.5em 0;
+}
+
+.rich-text-content .ProseMirror li {
+  margin: 0.25em 0;
+}
+
+.rich-text-content .ProseMirror img.rich-text-image {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+  margin: 8px 0;
+  display: block;
+}
+
+.rich-text-content .ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  color: #9ca3af;
+  pointer-events: none;
+  height: 0;
+}

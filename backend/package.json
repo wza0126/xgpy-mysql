@@ -1,0 +1,42 @@
+{
+  "name": "xgpy-backend",
+  "version": "1.0.0",
+  "description": "XGPY Learning Platform Backend",
+  "main": "src/index.js",
+  "scripts": {
+    "predev": "node scripts/embed-migrations.js",
+    "prestart": "node scripts/embed-migrations.js",
+    "premigrate": "node scripts/embed-migrations.js",
+    "premigrate:dev": "node scripts/embed-migrations.js",
+    "premigrate:prod": "node scripts/embed-migrations.js",
+    "prebuild": "node scripts/embed-migrations.js",
+    "prebuild:exe": "node scripts/embed-migrations.js",
+    "build:frontend": "npm --prefix ../frontend run build",
+    "build": "ncc build src/index.js -o dist --target es2020 ; Move-Item -Force dist/index.js dist/server.cjs",
+    "build:exe": "npm run build:frontend && node scripts/prepare-exe-assets.js && pkg --config package.json src/exe-entry.js --targets node22-win-x64 --output dist/xgpy.exe --compress GZip",
+    "migrate": "node src/migrate.js",
+    "migrate:dev": "cross-env NODE_ENV=development node src/migrate.js",
+    "migrate:prod": "cross-env NODE_ENV=production node src/migrate.js",
+    "start": "cross-env NODE_ENV=production node src/index.js",
+    "dev": "cross-env NODE_ENV=development nodemon src/index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "cross-env": "^7.0.3",
+    "dotenv": "^16.6.1",
+    "express": "^4.18.2",
+    "multer": "^1.4.5-lts.1",
+    "mysql2": "^3.6.5",
+    "uuid": "^14.0.0"
+  },
+  "devDependencies": {
+    "@vercel/ncc": "^0.38.4",
+    "@yao-pkg/pkg": "^6.19.0",
+    "nodemon": "^3.0.2"
+  },
+  "pkg": {
+    "assets": [
+      "exe-assets/frontend-dist/**/*"
+    ]
+  }
+}

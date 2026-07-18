@@ -1,0 +1,31 @@
+# 依赖
+node_modules/
+
+# 构建产物
+backend/dist/
+frontend/dist/
+backend/exe-assets/
+
+# 环境配置与密钥（含数据库密码，绝不上传）
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# 用户上传的文件（业务数据，不属于代码）
+backend/uploads/
+
+# 数据库备份（含账号散列与 API 密钥）
+*.sql
+
+# 日志
+*.log
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 编辑器/IDE 配置
+.trae/
+.vscode/
+.idea/

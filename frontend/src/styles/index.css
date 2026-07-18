@@ -1,0 +1,337 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  --bg-color: #ffffff;
+  --text-color: #000000;
+  --text-secondary: #8a8a8a;
+}
+
+:root.dark,
+[data-theme='dark'] {
+  --bg-color: #1a1a1a;
+  --text-color: #ffffff;
+  --text-secondary: #9ca3af;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: var(--bg-color);
+  color: var(--text-color);
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  height: 8px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: #1e293b;
+  border-radius: 4px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: #475569;
+  border-radius: 4px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
+/* Markdown 渲染样式 */
+.markdown-content {
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: inherit;
+}
+
+.markdown-content h1 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin: 1rem 0 0.75rem 0;
+  color: #1f2937;
+}
+
+.markdown-content h2 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin: 0.875rem 0 0.5rem 0;
+  color: #374151;
+}
+
+.markdown-content h3 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 0.75rem 0 0.5rem 0;
+  color: #4b5563;
+}
+
+.markdown-content p {
+  margin: 0.5rem 0;
+}
+
+.markdown-content ul,
+.markdown-content ol {
+  margin: 0.5rem 0;
+  padding-left: 1.5rem;
+}
+
+.markdown-content li {
+  margin: 0.25rem 0;
+}
+
+.markdown-content strong {
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.markdown-content em {
+  font-style: italic;
+}
+
+.markdown-content code {
+  background-color: #f3f4f6;
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 0.875em;
+  color: #dc2626;
+}
+
+.markdown-content pre {
+  background-color: #1f2937;
+  color: #e5e7eb;
+  padding: 1rem;
+  border-radius: 0.5rem;
+  overflow-x: auto;
+  margin: 0.75rem 0;
+}
+
+.markdown-content pre code {
+  background-color: transparent;
+  padding: 0;
+  color: inherit;
+  font-size: 0.875rem;
+}
+
+.markdown-content blockquote {
+  border-left: 4px solid #3b82f6;
+  padding-left: 1rem;
+  margin: 0.75rem 0;
+  color: #6b7280;
+  font-style: italic;
+}
+
+.markdown-content a {
+  color: #3b82f6;
+  text-decoration: underline;
+}
+
+.markdown-content a:hover {
+  color: #2563eb;
+}
+
+.markdown-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.75rem 0;
+}
+
+.markdown-content th,
+.markdown-content td {
+  border: 1px solid #e5e7eb;
+  padding: 0.5rem;
+  text-align: left;
+}
+
+.markdown-content th {
+  background-color: #f9fafb;
+  font-weight: 600;
+}
+
+.markdown-content hr {
+  border: none;
+  border-top: 1px solid #e5e7eb;
+  margin: 1rem 0;
+}
+
+.markdown-content img {
+  max-width: 100%;
+  border-radius: 0.375rem;
+}
+
+.question-rich-content {
+  white-space: pre-wrap;
+}
+
+.question-rich-content p {
+  margin: 0.5em 0;
+  line-height: 1.7;
+}
+
+.question-rich-content p:first-child {
+  margin-top: 0;
+}
+
+.question-rich-content p:last-child {
+  margin-bottom: 0;
+}
+
+.question-rich-content img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.375rem;
+  margin: 0.5rem 0;
+  display: block;
+}
+
+.question-rich-content ul,
+.question-rich-content ol {
+  padding-left: 1.5em;
+  margin: 0.5em 0;
+}
+
+.question-rich-content li {
+  margin: 0.25em 0;
+  line-height: 1.7;
+}
+
+.question-rich-content strong,
+.question-rich-content b {
+  font-weight: 600;
+}
+
+.question-rich-content em,
+.question-rich-content i {
+  font-style: italic;
+}
+
+.question-rich-content u {
+  text-decoration: underline;
+}
+
+/* ==================== 窗口皮肤动画 ==================== */
+
+/* 流光渐变动画（紫霞幻彩） */
+@keyframes skin-shimmer {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+
+.skin-shimmer {
+  background-size: 200% 200%;
+  animation: skin-shimmer 3s linear infinite;
+}
+
+/* 微光脉冲动画（日落橙金） */
+@keyframes skin-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.85; }
+}
+
+.skin-pulse {
+  animation: skin-pulse 2.5s ease-in-out infinite;
+}
+
+/* 金色流光横扫动画（流光金黑） */
+@keyframes skin-gold-flow {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+.skin-gold-flow-bar::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 50%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 215, 0, 0.4), transparent);
+  animation: skin-gold-flow 3s linear infinite;
+  pointer-events: none;
+}
+
+/* 金粉粒子飘落（流光金黑） */
+@keyframes skin-gold-particle {
+  0% {
+    transform: translateY(-10px) translateX(0);
+    opacity: 0;
+  }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% {
+    transform: translateY(40px) translateX(10px);
+    opacity: 0;
+  }
+}
+
+.skin-gold-particle {
+  position: absolute;
+  width: 3px;
+  height: 3px;
+  background: #fbbf24;
+  border-radius: 50%;
+  box-shadow: 0 0 4px #fbbf24;
+  animation: skin-gold-particle 3s linear infinite;
+  pointer-events: none;
+}
+
+/* 星河闪烁动画（星河璀璨） */
+@keyframes skin-galaxy-twinkle {
+  0%, 100% { opacity: 0.3; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.2); }
+}
+
+.skin-galaxy-star {
+  position: absolute;
+  background: white;
+  border-radius: 50%;
+  animation: skin-galaxy-twinkle 2s ease-in-out infinite;
+  pointer-events: none;
+}
+
+/* 流星划过（星河璀璨） */
+@keyframes skin-galaxy-meteor {
+  0% {
+    transform: translateX(-20px) translateY(0) rotate(-45deg);
+    opacity: 0;
+  }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% {
+    transform: translateX(120px) translateY(40px) rotate(-45deg);
+    opacity: 0;
+  }
+}
+
+.skin-galaxy-meteor {
+  position: absolute;
+  width: 30px;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, #22d3ee, white);
+  border-radius: 2px;
+  animation: skin-galaxy-meteor 4s linear infinite;
+  pointer-events: none;
+}
+
+/* 边框光晕脉冲 */
+@keyframes skin-border-glow {
+  0%, 100% { box-shadow: 0 0 8px currentColor; }
+  50% { box-shadow: 0 0 20px currentColor; }
+}
+
+.skin-border-glow {
+  animation: skin-border-glow 2s ease-in-out infinite;
+}
+

@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>XGPY 授权码生成器</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.card {
+  background: rgba(255,255,255,0.97);
+  border-radius: 20px;
+  padding: 36px 28px;
+  max-width: 560px;
+  width: 100%;
+  box-shadow: 0 25px 60px rgba(0,0,0,0.5);
+}
+.header {
+  text-align: center;
+  margin-bottom: 32px;
+}
+.header .icon {
+  width: 64px; height: 64px;
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+  border-radius: 16px;
+  display: inline-flex; align-items: center; justify-content: center;
+  margin-bottom: 16px;
+}
+.header .icon svg { width: 32px; height: 32px; fill: white; }
+.header h1 { font-size: 22px; color: #1f2937; font-weight: 700; }
+.header p { font-size: 14px; color: #6b7280; margin-top: 6px; }
+.form-group { margin-bottom: 20px; }
+.form-group label {
+  display: block; font-size: 14px; font-weight: 600; color: #374151;
+  margin-bottom: 8px;
+}
+.form-group input {
+  width: 100%; padding: 14px 16px;
+  border: 2px solid #e5e7eb; border-radius: 12px;
+  font-size: 16px; font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  letter-spacing: 1px; transition: border-color 0.2s;
+  -webkit-appearance: none; appearance: none;
+}
+.form-group input:focus {
+  outline: none; border-color: #f59e0b; box-shadow: 0 0 0 3px rgba(245,158,11,0.15);
+}
+.form-row {
+  display: flex; gap: 16px;
+}
+.form-row .form-group { flex: 1; }
+.btn {
+  width: 100%; padding: 14px; border: none; border-radius: 12px;
+  font-size: 16px; font-weight: 600; cursor: pointer;
+  transition: all 0.2s; -webkit-appearance: none; appearance: none;
+}
+.btn-primary { background: linear-gradient(135deg, #f59e0b, #d97706); color: white; }
+.btn-primary:hover { transform: translateY(-1px); box-shadow: 0 8px 20px rgba(245,158,11,0.35); }
+.btn-primary:active { transform: translateY(0); }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+.btn-copy {
+  background: #f3f4f6; color: #374151; padding: 10px 20px; border-radius: 10px;
+  font-size: 14px; border: none; cursor: pointer; transition: background 0.2s;
+  -webkit-appearance: none; appearance: none;
+}
+.btn-copy:hover { background: #e5e7eb; }
+.result {
+  margin-top: 24px; padding: 20px;
+  background: linear-gradient(135deg, #fffbeb, #fef3c7);
+  border: 2px solid #fcd34d; border-radius: 14px;
+  display: none;
+}
+.result.show { display: block; }
+.result .label { font-size: 13px; color: #92400e; font-weight: 600; margin-bottom: 8px; }
+.result .code {
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 16px; font-weight: 700; color: #78350f; letter-spacing: 1px;
+  word-break: break-all; line-height: 1.5;
+  user-select: all; -webkit-user-select: all;
+}
+.result .expiry-info {
+  font-size: 14px; color: #92400e; margin: 12px 0; padding: 10px 14px;
+  background: rgba(255,255,255,0.6); border-radius: 10px; text-align: center;
+}
+.result .expiry-info span { font-weight: 700; }
+.result .actions { margin-top: 14px; display: flex; gap: 10px; }
+.result .actions button { flex: 1; }
+.result .tip { font-size: 12px; color: #92400e; margin-top: 12px; }
+.result .code-explanation {
+  font-size: 11px; color: #a16207; margin-top: 8px; line-height: 1.5;
+}
+.example { margin-top: 16px; padding: 12px; background: #f9fafb; border-radius: 10px; }
+.example p { font-size: 13px; color: #6b7280; }
+.example code {
+  display: block; margin-top: 6px;
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 12px; color: #374151; word-break: break-all;
+  background: #e5e7eb; padding: 6px 10px; border-radius: 6px;
+}
+.footer { text-align: center; margin-top: 24px; font-size: 12px; color: #9ca3af; }
+.alert {
+  position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+  background: #10b981; color: white; padding: 12px 24px;
+  border-radius: 12px; font-size: 14px; font-weight: 500;
+  box-shadow: 0 8px 24px rgba(16,185,129,0.3);
+  opacity: 0; transition: opacity 0.3s; pointer-events: none;
+  z-index: 100;
+}
+.alert.show { opacity: 1; }
+.alert.error { background: #ef4444; box-shadow: 0 8px 24px rgba(239,68,68,0.3); }
+.clear-btn {
+  background: none; border: 1px solid #d1d5db; color: #6b7280;
+  padding: 6px 12px; border-radius: 8px; font-size: 13px;
+  cursor: pointer; transition: all 0.2s; margin-top: 12px;
+  -webkit-appearance: none; appearance: none;
+}
+.clear-btn:hover { background: #f3f4f6; border-color: #9ca3af; }
+</style>
+</head>
+<body>
+<div id="alert" class="alert">已复制到剪贴板</div>
+<div class="card">
+  <div class="header">
+    <div class="icon">
+      <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+    </div>
+    <h1>XGPY 授权码生成器</h1>
+    <p>输入机器码，生成内嵌有效期的授权码</p>
+  </div>
+
+  <div class="form-group">
+    <label for="machineCode">机器码</label>
+    <input type="text" id="machineCode" placeholder="例如：DB6F-D268-1521-445B-FB0E-493B-2D43-64F8" autocomplete="off" autocapitalize="characters" spellcheck="false">
+  </div>
+
+  <div class="form-row">
+    <div class="form-group">
+      <label for="months">授权时长（月）</label>
+      <input type="number" id="months" value="13" min="1" max="120">
+    </div>
+    <div class="form-group">
+      <label>到期时间预览</label>
+      <input type="text" id="expiryPreview" readonly style="background:#f3f4f6;color:#6b7280;">
+    </div>
+  </div>
+
+  <button class="btn btn-primary" id="generateBtn" onclick="generateLicense()">
+    生成授权码
+  </button>
+
+  <div class="result" id="result">
+    <div class="label">授权码</div>
+    <div class="code" id="licenseCode"></div>
+    <div class="expiry-info">
+      📅 有效期至：<span id="expiryDate"></span>
+    </div>
+    <div class="actions">
+      <button class="btn-copy" onclick="copyLicense()">复制授权码</button>
+      <button class="clear-btn" onclick="clearAll()">清空</button>
+    </div>
+    <div class="code-explanation">
+      授权码使用 AES-256-CBC 加密，内嵌机器码和到期时间。激活时系统解密验证，过期授权码无法激活。
+    </div>
+  </div>
+
+  <div class="example">
+    <p>📌 此授权码由 AES-256-CBC 加密生成，内嵌有效期时间戳。绑定机器码 + 到期时间，过期即失效。</p>
+    <code>调用 XGPY 教师后台 → 系统配置 → 系统授权 → 获取机器码，粘贴到上方输入框，设置授权时长后生成</code>
+  </div>
+
+  <div class="footer">XGPY License Generator v3.0（有效期内嵌式）</div>
+</div>
+
+<script>
+const LICENSE_SECRET = 'xgpy_2024_license_salt_!@#$';
+
+function formatCode(hex) {
+  const parts = [];
+  for (let i = 0; i < hex.length; i += 4) {
+    parts.push(hex.substring(i, i + 4));
+  }
+  return parts.join('-').toUpperCase();
+}
+
+function showAlert(msg, isError) {
+  const el = document.getElementById('alert');
+  el.textContent = msg;
+  el.className = 'alert' + (isError ? ' error' : '');
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 2000);
+}
+
+async function getAesKey() {
+  const encoder = new TextEncoder();
+  const hashBuffer = await crypto.subtle.digest('SHA-256', encoder.encode(LICENSE_SECRET + '_aes_key'));
+  return crypto.subtle.importKey('raw', hashBuffer, { name: 'AES-CBC' }, false, ['encrypt']);
+}
+
+async function encryptLicenseData(machineCode, expireTimestamp) {
+  const key = await getAesKey();
+  const iv = crypto.getRandomValues(new Uint8Array(16));
+  const plaintext = machineCode + '|' + expireTimestamp;
+
+  const encrypted = await crypto.subtle.encrypt(
+    { name: 'AES-CBC', iv },
+    key,
+    new TextEncoder().encode(plaintext)
+  );
+
+  const combined = new Uint8Array(iv.length + encrypted.byteLength);
+  combined.set(iv);
+  combined.set(new Uint8Array(encrypted), iv.length);
+
+  return Array.from(combined)
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('')
+    .toUpperCase();
+}
+
+function updateExpiryPreview() {
+  const months = parseInt(document.getElementById('months').value) || 13;
+  const d = new Date();
+  d.setMonth(d.getMonth() + months);
+  document.getElementById('expiryPreview').value = d.toLocaleDateString('zh-CN');
+}
+
+document.getElementById('months').addEventListener('input', updateExpiryPreview);
+updateExpiryPreview();
+
+async function generateLicense() {
+  const input = document.getElementById('machineCode');
+  const btn = document.getElementById('generateBtn');
+  const code = input.value.trim().toUpperCase();
+
+  if (!code) {
+    showAlert('请输入机器码', true);
+    input.focus();
+    return;
+  }
+
+  const clean = code.replace(/-/g, '');
+  if (clean.length !== 32) {
+    showAlert('机器码格式不正确，应为32位十六进制字符', true);
+    return;
+  }
+
+  const months = parseInt(document.getElementById('months').value) || 13;
+
+  btn.disabled = true;
+  btn.textContent = '生成中...';
+
+  try {
+    const expireDate = new Date();
+    expireDate.setMonth(expireDate.getMonth() + months);
+    const encrypted = await encryptLicenseData(clean, expireDate.getTime());
+    const licenseCode = formatCode(encrypted);
+
+    document.getElementById('licenseCode').textContent = licenseCode;
+    document.getElementById('expiryDate').textContent = expireDate.toLocaleDateString('zh-CN') + '（' + months + '个月）';
+    document.getElementById('result').classList.add('show');
+    showAlert('授权码生成成功！');
+  } catch (err) {
+    showAlert('生成失败: ' + err.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '生成授权码';
+  }
+}
+
+async function copyLicense() {
+  const text = document.getElementById('licenseCode').textContent;
+  if (!text) return;
+
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    showAlert('授权码已复制到剪贴板');
+  } catch {
+    showAlert('复制失败，请手动选择复制', true);
+  }
+}
+
+function clearAll() {
+  document.getElementById('machineCode').value = '';
+  document.getElementById('result').classList.remove('show');
+  document.getElementById('licenseCode').textContent = '';
+  document.getElementById('expiryDate').textContent = '';
+  document.getElementById('machineCode').focus();
+  updateExpiryPreview();
+}
+
+document.getElementById('machineCode').addEventListener('input', function(e) {
+  let val = this.value.toUpperCase().replace(/[^0-9A-F]/g, '');
+  const parts = [];
+  for (let i = 0; i < val.length && i < 32; i += 4) {
+    parts.push(val.substring(i, i + 4));
+  }
+  this.value = parts.join('-');
+});
+
+document.getElementById('machineCode').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') generateLicense();
+});
+</script>
+</body>
+</html>
