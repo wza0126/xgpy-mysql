@@ -22,7 +22,9 @@ const licenseManager = new LicenseManager(pool);
 let notificationScheduler = null;
 
 // 确保上传文件夹存在（使用脚本所在目录，不依赖工作目录）
-const uploadsDir = path.join(__dirname, '..', 'uploads');
+// pkg 打包成 exe 后 __dirname 指向只读快照，运行时目录要以 exe 所在目录为准
+const appBaseDir = process.pkg ? path.dirname(process.execPath) : path.join(__dirname, '..');
+const uploadsDir = path.join(appBaseDir, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
