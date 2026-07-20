@@ -200,6 +200,17 @@ function checkTableLicense(tableName, method) {
   return feature;
 }
 
+// VIP 模块授权管控：课堂点名（教师端/学生端/公开页全组接口）、数据分析
+// 授权为整机开关：试用期内全开，过期未激活则整组 403
+app.use('/api/teacher/roll-call', requireLicense(FEATURES.ROLL_CALL));
+app.use('/api/student/roll-call', requireLicense(FEATURES.ROLL_CALL));
+app.use('/api/public/roll-call', requireLicense(FEATURES.ROLL_CALL));
+
+// 数据分析入口校验（分析数据来自通用表接口无法整组拦截，前端进入模块前先调此接口）
+app.get('/api/teacher/analytics/access', authenticate, requireTeacher, requireLicense(FEATURES.ANALYTICS), (req, res) => {
+  res.json({ data: { allowed: true }, error: null });
+});
+
 function formatRow(row, forWriting = false) {
   const formatted = { ...row };
   

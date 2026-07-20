@@ -61,6 +61,7 @@ export function useRollCall(classId: string | null, mode: RollCallMode = 'teache
   const [error, setError] = useState<string | null>(null);
   const [selectedSeatNumber, setSelectedSeatNumber] = useState<number | null>(null);
   const [ipRestriction, setIpRestriction] = useState(false);
+  const [licenseDenied, setLicenseDenied] = useState(false);
   const pollRef = useRef<number | null>(null);
 
   const apiPrefix = mode === 'teacher' ? '/api/teacher/roll-call' : '/api/student/roll-call';
@@ -72,6 +73,10 @@ export function useRollCall(classId: string | null, mode: RollCallMode = 'teache
         : `${API_CONFIG.apiUrl}${apiPrefix}/students`;
       const res = await fetch(url, { headers: authHeaders() });
       const json = await res.json();
+      if (res.status === 403 && json.licenseStatus) {
+        setLicenseDenied(true);
+        return;
+      }
       if (json.error) {
         console.error('loadStudents error:', json.error);
         setError(json.error);
@@ -91,6 +96,10 @@ export function useRollCall(classId: string | null, mode: RollCallMode = 'teache
         : `${API_CONFIG.apiUrl}${apiPrefix}/seating`;
       const res = await fetch(url, { headers: authHeaders() });
       const json = await res.json();
+      if (res.status === 403 && json.licenseStatus) {
+        setLicenseDenied(true);
+        return;
+      }
       if (json.error) {
         console.error('loadSeating error:', json.error);
         setError(json.error);
@@ -467,6 +476,7 @@ export function useRollCall(classId: string | null, mode: RollCallMode = 'teache
     setSelectedSeatNumber,
     isLocked: layout.is_locked,
     ipRestriction,
+    licenseDenied,
     bindIp,
     bindAllIp,
     toggleIpRestriction,

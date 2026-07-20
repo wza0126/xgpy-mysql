@@ -251,6 +251,23 @@ export const RollCallApp: React.FC<RollCallAppProps> = ({ onClose, mode = 'teach
   const onlineCount = rollCall.students.filter((s) => s.is_online).length;
   const assignedCount = rollCall.seats.filter((s) => s.student_id).length;
 
+  // 授权到期/未激活：整组接口被 403 拦截，显示锁定界面
+  if (rollCall.licenseDenied) {
+    return (
+      <div className="h-full flex flex-col items-center justify-center bg-slate-950 text-slate-200 p-8">
+        <i className="fa-solid fa-lock text-6xl text-amber-500 mb-6"></i>
+        <h2 className="text-xl font-bold mb-2">课堂点名为授权功能</h2>
+        <p className="text-sm text-slate-400 mb-1">系统授权已到期或尚未激活，激活后即可继续使用</p>
+        <p className="text-xs text-slate-500">请联系平台提供方获取授权，或在 系统配置 → 授权管理 中输入授权码</p>
+        {onClose && (
+          <button onClick={onClose} className="mt-6 px-6 py-2 bg-slate-800 hover:bg-slate-700 rounded-lg text-sm transition-colors">
+            关闭
+          </button>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="h-full flex flex-col bg-slate-950 text-slate-200">
       <Toolbar

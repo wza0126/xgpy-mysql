@@ -18,6 +18,8 @@ const FEATURES = {
   AI: 'ai',
   PET: 'pet',
   PRIZES: 'prizes',
+  ANALYTICS: 'analytics',
+  ROLL_CALL: 'roll_call',
 };
 
 const TIME_API_URLS = [

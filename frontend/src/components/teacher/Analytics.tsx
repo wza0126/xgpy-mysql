@@ -4,6 +4,7 @@ import { backendClient } from '../../api/backendClient';
 import { Profile, Class, StudentAnswer, TestRecord, StudentPet } from '../../types';
 import { useAuth } from '../../hooks/useAuth';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
+import { API_CONFIG } from '../../api/config';
 
 interface StudentWithStats extends Profile {
   class?: Class;
@@ -26,11 +27,27 @@ export const Analytics: React.FC = () => {
     petAdoptionRate: 0,
   });
   const { profile } = useAuth();
+  const [licenseDenied, setLicenseDenied] = useState(false);
 
   useEffect(() => {
-    if (profile) {
-      fetchClasses();
-    }
+    if (!profile) return;
+    // 数据分析为授权功能：进入模块前先校验授权状态
+    (async () => {
+      try {
+        const token = localStorage.getItem('xgpy_token');
+        const res = await fetch(`${API_CONFIG.apiUrl}/api/teacher/analytics/access`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (res.status === 403) {
+          setLicenseDenied(true);
+          setLoading(false);
+          return;
+        }
+        fetchClasses();
+      } catch {
+        fetchClasses();
+      }
+    })();
   }, [profile]);
 
   useEffect(() => {
@@ -159,6 +176,17 @@ export const Analytics: React.FC = () => {
   ].filter((d) => d.value > 0);
 
   const COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A'];
+
+  if (licenseDenied) {
+    return (
+      <div className="flex flex-col items-center justify-center h-96 text-center">
+        <i className="fa-solid fa-lock text-6xl text-amber-500 mb-6"></i>
+        <h2 className="text-xl font-bold text-gray-800 mb-2">学情分析为授权功能</h2>
+        <p className="text-sm text-gray-500 mb-1">系统授权已到期或尚未激活，激活后即可继续使用</p>
+        <p className="text-xs text-gray-400">请联系平台提供方获取授权，或在 系统配置 → 授权管理 中输入授权码</p>
+      </div>
+    );
+  }
 
   if (loading) {
     return (
