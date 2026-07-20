@@ -211,6 +211,379 @@ app.get('/api/teacher/analytics/access', authenticate, requireTeacher, requireLi
   res.json({ data: { allowed: true }, error: null });
 });
 
+// ==================== 数据分析模块：学情分析接口 ====================
+
+// 校验班级归属当前教师，失败时已写响应并返回 false
+async function assertTeacherOwnsClass(req, res, classId) {
+  const [classRows] = await pool.query('SELECT id, teacher_id FROM classes WHERE id = ?', [classId]);
+  if (classRows.length === 0) {
+    res.status(404).json({ data: null, error: '班级不存在' });
+    return false;
+  }
+  if (classRows[0].teacher_id !== req.user.userId) {
+    res.status(403).json({ data: null, error: '无权限访问该班级' });
+    return false;
+  }
+  return true;
+}
+
+// 去 HTML 标签并压缩空白
+function stripHtml(html) {
+  if (!html || typeof html !== 'string') return '';
+  return html.replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// 1. 全班错题排行 TOP 10
+app.get('/api/teacher/analytics/wrong-questions/:classId', authenticate, requireTeacher, requireLicense(FEATURES.ANALYTICS), async (req, res) => {
+  try {
+    const { classId } = req.params;
+    if (!(await assertTeacherOwnsClass(req, res, classId))) return;
+
+    // 该班学生每题的错误次数与总作答数，按错误次数降序取前 10
+    const [rows] = await pool.query(`
+      SELECT sa.question_id,
+        SUM(CASE WHEN sa.is_correct = 0 THEN 1 ELSE 0 END) AS wrong_count,
+        COUNT(*) AS total_attempts,
+        SUM(sa.is_correct) AS correct_count
+      FROM student_answers sa
+      JOIN profiles p ON p.id = sa.student_id
+      WHERE p.class_id = ? AND p.role = 'student'
+      GROUP BY sa.question_id
+      HAVING wrong_count > 0
+      ORDER BY wrong_count DESC, total_attempts DESC
+      LIMIT 10
+    `, [classId]);
+
+    if (rows.length === 0) {
+      return res.json({ data: [], error: null });
+    }
+
+    const questionIds = rows.map(r => r.question_id);
+    const [questions] = await pool.query(
+      'SELECT id, type, content, options, answers, knowledge_point_id FROM questions WHERE id IN (?)',
+      [questionIds]
+    );
+    const questionMap = new Map(questions.map(q => [q.id, q]));
+
+    // 知识点名称（knowledge_points 表存在则取 title，失败则返回空）
+    const kpIds = [...new Set(questions.map(q => q.knowledge_point_id).filter(Boolean))];
+    const kpMap = new Map();
+    if (kpIds.length > 0) {
+      try {
+        const [kps] = await pool.query('SELECT id, title FROM knowledge_points WHERE id IN (?)', [kpIds]);
+        kps.forEach(k => kpMap.set(k.id, k.title));
+      } catch { /* 表不存在或异常时知识点名称为空 */ }
+    }
+
+    // 选择题的错误答案按选项字母分布
+    const choiceIds = rows
+      .filter(r => questionMap.get(r.question_id) && questionMap.get(r.question_id).type === 'choice')
+      .map(r => r.question_id);
+    const optionStatsMap = new Map();
+    if (choiceIds.length > 0) {
+      const [distRows] = await pool.query(`
+        SELECT sa.question_id, sa.answer, COUNT(*) AS cnt
+        FROM student_answers sa
+        JOIN profiles p ON p.id = sa.student_id
+        WHERE p.class_id = ? AND p.role = 'student' AND sa.is_correct = 0 AND sa.question_id IN (?)
+        GROUP BY sa.question_id, sa.answer
+      `, [classId, choiceIds]);
+      for (const d of distRows) {
+        const letter = (d.answer || '').trim().toUpperCase();
+        if (!/^[A-Z]$/.test(letter)) continue;
+        if (!optionStatsMap.has(d.question_id)) optionStatsMap.set(d.question_id, {});
+        optionStatsMap.get(d.question_id)[letter] = Number(d.cnt);
+      }
+    }
+
+    const data = rows.map(r => {
+      const q = questionMap.get(r.question_id);
+      const totalAttempts = Number(r.total_attempts);
+      const wrongCount = Number(r.wrong_count);
+      const item = {
+        question_id: r.question_id,
+        type: q ? q.type : null,
+        content: q ? stripHtml(q.content).slice(0, 120) : '',
+        wrong_count: wrongCount,
+        total_attempts: totalAttempts,
+        correct_rate: totalAttempts > 0 ? Math.round((Number(r.correct_count) / totalAttempts) * 100) : 0,
+        knowledge_point: q && q.knowledge_point_id ? (kpMap.get(q.knowledge_point_id) || null) : null,
+      };
+      if (q && q.type === 'choice') {
+        item.option_stats = optionStatsMap.get(r.question_id) || {};
+        // 解析正确答案（answers 为 {"answers":["A"]} 结构，取第一个）
+        let correctAnswer = null;
+        try {
+          const parsed = typeof q.answers === 'string' ? JSON.parse(q.answers) : q.answers;
+          if (parsed && Array.isArray(parsed.answers) && parsed.answers.length > 0) {
+            correctAnswer = String(parsed.answers[0]).trim().toUpperCase();
+          } else if (Array.isArray(parsed) && parsed.length > 0 && Array.isArray(parsed[0].answers)) {
+            correctAnswer = String(parsed[0].answers[0]).trim().toUpperCase();
+          }
+        } catch { /* 解析失败则为 null */ }
+        item.correct_answer = correctAnswer;
+      }
+      return item;
+    });
+
+    res.json({ data, error: null });
+  } catch (error) {
+    console.error('Error in GET /api/teacher/analytics/wrong-questions/:classId:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 2. 个人学情曲线（按自然周统计）
+app.get('/api/teacher/analytics/student-trend/:classId/:studentId', authenticate, requireTeacher, requireLicense(FEATURES.ANALYTICS), async (req, res) => {
+  try {
+    const { classId, studentId } = req.params;
+    let weeks = parseInt(req.query.weeks, 10);
+    if (!Number.isFinite(weeks) || weeks < 1) weeks = 8;
+    if (weeks > 52) weeks = 52;
+
+    if (!(await assertTeacherOwnsClass(req, res, classId))) return;
+
+    // 校验学生属于该班
+    const [stuRows] = await pool.query(
+      "SELECT id FROM profiles WHERE id = ? AND class_id = ? AND role = 'student'",
+      [studentId, classId]
+    );
+    if (stuRows.length === 0) {
+      return res.status(404).json({ data: null, error: '学生不存在或不属于该班级' });
+    }
+
+    // 计算最近 weeks 个自然周的周一日期（周一为一周起点）
+    const now = new Date();
+    const day = now.getDay(); // 0=周日
+    const diffToMonday = (day + 6) % 7;
+    const currentMonday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - diffToMonday);
+    const weekStarts = [];
+    for (let i = weeks - 1; i >= 0; i--) {
+      const d = new Date(currentMonday);
+      d.setDate(d.getDate() - i * 7);
+      weekStarts.push(d);
+    }
+    const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const startDate = fmt(weekStarts[0]);
+
+    const [rows] = await pool.query(`
+      SELECT DATE_FORMAT(DATE_SUB(DATE(sa.created_at), INTERVAL WEEKDAY(sa.created_at) DAY), '%Y-%m-%d') AS week_start,
+        COUNT(*) AS answers,
+        SUM(sa.is_correct) AS correct,
+        COUNT(DISTINCT DATE(sa.created_at)) AS active_days
+      FROM student_answers sa
+      WHERE sa.student_id = ? AND sa.created_at >= ?
+      GROUP BY week_start
+    `, [studentId, startDate]);
+
+    const statMap = new Map(rows.map(r => [r.week_start, r]));
+    const data = weekStarts.map(d => {
+      const key = fmt(d);
+      const stat = statMap.get(key);
+      const answers = stat ? Number(stat.answers) : 0;
+      return {
+        week_start: key,
+        answers,
+        correct_rate: answers > 0 ? Math.round((Number(stat.correct) / answers) * 100) : null,
+        active_days: stat ? Number(stat.active_days) : 0,
+      };
+    });
+
+    res.json({ data, error: null });
+  } catch (error) {
+    console.error('Error in GET /api/teacher/analytics/student-trend/:classId/:studentId:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 3. 掉队预警名单
+app.get('/api/teacher/analytics/at-risk/:classId', authenticate, requireTeacher, requireLicense(FEATURES.ANALYTICS), async (req, res) => {
+  try {
+    const { classId } = req.params;
+    let days = parseInt(req.query.days, 10);
+    if (!Number.isFinite(days) || days < 1) days = 3;
+
+    if (!(await assertTeacherOwnsClass(req, res, classId))) return;
+
+    const [students] = await pool.query(
+      "SELECT id, real_name, username FROM profiles WHERE class_id = ? AND role = 'student'",
+      [classId]
+    );
+    if (students.length === 0) {
+      return res.json({ data: [], error: null });
+    }
+    const studentIds = students.map(s => s.id);
+
+    // 每个学生的最后活跃时间
+    const [sessionRows] = await pool.query(
+      'SELECT user_id, MAX(last_active_at) AS last_active FROM login_sessions WHERE user_id IN (?) GROUP BY user_id',
+      [studentIds]
+    );
+    const lastActiveMap = new Map(sessionRows.map(r => [r.user_id, r.last_active]));
+
+    // 近7天 / 前7天（8-14天前）/ 近30天 答题统计
+    const [answerRows] = await pool.query(`
+      SELECT sa.student_id,
+        SUM(CASE WHEN sa.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) THEN 1 ELSE 0 END) AS r7_answers,
+        SUM(CASE WHEN sa.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) THEN sa.is_correct ELSE 0 END) AS r7_correct,
+        SUM(CASE WHEN sa.created_at < DATE_SUB(NOW(), INTERVAL 7 DAY) AND sa.created_at >= DATE_SUB(NOW(), INTERVAL 14 DAY) THEN 1 ELSE 0 END) AS p7_answers,
+        SUM(CASE WHEN sa.created_at < DATE_SUB(NOW(), INTERVAL 7 DAY) AND sa.created_at >= DATE_SUB(NOW(), INTERVAL 14 DAY) THEN sa.is_correct ELSE 0 END) AS p7_correct,
+        SUM(CASE WHEN sa.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) THEN 1 ELSE 0 END) AS a30
+      FROM student_answers sa
+      WHERE sa.student_id IN (?)
+      GROUP BY sa.student_id
+    `, [studentIds]);
+    const answerMap = new Map(answerRows.map(r => [r.student_id, r]));
+
+    // 班级近30天人均答题数（含零答题学生）
+    const totalAnswers30 = students.reduce((sum, s) => {
+      const r = answerMap.get(s.id);
+      return sum + (r ? Number(r.a30) : 0);
+    }, 0);
+    const classAvg30 = totalAnswers30 / students.length;
+
+    const nowMs = Date.now();
+    const data = [];
+    for (const s of students) {
+      const lastActive = lastActiveMap.get(s.id) || null;
+      const inactiveDays = lastActive
+        ? Math.floor((nowMs - new Date(lastActive).getTime()) / 86400000)
+        : null;
+
+      const r = answerMap.get(s.id) || {};
+      const r7Answers = Number(r.r7_answers || 0);
+      const p7Answers = Number(r.p7_answers || 0);
+      const a30 = Number(r.a30 || 0);
+      const r7Rate = r7Answers > 0 ? (Number(r.r7_correct || 0) / r7Answers) * 100 : null;
+      const p7Rate = p7Answers > 0 ? (Number(r.p7_correct || 0) / p7Answers) * 100 : null;
+
+      const flags = [];
+      if (lastActive === null || inactiveDays >= days) flags.push('inactive');
+      if (r7Answers >= 5 && p7Answers >= 5 && r7Rate !== null && p7Rate !== null && r7Rate < p7Rate - 15) flags.push('declining');
+      if (classAvg30 > 0 && a30 < classAvg30 * 0.5) flags.push('low_activity');
+
+      if (flags.length === 0) continue;
+      data.push({
+        id: s.id,
+        real_name: s.real_name,
+        username: s.username,
+        flags,
+        inactive_days: inactiveDays,
+        recent7_correct_rate: r7Rate !== null ? Math.round(r7Rate) : null,
+        prev7_correct_rate: p7Rate !== null ? Math.round(p7Rate) : null,
+        answers30: a30,
+      });
+    }
+
+    // flags 多的在前，其次 inactive_days 大的在前（从未登录视为最大）
+    data.sort((a, b) => {
+      if (b.flags.length !== a.flags.length) return b.flags.length - a.flags.length;
+      const ia = a.inactive_days === null ? Number.MAX_SAFE_INTEGER : a.inactive_days;
+      const ib = b.inactive_days === null ? Number.MAX_SAFE_INTEGER : b.inactive_days;
+      return ib - ia;
+    });
+
+    res.json({ data, error: null });
+  } catch (error) {
+    console.error('Error in GET /api/teacher/analytics/at-risk/:classId:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 4. 考试成绩分布（仅 tests.type='exam'）
+app.get('/api/teacher/analytics/exam-distribution/:classId', authenticate, requireTeacher, requireLicense(FEATURES.ANALYTICS), async (req, res) => {
+  try {
+    const { classId } = req.params;
+    if (!(await assertTeacherOwnsClass(req, res, classId))) return;
+
+    // 该班学生数
+    const [cntRows] = await pool.query(
+      "SELECT COUNT(*) AS cnt FROM profiles WHERE class_id = ? AND role = 'student'",
+      [classId]
+    );
+    const classSize = Number(cntRows[0].cnt);
+
+    // 该班相关考试：class_ids 含该班，或该班有学生答卷的考试，取并集
+    const likePattern = `%"${classId}"%`;
+    const [exams] = await pool.query(`
+      SELECT DISTINCT t.id, t.title, t.passing_score, t.created_at
+      FROM tests t
+      WHERE t.type = 'exam' AND (
+        t.class_ids LIKE ?
+        OR t.id IN (
+          SELECT tr.test_id FROM test_records tr
+          JOIN profiles p ON p.id = tr.student_id
+          WHERE p.class_id = ? AND p.role = 'student'
+        )
+      )
+      ORDER BY t.created_at DESC
+    `, [likePattern, classId]);
+
+    if (exams.length === 0) {
+      return res.json({ data: [], error: null });
+    }
+
+    const examIds = exams.map(e => e.id);
+    const [records] = await pool.query(`
+      SELECT tr.test_id, tr.score
+      FROM test_records tr
+      JOIN profiles p ON p.id = tr.student_id
+      WHERE tr.test_id IN (?) AND p.class_id = ? AND p.role = 'student'
+    `, [examIds, classId]);
+
+    const recordsByExam = new Map();
+    for (const r of records) {
+      if (!recordsByExam.has(r.test_id)) recordsByExam.set(r.test_id, []);
+      recordsByExam.get(r.test_id).push(Number(r.score));
+    }
+
+    const data = exams.map(e => {
+      const passing = e.passing_score === null || e.passing_score === undefined ? 60 : Number(e.passing_score);
+      const scores = recordsByExam.get(e.id) || [];
+      const submitCount = scores.length;
+      const buckets = [
+        { range: passing !== 60 ? `0-${passing - 1}` : '0-59', count: 0 },
+        { range: '60-69', count: 0 },
+        { range: '70-79', count: 0 },
+        { range: '80-89', count: 0 },
+        { range: '90-100', count: 0 },
+      ];
+      let passCount = 0;
+      let excellentCount = 0;
+      for (const score of scores) {
+        if (score < 60) buckets[0].count++;
+        else if (score < 70) buckets[1].count++;
+        else if (score < 80) buckets[2].count++;
+        else if (score < 90) buckets[3].count++;
+        else buckets[4].count++;
+        if (score >= passing) passCount++;
+        if (score >= 85) excellentCount++;
+      }
+      const sum = scores.reduce((a, b) => a + b, 0);
+      return {
+        test_id: e.id,
+        title: e.title,
+        passing_score: passing,
+        submit_count: submitCount,
+        class_size: classSize,
+        avg_score: submitCount > 0 ? Math.round((sum / submitCount) * 10) / 10 : null,
+        max_score: submitCount > 0 ? Math.max(...scores) : null,
+        min_score: submitCount > 0 ? Math.min(...scores) : null,
+        pass_rate: submitCount > 0 ? Math.round((passCount / submitCount) * 100) : 0,
+        excellent_rate: submitCount > 0 ? Math.round((excellentCount / submitCount) * 100) : 0,
+        buckets,
+      };
+    });
+
+    res.json({ data, error: null });
+  } catch (error) {
+    console.error('Error in GET /api/teacher/analytics/exam-distribution/:classId:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// ==================== 数据分析模块接口结束 ====================
+
 function formatRow(row, forWriting = false) {
   const formatted = { ...row };
   
