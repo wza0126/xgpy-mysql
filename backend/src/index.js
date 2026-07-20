@@ -233,32 +233,50 @@ function stripHtml(html) {
   return html.replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-// 1. 全班错题排行 TOP 10
+// 1. 全班错题排行（按错误次数降序，最多统计前 100 条，支持分页与已讲解筛选）
 app.get('/api/teacher/analytics/wrong-questions/:classId', authenticate, requireTeacher, requireLicense(FEATURES.ANALYTICS), async (req, res) => {
   try {
     const { classId } = req.params;
     if (!(await assertTeacherOwnsClass(req, res, classId))) return;
 
-    // 该班学生每题的错误次数与总作答数，按错误次数降序取前 10
+    let page = parseInt(req.query.page, 10);
+    if (!Number.isFinite(page) || page < 1) page = 1;
+    let pageSize = parseInt(req.query.pageSize, 10);
+    if (!Number.isFinite(pageSize) || pageSize < 1) pageSize = 20;
+    if (pageSize > 100) pageSize = 100;
+    const filter = ['all', 'unexplained', 'explained'].includes(req.query.filter) ? req.query.filter : 'all';
+
+    // 该班学生每题的错误次数与总作答数，按错误次数降序取前 100；LEFT JOIN 本班级的已讲解标记
     const [rows] = await pool.query(`
       SELECT sa.question_id,
         SUM(CASE WHEN sa.is_correct = 0 THEN 1 ELSE 0 END) AS wrong_count,
         COUNT(*) AS total_attempts,
-        SUM(sa.is_correct) AS correct_count
+        SUM(sa.is_correct) AS correct_count,
+        MAX(CASE WHEN em.id IS NULL THEN 0 ELSE 1 END) AS explained
       FROM student_answers sa
       JOIN profiles p ON p.id = sa.student_id
+      LEFT JOIN question_explained_marks em ON em.class_id = ? AND em.question_id = sa.question_id
       WHERE p.class_id = ? AND p.role = 'student'
       GROUP BY sa.question_id
       HAVING wrong_count > 0
       ORDER BY wrong_count DESC, total_attempts DESC
-      LIMIT 10
-    `, [classId]);
+      LIMIT 100
+    `, [classId, classId]);
 
-    if (rows.length === 0) {
-      return res.json({ data: [], error: null });
+    // 按已讲解状态筛选后分页
+    const filtered = filter === 'explained'
+      ? rows.filter(r => Number(r.explained) === 1)
+      : filter === 'unexplained'
+        ? rows.filter(r => Number(r.explained) === 0)
+        : rows;
+    const total = filtered.length;
+    const pageRows = filtered.slice((page - 1) * pageSize, page * pageSize);
+
+    if (pageRows.length === 0) {
+      return res.json({ data: { items: [], total, page, pageSize }, error: null });
     }
 
-    const questionIds = rows.map(r => r.question_id);
+    const questionIds = pageRows.map(r => r.question_id);
     const [questions] = await pool.query(
       'SELECT id, type, content, options, answers, knowledge_point_id FROM questions WHERE id IN (?)',
       [questionIds]
@@ -276,7 +294,7 @@ app.get('/api/teacher/analytics/wrong-questions/:classId', authenticate, require
     }
 
     // 选择题的错误答案按选项字母分布
-    const choiceIds = rows
+    const choiceIds = pageRows
       .filter(r => questionMap.get(r.question_id) && questionMap.get(r.question_id).type === 'choice')
       .map(r => r.question_id);
     const optionStatsMap = new Map();
@@ -296,7 +314,7 @@ app.get('/api/teacher/analytics/wrong-questions/:classId', authenticate, require
       }
     }
 
-    const data = rows.map(r => {
+    const items = pageRows.map(r => {
       const q = questionMap.get(r.question_id);
       const totalAttempts = Number(r.total_attempts);
       const wrongCount = Number(r.wrong_count);
@@ -308,6 +326,7 @@ app.get('/api/teacher/analytics/wrong-questions/:classId', authenticate, require
         total_attempts: totalAttempts,
         correct_rate: totalAttempts > 0 ? Math.round((Number(r.correct_count) / totalAttempts) * 100) : 0,
         knowledge_point: q && q.knowledge_point_id ? (kpMap.get(q.knowledge_point_id) || null) : null,
+        explained: Number(r.explained) === 1,
       };
       if (q && q.type === 'choice') {
         item.option_stats = optionStatsMap.get(r.question_id) || {};
@@ -326,9 +345,87 @@ app.get('/api/teacher/analytics/wrong-questions/:classId', authenticate, require
       return item;
     });
 
-    res.json({ data, error: null });
+    res.json({ data: { items, total, page, pageSize }, error: null });
   } catch (error) {
     console.error('Error in GET /api/teacher/analytics/wrong-questions/:classId:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 1a. 批量标记/取消错题已讲解（按班级隔离）
+app.post('/api/teacher/analytics/explained/:classId', authenticate, requireTeacher, requireLicense(FEATURES.ANALYTICS), async (req, res) => {
+  try {
+    const { classId } = req.params;
+    if (!(await assertTeacherOwnsClass(req, res, classId))) return;
+
+    const questionIds = Array.isArray(req.body?.question_ids)
+      ? req.body.question_ids.filter(id => typeof id === 'string' && id.trim()).map(id => id.trim())
+      : [];
+    if (questionIds.length === 0) {
+      return res.status(400).json({ data: null, error: 'question_ids 不能为空' });
+    }
+    const explained = req.body?.explained === true;
+
+    let updated = 0;
+    if (explained) {
+      // INSERT IGNORE：已存在的 (class_id, question_id) 不重复插入
+      const values = questionIds.map(() => '(?, ?, ?, ?)').join(', ');
+      const params = questionIds.flatMap(qid => [uuidv4(), classId, qid, req.user.userId]);
+      const [result] = await pool.query(
+        `INSERT IGNORE INTO question_explained_marks (id, class_id, question_id, marked_by) VALUES ${values}`,
+        params
+      );
+      updated = result.affectedRows || 0;
+    } else {
+      const [result] = await pool.query(
+        'DELETE FROM question_explained_marks WHERE class_id = ? AND question_id IN (?)',
+        [classId, questionIds]
+      );
+      updated = result.affectedRows || 0;
+    }
+
+    res.json({ data: { updated }, error: null });
+  } catch (error) {
+    console.error('Error in POST /api/teacher/analytics/explained/:classId:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 1b. 批量给错题追加标签（写入 questions.tags JSON 数组，去重）
+app.post('/api/teacher/analytics/wrong-questions/tag/:classId', authenticate, requireTeacher, requireLicense(FEATURES.ANALYTICS), async (req, res) => {
+  try {
+    const { classId } = req.params;
+    if (!(await assertTeacherOwnsClass(req, res, classId))) return;
+
+    const tag = typeof req.body?.tag === 'string' ? req.body.tag.trim() : '';
+    if (!tag) {
+      return res.status(400).json({ data: null, error: 'tag 不能为空' });
+    }
+    const questionIds = Array.isArray(req.body?.question_ids)
+      ? [...new Set(req.body.question_ids.filter(id => typeof id === 'string' && id.trim()).map(id => id.trim()))]
+      : [];
+    if (questionIds.length === 0) {
+      return res.status(400).json({ data: null, error: 'question_ids 不能为空' });
+    }
+
+    const [questions] = await pool.query('SELECT id, tags FROM questions WHERE id IN (?)', [questionIds]);
+
+    let updated = 0;
+    for (const q of questions) {
+      let tags = [];
+      try {
+        const parsed = typeof q.tags === 'string' ? JSON.parse(q.tags) : q.tags;
+        if (Array.isArray(parsed)) tags = parsed.filter(t => typeof t === 'string');
+      } catch { tags = []; }
+      if (tags.includes(tag)) continue; // 去重：已有该标签则跳过
+      tags.push(tag);
+      await pool.query('UPDATE questions SET tags = ? WHERE id = ?', [JSON.stringify(tags), q.id]);
+      updated++;
+    }
+
+    res.json({ data: { updated }, error: null });
+  } catch (error) {
+    console.error('Error in POST /api/teacher/analytics/wrong-questions/tag/:classId:', error);
     res.status(500).json({ data: null, error: error.message });
   }
 });

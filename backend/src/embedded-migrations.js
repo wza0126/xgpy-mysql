@@ -187,5 +187,9 @@ module.exports = [
   {
     "version": "045_add_ip_binding.sql",
     "sql": "-- 课堂点名 - IP 绑定与登录限制\n-- roll_call_seating 增加绑定的学生机 IP；classes 增加 IP 登录限制开关\n\nALTER TABLE roll_call_seating\nADD COLUMN IF NOT EXISTS bound_ip VARCHAR(45) DEFAULT NULL COMMENT '绑定的学生机IP';\n\nALTER TABLE classes\nADD COLUMN IF NOT EXISTS ip_login_restriction TINYINT(1) NOT NULL DEFAULT 0 COMMENT '开启后学生须从绑定IP登录';\n"
+  },
+  {
+    "version": "046_add_question_explained.sql",
+    "sql": "-- 学情分析 - 错题已讲解标记（按班级隔离）\nCREATE TABLE IF NOT EXISTS question_explained_marks (\n  id VARCHAR(50) PRIMARY KEY,\n  class_id VARCHAR(50) NOT NULL COMMENT '班级ID',\n  question_id VARCHAR(50) NOT NULL COMMENT '题目ID',\n  marked_by VARCHAR(50) DEFAULT NULL COMMENT '标记的教师ID',\n  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,\n  UNIQUE KEY uk_class_question (class_id, question_id),\n  INDEX idx_class (class_id)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;\n"
   }
 ];

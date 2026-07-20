@@ -5,6 +5,7 @@ import { Profile, Class, StudentAnswer, TestRecord, StudentPet } from '../../typ
 import { useAuth } from '../../hooks/useAuth';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, ComposedChart, Line, Legend } from 'recharts';
 import { API_CONFIG } from '../../api/config';
+import { sanitizeHtml } from '../../utils/htmlUtils';
 
 interface StudentWithStats extends Profile {
   class?: Class;
@@ -357,8 +358,16 @@ interface WrongQuestion {
   total_attempts: number;
   correct_rate: number;
   knowledge_point: string | null;
+  explained: boolean;
   option_stats?: Record<string, number>;
   correct_answer?: string | null;
+}
+
+interface WrongQuestionsPage {
+  items: WrongQuestion[];
+  total: number;
+  page: number;
+  pageSize: number;
 }
 
 interface TrendPoint {
@@ -409,6 +418,21 @@ const analyticsFetch = async <T,>(path: string): Promise<T> => {
   return json.data as T;
 };
 
+const analyticsPost = async <T,>(path: string, body: unknown): Promise<T> => {
+  const token = localStorage.getItem('xgpy_token');
+  const res = await fetch(`${API_CONFIG.apiUrl}${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || '请求失败');
+  return json.data as T;
+};
+
 const SectionSpinner: React.FC = () => (
   <div className="flex items-center justify-center h-40">
     <i className="fa-solid fa-circle-notch fa-spin text-2xl text-blue-500"></i>
@@ -418,22 +442,219 @@ const SectionSpinner: React.FC = () => (
 const sectionTitleCls = 'text-lg font-bold text-gray-800';
 const sectionSubCls = 'text-sm text-gray-500 mt-1 mb-4';
 
-// 1. 错题排行 TOP 10
-const WrongQuestionsSection: React.FC<{ classId: string }> = ({ classId }) => {
-  const [data, setData] = useState<WrongQuestion[]>([]);
-  const [loading, setLoading] = useState(true);
+// 解析题目 JSON 字段（options / answers 可能是字符串或已解析对象）
+const parseQuestionJson = (raw: any): any => {
+  if (raw == null) return null;
+  if (typeof raw === 'string') {
+    try { return JSON.parse(raw); } catch { return null; }
+  }
+  return raw;
+};
 
-  useEffect(() => {
+const getQuestionOptions = (raw: any): string[] => {
+  const parsed = parseQuestionJson(raw);
+  if (!parsed) return [];
+  const list = Array.isArray(parsed) ? parsed : parsed.options;
+  if (!Array.isArray(list)) return [];
+  return list.map((o: any) => (o == null ? '' : String(o)));
+};
+
+const getQuestionAnswers = (raw: any): string[] => {
+  const parsed = parseQuestionJson(raw);
+  if (!parsed) return [];
+  let r = parsed.answers !== undefined ? parsed.answers : parsed;
+  if (Array.isArray(r) && r.length > 0 && r[0] && Array.isArray(r[0].answers)) r = r[0].answers;
+  if (!Array.isArray(r)) return typeof r === 'string' ? [r] : [];
+  return r.map((a: any) => (a == null ? '' : String(a)));
+};
+
+// 错题详情弹窗：展示完整题干（消毒后渲染 HTML）、选项、答案、解析、知识点
+const WrongQuestionDetailModal: React.FC<{
+  question: any;
+  knowledgePoint: string | null;
+  onClose: () => void;
+}> = ({ question, knowledgePoint, onClose }) => {
+  const options = getQuestionOptions(question.options);
+  const answers = getQuestionAnswers(question.answers);
+  const correctLetters = answers.map(a => a.trim().toUpperCase());
+  // 去掉选项文本自带的字母前缀（如 "A. xxx"），统一用序号渲染
+  const stripLetterPrefix = (opt: string, letter: string) =>
+    opt.replace(new RegExp(`^\\s*${letter}[.、．:]\\s*`, 'i'), '');
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="sticky top-0 bg-white border-b border-gray-100 px-6 py-4 flex items-center justify-between rounded-t-2xl">
+          <h4 className="text-base font-bold text-gray-800">题目详情</h4>
+          <button
+            onClick={onClose}
+            className="w-8 h-8 rounded-full hover:bg-gray-100 text-gray-400 hover:text-gray-600 flex items-center justify-center transition-colors"
+            title="关闭"
+          >
+            <i className="fa-solid fa-xmark"></i>
+          </button>
+        </div>
+        <div className="px-6 py-5">
+          <div className="text-gray-800 leading-relaxed question-rich-content">
+            <div dangerouslySetInnerHTML={{ __html: sanitizeHtml(question.content || '') }} />
+          </div>
+
+          {question.type === 'choice' && options.length > 0 && (
+            <div className="mt-4 space-y-2">
+              {options.map((opt, oIdx) => {
+                const letter = String.fromCharCode(65 + oIdx);
+                const isCorrect = correctLetters.includes(letter);
+                return (
+                  <div
+                    key={oIdx}
+                    className={`flex items-start gap-3 p-3 rounded-xl border-2 ${isCorrect ? 'border-green-500 bg-green-50' : 'border-gray-200 bg-white'}`}
+                  >
+                    <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 ${isCorrect ? 'bg-green-500 text-white' : 'bg-gray-100 text-gray-500'}`}>
+                      {letter}
+                    </span>
+                    <span className="flex-1 text-sm text-gray-700 question-rich-content">
+                      <span dangerouslySetInnerHTML={{ __html: sanitizeHtml(stripLetterPrefix(opt, letter)) }} />
+                    </span>
+                    {isCorrect && <i className="fa-solid fa-check text-green-600 mt-1"></i>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="mt-4 pt-4 border-t border-gray-100 space-y-3">
+            <div className="flex items-start gap-2">
+              <span className="text-sm font-medium text-gray-500 flex-shrink-0 w-16">正确答案</span>
+              <span className="text-sm font-bold text-green-700">{answers.join('、') || '（未设置）'}</span>
+            </div>
+            {question.explanation && (
+              <div className="flex items-start gap-2">
+                <span className="text-sm font-medium text-gray-500 flex-shrink-0 w-16">解析</span>
+                <div className="flex-1 text-sm text-gray-600 bg-amber-50/50 p-3 rounded-lg question-rich-content">
+                  <div dangerouslySetInnerHTML={{ __html: sanitizeHtml(question.explanation) }} />
+                </div>
+              </div>
+            )}
+            {knowledgePoint && (
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-gray-500 flex-shrink-0 w-16">知识点</span>
+                <span className="px-2 py-0.5 bg-blue-50 text-blue-600 rounded text-xs">{knowledgePoint}</span>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// 1. 错题排行（分页 + 已讲解标记 + 批量打标签）
+const WrongQuestionsSection: React.FC<{ classId: string }> = ({ classId }) => {
+  const [pageData, setPageData] = useState<WrongQuestionsPage>({ items: [], total: 0, page: 1, pageSize: 20 });
+  const [page, setPage] = useState(1);
+  const [filter, setFilter] = useState<'all' | 'unexplained' | 'explained'>('all');
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [tagInput, setTagInput] = useState('');
+  const [actionLoading, setActionLoading] = useState(false);
+  const [detail, setDetail] = useState<{ question: any; knowledgePoint: string | null } | null>(null);
+  const pageSize = 20;
+
+  const fetchPage = async (targetPage = page) => {
     if (!classId) return;
     setLoading(true);
-    analyticsFetch<WrongQuestion[]>(`/api/teacher/analytics/wrong-questions/${classId}`)
-      .then(setData)
-      .catch((e) => {
-        console.error('获取错题排行失败:', e);
-        setData([]);
-      })
-      .finally(() => setLoading(false));
-  }, [classId]);
+    try {
+      const data = await analyticsFetch<WrongQuestionsPage>(
+        `/api/teacher/analytics/wrong-questions/${classId}?page=${targetPage}&pageSize=${pageSize}&filter=${filter}`
+      );
+      setPageData(data);
+    } catch (e) {
+      console.error('获取错题排行失败:', e);
+      setPageData({ items: [], total: 0, page: targetPage, pageSize });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    setPage(1);
+    setSelected(new Set());
+  }, [classId, filter]);
+
+  useEffect(() => {
+    fetchPage(page);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [classId, page, filter]);
+
+  const refresh = async () => {
+    setSelected(new Set());
+    await fetchPage(page);
+  };
+
+  const openDetail = async (q: WrongQuestion) => {
+    try {
+      const { data, error } = await backendClient.from('questions').select('*').eq('id', q.question_id).single();
+      if (error || !data) throw error || new Error('题目不存在');
+      setDetail({ question: data, knowledgePoint: q.knowledge_point });
+    } catch (e) {
+      console.error('获取题目详情失败:', e);
+      alert('获取题目详情失败');
+    }
+  };
+
+  const items = pageData.items;
+  const totalPages = Math.max(1, Math.ceil(pageData.total / pageData.pageSize));
+  const allPageSelected = items.length > 0 && items.every(q => selected.has(q.question_id));
+
+  const toggleSelectAll = () => {
+    const next = new Set(selected);
+    if (allPageSelected) {
+      items.forEach(q => next.delete(q.question_id));
+    } else {
+      items.forEach(q => next.add(q.question_id));
+    }
+    setSelected(next);
+  };
+
+  const toggleSelect = (qid: string) => {
+    const next = new Set(selected);
+    if (next.has(qid)) next.delete(qid); else next.add(qid);
+    setSelected(next);
+  };
+
+  const runBatch = async (action: 'explain' | 'unexplain' | 'tag') => {
+    const questionIds = Array.from(selected);
+    if (questionIds.length === 0) return;
+    setActionLoading(true);
+    try {
+      if (action === 'tag') {
+        const tag = tagInput.trim();
+        if (!tag) {
+          alert('请输入标签');
+          return;
+        }
+        await analyticsPost<{ updated: number }>(`/api/teacher/analytics/wrong-questions/tag/${classId}`, { question_ids: questionIds, tag });
+        setTagInput('');
+      } else {
+        await analyticsPost<{ updated: number }>(`/api/teacher/analytics/explained/${classId}`, {
+          question_ids: questionIds,
+          explained: action === 'explain',
+        });
+      }
+      await refresh();
+    } catch (e: any) {
+      console.error('批量操作失败:', e);
+      alert(e?.message || '批量操作失败');
+    } finally {
+      setActionLoading(false);
+    }
+  };
 
   const typeLabel = (t: string | null) => {
     switch (t) {
@@ -445,94 +666,221 @@ const WrongQuestionsSection: React.FC<{ classId: string }> = ({ classId }) => {
     }
   };
 
+  const filterTabs: { key: 'all' | 'unexplained' | 'explained'; label: string }[] = [
+    { key: 'all', label: '全部' },
+    { key: 'unexplained', label: '未讲解' },
+    { key: 'explained', label: '已讲解' },
+  ];
+
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-      <h3 className={sectionTitleCls}>错题排行 TOP 10</h3>
-      <p className={sectionSubCls}>全班错误次数最多的题目，帮助定位共性薄弱点</p>
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <h3 className={sectionTitleCls}>错题排行</h3>
+          <p className={sectionSubCls}>全班错误次数最多的题目（最多统计前 100 题），双击行可查看完整题目</p>
+        </div>
+        <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
+          {filterTabs.map(t => (
+            <button
+              key={t.key}
+              onClick={() => setFilter(t.key)}
+              className={`px-3 py-1.5 rounded-md text-sm transition-colors ${filter === t.key ? 'bg-white text-blue-600 font-medium shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {selected.size > 0 && (
+        <div className="mb-4 flex items-center gap-2 flex-wrap bg-blue-50 border border-blue-200 rounded-lg px-4 py-2.5">
+          <span className="text-sm text-blue-700 font-medium">已选 {selected.size} 题</span>
+          <div className="flex items-center gap-2 ml-2">
+            <input
+              type="text"
+              value={tagInput}
+              onChange={(e) => setTagInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') runBatch('tag'); }}
+              placeholder="错题专攻"
+              className="px-3 py-1.5 border border-blue-300 rounded-lg text-sm w-36 focus:outline-none focus:border-blue-500 bg-white"
+            />
+            <button
+              onClick={() => runBatch('tag')}
+              disabled={actionLoading}
+              className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50 transition-colors"
+            >
+              添加标签
+            </button>
+          </div>
+          <button
+            onClick={() => runBatch('explain')}
+            disabled={actionLoading}
+            className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700 disabled:opacity-50 transition-colors"
+          >
+            标记已讲解
+          </button>
+          <button
+            onClick={() => runBatch('unexplain')}
+            disabled={actionLoading}
+            className="px-3 py-1.5 bg-white border border-gray-300 text-gray-600 rounded-lg text-sm hover:bg-gray-50 disabled:opacity-50 transition-colors"
+          >
+            取消已讲解
+          </button>
+          <button
+            onClick={() => setSelected(new Set())}
+            className="ml-auto text-sm text-gray-400 hover:text-gray-600"
+          >
+            清空选择
+          </button>
+        </div>
+      )}
+
       {loading ? (
         <SectionSpinner />
-      ) : data.length === 0 ? (
+      ) : items.length === 0 ? (
         <div className="text-center text-gray-400 py-10">
           <i className="fa-regular fa-circle-check text-3xl mb-2"></i>
-          <p>暂无错题数据</p>
+          <p>{filter === 'all' ? '暂无错题数据' : filter === 'explained' ? '暂无已讲解的错题' : '暂无未讲解的错题'}</p>
         </div>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead className="bg-gray-50">
-              <tr>
-                <th className="px-4 py-3 text-left text-sm font-medium text-gray-600 w-12">排名</th>
-                <th className="px-4 py-3 text-left text-sm font-medium text-gray-600">题干</th>
-                <th className="px-4 py-3 text-center text-sm font-medium text-gray-600 w-20">题型</th>
-                <th className="px-4 py-3 text-center text-sm font-medium text-gray-600 w-20">错误次数</th>
-                <th className="px-4 py-3 text-center text-sm font-medium text-gray-600 w-20">正确率</th>
-                <th className="px-4 py-3 text-left text-sm font-medium text-gray-600">选项分布</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-200">
-              {data.map((q, idx) => {
-                const letters = Object.keys(q.option_stats || {}).sort();
-                const maxWrong = letters.reduce((max, l) => {
-                  if (q.correct_answer && l === q.correct_answer) return max;
-                  const cnt = q.option_stats?.[l] || 0;
-                  return cnt > max.count ? { letter: l, count: cnt } : max;
-                }, { letter: '', count: 0 });
-                return (
-                  <tr key={q.question_id} className="hover:bg-gray-50 align-top">
-                    <td className="px-4 py-3">
-                      <span className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold ${idx < 3 ? 'bg-red-100 text-red-600' : 'bg-gray-100 text-gray-500'}`}>
-                        {idx + 1}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-sm text-gray-800">
-                      <div>{q.content || '（无题干）'}</div>
-                      {q.knowledge_point && (
-                        <span className="inline-block mt-1 px-2 py-0.5 bg-blue-50 text-blue-600 rounded text-xs">{q.knowledge_point}</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-center text-sm text-gray-600">{typeLabel(q.type)}</td>
-                    <td className="px-4 py-3 text-center text-sm font-bold text-red-600">{q.wrong_count}</td>
-                    <td className="px-4 py-3 text-center text-sm text-gray-600">{q.correct_rate}%</td>
-                    <td className="px-4 py-3">
-                      {q.type === 'choice' && q.option_stats ? (
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          {letters.length === 0 && <span className="text-xs text-gray-400">-</span>}
-                          {letters.map((l) => {
-                            const isCorrect = q.correct_answer === l;
-                            const isTopDistractor = maxWrong.letter === l && maxWrong.count > 0;
-                            return (
-                              <span
-                                key={l}
-                                className={`px-2 py-0.5 rounded text-xs border ${
-                                  isCorrect
-                                    ? 'border-green-500 bg-green-50 text-green-700 font-bold'
-                                    : isTopDistractor
-                                      ? 'border-red-500 bg-red-50 text-red-600 font-bold'
-                                      : 'border-gray-200 bg-gray-50 text-gray-600'
-                                }`}
-                                title={isTopDistractor ? '最强迷惑项' : undefined}
-                              >
-                                {l}×{q.option_stats?.[l]}
-                                {isTopDistractor && ' 最强迷惑项'}
-                              </span>
-                            );
-                          })}
-                          {q.correct_answer && !letters.includes(q.correct_answer) && (
-                            <span className="px-2 py-0.5 rounded text-xs border border-green-500 bg-green-50 text-green-700 font-bold">
-                              {q.correct_answer}×0
+        <>
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-3 py-3 w-10">
+                    <input
+                      type="checkbox"
+                      checked={allPageSelected}
+                      onChange={toggleSelectAll}
+                      className="w-4 h-4 accent-blue-600 cursor-pointer"
+                      title="全选本页"
+                    />
+                  </th>
+                  <th className="px-4 py-3 text-left text-sm font-medium text-gray-600 w-12">排名</th>
+                  <th className="px-4 py-3 text-left text-sm font-medium text-gray-600">题干</th>
+                  <th className="px-4 py-3 text-center text-sm font-medium text-gray-600 w-20">题型</th>
+                  <th className="px-4 py-3 text-center text-sm font-medium text-gray-600 w-20">错误次数</th>
+                  <th className="px-4 py-3 text-center text-sm font-medium text-gray-600 w-20">正确率</th>
+                  <th className="px-4 py-3 text-left text-sm font-medium text-gray-600">选项分布</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-200">
+                {items.map((q, idx) => {
+                  const rank = (pageData.page - 1) * pageData.pageSize + idx + 1;
+                  const letters = Object.keys(q.option_stats || {}).sort();
+                  const maxWrong = letters.reduce((max, l) => {
+                    if (q.correct_answer && l === q.correct_answer) return max;
+                    const cnt = q.option_stats?.[l] || 0;
+                    return cnt > max.count ? { letter: l, count: cnt } : max;
+                  }, { letter: '', count: 0 });
+                  return (
+                    <tr
+                      key={q.question_id}
+                      className={`hover:bg-gray-50 align-top cursor-pointer ${q.explained ? 'opacity-50' : ''}`}
+                      onDoubleClick={() => openDetail(q)}
+                      title="双击查看完整题目"
+                    >
+                      <td className="px-3 py-3">
+                        <input
+                          type="checkbox"
+                          checked={selected.has(q.question_id)}
+                          onChange={() => toggleSelect(q.question_id)}
+                          onDoubleClick={(e) => e.stopPropagation()}
+                          className="w-4 h-4 accent-blue-600 cursor-pointer"
+                        />
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold ${rank <= 3 ? 'bg-red-100 text-red-600' : 'bg-gray-100 text-gray-500'}`}>
+                          {rank}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-sm text-gray-800">
+                        <div>{q.content || '（无题干）'}</div>
+                        <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                          {q.knowledge_point && (
+                            <span className="inline-block px-2 py-0.5 bg-blue-50 text-blue-600 rounded text-xs">{q.knowledge_point}</span>
+                          )}
+                          {q.explained && (
+                            <span className="inline-block px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium">
+                              <i className="fa-solid fa-check mr-1"></i>已讲解
                             </span>
                           )}
                         </div>
-                      ) : (
-                        <span className="text-xs text-gray-400">-</span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                      </td>
+                      <td className="px-4 py-3 text-center text-sm text-gray-600">{typeLabel(q.type)}</td>
+                      <td className="px-4 py-3 text-center text-sm font-bold text-red-600">{q.wrong_count}</td>
+                      <td className="px-4 py-3 text-center text-sm text-gray-600">{q.correct_rate}%</td>
+                      <td className="px-4 py-3">
+                        {q.type === 'choice' && q.option_stats ? (
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {letters.length === 0 && <span className="text-xs text-gray-400">-</span>}
+                            {letters.map((l) => {
+                              const isCorrect = q.correct_answer === l;
+                              const isTopDistractor = maxWrong.letter === l && maxWrong.count > 0;
+                              return (
+                                <span
+                                  key={l}
+                                  className={`px-2 py-0.5 rounded text-xs border ${
+                                    isCorrect
+                                      ? 'border-green-500 bg-green-50 text-green-700 font-bold'
+                                      : isTopDistractor
+                                        ? 'border-red-500 bg-red-50 text-red-600 font-bold'
+                                        : 'border-gray-200 bg-gray-50 text-gray-600'
+                                  }`}
+                                  title={isTopDistractor ? '最强迷惑项' : undefined}
+                                >
+                                  {l}×{q.option_stats?.[l]}
+                                  {isTopDistractor && ' 最强迷惑项'}
+                                </span>
+                              );
+                            })}
+                            {q.correct_answer && !letters.includes(q.correct_answer) && (
+                              <span className="px-2 py-0.5 rounded text-xs border border-green-500 bg-green-50 text-green-700 font-bold">
+                                {q.correct_answer}×0
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-xs text-gray-400">-</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="mt-4 flex items-center justify-between">
+            <span className="text-sm text-gray-500">共 {pageData.total} 题</span>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setPage(p => Math.max(1, p - 1))}
+                disabled={pageData.page <= 1}
+                className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                <i className="fa-solid fa-chevron-left mr-1"></i>上一页
+              </button>
+              <span className="text-sm text-gray-600">第 {pageData.page} 页 / 共 {totalPages} 页</span>
+              <button
+                onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                disabled={pageData.page >= totalPages}
+                className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                下一页<i className="fa-solid fa-chevron-right ml-1"></i>
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {detail && (
+        <WrongQuestionDetailModal
+          question={detail.question}
+          knowledgePoint={detail.knowledgePoint}
+          onClose={() => setDetail(null)}
+        />
       )}
     </div>
   );
