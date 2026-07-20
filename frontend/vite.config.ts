@@ -13,11 +13,14 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:3101',
         changeOrigin: true,
+        // 转发时附带 X-Forwarded-For，让后端能看到手机/平板等真实客户端 IP
+        xfwd: true,
         timeout: 300000,
       },
       '/uploads': {
         target: 'http://localhost:3101',
         changeOrigin: true,
+        xfwd: true,
       },
     },
   },

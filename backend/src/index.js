@@ -850,8 +850,11 @@ app.get('/api/auth/session', authenticate, async (req, res) => {
 // 归一化 IP：x-forwarded-for 列表取第一个，去掉 ::ffff: 前缀
 function normalizeIp(ip) {
   if (!ip || typeof ip !== 'string') return '';
-  // x-forwarded-for 可能是 "ip1, ip2" 列表，取第一个
-  let s = ip.split(',')[0].trim();
+  // x-forwarded-for 是 "client, proxy1, proxy2" 链，取最后一个：
+  // 它是最内层代理（如 Vite/Nginx）看到的真实客户端地址，
+  // 取第一个会被客户端伪造的 XFF 头欺骗
+  const parts = ip.split(',').map(s => s.trim()).filter(Boolean);
+  let s = parts[parts.length - 1] || '';
   // 去掉 IPv4-mapped IPv6 前缀 ::ffff:
   s = s.replace(/^::ffff:/i, '');
   return s;
