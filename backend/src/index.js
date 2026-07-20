@@ -504,6 +504,7 @@ app.get('/api/teacher/analytics/exam-distribution/:classId', authenticate, requi
     const classSize = Number(cntRows[0].cnt);
 
     // 该班相关考试：class_ids 含该班，或该班有学生答卷的考试，取并集
+    // 注意：考试成绩存放在 exam_records（自主测试才是 test_records）
     const likePattern = `%"${classId}"%`;
     const [exams] = await pool.query(`
       SELECT DISTINCT t.id, t.title, t.passing_score, t.created_at
@@ -511,8 +512,8 @@ app.get('/api/teacher/analytics/exam-distribution/:classId', authenticate, requi
       WHERE t.type = 'exam' AND (
         t.class_ids LIKE ?
         OR t.id IN (
-          SELECT tr.test_id FROM test_records tr
-          JOIN profiles p ON p.id = tr.student_id
+          SELECT er.test_id FROM exam_records er
+          JOIN profiles p ON p.id = er.student_id
           WHERE p.class_id = ? AND p.role = 'student'
         )
       )
@@ -524,15 +525,24 @@ app.get('/api/teacher/analytics/exam-distribution/:classId', authenticate, requi
     }
 
     const examIds = exams.map(e => e.id);
+    // 区分真实考生与占位记录：考试结束时系统会为未参加学生批量生成
+    // started_at = completed_at 的 0 分占位记录，统计时须剔除，
+    // 否则会把"2 人参考"显示成"全班 14 人参考"并拉低平均分
     const [records] = await pool.query(`
-      SELECT tr.test_id, tr.score
-      FROM test_records tr
-      JOIN profiles p ON p.id = tr.student_id
-      WHERE tr.test_id IN (?) AND p.class_id = ? AND p.role = 'student'
+      SELECT er.test_id, er.score,
+        (TIMESTAMPDIFF(SECOND, er.started_at, er.completed_at) > 0
+         OR EXISTS (
+           SELECT 1 FROM student_answers sa
+           WHERE sa.test_id = er.test_id AND sa.student_id = er.student_id AND sa.source = 'exam'
+         )) AS participated
+      FROM exam_records er
+      JOIN profiles p ON p.id = er.student_id
+      WHERE er.test_id IN (?) AND p.class_id = ? AND p.role = 'student'
     `, [examIds, classId]);
 
     const recordsByExam = new Map();
     for (const r of records) {
+      if (!Number(r.participated)) continue; // 跳过未参加占位记录
       if (!recordsByExam.has(r.test_id)) recordsByExam.set(r.test_id, []);
       recordsByExam.get(r.test_id).push(Number(r.score));
     }
@@ -566,6 +576,7 @@ app.get('/api/teacher/analytics/exam-distribution/:classId', authenticate, requi
         passing_score: passing,
         submit_count: submitCount,
         class_size: classSize,
+        absent_count: Math.max(0, classSize - submitCount),
         avg_score: submitCount > 0 ? Math.round((sum / submitCount) * 10) / 10 : null,
         max_score: submitCount > 0 ? Math.max(...scores) : null,
         min_score: submitCount > 0 ? Math.min(...scores) : null,

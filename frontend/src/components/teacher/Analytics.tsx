@@ -390,6 +390,7 @@ interface ExamDistribution {
   passing_score: number;
   submit_count: number;
   class_size: number;
+  absent_count?: number;
   avg_score: number | null;
   max_score: number | null;
   min_score: number | null;
@@ -769,6 +770,9 @@ const ExamDistributionSection: React.FC<{ classId: string }> = ({ classId }) => 
               </p>
               <p className="text-sm text-gray-600">
                 参考率 {exam.class_size > 0 ? Math.round((exam.submit_count / exam.class_size) * 100) : 0}%
+                {(exam.absent_count ?? 0) > 0 && (
+                  <span className="text-red-500 ml-1">（{exam.absent_count} 人未参加）</span>
+                )}
               </p>
             </div>
             <div className="bg-gray-50 rounded-lg p-4 text-center">
