@@ -29,6 +29,7 @@ export const Seat: React.FC<SeatProps> = ({
   const isOnline = !!student?.is_online;
   const isEmpty = !student;
   const isDraggable = !isLayoutLocked && !isSeatLocked && !isEmpty;
+  const isIpMismatch = !!student?.is_ip_mismatch;
 
   // 状态色彩
   let bgClass = '';
@@ -45,6 +46,12 @@ export const Seat: React.FC<SeatProps> = ({
     // 离线/缺席：红橙色醒目提示
     bgClass = 'bg-gradient-to-br from-red-500/15 to-orange-600/15 border-2 border-red-400/50';
     textClass = 'text-red-200';
+  }
+
+  // IP 异常：红色警示描边 + 脉冲
+  if (isIpMismatch) {
+    bgClass = 'bg-gradient-to-br from-red-500/25 to-red-700/25 border-2 border-red-500';
+    ringClass = 'ring-2 ring-red-500/60 animate-pulse';
   }
 
   if (isSelected) {
@@ -83,6 +90,14 @@ export const Seat: React.FC<SeatProps> = ({
           className="fa-solid fa-lock absolute top-1 right-1.5 text-[10px] text-amber-400"
           title={isLayoutLocked ? '整体已锁定' : '该座位已锁定'}
         ></i>
+      )}
+
+      {/* IP 异常红点角标 */}
+      {isIpMismatch && (
+        <span
+          className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-red-500 border-2 border-slate-900 shadow-lg shadow-red-500/60 animate-pulse"
+          title="IP异常：当前IP与绑定IP不符"
+        ></span>
       )}
 
       {/* 学生内容 */}

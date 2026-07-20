@@ -284,6 +284,9 @@ export const RollCallApp: React.FC<RollCallAppProps> = ({ onClose, mode = 'teach
         onClose={onClose}
         hideClassSelector={mode === 'student'}
         mode={mode}
+        ipRestriction={rollCall.ipRestriction}
+        onBindAllIp={rollCall.bindAllIp}
+        onToggleIpRestriction={rollCall.toggleIpRestriction}
       />
 
       {/* 主体三栏 */}
@@ -342,6 +345,7 @@ export const RollCallApp: React.FC<RollCallAppProps> = ({ onClose, mode = 'teach
               handleToggleSeatLock(rollCall.selectedSeatNumber);
             }
           }}
+          onBindIp={rollCall.bindIp}
         />
       </div>
 

@@ -9,8 +9,41 @@ import RollCallPublic from './pages/RollCallPublic';
 import { useAuth } from './hooks/useAuth';
 import { backendClient } from './api/backendClient';
 
+// IP 违规强制退出弹窗：3 秒倒计时后自动登出，不可关闭
+const IpViolationOverlay: React.FC<{ seatNumber: number; onTimeout: () => void }> = ({ seatNumber, onTimeout }) => {
+  const [countdown, setCountdown] = useState(3);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCountdown((prev) => {
+        if (prev <= 1) {
+          clearInterval(timer);
+          onTimeout();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [onTimeout]);
+
+  return (
+    <div className="fixed inset-0 z-[9999] bg-slate-950/95 backdrop-blur flex flex-col items-center justify-center text-center px-6">
+      <i className="fa-solid fa-triangle-exclamation text-7xl text-red-500 mb-6 animate-pulse"></i>
+      <p className="text-2xl md:text-3xl font-bold text-red-400 mb-4">
+        请回自己的 {seatNumber} 号座位登录
+      </p>
+      <p className="text-sm text-slate-400 mb-8">检测到当前登录 IP 与座位绑定 IP 不符</p>
+      <div className="w-16 h-16 rounded-full border-4 border-red-500/60 flex items-center justify-center">
+        <span className="text-3xl font-bold text-red-400 font-mono">{countdown}</span>
+      </div>
+      <p className="text-xs text-slate-500 mt-4 font-mono">秒后将自动退出登录</p>
+    </div>
+  );
+};
+
 function App() {
-  const { profile, loading: authLoading, checkAndEnforceLoginRestriction, isStudent, isProxyMode } = useAuth();
+  const { profile, loading: authLoading, checkAndEnforceLoginRestriction, checkIpViolation, ipViolation, isStudent, isProxyMode, signOut } = useAuth();
   const [initStatus, setInitStatus] = useState('Initializing...');
   const [initError, setInitError] = useState<string | null>(null);
 
@@ -31,22 +64,24 @@ function App() {
     checkConnection();
   }, []);
 
-  // 定期检查学生登录权限
+  // 定期检查学生登录权限 + IP 绑定违规
   useEffect(() => {
     if (!isStudent) return;
 
     console.log('启动学生登录权限定期检查');
-    
+
     // 立即检查一次
     checkAndEnforceLoginRestriction();
+    checkIpViolation();
 
     // 每30秒检查一次
     const interval = setInterval(() => {
       checkAndEnforceLoginRestriction();
+      checkIpViolation();
     }, 30000);
 
     return () => clearInterval(interval);
-  }, [isStudent, checkAndEnforceLoginRestriction]);
+  }, [isStudent, checkAndEnforceLoginRestriction, checkIpViolation]);
 
   console.log('App.tsx: profile =', profile?.role, 'authLoading =', authLoading);
 
@@ -82,7 +117,12 @@ function App() {
   }
 
   return (
-    <HashRouter>
+    <>
+      {/* IP 违规强制退出遮罩（代理模式下不显示，不可关闭） */}
+      {ipViolation && !isProxyMode && (
+        <IpViolationOverlay seatNumber={ipViolation.seat_number} onTimeout={signOut} />
+      )}
+      <HashRouter>
       <Routes>
         <Route path="/mental-health" element={<MentalHealthExternal />} />
         <Route path="/public/task/:taskId" element={<PublicTaskView />} />
@@ -102,6 +142,7 @@ function App() {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </HashRouter>
+    </>
   );
 }
 

@@ -833,7 +833,8 @@ app.get('/api/auth/session', authenticate, async (req, res) => {
         data: {
           session: {
             access_token: req.headers.authorization.replace('Bearer ', ''),
-            user: formatRow(rows[0])
+            user: formatRow(rows[0]),
+            ip_violation: await getIpViolation(req.user.userId, req, req.user.deviceInfo)
           }
         },
         error: null
@@ -844,6 +845,59 @@ app.get('/api/auth/session', authenticate, async (req, res) => {
     res.status(500).json({ data: { session: null }, error: error.message });
   }
 });
+
+// ===== IP 归一化与绑定违规检测（课堂点名 IP 绑定与登录限制） =====
+// 归一化 IP：x-forwarded-for 列表取第一个，去掉 ::ffff: 前缀
+function normalizeIp(ip) {
+  if (!ip || typeof ip !== 'string') return '';
+  // x-forwarded-for 可能是 "ip1, ip2" 列表，取第一个
+  let s = ip.split(',')[0].trim();
+  // 去掉 IPv4-mapped IPv6 前缀 ::ffff:
+  s = s.replace(/^::ffff:/i, '');
+  return s;
+}
+
+// 查询学生最近一次活跃的非代理会话 IP（排除教师远程控制代理会话）
+async function getStudentCurrentIp(studentId) {
+  const [rows] = await pool.query(
+    `SELECT ip_address FROM login_sessions
+     WHERE user_id = ? AND is_active = TRUE AND expires_at > NOW()
+       AND last_active_at > DATE_SUB(NOW(), INTERVAL 5 MINUTE)
+       AND device_info NOT LIKE '教师远程控制%'
+     ORDER BY last_active_at DESC LIMIT 1`,
+    [studentId]
+  );
+  return rows.length > 0 ? rows[0].ip_address : null;
+}
+
+// 检测学生当前请求 IP 是否违反班级 IP 登录限制
+// 违规时返回 { seat_number, bound_ip, current_ip }，否则返回 null
+// deviceInfo 以 '教师远程控制' 开头的代理会话跳过检测
+async function getIpViolation(userId, req, deviceInfo) {
+  try {
+    if (deviceInfo && String(deviceInfo).startsWith('教师远程控制')) return null;
+    const [profileRows] = await pool.query('SELECT role, class_id FROM profiles WHERE id = ?', [userId]);
+    if (profileRows.length === 0) return null;
+    const { role, class_id: classId } = profileRows[0];
+    if (role !== 'student' || !classId) return null;
+    const [classRows] = await pool.query('SELECT ip_login_restriction FROM classes WHERE id = ?', [classId]);
+    if (classRows.length === 0) return null;
+    const restriction = classRows[0].ip_login_restriction;
+    if (!(restriction === 1 || restriction === true)) return null;
+    const [seatRows] = await pool.query(
+      'SELECT bound_ip, seat_number FROM roll_call_seating WHERE class_id = ? AND student_id = ?',
+      [classId, userId]
+    );
+    if (seatRows.length === 0 || !seatRows[0].bound_ip) return null;
+    const currentIp = normalizeIp(req.headers['x-forwarded-for'] || req.ip || req.connection.remoteAddress);
+    const boundIp = normalizeIp(seatRows[0].bound_ip);
+    if (!currentIp || currentIp === boundIp) return null;
+    return { seat_number: seatRows[0].seat_number, bound_ip: boundIp, current_ip: currentIp };
+  } catch (e) {
+    console.error('getIpViolation error:', e);
+    return null;
+  }
+}
 
 // ============ 安全认证 API ============
 
@@ -856,7 +910,7 @@ app.post('/api/auth/secure-login', async (req, res) => {
     }
     
     const deviceInfo = req.headers['x-device-info'] || 'Unknown Device';
-    const ipAddress = req.headers['x-forwarded-for'] || req.ip || req.connection.remoteAddress || 'Unknown';
+    const ipAddress = normalizeIp(req.headers['x-forwarded-for'] || req.ip || req.connection.remoteAddress || 'Unknown');
     const userAgent = req.headers['user-agent'] || 'Unknown';
     
     console.log('Secure login attempt:', { username, deviceInfo, ipAddress });
@@ -869,6 +923,7 @@ app.post('/api/auth/secure-login', async (req, res) => {
       res.json({
         data: {
           user: result.user,
+          ip_violation: await getIpViolation(result.user.id, req, deviceInfo),
           session: {
             access_token: result.token,
             sessionId: result.sessionId,
@@ -8840,12 +8895,26 @@ app.get('/api/teacher/roll-call/students/:classId', authenticate, requireTeacher
          WHERE ls.user_id = p.id
            AND ls.is_active = TRUE
            AND ls.expires_at > NOW()
-           AND ls.last_active_at > DATE_SUB(NOW(), INTERVAL 5 MINUTE)) > 0 AS is_online
+           AND ls.last_active_at > DATE_SUB(NOW(), INTERVAL 5 MINUTE)) > 0 AS is_online,
+        (SELECT ls.ip_address FROM login_sessions ls
+         WHERE ls.user_id = p.id
+           AND ls.is_active = TRUE
+           AND ls.expires_at > NOW()
+           AND ls.last_active_at > DATE_SUB(NOW(), INTERVAL 5 MINUTE)
+           AND ls.device_info NOT LIKE '教师远程控制%'
+         ORDER BY ls.last_active_at DESC LIMIT 1) AS current_ip,
+        rs.bound_ip AS bound_ip
       FROM profiles p
+      LEFT JOIN roll_call_seating rs ON rs.class_id = p.class_id AND rs.student_id = p.id
       WHERE p.class_id = ? AND p.role = 'student'
       ORDER BY p.real_name ASC
     `, [classId]);
-    res.json({ data: students, error: null });
+    // JS 层统一归一化 IP 后计算是否不匹配（离线时 current_ip 为 null，不报警）
+    const studentsWithIp = students.map(s => ({
+      ...s,
+      is_ip_mismatch: !!(s.bound_ip && s.current_ip && normalizeIp(s.current_ip) !== normalizeIp(s.bound_ip)),
+    }));
+    res.json({ data: studentsWithIp, error: null });
   } catch (error) {
     console.error('Error in GET /api/teacher/roll-call/students/:classId:', error);
     res.status(500).json({ data: null, error: error.message });
@@ -8856,7 +8925,7 @@ app.get('/api/teacher/roll-call/students/:classId', authenticate, requireTeacher
 app.get('/api/teacher/roll-call/seating/:classId', authenticate, requireTeacher, async (req, res) => {
   try {
     const { classId } = req.params;
-    const [classRows] = await pool.query('SELECT id, teacher_id FROM classes WHERE id = ?', [classId]);
+    const [classRows] = await pool.query('SELECT id, teacher_id, ip_login_restriction FROM classes WHERE id = ?', [classId]);
     if (classRows.length === 0) {
       return res.status(404).json({ data: null, error: '班级不存在' });
     }
@@ -8864,7 +8933,7 @@ app.get('/api/teacher/roll-call/seating/:classId', authenticate, requireTeacher,
       return res.status(403).json({ data: null, error: '无权限访问该班级' });
     }
     const [seats] = await pool.query(
-      'SELECT id, class_id, seat_number, student_id, position_x, position_y, is_locked, updated_at FROM roll_call_seating WHERE class_id = ? ORDER BY seat_number',
+      'SELECT id, class_id, seat_number, student_id, position_x, position_y, is_locked, bound_ip, updated_at FROM roll_call_seating WHERE class_id = ? ORDER BY seat_number',
       [classId]
     );
     const [layoutRows] = await pool.query(
@@ -8879,7 +8948,8 @@ app.get('/api/teacher/roll-call/seating/:classId', authenticate, requireTeacher,
             : layoutRows[0].layout_data,
         }
       : { is_locked: false, layout_data: { version: 1 } };
-    res.json({ data: { seats, layout }, error: null });
+    const restriction = classRows[0].ip_login_restriction;
+    res.json({ data: { seats, layout, ip_login_restriction: !!(restriction === 1 || restriction === true) }, error: null });
   } catch (error) {
     console.error('Error in GET /api/teacher/roll-call/seating/:classId:', error);
     res.status(500).json({ data: null, error: error.message });
@@ -9108,6 +9178,112 @@ app.post('/api/teacher/roll-call/lock/:classId', authenticate, requireTeacher, a
     res.json({ data: { is_locked: !!is_locked }, error: null });
   } catch (error) {
     console.error('Error in POST /api/teacher/roll-call/lock/:classId:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 5.1 绑定/解绑单个学生的座位 IP
+app.post('/api/teacher/roll-call/seating/:classId/bind-ip', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { classId } = req.params;
+    const { student_id, action } = req.body;
+    if (!student_id || (action !== 'bind' && action !== 'unbind')) {
+      return res.status(400).json({ data: null, error: '参数错误：需要 student_id 和 action(bind/unbind)' });
+    }
+    // 校验班级归属
+    const [classRows] = await pool.query('SELECT id, teacher_id FROM classes WHERE id = ?', [classId]);
+    if (classRows.length === 0) {
+      return res.status(404).json({ data: null, error: '班级不存在' });
+    }
+    if (classRows[0].teacher_id !== req.user.userId) {
+      return res.status(403).json({ data: null, error: '无权限访问该班级' });
+    }
+    // 学生必须已有座位
+    const [seatRows] = await pool.query(
+      'SELECT id, seat_number FROM roll_call_seating WHERE class_id = ? AND student_id = ?',
+      [classId, student_id]
+    );
+    if (seatRows.length === 0) {
+      return res.status(400).json({ data: null, error: '该学生还未排座' });
+    }
+    if (action === 'unbind') {
+      await pool.query(
+        'UPDATE roll_call_seating SET bound_ip = NULL WHERE class_id = ? AND student_id = ?',
+        [classId, student_id]
+      );
+      return res.json({ data: { bound_ip: null }, error: null });
+    }
+    // bind：取该学生当前在线非代理会话 IP
+    const currentIp = await getStudentCurrentIp(student_id);
+    if (!currentIp) {
+      return res.status(400).json({ data: null, error: '学生不在线，无法获取其 IP' });
+    }
+    const boundIp = normalizeIp(currentIp);
+    await pool.query(
+      'UPDATE roll_call_seating SET bound_ip = ? WHERE class_id = ? AND student_id = ?',
+      [boundIp, classId, student_id]
+    );
+    res.json({ data: { bound_ip: boundIp }, error: null });
+  } catch (error) {
+    console.error('Error in POST /api/teacher/roll-call/seating/:classId/bind-ip:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 5.2 一键绑定全班在线学生的座位 IP（覆盖旧值）
+app.post('/api/teacher/roll-call/seating/:classId/bind-all-ip', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { classId } = req.params;
+    // 校验班级归属
+    const [classRows] = await pool.query('SELECT id, teacher_id FROM classes WHERE id = ?', [classId]);
+    if (classRows.length === 0) {
+      return res.status(404).json({ data: null, error: '班级不存在' });
+    }
+    if (classRows[0].teacher_id !== req.user.userId) {
+      return res.status(403).json({ data: null, error: '无权限访问该班级' });
+    }
+    const [seats] = await pool.query(
+      'SELECT student_id FROM roll_call_seating WHERE class_id = ? AND student_id IS NOT NULL',
+      [classId]
+    );
+    let bound = 0;
+    let skippedOffline = 0;
+    for (const seat of seats) {
+      const currentIp = await getStudentCurrentIp(seat.student_id);
+      if (!currentIp) {
+        skippedOffline++;
+        continue;
+      }
+      await pool.query(
+        'UPDATE roll_call_seating SET bound_ip = ? WHERE class_id = ? AND student_id = ?',
+        [normalizeIp(currentIp), classId, seat.student_id]
+      );
+      bound++;
+    }
+    res.json({ data: { bound, skipped_offline: skippedOffline }, error: null });
+  } catch (error) {
+    console.error('Error in POST /api/teacher/roll-call/seating/:classId/bind-all-ip:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 5.3 开启/关闭班级 IP 登录限制
+app.post('/api/teacher/roll-call/restriction/:classId', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { classId } = req.params;
+    const { enabled } = req.body;
+    // 校验班级归属
+    const [classRows] = await pool.query('SELECT id, teacher_id FROM classes WHERE id = ?', [classId]);
+    if (classRows.length === 0) {
+      return res.status(404).json({ data: null, error: '班级不存在' });
+    }
+    if (classRows[0].teacher_id !== req.user.userId) {
+      return res.status(403).json({ data: null, error: '无权限访问该班级' });
+    }
+    await pool.query('UPDATE classes SET ip_login_restriction = ? WHERE id = ?', [enabled ? 1 : 0, classId]);
+    res.json({ data: { ip_login_restriction: !!enabled }, error: null });
+  } catch (error) {
+    console.error('Error in POST /api/teacher/roll-call/restriction/:classId:', error);
     res.status(500).json({ data: null, error: error.message });
   }
 });

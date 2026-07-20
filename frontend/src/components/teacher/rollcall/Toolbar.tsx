@@ -22,6 +22,9 @@ interface ToolbarProps {
   onClose?: () => void;
   hideClassSelector?: boolean;
   mode?: RollCallMode;
+  ipRestriction?: boolean;
+  onBindAllIp?: () => void;
+  onToggleIpRestriction?: () => void;
 }
 
 export const Toolbar: React.FC<ToolbarProps> = ({
@@ -44,6 +47,9 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onClose,
   hideClassSelector = false,
   mode = 'teacher',
+  ipRestriction = false,
+  onBindAllIp,
+  onToggleIpRestriction,
 }) => {
   const currentClass = classes.find((c) => c.id === selectedClassId);
   // 学生端（课代表/班长）：仅保留反向排座和考勤记录
@@ -177,6 +183,50 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           <i className="fa-solid fa-clipboard-check"></i>
           考勤记录
         </button>
+
+        {/* IP 绑定与登录限制 - 仅教师 */}
+        {!isStudent && onBindAllIp && onToggleIpRestriction && (
+          <>
+            <div className="h-6 w-px bg-slate-700"></div>
+            <button
+              onClick={() => {
+                if (!confirm('将本班所有在线学生的当前IP绑定到座位，覆盖已有绑定，继续？')) return;
+                onBindAllIp();
+              }}
+              disabled={!selectedClassId}
+              className="px-3 py-1.5 bg-slate-800 hover:bg-cyan-500/20 text-slate-300 hover:text-cyan-300 text-xs rounded flex items-center gap-1.5 border border-slate-700 hover:border-cyan-500/40 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              title="将本班所有在线学生的当前IP绑定到座位"
+            >
+              <i className="fa-solid fa-link"></i>
+              一键绑定IP
+            </button>
+
+            <button
+              onClick={onToggleIpRestriction}
+              disabled={!selectedClassId}
+              className={`
+                px-3 py-1.5 text-xs rounded flex items-center gap-1.5 transition-colors border
+                ${
+                  ipRestriction
+                    ? 'bg-red-500/20 text-red-300 border-red-500/40 hover:bg-red-500/30'
+                    : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
+                }
+                ${!selectedClassId ? 'opacity-50 cursor-not-allowed' : ''}
+              `}
+              title="开启后学生须从绑定IP的座位登录，否则将被强制退出"
+            >
+              <i className="fa-solid fa-network-wired"></i>
+              登录限制
+              <span
+                className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                  ipRestriction ? 'bg-red-500/30 text-red-200' : 'bg-slate-700 text-slate-400'
+                }`}
+              >
+                {ipRestriction ? '开' : '关'}
+              </span>
+            </button>
+          </>
+        )}
 
         {/* 锁定布局、清空 - 仅教师 */}
         {!isStudent && (

@@ -9,6 +9,9 @@ export interface RollCallStudent {
   max_points: number;
   total_correct: number;
   is_online: boolean | number;
+  current_ip?: string | null;
+  bound_ip?: string | null;
+  is_ip_mismatch?: boolean;
 }
 
 export interface RollCallSeat {
@@ -19,6 +22,7 @@ export interface RollCallSeat {
   position_x: number;
   position_y: number;
   is_locked: boolean | number;
+  bound_ip?: string | null;
 }
 
 export interface RollCallLayout {
@@ -56,6 +60,7 @@ export function useRollCall(classId: string | null, mode: RollCallMode = 'teache
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedSeatNumber, setSelectedSeatNumber] = useState<number | null>(null);
+  const [ipRestriction, setIpRestriction] = useState(false);
   const pollRef = useRef<number | null>(null);
 
   const apiPrefix = mode === 'teacher' ? '/api/teacher/roll-call' : '/api/student/roll-call';
@@ -92,6 +97,9 @@ export function useRollCall(classId: string | null, mode: RollCallMode = 'teache
       } else {
         setSeats(json.data?.seats || []);
         setLayout(json.data?.layout || { is_locked: false, layout_data: { version: 1 } });
+        if (mode === 'teacher') {
+          setIpRestriction(!!json.data?.ip_login_restriction);
+        }
       }
     } catch (e) {
       console.error('loadSeating fetch error:', e);
@@ -244,6 +252,79 @@ export function useRollCall(classId: string | null, mode: RollCallMode = 'teache
     return saveSeating([], false);
   }, [classId, saveSeating]);
 
+  // 绑定/解绑单个学生的座位 IP（仅教师模式）
+  const bindIp = useCallback(
+    async (studentId: string, action: 'bind' | 'unbind'): Promise<boolean> => {
+      if (mode !== 'teacher' || !classId) return false;
+      try {
+        const res = await fetch(`${API_CONFIG.apiUrl}${apiPrefix}/seating/${classId}/bind-ip`, {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ student_id: studentId, action }),
+        });
+        const json = await res.json();
+        if (json.error) {
+          console.error('bindIp error:', json.error);
+          alert(json.error);
+          return false;
+        }
+        await Promise.all([loadStudents(classId), loadSeating(classId)]);
+        return true;
+      } catch (e) {
+        console.error('bindIp fetch error:', e);
+        alert((action === 'bind' ? '绑定' : '解绑') + '失败：' + (e as Error).message);
+        return false;
+      }
+    },
+    [classId, mode, apiPrefix, loadStudents, loadSeating]
+  );
+
+  // 一键绑定全班在线学生的座位 IP（仅教师模式）
+  const bindAllIp = useCallback(async (): Promise<void> => {
+    if (mode !== 'teacher' || !classId) return;
+    try {
+      const res = await fetch(`${API_CONFIG.apiUrl}${apiPrefix}/seating/${classId}/bind-all-ip`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({}),
+      });
+      const json = await res.json();
+      if (json.error) {
+        console.error('bindAllIp error:', json.error);
+        alert(json.error);
+        return;
+      }
+      alert(`已绑定 ${json.data?.bound ?? 0} 人，跳过离线 ${json.data?.skipped_offline ?? 0} 人`);
+      await Promise.all([loadStudents(classId), loadSeating(classId)]);
+    } catch (e) {
+      console.error('bindAllIp fetch error:', e);
+      alert('一键绑定失败：' + (e as Error).message);
+    }
+  }, [classId, mode, apiPrefix, loadStudents, loadSeating]);
+
+  // 开启/关闭班级 IP 登录限制（仅教师模式）
+  const toggleIpRestriction = useCallback(async (): Promise<void> => {
+    if (mode !== 'teacher' || !classId) return;
+    const next = !ipRestriction;
+    try {
+      const res = await fetch(`${API_CONFIG.apiUrl}${apiPrefix}/restriction/${classId}`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ enabled: next }),
+      });
+      const json = await res.json();
+      if (json.error) {
+        console.error('toggleIpRestriction error:', json.error);
+        alert(json.error);
+        return;
+      }
+      setIpRestriction(!!json.data?.ip_login_restriction);
+    } catch (e) {
+      console.error('toggleIpRestriction fetch error:', e);
+      alert('设置失败：' + (e as Error).message);
+    }
+  }, [classId, mode, apiPrefix, ipRestriction]);
+
   const requestProxyToken = useCallback(async (studentId: string): Promise<ProxyTokenInfo | null> => {
     try {
       const res = await fetch(`${API_CONFIG.apiUrl}${apiPrefix}/proxy-token/${studentId}`, {
@@ -385,6 +466,10 @@ export function useRollCall(classId: string | null, mode: RollCallMode = 'teache
     selectedSeatNumber,
     setSelectedSeatNumber,
     isLocked: layout.is_locked,
+    ipRestriction,
+    bindIp,
+    bindAllIp,
+    toggleIpRestriction,
     saveSeating,
     autoArrange,
     reverseArrange,

@@ -31,6 +31,7 @@ export function useAuth() {
   const [isProxyMode, setIsProxyMode] = useState(false);
   const [proxyError, setProxyError] = useState<string | null>(null);
   const [proxySessionId, setProxySessionId] = useState<string | null>(null);
+  const [ipViolation, setIpViolation] = useState<{ seat_number: number } | null>(null);
   const [authListeners] = useState<Set<(event: string, session: Session | null) => void>>(() => new Set());
 
   useEffect(() => {
@@ -81,11 +82,28 @@ export function useAuth() {
         setSession(data.session);
         setUser(data.session.user);
         await fetchProfile(data.session.user.id);
+        // IP 登录限制：非代理模式下若当前 IP 与绑定座位 IP 不符，标记违规
+        if (!isProxyMode && data.session.ip_violation) {
+          setIpViolation(data.session.ip_violation);
+        }
       }
     } catch (error) {
       console.error('Failed to load session:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // 轮询检查 IP 登录限制违规（学生从非绑定 IP 登录时触发强制退出）
+  const checkIpViolation = async () => {
+    if (isProxyMode || !user) return;
+    try {
+      const { data } = await backendClient.getSession();
+      if (data?.session?.ip_violation) {
+        setIpViolation(data.session.ip_violation);
+      }
+    } catch (error) {
+      console.error('checkIpViolation error:', error);
     }
   };
 
@@ -219,6 +237,7 @@ export function useAuth() {
     setProfile(null);
     setUser(null);
     setSession(null);
+    setIpViolation(null);
 
     authListeners.forEach((listener) => listener('SIGNED_OUT', null));
 
@@ -356,6 +375,8 @@ export function useAuth() {
     isProxyMode,
     proxyError,
     proxySessionId,
+    ipViolation,
+    checkIpViolation,
     signUp,
     signIn,
     signOut,
