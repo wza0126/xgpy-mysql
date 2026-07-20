@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { backendClient } from '../api/backendClient';
 import { API_CONFIG } from '../api/config';
 import { Profile } from '../types';
@@ -95,17 +95,19 @@ export function useAuth() {
   };
 
   // 轮询检查 IP 登录限制违规（学生从非绑定 IP 登录时触发强制退出）
-  const checkIpViolation = async () => {
+  const checkIpViolation = useCallback(async () => {
     if (isProxyMode || !user) return;
     try {
       const { data } = await backendClient.getSession();
-      if (data?.session?.ip_violation) {
-        setIpViolation(data.session.ip_violation);
+      const v = data?.session?.ip_violation;
+      if (v) {
+        // 相同违规不重复设置 state，避免触发无限重渲染
+        setIpViolation((prev) => (prev?.seat_number === v.seat_number ? prev : v));
       }
     } catch (error) {
       console.error('checkIpViolation error:', error);
     }
-  };
+  }, [isProxyMode, user]);
 
   const fetchProfile = async (userId: string) => {
     const { data, error } = await backendClient

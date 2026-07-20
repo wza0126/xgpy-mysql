@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Login } from './pages/Login';
 import { Desktop } from './pages/Desktop';
@@ -12,20 +12,23 @@ import { backendClient } from './api/backendClient';
 // IP 违规强制退出弹窗：3 秒倒计时后自动登出，不可关闭
 const IpViolationOverlay: React.FC<{ seatNumber: number; onTimeout: () => void }> = ({ seatNumber, onTimeout }) => {
   const [countdown, setCountdown] = useState(3);
+  // onTimeout 每次渲染都是新引用，用 ref 固定，保证倒计时只启动一次、不被打断
+  const onTimeoutRef = useRef(onTimeout);
+  onTimeoutRef.current = onTimeout;
 
   useEffect(() => {
     const timer = setInterval(() => {
       setCountdown((prev) => {
         if (prev <= 1) {
           clearInterval(timer);
-          onTimeout();
+          onTimeoutRef.current();
           return 0;
         }
         return prev - 1;
       });
     }, 1000);
     return () => clearInterval(timer);
-  }, [onTimeout]);
+  }, []);
 
   return (
     <div className="fixed inset-0 z-[9999] bg-slate-950/95 backdrop-blur flex flex-col items-center justify-center text-center px-6">

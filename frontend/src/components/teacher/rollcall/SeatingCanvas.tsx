@@ -88,6 +88,22 @@ export const SeatingCanvas: React.FC<SeatingCanvasProps> = ({
     }
   };
 
+  // 讲台位置跟随第一排（1-8 号座）：反向排座后第一排翻到最下面，讲台跟着走
+  const frontRowSeats = seats.filter((s) => s.seat_number >= 1 && s.seat_number <= 8);
+  const avgFrontY = frontRowSeats.length
+    ? frontRowSeats.reduce((sum, s) => sum + s.position_y, 0) / frontRowSeats.length
+    : 0;
+  const podiumAtTop = avgFrontY < 3.5;
+
+  const podium = (
+    <div className="flex justify-center py-1 select-none" title="讲台">
+      <div className="flex items-center gap-2 px-8 py-1.5 bg-amber-900/40 border border-amber-700/50 rounded-md">
+        <i className="fa-solid fa-chalkboard-user text-amber-400 text-lg"></i>
+        <span className="text-xs font-mono text-amber-300 tracking-widest">讲台</span>
+      </div>
+    </div>
+  );
+
   return (
     <div className="relative w-full h-full flex flex-col items-center justify-center p-6 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
       {/* 装饰：网格背景 */}
@@ -100,24 +116,20 @@ export const SeatingCanvas: React.FC<SeatingCanvasProps> = ({
         }}
       ></div>
 
-      {/* 黑板装饰 */}
-      <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 px-6 py-1.5 bg-slate-800/80 border border-slate-700 rounded-md">
-        <span className="text-xs font-mono text-cyan-300 tracking-widest">CLASSROOM</span>
-      </div>
-
-      {/* 主座位网格 */}
-      <div
-        ref={canvasRef}
-        className="relative z-[5] grid gap-2"
-        style={{
-          gridTemplateColumns: `repeat(${COLS}, minmax(0, 1fr))`,
-          gridTemplateRows: `repeat(${ROWS}, minmax(0, 1fr))`,
-          width: 'min(640px, 90%)',
-          aspectRatio: '1 / 1',
-        }}
-        onDragOver={handleEmptyDrop as any}
-        onDrop={handleEmptyDrop as any}
-      >
+      {/* 讲台 + 主座位网格（讲台跟随第一排方向） */}
+      <div className="relative z-[5] flex flex-col" style={{ width: 'min(640px, 90%)' }}>
+        {podiumAtTop && podium}
+        <div
+          ref={canvasRef}
+          className="grid gap-2 w-full"
+          style={{
+            gridTemplateColumns: `repeat(${COLS}, minmax(0, 1fr))`,
+            gridTemplateRows: `repeat(${ROWS}, minmax(0, 1fr))`,
+            aspectRatio: '1 / 1',
+          }}
+          onDragOver={handleEmptyDrop as any}
+          onDrop={handleEmptyDrop as any}
+        >
         {Array.from({ length: 64 }, (_, idx) => {
           const position_x = idx % COLS;
           const position_y = Math.floor(idx / COLS);
@@ -154,6 +166,8 @@ export const SeatingCanvas: React.FC<SeatingCanvasProps> = ({
             />
           );
         })}
+        </div>
+        {!podiumAtTop && podium}
       </div>
 
       {/* 底部信息 */}
