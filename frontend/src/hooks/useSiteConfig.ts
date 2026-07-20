@@ -1,11 +1,13 @@
 import { useState, useEffect } from 'react';
 import { API_CONFIG } from '../api/config';
 
-// 站点公共配置（site_title / site_subtitle），来源于 /api/public/site-config
+// 站点公共配置（site_title / site_subtitle / 系统版本），来源于 /api/public/site-config
 // 模块级缓存避免每个页面重复请求；保存站点设置后可通过 applySiteConfig 立即生效
 export interface SiteConfig {
   site_title?: string;
   site_subtitle?: string;
+  system_version?: string;
+  system_build_time?: string;
 }
 
 let cache: SiteConfig | null = null;
@@ -25,6 +27,9 @@ async function loadSiteConfig(): Promise<SiteConfig> {
         }
         if (val && typeof val === 'object' && val.value !== undefined) val = val.value;
         if ((key === 'site_title' || key === 'site_subtitle') && val) {
+          cfg[key] = String(val);
+        }
+        if ((key === 'system_version' || key === 'system_build_time') && val) {
           cfg[key] = String(val);
         }
       });

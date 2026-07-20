@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
 import { API_CONFIG } from '../../api/config';
 import { useAuth } from '../../hooks/useAuth';
-import { applySiteConfig } from '../../hooks/useSiteConfig';
+import { applySiteConfig, useSiteConfig } from '../../hooks/useSiteConfig';
 
 const API_BASE = API_CONFIG.apiUrl;
 
@@ -60,6 +60,7 @@ type ClassInfo = {
 };
 
 export const SystemSettings: React.FC = () => {
+  const siteConfig = useSiteConfig();
   const defaultConfigs: Record<string, any> = {
     points_correct_answer: 10,
     points_wrong_answer: -5,
@@ -945,6 +946,21 @@ export const SystemSettings: React.FC = () => {
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                   placeholder="江苏省高中信息技术"
                 />
+              </div>
+
+              {/* 系统版本（只读，来自构建信息，随每次提交/打包自动更新） */}
+              <div className="pt-2">
+                <label className="block text-sm font-medium text-gray-700 mb-2">系统版本</label>
+                <div className="flex items-center gap-3 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg">
+                  <i className="fa-solid fa-code-branch text-gray-400"></i>
+                  <span className="font-mono text-sm text-gray-700">{siteConfig.system_version || '获取中...'}</span>
+                  {siteConfig.system_build_time && (
+                    <span className="text-xs text-gray-400">
+                      构建于 {new Date(siteConfig.system_build_time).toLocaleString('zh-CN')}
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-gray-400 mt-1">版本号随系统更新自动变化，学校部署升级后可在此处核对是否为最新版本</p>
               </div>
             </div>
 

@@ -136,6 +136,9 @@ export const Login: React.FC = () => {
         <div className="mt-6 text-center text-sm text-gray-500">
           <p>登陆后自动跳出说明平台未开放，请联系老师</p>
           <p>学生账号由教师后台批量导入</p>
+          {siteConfig.system_version && (
+            <p className="mt-3 text-xs text-gray-400 font-mono">{siteConfig.system_version}</p>
+          )}
         </div>
       </motion.div>
     </div>

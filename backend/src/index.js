@@ -16,6 +16,12 @@ const pythonSandbox = new PythonSandbox({ maxExecutionTime: 3000 });
 const pythonGrader = new PythonGrader();
 const { getSystemConfig } = require('./public-config');
 
+// 版本信息由 scripts/gen-version.js 在启动/构建时自动生成
+let appVersion = { version: '0.0.0', commit: 'unknown', buildTime: '' };
+try {
+  appVersion = require('./version');
+} catch { /* version.js 不存在时使用兜底值 */ }
+
 const app = express();
 const secureAuth = new SecureAuth(pool);
 const licenseManager = new LicenseManager(pool);
@@ -115,6 +121,11 @@ app.use(express.static(path.join(__dirname, '../public')));
 app.get('/api/public/site-config', async (req, res) => {
   try {
     const rows = await getSystemConfig();
+    // 系统版本信息（来自代码构建，不存数据库，只读展示）
+    rows.push(
+      { key: 'system_version', value: `v${appVersion.version} (${appVersion.commit})` },
+      { key: 'system_build_time', value: appVersion.buildTime }
+    );
     res.json({ data: rows, error: null });
   } catch (error) {
     console.error('Error in GET /api/public/site-config:', error);
