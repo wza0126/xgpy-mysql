@@ -28,6 +28,7 @@ export const desktopIcons: DesktopIcon[] = [
   { id: 'exchange', title: '兑换', icon: 'fa-gift', color: 'bg-orange-500' },
   { id: 'leaderboard', title: '排行榜', icon: 'fa-trophy', color: 'bg-amber-500' },
   { id: 'security', title: '登录安全', icon: 'fa-shield-halved', color: 'bg-teal-500' },
+  { id: 'proxyBrowser', title: '上网冲浪', icon: 'fa-earth-asia', color: 'bg-sky-500' },
   { id: 'profile', title: '我的', icon: 'fa-user', color: 'bg-cyan-500' },
 ];
 

@@ -19,6 +19,7 @@ type ExamTest = {
   allow_view_paper: boolean;
   allow_internet_code: boolean;
   internet_code_reward: number;
+  pass_grant_browser?: boolean | number;
   question_count: number;
   is_active: boolean;
   created_by: string;
@@ -141,6 +142,7 @@ export const ExamManager: React.FC = () => {
     allow_view_paper: false,
     allow_internet_code: false,
     internet_code_reward: 0,
+    pass_grant_browser: false,
     question_count: 0,
     is_active: true,
   });
@@ -237,6 +239,7 @@ export const ExamManager: React.FC = () => {
       allow_view_paper: formData.allow_view_paper,
       allow_internet_code: formData.allow_internet_code,
       internet_code_reward: formData.internet_code_reward,
+      pass_grant_browser: formData.pass_grant_browser,
       question_count: formData.question_ids.length,
       is_active: formData.is_active,
       type: 'exam',
@@ -318,6 +321,7 @@ export const ExamManager: React.FC = () => {
       allow_view_paper: false,
       allow_internet_code: false,
       internet_code_reward: 0,
+      pass_grant_browser: false,
       question_count: 0,
       is_active: true,
     });
@@ -344,6 +348,7 @@ export const ExamManager: React.FC = () => {
         allow_view_paper: test.allow_view_paper || false,
         allow_internet_code: test.allow_internet_code || false,
         internet_code_reward: test.internet_code_reward || 0,
+        pass_grant_browser: test.pass_grant_browser === true || test.pass_grant_browser === 1,
         question_count: test.question_count || parsedQuestionIds.length,
         is_active: test.is_active !== false,
       });
@@ -863,6 +868,20 @@ export const ExamManager: React.FC = () => {
                       允许学生查看试卷
                     </label>
                   </div>
+                </div>
+
+                <div className="flex items-center gap-3 p-3 border border-sky-200 bg-sky-50 rounded-lg">
+                  <input
+                    type="checkbox"
+                    id="passGrantBrowser"
+                    checked={formData.pass_grant_browser}
+                    onChange={(e) => setFormData({ ...formData, pass_grant_browser: e.target.checked })}
+                    className="w-4 h-4"
+                  />
+                  <label htmlFor="passGrantBrowser" className="text-sm font-medium text-sky-700">
+                    及格后允许上网
+                  </label>
+                  <span className="text-xs text-gray-500">学生及格后自动开通上网权限，并收到系统通知</span>
                 </div>
 
                 <div className="flex items-center gap-3 p-3 border border-gray-200 rounded-lg">

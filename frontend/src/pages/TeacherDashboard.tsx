@@ -19,6 +19,7 @@ import { MentalHealthManager } from '../components/teacher/MentalHealthManager';
 import { KnowledgeBaseManager } from '../components/teacher/KnowledgeBaseManager';
 import { TaskManager } from '../components/teacher/TaskManager';
 import { RollCallApp } from '../components/teacher/RollCallApp';
+import { ProxyManager } from '../components/teacher/ProxyManager';
 
 const API_BASE = API_CONFIG.apiUrl;
 
@@ -40,6 +41,7 @@ const menuItems = [
   { id: 'notifications', title: '通知管理', icon: 'fa-bell' },
   { id: 'taskManager', title: '备课工作台', icon: 'fa-chalkboard-user' },
   { id: 'rollCall', title: '课堂点名', icon: 'fa-hand-pointer' },
+  { id: 'proxyNet', title: '上网管理', icon: 'fa-earth-asia' },
   { id: 'mentalHealth', title: '心理健康', icon: 'fa-heart-pulse' },
   { id: 'classes', title: '班级管理', icon: 'fa-users' },
   { id: 'students', title: '学生管理', icon: 'fa-user-graduate' },
@@ -59,6 +61,7 @@ const components: Record<string, React.ReactNode> = {
   notifications: <NotificationManager />,
   taskManager: <TaskManager />,
   rollCall: <RollCallApp />,
+  proxyNet: <ProxyManager />,
   mentalHealth: <MentalHealthManager />,
   classes: <ClassManager />,
   students: <StudentManager />,

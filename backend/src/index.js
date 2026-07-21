@@ -5,6 +5,7 @@ const pool = require('./db');
 const SecureAuth = require('./secure-auth');
 const { LicenseManager, FEATURES } = require('./license-manager');
 const { runMigrations } = require('./migrate');
+const { registerWebProxy, invalidateProxyPerm } = require('./web-proxy');
 const PythonSandbox = require('./python-sandbox');
 const PythonGrader = require('./python-grader');
 const { v4: uuidv4 } = require('uuid');
@@ -26,6 +27,16 @@ const app = express();
 const secureAuth = new SecureAuth(pool);
 const licenseManager = new LicenseManager(pool);
 let notificationScheduler = null;
+
+// ===== 进程级异常兜底 =====
+// 教室生产环境：进程活着比严格崩溃重要。单个请求/定时任务的未捕获异常
+// 只打日志不退出，避免一个坏请求把全班的服务端干掉
+process.on('unhandledRejection', (reason) => {
+  console.error('⚠️ [进程兜底] 未处理的 Promise 拒绝（已拦截，进程继续运行）:', reason);
+});
+process.on('uncaughtException', (error) => {
+  console.error('⚠️ [进程兜底] 未捕获的异常（已拦截，进程继续运行）:', error);
+});
 
 // 确保上传文件夹存在（使用脚本所在目录，不依赖工作目录）
 // pkg 打包成 exe 后 __dirname 指向只读快照，运行时目录要以 exe 所在目录为准
@@ -105,7 +116,13 @@ const upload = multer({
 });
 
 app.use(cors());
-app.use(express.json({ limit: '100mb' }));
+// 代理上网模块需要原始请求体转发给上游，verify 里为 /api/web-proxy 路径缓存 rawBody
+app.use(express.json({
+  limit: '100mb',
+  verify: (req, res, buf) => {
+    if (req.path && req.path.startsWith('/api/web-proxy/')) req.rawBody = buf;
+  }
+}));
 
 app.use('/api', (req, res, next) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -2716,6 +2733,11 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
       'INSERT INTO test_records (id, test_id, student_id, score, correct_count, total_count, points_earned, internet_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
       [testRecordId, test_id, student_id, score, correct, total, pointsEarned, internetCode]
     );
+
+    // 及格后开通上网权限（勾选 pass_grant_browser 时生效，首次开通会发系统通知）
+    if (isPassed) {
+      await grantBrowserOnPass(connection, test, student_id, '测试');
+    }
     
     // 处理积分
     if (pointsEarned > 0) {
@@ -3096,6 +3118,11 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
         'INSERT INTO exam_records (id, test_id, student_id, score, correct_count, total_count, points_earned, internet_codes_earned, is_passed, started_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())',
         [examRecordId, test_id, student_id, score, correct, total, pointsEarned, internetCodes.length, isPassed ? 1 : 0]
       );
+    }
+
+    // 及格后开通上网权限（勾选 pass_grant_browser 时生效，首次开通会发系统通知）
+    if (isPassed) {
+      await grantBrowserOnPass(connection, test, student_id, '考试');
     }
     
     if (pointsEarned > 0) {
@@ -4317,6 +4344,7 @@ app.post('/api/notifications', async (req, res) => {
       enable_app_access,
       can_open_exchange_module,
       enable_focus_mode,
+      grant_browser,
       has_buff,
       buff_type,
       buff_modifier,
@@ -4344,6 +4372,9 @@ app.post('/api/notifications', async (req, res) => {
     if (enable_app_access !== undefined) {
       finalContent += `\n📱 应用访问：${enable_app_access ? '✅ 允许' : '❌ 禁止'}`;
     }
+    if (grant_browser) {
+      finalContent += `\n🌐 上网权限：✅ 已为你开通（桌面「上网冲浪」可用）`;
+    }
     
     // 添加Buff提示
     if (has_buff && buff_modifier && buff_duration) {
@@ -4358,9 +4389,10 @@ app.post('/api/notifications', async (req, res) => {
         target_student_ids, has_point_reward, point_reward_amount, point_reward_reason,
         has_point_penalty, point_penalty_amount, point_penalty_reason,
         can_open_exchange_module, enable_app_access, enable_focus_mode, 
+        grant_browser,
         has_buff, buff_type, buff_modifier, buff_duration,
         scheduled_at, published_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       teacher_id,
       title,
@@ -4377,6 +4409,7 @@ app.post('/api/notifications', async (req, res) => {
       can_open_exchange_module !== false,
       enable_app_access !== false,
       enable_focus_mode !== false,
+      grant_browser ? 1 : 0,
       has_buff || false,
       buff_type || 'teacher_crit',
       buff_modifier || null,
@@ -4402,6 +4435,7 @@ app.post('/api/notifications', async (req, res) => {
         can_open_exchange_module,
         enable_app_access,
         enable_focus_mode,
+        grant_browser,
         has_buff,
         buff_type,
         buff_modifier,
@@ -4428,9 +4462,33 @@ app.post('/api/notifications', async (req, res) => {
   }
 });
 
+// 测试/考试及格后开通上网权限（pass_grant_browser 开关）
+// 已开通的学生跳过（不重复发通知刷屏）；开通同时发一条系统通知告知学生
+async function grantBrowserOnPass(connection, test, studentId, sourceLabel) {
+  if (!test || !test.pass_grant_browser) return;
+  const [rows] = await connection.query('SELECT can_use_browser FROM profiles WHERE id = ?', [studentId]);
+  if (rows.length === 0) return;
+  if (rows[0].can_use_browser === 1 || rows[0].can_use_browser === true) return; // 已开通，不重复发通知
+
+  await connection.query('UPDATE profiles SET can_use_browser = 1 WHERE id = ?', [studentId]);
+  invalidateProxyPerm(studentId);
+
+  // 发系统通知（学生端 notificationStore 轮询会自动弹出提示）
+  const title = '🌐 上网权限已开通';
+  const content = `恭喜通过${sourceLabel}《${test.title || ''}》，已为你开通上网权限，去桌面「上网冲浪」看看吧！`;
+  const [notifResult] = await connection.query(`
+    INSERT INTO notifications (teacher_id, title, content, notification_type, target_student_ids, published_at)
+    VALUES (?, ?, ?, 'student', ?, NOW())
+  `, [test.created_by || 'system', title, content, JSON.stringify([studentId])]);
+  await connection.query(
+    'INSERT INTO notification_recipients (notification_id, student_id, point_change, point_change_reason) VALUES (?, ?, 0, \'\')',
+    [notifResult.insertId, studentId]
+  );
+  console.log(`🌐 学生 ${studentId} 通过${sourceLabel}《${test.title || ''}》，已开通上网权限`);
+}
+
 // 处理通知分发和积分
-async function processNotificationDelivery(connection, notificationId, options) {
-  const {
+async function processNotificationDelivery(connection, notificationId, options) {  const {
     notification_type,
     target_class_id,
     target_student_ids,
@@ -4446,6 +4504,7 @@ async function processNotificationDelivery(connection, notificationId, options) 
     buff_type,
     buff_modifier,
     buff_duration,
+    grant_browser,
     teacher_id
   } = options;
 
@@ -4527,6 +4586,17 @@ async function processNotificationDelivery(connection, notificationId, options) 
         VALUES (?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL ? MINUTE), NOW())
       `, [buffId, studentId, buff_type || 'teacher_crit', buff_modifier, buff_duration]);
     }
+  }
+
+  // 勾选"允许上网"：批量给所有接收学生开通上网权限（即时生效，清权限缓存）
+  if (grant_browser && students.length > 0) {
+    const studentIds = students.map(s => s.id);
+    await connection.query(
+      `UPDATE profiles SET can_use_browser = 1 WHERE id IN (${studentIds.map(() => '?').join(',')})`,
+      studentIds
+    );
+    invalidateProxyPerm();
+    console.log(`🌐 通知 ${notificationId}：已为 ${studentIds.length} 名学生开通上网权限`);
   }
 }
 
@@ -4707,6 +4777,7 @@ async function checkAndPublishScheduledNotifications() {
         buff_type: notification.buff_type,
         buff_modifier: notification.buff_modifier,
         buff_duration: notification.buff_duration,
+        grant_browser: notification.grant_browser,
         teacher_id: notification.teacher_id
       });
     }
@@ -9396,7 +9467,7 @@ app.get('/api/teacher/roll-call/students/:classId', authenticate, requireTeacher
       return res.status(403).json({ data: null, error: '无权限访问该班级' });
     }
     const [students] = await pool.query(`
-      SELECT p.id, p.username, p.real_name, p.current_points, p.max_points, p.total_correct,
+      SELECT p.id, p.username, p.real_name, p.current_points, p.max_points, p.total_correct, p.can_use_browser,
         (SELECT COUNT(*) FROM login_sessions ls
          WHERE ls.user_id = p.id
            AND ls.is_active = TRUE
@@ -10545,6 +10616,11 @@ app.get('/api/proxy/verify', async (req, res) => {
     res.status(500).json({ data: null, error: error.message });
   }
 });
+
+// ===== 代理上网（学生上网冲浪）模块 =====
+// 教师管理 /api/teacher/proxy/*、学生端 /api/student/proxy/*、中转 /api/web-proxy/*
+// （内部自验 HMAC 令牌，不挂授权门 requireLicense）
+registerWebProxy(app, pool, authenticate, requireTeacher, requireStudent);
 
   await runMigrations();
 

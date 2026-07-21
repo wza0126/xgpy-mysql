@@ -84,6 +84,7 @@ export const NotificationManager: React.FC = () => {
     buff_duration: 10,
     can_open_exchange_module: false,
     enable_app_access: true,
+    grant_browser: false,
     scheduled_at: '',
   });
 
@@ -348,6 +349,7 @@ export const NotificationManager: React.FC = () => {
       buff_duration: 10,
       can_open_exchange_module: false,
       enable_app_access: true,
+      grant_browser: false,
       scheduled_at: '',
     });
     setSelectedClass(null);
@@ -919,6 +921,20 @@ export const NotificationManager: React.FC = () => {
                       <span className="font-medium text-orange-700">允许使用应用</span>
                     </label>
                     <p className="text-xs text-gray-500 mt-2">关闭后，学生将无法访问学习应用功能</p>
+                  </div>
+
+                  {/* 上网权限奖励 */}
+                  <div className="p-4 bg-sky-50 rounded-xl">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={formData.grant_browser}
+                        onChange={(e) => setFormData({ ...formData, grant_browser: e.target.checked })}
+                        className="w-4 h-4 text-sky-500"
+                      />
+                      <span className="font-medium text-sky-700">允许上网</span>
+                    </label>
+                    <p className="text-xs text-gray-500 mt-2">勾选后，通知发出时所有接收学生自动开通上网权限（桌面「上网冲浪」可用）</p>
                   </div>
 
                   {/* 定时发布 */}

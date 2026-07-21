@@ -304,6 +304,7 @@ export const RollCallApp: React.FC<RollCallAppProps> = ({ onClose, mode = 'teach
         ipRestriction={rollCall.ipRestriction}
         onBindAllIp={rollCall.bindAllIp}
         onToggleIpRestriction={rollCall.toggleIpRestriction}
+        onSetBrowserPermission={rollCall.setClassBrowserPermission}
       />
 
       {/* 主体三栏 */}
@@ -363,6 +364,7 @@ export const RollCallApp: React.FC<RollCallAppProps> = ({ onClose, mode = 'teach
             }
           }}
           onBindIp={rollCall.bindIp}
+          onToggleBrowser={rollCall.setBrowserPermission}
         />
       </div>
 

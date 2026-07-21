@@ -25,6 +25,7 @@ interface ToolbarProps {
   ipRestriction?: boolean;
   onBindAllIp?: () => void;
   onToggleIpRestriction?: () => void;
+  onSetBrowserPermission?: (canUse: boolean) => void;
 }
 
 export const Toolbar: React.FC<ToolbarProps> = ({
@@ -50,6 +51,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   ipRestriction = false,
   onBindAllIp,
   onToggleIpRestriction,
+  onSetBrowserPermission,
 }) => {
   const currentClass = classes.find((c) => c.id === selectedClassId);
   // 学生端（课代表/班长）：仅保留反向排座和考勤记录
@@ -224,6 +226,37 @@ export const Toolbar: React.FC<ToolbarProps> = ({
               >
                 {ipRestriction ? '开' : '关'}
               </span>
+            </button>
+          </>
+        )}
+
+        {/* 上网权限批量开关 - 仅教师 */}
+        {!isStudent && onSetBrowserPermission && (
+          <>
+            <div className="h-6 w-px bg-slate-700"></div>
+            <button
+              onClick={() => {
+                if (!confirm('将开通本班所有学生的上网权限，继续？')) return;
+                onSetBrowserPermission(true);
+              }}
+              disabled={!selectedClassId}
+              className="px-3 py-1.5 bg-slate-800 hover:bg-sky-500/20 text-slate-300 hover:text-sky-300 text-xs rounded flex items-center gap-1.5 border border-slate-700 hover:border-sky-500/40 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              title="开通本班所有学生的上网冲浪权限"
+            >
+              <i className="fa-solid fa-earth-asia"></i>
+              开通上网
+            </button>
+            <button
+              onClick={() => {
+                if (!confirm('将关闭本班所有学生的上网权限，继续？')) return;
+                onSetBrowserPermission(false);
+              }}
+              disabled={!selectedClassId}
+              className="px-3 py-1.5 bg-slate-800 hover:bg-red-500/20 text-slate-300 hover:text-red-300 text-xs rounded flex items-center gap-1.5 border border-slate-700 hover:border-red-500/40 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              title="关闭本班所有学生的上网冲浪权限"
+            >
+              <i className="fa-solid fa-ban"></i>
+              关闭上网
             </button>
           </>
         )}

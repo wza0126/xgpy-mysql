@@ -12,6 +12,7 @@ export interface RollCallStudent {
   current_ip?: string | null;
   bound_ip?: string | null;
   is_ip_mismatch?: boolean;
+  can_use_browser?: boolean | number;
 }
 
 export interface RollCallSeat {
@@ -311,6 +312,59 @@ export function useRollCall(classId: string | null, mode: RollCallMode = 'teache
     }
   }, [classId, mode, apiPrefix, loadStudents, loadSeating]);
 
+  // 开关单个学生的上网权限（仅教师模式）
+  const setBrowserPermission = useCallback(
+    async (studentId: string, canUse: boolean): Promise<boolean> => {
+      if (mode !== 'teacher' || !classId) return false;
+      try {
+        const res = await fetch(`${API_CONFIG.apiUrl}/api/teacher/proxy/students/${studentId}/permission`, {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ can_use_browser: canUse }),
+        });
+        const json = await res.json();
+        if (json.error) {
+          console.error('setBrowserPermission error:', json.error);
+          alert(json.error);
+          return false;
+        }
+        await loadStudents(classId);
+        return true;
+      } catch (e) {
+        console.error('setBrowserPermission fetch error:', e);
+        alert('设置上网权限失败：' + (e as Error).message);
+        return false;
+      }
+    },
+    [classId, mode, loadStudents]
+  );
+
+  // 批量开关全班上网权限（仅教师模式）
+  const setClassBrowserPermission = useCallback(
+    async (canUse: boolean): Promise<void> => {
+      if (mode !== 'teacher' || !classId) return;
+      try {
+        const res = await fetch(`${API_CONFIG.apiUrl}/api/teacher/proxy/classes/${classId}/permission`, {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ can_use_browser: canUse }),
+        });
+        const json = await res.json();
+        if (json.error) {
+          console.error('setClassBrowserPermission error:', json.error);
+          alert(json.error);
+          return;
+        }
+        alert(`已${canUse ? '开通' : '关闭'}全班上网权限（${json.data?.affected ?? 0} 人）`);
+        await loadStudents(classId);
+      } catch (e) {
+        console.error('setClassBrowserPermission fetch error:', e);
+        alert('批量设置失败：' + (e as Error).message);
+      }
+    },
+    [classId, mode, loadStudents]
+  );
+
   // 开启/关闭班级 IP 登录限制（仅教师模式）
   const toggleIpRestriction = useCallback(async (): Promise<void> => {
     if (mode !== 'teacher' || !classId) return;
@@ -480,6 +534,8 @@ export function useRollCall(classId: string | null, mode: RollCallMode = 'teache
     bindIp,
     bindAllIp,
     toggleIpRestriction,
+    setBrowserPermission,
+    setClassBrowserPermission,
     saveSeating,
     autoArrange,
     reverseArrange,

@@ -26,6 +26,7 @@ import { BuffBadge } from '../components/student/BuffBadge';
 import { PaintBoard } from '../components/student/PaintBoard';
 import { TaskCenter } from '../components/student/TaskCenter';
 import { StudentRollCall } from '../components/student/StudentRollCall';
+import { ProxyBrowser } from '../components/student/ProxyBrowser';
 import { RollCallApp } from '../components/teacher/RollCallApp';
 import { backendClient } from '../api/backendClient';
 import { API_CONFIG } from '../api/config';
@@ -65,6 +66,7 @@ const moduleComponents: Record<string, React.ReactNode> = {
   security: <SecuritySettings />,
   taskCenter: <TaskCenter />,
   studentRollCall: <StudentRollCall />,
+  proxyBrowser: <ProxyBrowser />,
   rollCall: <RollCallApp onClose={() => { const { closeWindow } = useDesktopStore.getState(); closeWindow('rollCall'); }} />,
 };
 

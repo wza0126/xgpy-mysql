@@ -11,6 +11,7 @@ interface StudentDetailPanelProps {
   onUnassign: () => void;
   onToggleSeatLock: () => void;
   onBindIp?: (studentId: string, action: 'bind' | 'unbind') => void;
+  onToggleBrowser?: (studentId: string, canUse: boolean) => void;
 }
 
 export const StudentDetailPanel: React.FC<StudentDetailPanelProps> = ({
@@ -23,6 +24,7 @@ export const StudentDetailPanel: React.FC<StudentDetailPanelProps> = ({
   onUnassign,
   onToggleSeatLock,
   onBindIp,
+  onToggleBrowser,
 }) => {
   if (!student || seatNumber == null) {
     return (
@@ -190,6 +192,26 @@ export const StudentDetailPanel: React.FC<StudentDetailPanelProps> = ({
           {isSeatLocked ? '解锁该座位' : '锁定该座位'}
         </button>
         )}
+
+        {mode === 'teacher' && onToggleBrowser && (() => {
+          const canUseBrowser = student.can_use_browser === 1 || student.can_use_browser === true;
+          return (
+            <button
+              onClick={() => onToggleBrowser(student.id, !canUseBrowser)}
+              className={`
+                w-full px-4 py-2 rounded text-sm flex items-center justify-center gap-2 transition-colors
+                ${canUseBrowser
+                  ? 'bg-sky-500/20 text-sky-300 hover:bg-red-500/20 hover:text-red-300 border border-sky-500/30 hover:border-red-500/40'
+                  : 'bg-slate-800 hover:bg-sky-500/20 text-slate-200 hover:text-sky-300 border border-slate-700 hover:border-sky-500/40'
+                }
+              `}
+              title={canUseBrowser ? '该学生已开通上网，点击关闭' : '开通该学生的上网冲浪权限'}
+            >
+              <i className={`fa-solid ${canUseBrowser ? 'fa-ban' : 'fa-earth-asia'}`}></i>
+              {canUseBrowser ? '关闭上网权限（当前已开通）' : '开通上网权限'}
+            </button>
+          );
+        })()}
 
         {mode === 'teacher' && (
         <button

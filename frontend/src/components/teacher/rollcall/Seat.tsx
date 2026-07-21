@@ -100,6 +100,22 @@ export const Seat: React.FC<SeatProps> = ({
         ></span>
       )}
 
+      {/* 上网权限标记（右下角）：绿色=已开通，灰色淡化=未开通 */}
+      {student && (
+        <i
+          className={`fa-solid fa-earth-asia absolute bottom-1 right-1.5 text-[10px] ${
+            student.can_use_browser === 1 || student.can_use_browser === true
+              ? 'text-green-400 drop-shadow-[0_0_3px_rgba(74,222,128,0.6)]'
+              : 'text-slate-600 opacity-50'
+          }`}
+          title={
+            student.can_use_browser === 1 || student.can_use_browser === true
+              ? '已开通上网'
+              : '未开通上网'
+          }
+        ></i>
+      )}
+
       {/* 学生内容 */}
       {student ? (
         <>

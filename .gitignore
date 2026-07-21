@@ -15,6 +15,9 @@ backend/exe-assets/
 # 用户上传的文件（业务数据，不属于代码）
 backend/uploads/
 
+# 代理上网静态资源磁盘缓存（可随时手工删除）
+backend/cache/
+
 # 数据库备份（含账号散列与 API 密钥，仅忽略根目录下的导出文件；
 # backend/database/migrations/ 下的迁移脚本是代码，必须入库）
 /*.sql
