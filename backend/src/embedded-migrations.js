@@ -121,6 +121,10 @@ module.exports = [
     "sql": "-- Python魔法学院奖励机制\n\n-- 1. 为python_magic_progress表添加奖励领取标记\nALTER TABLE python_magic_progress \nADD COLUMN IF NOT EXISTS reward_claimed BOOLEAN DEFAULT false COMMENT '奖励是否已领取';\n\n-- 2. 更新Python魔法学院应用配置，添加奖励设置字段\nUPDATE apps \nSET config = JSON_MERGE_PATCH(config, JSON_OBJECT(\n  'reward_enabled', true,\n  'points_reward', 100,\n  'equipment_id', ''\n))\nWHERE id = 'app_python_magic_academy';"
   },
   {
+    "version": "031_add_proxy_browser_focus_mode.sql",
+    "sql": "-- 添加上网冲浪模块的专注模式配置字段\r\n\r\nALTER TABLE pet_config\r\nADD COLUMN IF NOT EXISTS focus_mode_show_proxyBrowser BOOLEAN DEFAULT true COMMENT '专注模式下是否显示上网冲浪图标';"
+  },
+  {
     "version": "031_add_studious_checkins.sql",
     "sql": "-- 学习打卡表：确保每日只能触发一次勤学好问buff\nCREATE TABLE IF NOT EXISTS studious_checkins (\n  id VARCHAR(50) PRIMARY KEY,\n  student_id VARCHAR(50) NOT NULL COMMENT '学生ID',\n  check_date DATE NOT NULL COMMENT '打卡日期',\n  question_count INT DEFAULT 0 COMMENT '当日看题数量',\n  triggered TINYINT(1) DEFAULT 0 COMMENT '是否已触发buff',\n  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,\n  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,\n  UNIQUE KEY idx_student_date (student_id, check_date)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='学习勤学好问每日打卡记录';\n"
   },

@@ -47,6 +47,7 @@ interface FocusModeConfig {
   focus_mode_show_leaderboard: boolean;
   focus_mode_show_profile: boolean;
   focus_mode_show_security: boolean;
+  focus_mode_show_proxyBrowser: boolean;
   focus_mode_quick_access: string[];
   focus_mode_classes: string[];
 }
@@ -116,27 +117,46 @@ export const Desktop: React.FC = () => {
   };
 
   const toggleFullscreen = async () => {
-    if (!isFullscreen) {
-      try {
+    console.log('toggleFullscreen called, current state:', isFullscreen);
+    try {
+      if (!isFullscreen) {
         const el = document.documentElement;
+        console.log('Attempting to enter fullscreen...');
         if (el.requestFullscreen) {
           await el.requestFullscreen();
+          console.log('requestFullscreen called');
         } else if ((el as any).webkitRequestFullscreen) {
           await (el as any).webkitRequestFullscreen();
+          console.log('webkitRequestFullscreen called');
+        } else if ((el as any).mozRequestFullScreen) {
+          await (el as any).mozRequestFullScreen();
+          console.log('mozRequestFullScreen called');
+        } else if ((el as any).msRequestFullscreen) {
+          await (el as any).msRequestFullscreen();
+          console.log('msRequestFullscreen called');
+        } else {
+          console.error('浏览器不支持全屏API');
+          alert('当前浏览器不支持全屏模式');
         }
-      } catch (err) {
-        console.error('进入全屏失败:', err);
-      }
-    } else {
-      try {
+      } else {
+        console.log('Attempting to exit fullscreen...');
         if (document.exitFullscreen) {
           await document.exitFullscreen();
+          console.log('exitFullscreen called');
         } else if ((document as any).webkitExitFullscreen) {
           await (document as any).webkitExitFullscreen();
+          console.log('webkitExitFullscreen called');
+        } else if ((document as any).mozCancelFullScreen) {
+          await (document as any).mozCancelFullScreen();
+          console.log('mozCancelFullScreen called');
+        } else if ((document as any).msExitFullscreen) {
+          await (document as any).msExitFullscreen();
+          console.log('msExitFullscreen called');
         }
-      } catch (err) {
-        console.error('退出全屏失败:', err);
       }
+    } catch (err) {
+      console.error('全屏操作失败:', err);
+      alert('全屏操作失败: ' + (err as Error).message);
     }
   };
 
@@ -359,45 +379,50 @@ export const Desktop: React.FC = () => {
   }, [effectiveProfile, checkForNewNotifications]);
 
   useEffect(() => {
+    let cancelled = false;
+
     const fetchBackground = async () => {
       try {
-        // 先检查学生是否有自定义背景
+        // 先检查学生是否有自定义背景（仅学生且已登录时才请求）
         if (effectiveProfile?.role === 'student' && effectiveProfile?.id) {
           const token = localStorage.getItem('xgpy_token');
-          const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
+          if (token) {
+            const headers: HeadersInit = { Authorization: `Bearer ${token}` };
 
-          // 获取学生自定义背景配置
-          const studentBgResponse = await fetch(`${API_CONFIG.apiUrl}/api/student/custom-background`, { headers });
-          const studentBgResult = await studentBgResponse.json();
+            // 获取学生自定义背景配置
+            const studentBgResponse = await fetch(`${API_CONFIG.apiUrl}/api/student/custom-background`, { headers });
+            const studentBgResult = await studentBgResponse.json();
 
-          if (studentBgResult.data && studentBgResult.data.customBackground) {
-            // 学生有自定义背景，使用学生的
-            setBackground(studentBgResult.data.customBackground);
-            return;
+            if (!cancelled && studentBgResult.data && studentBgResult.data.customBackground) {
+              // 学生有自定义背景，使用学生的（仅在变化时更新，避免重渲染）
+              if (useDesktopStore.getState().background !== studentBgResult.data.customBackground) {
+                setBackground(studentBgResult.data.customBackground);
+              }
+              return;
+            }
           }
         }
 
         // 没有自定义背景，使用教师设置的默认背景
         const response = await fetch(`${API_CONFIG.apiUrl}/api/desktop-background`);
         const result = await response.json();
-        if (result.data && result.data.url) {
-          setBackground(result.data.url);
+        if (!cancelled && result.data && result.data.url) {
+          if (useDesktopStore.getState().background !== result.data.url) {
+            setBackground(result.data.url);
+          }
         }
       } catch (error) {
         console.error('获取桌面背景失败:', error);
-        // 失败时使用默认背景
-        const response = await fetch(`${API_CONFIG.apiUrl}/api/desktop-background`);
-        const result = await response.json();
-        if (result.data && result.data.url) {
-          setBackground(result.data.url);
-        }
       }
     };
 
     fetchBackground();
     // 每30秒检查一次背景更新
     const interval = setInterval(fetchBackground, 30000);
-    return () => clearInterval(interval);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
   }, [setBackground, effectiveProfile]);
 
   // 拉取学生激活的窗口皮肤
@@ -609,7 +634,8 @@ export const Desktop: React.FC = () => {
     <div
       className="min-h-screen relative overflow-hidden"
       style={{
-        backgroundImage: `url(${background})`,
+        backgroundColor: background ? 'transparent' : '#1a202c',
+        backgroundImage: background ? `url(${background})` : 'none',
         backgroundSize: 'cover',
         backgroundPosition: 'center',
       }}

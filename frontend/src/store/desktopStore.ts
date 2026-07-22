@@ -36,7 +36,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   windows: [],
   activeWindowId: null,
   zIndexCounter: 100,
-  background: 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=1920',
+  background: '',
 
   setBackground: (url) => set({ background: url }),
 

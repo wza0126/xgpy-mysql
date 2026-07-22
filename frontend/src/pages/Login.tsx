@@ -134,8 +134,8 @@ export const Login: React.FC = () => {
         </form>
 
         <div className="mt-6 text-center text-sm text-gray-500">
-          <p>登陆后自动跳出说明平台未开放，请联系老师</p>
-          <p>学生账号由教师后台批量导入</p>
+          <p>系统持续更新优化，功能建议、部署咨询欢迎联系</p>
+          <p>抖音号：19353423793ylrs</p>
           {siteConfig.system_version && (
             <p className="mt-3 text-xs text-gray-400 font-mono">{siteConfig.system_version}</p>
           )}

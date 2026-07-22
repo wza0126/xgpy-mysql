@@ -19,6 +19,7 @@ interface FocusModeConfig {
   focus_mode_show_leaderboard: boolean;
   focus_mode_show_profile: boolean;
   focus_mode_show_security: boolean;
+  focus_mode_show_proxyBrowser: boolean;
   focus_mode_quick_access: string[];
   focus_mode_classes: string[];
 }
@@ -100,6 +101,7 @@ export const PetConfig: React.FC = () => {
           focus_mode_show_leaderboard: toBool(configData.focus_mode_show_leaderboard),
           focus_mode_show_profile: toBool(configData.focus_mode_show_profile),
           focus_mode_show_security: toBool(configData.focus_mode_show_security),
+          focus_mode_show_proxyBrowser: toBool(configData.focus_mode_show_proxyBrowser),
           focus_mode_quick_access: quickAccess,
           focus_mode_classes: focusClasses,
         },
@@ -126,6 +128,7 @@ export const PetConfig: React.FC = () => {
           focus_mode_show_leaderboard: true,
           focus_mode_show_profile: true,
           focus_mode_show_security: true,
+          focus_mode_show_proxyBrowser: true,
           focus_mode_quick_access: ['apps', 'ai_qa', 'notebook'],
           focus_mode_classes: [],
         },
@@ -136,39 +139,57 @@ export const PetConfig: React.FC = () => {
 
   const handleSaveConfig = async () => {
     if (!petConfig) return;
-    const { data: existing } = await backendClient.from('pet_config').select('id').maybeSingle();
-    
-    const updateData = {
-      tip_interval_seconds: petConfig.tip_interval_seconds,
-      tip_display_seconds: petConfig.tip_display_seconds,
-      double_click_aiqa: petConfig.double_click_aiqa,
-      level_base_threshold: petConfig.level_base_threshold,
-      level_threshold_increment: petConfig.level_threshold_increment,
-      max_stage: petConfig.max_stage,
-      focus_mode_enabled: petConfig.focus_mode.focus_mode_enabled,
-      focus_mode_show_learn: petConfig.focus_mode.focus_mode_show_learn,
-      focus_mode_show_practice: petConfig.focus_mode.focus_mode_show_practice,
-      focus_mode_show_test: petConfig.focus_mode.focus_mode_show_test,
-      focus_mode_show_wrong: petConfig.focus_mode.focus_mode_show_wrong,
-      focus_mode_show_notebook: petConfig.focus_mode.focus_mode_show_notebook,
-      focus_mode_show_python: petConfig.focus_mode.focus_mode_show_python,
-      focus_mode_show_apps: petConfig.focus_mode.focus_mode_show_apps,
-      focus_mode_show_pet: petConfig.focus_mode.focus_mode_show_pet,
-      focus_mode_show_exchange: petConfig.focus_mode.focus_mode_show_exchange,
-      focus_mode_show_leaderboard: petConfig.focus_mode.focus_mode_show_leaderboard,
-      focus_mode_show_profile: petConfig.focus_mode.focus_mode_show_profile,
-      focus_mode_show_security: petConfig.focus_mode.focus_mode_show_security,
-      focus_mode_quick_access: JSON.stringify(petConfig.focus_mode.focus_mode_quick_access),
-      focus_mode_classes: JSON.stringify(petConfig.focus_mode.focus_mode_classes),
-    };
-    
-    if (existing) {
-      await backendClient.from('pet_config').update(updateData).eq('id', existing.id);
-    } else {
-      await backendClient.from('pet_config').insert(updateData);
+    try {
+      const { data: existing } = await backendClient.from('pet_config').select('id').maybeSingle();
+
+      const updateData = {
+        tip_interval_seconds: petConfig.tip_interval_seconds,
+        tip_display_seconds: petConfig.tip_display_seconds,
+        double_click_aiqa: petConfig.double_click_aiqa,
+        level_base_threshold: petConfig.level_base_threshold,
+        level_threshold_increment: petConfig.level_threshold_increment,
+        max_stage: petConfig.max_stage,
+        focus_mode_enabled: petConfig.focus_mode.focus_mode_enabled,
+        focus_mode_show_learn: petConfig.focus_mode.focus_mode_show_learn,
+        focus_mode_show_practice: petConfig.focus_mode.focus_mode_show_practice,
+        focus_mode_show_test: petConfig.focus_mode.focus_mode_show_test,
+        focus_mode_show_wrong: petConfig.focus_mode.focus_mode_show_wrong,
+        focus_mode_show_notebook: petConfig.focus_mode.focus_mode_show_notebook,
+        focus_mode_show_python: petConfig.focus_mode.focus_mode_show_python,
+        focus_mode_show_apps: petConfig.focus_mode.focus_mode_show_apps,
+        focus_mode_show_pet: petConfig.focus_mode.focus_mode_show_pet,
+        focus_mode_show_exchange: petConfig.focus_mode.focus_mode_show_exchange,
+        focus_mode_show_leaderboard: petConfig.focus_mode.focus_mode_show_leaderboard,
+        focus_mode_show_profile: petConfig.focus_mode.focus_mode_show_profile,
+        focus_mode_show_security: petConfig.focus_mode.focus_mode_show_security,
+        focus_mode_show_proxyBrowser: petConfig.focus_mode.focus_mode_show_proxyBrowser,
+        focus_mode_quick_access: JSON.stringify(petConfig.focus_mode.focus_mode_quick_access),
+        focus_mode_classes: JSON.stringify(petConfig.focus_mode.focus_mode_classes),
+      };
+
+      console.log('保存萌宠配置:', updateData);
+
+      let result;
+      if (existing) {
+        result = await backendClient.from('pet_config').update(updateData).eq('id', existing.id);
+      } else {
+        result = await backendClient.from('pet_config').insert(updateData);
+      }
+
+      console.log('保存结果:', result);
+
+      if (result && result.error) {
+        console.error('保存失败:', result.error);
+        alert('保存失败: ' + result.error);
+        return;
+      }
+
+      await fetchData();
+      alert('配置已保存');
+    } catch (error) {
+      console.error('保存配置异常:', error);
+      alert('保存失败: ' + (error as Error).message);
     }
-    await fetchData();
-    alert('配置已保存');
   };
 
   const handleSave = async () => {
@@ -339,6 +360,7 @@ export const PetConfig: React.FC = () => {
     { id: 'profile', label: '个人信息', icon: 'fa-user' },
     { id: 'security', label: '安全设置', icon: 'fa-shield-alt' },
     { id: 'ai_qa', label: 'AI答疑', icon: 'fa-robot' },
+    { id: 'proxyBrowser', label: '上网冲浪', icon: 'fa-earth-asia' },
   ];
 
   return (
