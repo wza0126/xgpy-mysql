@@ -33,6 +33,36 @@ const MAX_CACHE_FILE_BYTES = 200 * 1024 * 1024;
 // 容量上限默认值（MB），可在教师端"上网管理-缓存设置"修改
 const DEFAULT_CACHE_LIMIT_MB = 2048;
 
+// 实例标识：多机房各教师机连同一个 MariaDB，缓存索引按 instance_id 隔离。
+// 首次启动生成 UUID 持久化在 cache/instance.id（exe 同理放 exe 同级 cache/），
+// 可用环境变量 PROXY_INSTANCE_ID 覆盖（测试/运维指定用）
+function resolveInstanceId() {
+    const fromEnv = String(process.env.PROXY_INSTANCE_ID || '').trim();
+    if (fromEnv) return fromEnv.slice(0, 64);
+    const idFile = path.join(appBaseDir, 'cache', 'instance.id');
+    try {
+        if (fs.existsSync(idFile)) {
+            const existing = fs.readFileSync(idFile, 'utf8').trim();
+            if (existing) return existing.slice(0, 64);
+        }
+        const id = crypto.randomUUID();
+        fs.mkdirSync(path.dirname(idFile), { recursive: true });
+        fs.writeFileSync(idFile, id, 'utf8');
+        return id;
+    } catch (error) {
+        // 目录只读等异常：退化为内存 UUID（本进程内缓存隔离仍正确，重启后换 ID 旧索引成一次性孤儿）
+        console.error('持久化代理缓存实例ID失败（本次用内存ID）:', error);
+        return crypto.randomUUID();
+    }
+}
+const INSTANCE_ID = resolveInstanceId();
+console.log(`代理缓存实例ID: ${INSTANCE_ID}`);
+
+// 缓存文件名带实例前缀：多实例共用目录时（开发/测试）也能按归属安全清理
+function cacheFileName(hash) {
+    return `${INSTANCE_ID}-${hash}`;
+}
+
 // 可缓存的静态资源 Content-Type（HTML/JSON/API 不匹配，自然绕过）
 const CACHEABLE_TYPE_RE = /^(image\/|video\/|audio\/|font\/|text\/css|text\/javascript|application\/javascript|application\/x-javascript|application\/font|application\/x-font|application\/vnd\.ms-fontobject)/;
 
@@ -97,22 +127,27 @@ async function upsertSystemConfig(pool, key, val) {
 }
 
 // 淘汰：总大小超上限时按 last_accessed_at 最旧先删，降到上限 90% 以下
+// 多机房隔离：统计与删除都只针对本机实例的记录和文件
 async function evictCacheIfNeeded(pool) {
     try {
         const settings = await getCacheSettings(pool);
         const limitBytes = settings.limitMb * 1024 * 1024;
-        const [sumRows] = await pool.query('SELECT COALESCE(SUM(size_bytes), 0) AS total FROM proxy_cache_files');
+        const [sumRows] = await pool.query(
+            'SELECT COALESCE(SUM(size_bytes), 0) AS total FROM proxy_cache_files WHERE instance_id = ?',
+            [INSTANCE_ID]
+        );
         let current = Number(sumRows[0].total) || 0;
         if (current <= limitBytes) return;
         const target = Math.floor(limitBytes * 0.9);
         const [rows] = await pool.query(
-            'SELECT url_hash, file_name, size_bytes FROM proxy_cache_files ORDER BY last_accessed_at ASC'
+            'SELECT url_hash, file_name, size_bytes FROM proxy_cache_files WHERE instance_id = ? ORDER BY last_accessed_at ASC',
+            [INSTANCE_ID]
         );
         let evicted = 0;
         for (const row of rows) {
             if (current <= target) break;
             fs.unlink(path.join(CACHE_DIR, row.file_name), () => {});
-            await pool.query('DELETE FROM proxy_cache_files WHERE url_hash = ?', [row.url_hash]);
+            await pool.query('DELETE FROM proxy_cache_files WHERE url_hash = ? AND instance_id = ?', [row.url_hash, INSTANCE_ID]);
             current -= Number(row.size_bytes) || 0;
             evicted++;
         }
@@ -124,13 +159,14 @@ async function evictCacheIfNeeded(pool) {
     }
 }
 
-// 写缓存索引（文件已 rename 成正式文件后调用）
+// 写缓存索引（文件已 rename 成正式文件后调用），记录归属本机实例
 async function insertCacheIndex(pool, hash, url, sizeBytes, contentType) {
+    const fileName = cacheFileName(hash);
     await pool.query(
-        `INSERT INTO proxy_cache_files (url_hash, url, file_name, size_bytes, content_type, created_at, last_accessed_at)
-         VALUES (?, ?, ?, ?, ?, NOW(), NOW())
+        `INSERT INTO proxy_cache_files (url_hash, instance_id, url, file_name, size_bytes, content_type, created_at, last_accessed_at)
+         VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())
          ON DUPLICATE KEY UPDATE size_bytes = VALUES(size_bytes), content_type = VALUES(content_type), last_accessed_at = NOW()`,
-        [hash, url, hash, sizeBytes, String(contentType || '').slice(0, 100)]
+        [hash, INSTANCE_ID, url, fileName, sizeBytes, String(contentType || '').slice(0, 100)]
     );
 }
 
@@ -140,8 +176,9 @@ async function writeBufferToCache(pool, url, buffer, contentType) {
         if (buffer.length === 0 || buffer.length > MAX_CACHE_FILE_BYTES) return;
         ensureCacheDir();
         const hash = cacheUrlHash(url);
-        const tmpPath = path.join(CACHE_DIR, `${hash}.tmp`);
-        const finalPath = path.join(CACHE_DIR, hash);
+        const fileName = cacheFileName(hash);
+        const tmpPath = path.join(CACHE_DIR, `${fileName}.tmp`);
+        const finalPath = path.join(CACHE_DIR, fileName);
         fs.writeFileSync(tmpPath, buffer);
         fs.renameSync(tmpPath, finalPath);
         await insertCacheIndex(pool, hash, url, buffer.length, contentType);
@@ -152,13 +189,17 @@ async function writeBufferToCache(pool, url, buffer, contentType) {
 }
 
 // 缓存命中：从磁盘直接发送（支持 Range 切片返回 206）。返回 true 表示已响应
+// 多机房隔离：只查本机实例的索引，其他机房的记录不命中也不误删
 async function tryServeFromCache(pool, req, res, siteId, scheme, host, upstreamUrl) {
     if (req.method !== 'GET' && req.method !== 'HEAD') return false;
     const settings = await getCacheSettings(pool);
     if (!settings.enabled) return false;
 
     const hash = cacheUrlHash(upstreamUrl);
-    const [rows] = await pool.query('SELECT * FROM proxy_cache_files WHERE url_hash = ?', [hash]);
+    const [rows] = await pool.query(
+        'SELECT * FROM proxy_cache_files WHERE url_hash = ? AND instance_id = ?',
+        [hash, INSTANCE_ID]
+    );
     if (rows.length === 0) return false;
 
     const row = rows[0];
@@ -167,8 +208,8 @@ async function tryServeFromCache(pool, req, res, siteId, scheme, host, upstreamU
     try {
         stat = fs.statSync(filePath);
     } catch {
-        // 文件被手工清理但索引还在：删索引按未命中处理
-        pool.query('DELETE FROM proxy_cache_files WHERE url_hash = ?', [hash]).catch(() => {});
+        // 文件被手工清理但索引还在：删本机索引按未命中处理
+        pool.query('DELETE FROM proxy_cache_files WHERE url_hash = ? AND instance_id = ?', [hash, INSTANCE_ID]).catch(() => {});
         return false;
     }
 
@@ -179,7 +220,7 @@ async function tryServeFromCache(pool, req, res, siteId, scheme, host, upstreamU
     res.setHeader('access-control-allow-origin', '*');
     res.setHeader('x-proxy-cache', 'HIT');
     // 更新命中时间（淘汰依据），不阻塞响应
-    pool.query('UPDATE proxy_cache_files SET last_accessed_at = NOW() WHERE url_hash = ?', [hash]).catch(() => {});
+    pool.query('UPDATE proxy_cache_files SET last_accessed_at = NOW() WHERE url_hash = ? AND instance_id = ?', [hash, INSTANCE_ID]).catch(() => {});
 
     // CSS 缓存的是上游原文，命中时要重新改写 url(...) 到代理命名空间
     if (contentType.toLowerCase().includes('text/css')) {
@@ -245,8 +286,9 @@ async function tryServeFromCache(pool, req, res, siteId, scheme, host, upstreamU
 function streamToClientWithCache(pool, source, res, upstreamUrl, contentType) {
     ensureCacheDir();
     const hash = cacheUrlHash(upstreamUrl);
-    const tmpPath = path.join(CACHE_DIR, `${hash}.tmp`);
-    const finalPath = path.join(CACHE_DIR, hash);
+    const fileName = cacheFileName(hash);
+    const tmpPath = path.join(CACHE_DIR, `${fileName}.tmp`);
+    const finalPath = path.join(CACHE_DIR, fileName);
     const fileStream = fs.createWriteStream(tmpPath);
     let written = 0;
     let fileBroken = false;
@@ -1242,18 +1284,20 @@ function registerWebProxy(app, pool, authenticate, requireTeacher, requireStuden
 
     // ========== 静态资源缓存管理（教师） ==========
 
-    // 缓存设置与用量
+    // 缓存设置与用量（多机房隔离：用量为本机实例口径，返回 instance_id 供前端区分机器）
     app.get('/api/teacher/proxy/cache/settings', authenticate, requireTeacher, async (req, res) => {
         try {
             const settings = await getCacheSettings(pool);
             const [stats] = await pool.query(
-                'SELECT COALESCE(SUM(size_bytes), 0) AS total_bytes, COUNT(*) AS file_count FROM proxy_cache_files'
+                'SELECT COALESCE(SUM(size_bytes), 0) AS total_bytes, COUNT(*) AS file_count FROM proxy_cache_files WHERE instance_id = ?',
+                [INSTANCE_ID]
             );
             res.json({
                 data: {
                     enabled: settings.enabled,
                     limit_mb: settings.limitMb,
                     cache_dir: CACHE_DIR,
+                    instance_id: INSTANCE_ID,
                     total_bytes: Number(stats[0].total_bytes) || 0,
                     file_count: Number(stats[0].file_count) || 0,
                 },
@@ -1285,21 +1329,26 @@ function registerWebProxy(app, pool, authenticate, requireTeacher, requireStuden
         }
     });
 
-    // 清空缓存：删目录下全部文件（含遗留 .tmp）并清空索引表
+    // 清空缓存：只删本机实例的文件（文件名带实例前缀）与本机索引记录，其他机房不受影响
     app.post('/api/teacher/proxy/cache/clear', authenticate, requireTeacher, async (req, res) => {
         try {
-            const [stats] = await pool.query('SELECT COALESCE(SUM(size_bytes), 0) AS total_bytes FROM proxy_cache_files');
+            const [stats] = await pool.query(
+                'SELECT COALESCE(SUM(size_bytes), 0) AS total_bytes FROM proxy_cache_files WHERE instance_id = ?',
+                [INSTANCE_ID]
+            );
             const freed = Number(stats[0].total_bytes) || 0;
             let removed = 0;
+            const prefix = `${INSTANCE_ID}-`;
             try {
                 for (const name of fs.readdirSync(CACHE_DIR)) {
+                    if (!name.startsWith(prefix)) continue;
                     try {
                         fs.unlinkSync(path.join(CACHE_DIR, name));
                         removed++;
                     } catch { /* 单个文件删除失败不阻塞整体清空 */ }
                 }
             } catch { /* 目录不存在视为已清空 */ }
-            await pool.query('DELETE FROM proxy_cache_files');
+            await pool.query('DELETE FROM proxy_cache_files WHERE instance_id = ?', [INSTANCE_ID]);
             res.json({ data: { success: true, freed_bytes: freed, removed_files: removed }, error: null });
         } catch (error) {
             console.error('Error in POST /api/teacher/proxy/cache/clear:', error);

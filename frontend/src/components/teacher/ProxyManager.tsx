@@ -41,6 +41,7 @@ interface CacheSettings {
   enabled: number;
   limit_mb: number;
   cache_dir: string;
+  instance_id: string;
   total_bytes: number;
   file_count: number;
 }
@@ -705,7 +706,10 @@ export const ProxyManager: React.FC = () => {
                   ></div>
                 </div>
                 <p className="text-xs text-gray-400 mt-1.5">
-                  已占上限 {((cacheSettings.total_bytes / (cacheSettings.limit_mb * 1024 * 1024)) * 100).toFixed(1)}%，超限时自动淘汰最久未访问的文件
+                  本机用量，已占上限 {((cacheSettings.total_bytes / (cacheSettings.limit_mb * 1024 * 1024)) * 100).toFixed(1)}%，超限时自动淘汰最久未访问的文件
+                  {cacheSettings.instance_id && (
+                    <span className="ml-2 text-gray-400">· 本机实例: {cacheSettings.instance_id.slice(0, 8)}</span>
+                  )}
                 </p>
               </>
             ) : (
