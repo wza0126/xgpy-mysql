@@ -10,6 +10,8 @@ interface QuickAccessPanelProps {
   moduleComponents: Record<string, React.ReactNode>;
   onCheckAppPermission?: () => Promise<boolean>;
   onCheckExchangePermission?: () => Promise<boolean>;
+  canUsePaidFeatures?: boolean;
+  paidFeatures?: string[];
 }
 
 const iconMap: Record<string, { icon: string; label: string }> = {
@@ -37,10 +39,21 @@ export const QuickAccessPanel: React.FC<QuickAccessPanelProps> = ({
   moduleComponents,
   onCheckAppPermission,
   onCheckExchangePermission,
+  canUsePaidFeatures = true,
+  paidFeatures = [],
 }) => {
   const { openWindow } = useDesktopStore();
 
+  const isPaid = (id: string) => paidFeatures.includes(id);
+
   const handleOpenApp = async (id: string) => {
+    if (isPaid(id) && !canUsePaidFeatures) {
+      const iconInfo = iconMap[id] || { icon: 'fa-folder', label: id };
+      alert(`${iconInfo.label}功能需要系统授权后才能使用，请联系管理员激活授权。`);
+      return;
+    }
+
+
     if (id === 'ai_qa') {
       if (onCheckAppPermission) {
         const allowed = await onCheckAppPermission();

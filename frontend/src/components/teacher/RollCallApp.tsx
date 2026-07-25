@@ -11,6 +11,7 @@ import { StudentDesktopModal } from './rollcall/StudentDesktopModal';
 import { API_CONFIG } from '../../api/config';
 import { RandomRollCallModal } from './rollcall/RandomRollCallModal';
 import { AttendanceModal } from './rollcall/AttendanceModal';
+import { LicenseGuard } from '../common/LicenseGuard';
 
 interface RollCallAppProps {
   onClose?: () => void;
@@ -268,7 +269,7 @@ export const RollCallApp: React.FC<RollCallAppProps> = ({ onClose, mode = 'teach
     );
   }
 
-  return (
+  const content = (
     <div className="h-full flex flex-col bg-slate-950 text-slate-200">
       <Toolbar
         classes={classes}
@@ -424,4 +425,14 @@ export const RollCallApp: React.FC<RollCallAppProps> = ({ onClose, mode = 'teach
       )}
     </div>
   );
+
+  if (mode === 'teacher') {
+    return (
+      <LicenseGuard featureName="课堂点名" featureIcon="fa-hand-pointer">
+        {content}
+      </LicenseGuard>
+    );
+  }
+
+  return content;
 };

@@ -31,11 +31,12 @@ interface LicenseStatus {
   expiresAt: string | null;
   isInTrial: boolean;
   isValid: boolean;
+  isFreeOpenDay: boolean;
   daysRemaining: number;
   isExpiringSoon: boolean;
 }
 
-const PAID_MENU_ITEMS = ['apps', 'prizes', 'pets'];
+const PAID_MENU_ITEMS = ['apps', 'prizes', 'pets', 'taskManager', 'proxyNet', 'game', 'rollCall', 'analytics'];
 
 const menuItems = [
   { id: 'notifications', title: '通知管理', icon: 'fa-bell' },
@@ -115,10 +116,14 @@ export const TeacherDashboard: React.FC = () => {
 
   const canAccessMenu = (menuId: string): boolean => {
     if (!PAID_MENU_ITEMS.includes(menuId)) return true;
-    return licenseStatus?.isValid ?? false;
+    return licenseStatus?.isValid || licenseStatus?.isFreeOpenDay || false;
   };
 
-  const visibleMenuItems = menuItems.filter(item => canAccessMenu(item.id));
+  const isPaidMenu = (menuId: string): boolean => {
+    return PAID_MENU_ITEMS.includes(menuId);
+  };
+
+  const visibleMenuItems = menuItems;
 
   useEffect(() => {
     const checkMobile = () => {
@@ -217,20 +222,32 @@ export const TeacherDashboard: React.FC = () => {
                     className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
                       activeTab === item.id
                         ? 'bg-blue-600 text-white shadow-lg'
+                        : isPaidMenu(item.id) && !canAccessMenu(item.id)
+                        ? 'text-gray-500 hover:bg-gray-800 hover:text-gray-400'
                         : 'text-gray-300 hover:bg-gray-800 hover:text-white'
                     } ${isCollapsed ? 'justify-center' : ''}`}
-                    title={isCollapsed ? item.title : ''}
+                    title={isCollapsed ? item.title : (isPaidMenu(item.id) && !canAccessMenu(item.id) ? `${item.title}（需授权）` : '')}
                   >
-                    <i className={`fa-solid ${item.icon} ${isCollapsed ? 'text-lg' : ''}`}></i>
+                    <div className="relative">
+                      <i className={`fa-solid ${item.icon} ${isCollapsed ? 'text-lg' : ''}`}></i>
+                      {isPaidMenu(item.id) && !canAccessMenu(item.id) && !isCollapsed && (
+                        <i className="fa-solid fa-lock text-[10px] absolute -bottom-1 -right-2 text-amber-400"></i>
+                      )}
+                    </div>
                     {!isCollapsed && (
                       <motion.span
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
                         exit={{ opacity: 0 }}
-                        className="font-medium"
+                        className="font-medium flex-1 text-left"
                       >
                         {item.title}
                       </motion.span>
+                    )}
+                    {isPaidMenu(item.id) && !canAccessMenu(item.id) && !isCollapsed && (
+                      <span className="text-[10px] px-1.5 py-0.5 bg-amber-500/20 text-amber-400 rounded">
+                        授权
+                      </span>
                     )}
                   </button>
                 ))}
@@ -307,11 +324,23 @@ export const TeacherDashboard: React.FC = () => {
                         className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
                           activeTab === item.id
                             ? 'bg-blue-600 text-white'
-                            : 'text-gray-300 hover:bg-gray-800'
+                            : isPaidMenu(item.id) && !canAccessMenu(item.id)
+                            ? 'text-gray-500 hover:bg-gray-800 hover:text-gray-400'
+                            : 'text-gray-300 hover:bg-gray-800 hover:text-white'
                         }`}
                       >
-                        <i className={`fa-solid ${item.icon}`}></i>
-                        <span className="font-medium">{item.title}</span>
+                        <div className="relative">
+                          <i className={`fa-solid ${item.icon}`}></i>
+                          {isPaidMenu(item.id) && !canAccessMenu(item.id) && (
+                            <i className="fa-solid fa-lock text-[10px] absolute -bottom-1 -right-2 text-amber-400"></i>
+                          )}
+                        </div>
+                        <span className="font-medium flex-1 text-left">{item.title}</span>
+                        {isPaidMenu(item.id) && !canAccessMenu(item.id) && (
+                          <span className="text-[10px] px-1.5 py-0.5 bg-amber-500/20 text-amber-400 rounded">
+                            授权
+                          </span>
+                        )}
                       </button>
                     ))}
                   </div>

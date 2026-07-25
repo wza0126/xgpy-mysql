@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { API_CONFIG } from '../../api/config';
 import { useAuth } from '../../hooks/useAuth';
 import { formatDateTime } from '../../utils/dateUtils';
+import { LicenseGuard } from '../common/LicenseGuard';
 
 // ============ 类型定义 ============
 type TaskStatus = 'draft' | 'published' | 'archived';
@@ -388,6 +389,7 @@ export const TaskManager: React.FC = () => {
   }
 
   return (
+    <LicenseGuard featureName="备课工作台" featureIcon="fa-chalkboard-user">
     <div className="space-y-6">
       {/* 顶部标题与新建按钮 */}
       <div className="flex justify-between items-center">
@@ -478,6 +480,7 @@ export const TaskManager: React.FC = () => {
         )}
       </AnimatePresence>
     </div>
+    </LicenseGuard>
   );
 };
 

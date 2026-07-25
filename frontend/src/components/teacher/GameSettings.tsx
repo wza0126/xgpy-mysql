@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
+import { LicenseGuard } from '../common/LicenseGuard';
 
 export const GameSettings: React.FC = () => {
   const defaultConfigs: Record<string, any> = {
@@ -162,6 +163,7 @@ export const GameSettings: React.FC = () => {
   }
 
   return (
+    <LicenseGuard featureName="刷题打怪系统" featureIcon="fa-gamepad">
     <div className="p-6 max-w-5xl mx-auto">
       <h2 className="text-2xl font-bold text-gray-800 mb-6 flex items-center gap-3">
         <i className="fa-solid fa-gamepad text-purple-600"></i>
@@ -596,5 +598,6 @@ export const GameSettings: React.FC = () => {
         </div>
       </div>
     </div>
+    </LicenseGuard>
   );
 };

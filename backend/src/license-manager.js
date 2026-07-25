@@ -20,6 +20,9 @@ const FEATURES = {
   PRIZES: 'prizes',
   ANALYTICS: 'analytics',
   ROLL_CALL: 'roll_call',
+  TASK_MANAGER: 'task_manager',
+  PROXY_NET: 'proxy_net',
+  GAME: 'game',
 };
 
 const TIME_API_URLS = [
@@ -156,37 +159,46 @@ class LicenseManager {
     return now < TRIAL_END_DATE;
   }
 
+  isFreeOpenDay(now = new Date()) {
+    const dayOfWeek = now.getDay();
+    return dayOfWeek === 3;
+  }
+
   async getLicenseStatus() {
     const { now, tamperDetected } = await this.getAuthoritativeTime();
     const record = await this.getLicenseRecord();
     const isInTrial = this.isInTrialPeriod(now);
+    const isFreeOpenDay = this.isFreeOpenDay(now);
 
-    if (!record) {
+    // 未激活时：以全局试用期为唯一有效标准
+    if (!record || !record.is_activated) {
+      const trialExpiresAt = TRIAL_END_DATE;
+      const trialValid = isInTrial && now < trialExpiresAt;
       return {
-        machineCode: null,
-        licenseCode: null,
+        machineCode: record ? (record.machine_code || null) : null,
+        licenseCode: record ? (record.license_code || null) : null,
         isActivated: false,
-        activatedAt: null,
-        expiresAt: isInTrial ? TRIAL_END_DATE.toISOString() : null,
+        activatedAt: record ? (record.activated_at || null) : null,
+        expiresAt: trialExpiresAt.toISOString(),
         isInTrial,
-        isValid: isInTrial,
-        daysRemaining: isInTrial
-          ? Math.ceil((TRIAL_END_DATE - now) / (1000 * 60 * 60 * 24))
+        isValid: trialValid,
+        isFreeOpenDay,
+        daysRemaining: trialValid
+          ? Math.ceil((trialExpiresAt - now) / (1000 * 60 * 60 * 24))
           : 0,
-        isExpiringSoon: isInTrial && this._isExpiringSoon(TRIAL_END_DATE, now),
+        isExpiringSoon: trialValid && this._isExpiringSoon(trialExpiresAt, now),
         tamperDetected,
       };
     }
 
+    // 已激活时：以授权码到期时间为准，忽略全局试用期
     const machineCode = record.machine_code || null;
-    const isActivated = record.is_activated === 1 || record.is_activated === true;
+    const isActivated = true;
     const expiresAt = record.expires_at
       ? new Date(record.expires_at)
-      : isInTrial
-      ? TRIAL_END_DATE
       : null;
 
-    const isValid = isInTrial || (isActivated && expiresAt && now < expiresAt);
+    const isValid = expiresAt ? now < expiresAt : false;
     const daysRemaining = expiresAt
       ? Math.max(0, Math.ceil((expiresAt - now) / (1000 * 60 * 60 * 24)))
       : 0;
@@ -198,8 +210,9 @@ class LicenseManager {
       isActivated,
       activatedAt: record.activated_at || null,
       expiresAt: expiresAt ? expiresAt.toISOString() : null,
-      isInTrial,
+      isInTrial: false,
       isValid,
+      isFreeOpenDay,
       daysRemaining,
       isExpiringSoon,
       tamperDetected,

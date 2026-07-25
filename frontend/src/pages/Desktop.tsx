@@ -84,9 +84,39 @@ export const Desktop: React.FC = () => {
     !!(document.fullscreenElement || (document as any).webkitFullscreenElement)
   );
   const [isPaintBoardOpen, setIsPaintBoardOpen] = useState(false);
+  const [licenseStatus, setLicenseStatus] = useState<{ isValid: boolean; isFreeOpenDay: boolean } | null>(null);
+  const [licenseLoaded, setLicenseLoaded] = useState(false);
 
   // 代理模式下 profile 由 useAuth 直接设置为目标学生
   const effectiveProfile = profile;
+
+  const PAID_STUDENT_FEATURES = ['taskCenter', 'apps', 'pet', 'exchange', 'proxyBrowser'];
+
+  const isPaidFeature = (featureId: string): boolean => {
+    return PAID_STUDENT_FEATURES.includes(featureId);
+  };
+
+  const canUseFeature = (featureId: string): boolean => {
+    if (!isPaidFeature(featureId)) return true;
+    return licenseStatus?.isValid || licenseStatus?.isFreeOpenDay || false;
+  };
+
+  const fetchLicenseStatus = async () => {
+    try {
+      const res = await fetch(`${API_CONFIG.apiUrl}/api/license/status`);
+      const result = await res.json();
+      if (result.data) {
+        setLicenseStatus({
+          isValid: result.data.isValid,
+          isFreeOpenDay: result.data.isFreeOpenDay,
+        });
+      }
+    } catch (error) {
+      console.error('获取授权状态失败:', error);
+    } finally {
+      setLicenseLoaded(true);
+    }
+  };
 
   const hiddenFeatures = effectiveProfile?.hidden_features
     ? (typeof effectiveProfile.hidden_features === 'string'
@@ -182,6 +212,10 @@ export const Desktop: React.FC = () => {
   }, [effectiveProfile, siteConfig.site_title]);
 
   useEffect(() => {
+    fetchLicenseStatus();
+  }, []);
+
+  useEffect(() => {
     if (effectiveProfile?.role === 'student') {
       // 代理模式下跳过登录限制检查
       if (!isProxyMode) {
@@ -238,6 +272,7 @@ export const Desktop: React.FC = () => {
           focus_mode_show_leaderboard: toBool(data.focus_mode_show_leaderboard),
           focus_mode_show_profile: toBool(data.focus_mode_show_profile),
           focus_mode_show_security: toBool(data.focus_mode_show_security),
+          focus_mode_show_proxyBrowser: toBool(data.focus_mode_show_proxyBrowser),
           focus_mode_quick_access: quickAccess,
           focus_mode_classes: focusClasses,
         };
@@ -267,6 +302,7 @@ export const Desktop: React.FC = () => {
           focus_mode_show_leaderboard: true,
           focus_mode_show_profile: true,
           focus_mode_show_security: true,
+          focus_mode_show_proxyBrowser: true,
           focus_mode_quick_access: ['apps', 'ai_qa', 'notebook'],
           focus_mode_classes: [],
         });
@@ -452,6 +488,11 @@ export const Desktop: React.FC = () => {
   }, [effectiveProfile, setActiveSkin]);
 
   const handleIconDoubleClick = async (icon: typeof desktopIcons[0]) => {
+    if (isPaidFeature(icon.id) && !canUseFeature(icon.id)) {
+      alert(`${icon.title}功能需要系统授权后才能使用，请联系管理员激活授权。`);
+      return;
+    }
+
     if (icon.id === 'apps') {
       if (!effectiveProfile) {
         alert('请先登录');
@@ -643,14 +684,20 @@ export const Desktop: React.FC = () => {
       <div className="absolute inset-0 bg-black/20"></div>
 
       <DesktopPet 
-        onOpenPetModule={() => openWindow({
-          id: 'pet',
-          title: '我的萌宠',
-          icon: 'fa-paw',
-          isMinimized: false,
-          isMaximized: false,
-          component: <PetModule />,
-        })}
+        onOpenPetModule={() => {
+          if (isPaidFeature('pet') && !canUseFeature('pet')) {
+            alert('萌宠功能需要系统授权后才能使用，请联系管理员激活授权。');
+            return;
+          }
+          openWindow({
+            id: 'pet',
+            title: '我的萌宠',
+            icon: 'fa-paw',
+            isMinimized: false,
+            isMaximized: false,
+            component: <PetModule />,
+          });
+        }}
         onOpenAiQa={handleOpenAiQa}
         focusModeEnabled={isFocusModeActive}
         onToggleQuickAccess={() => setQuickAccessOpen(!quickAccessOpen)}
@@ -662,6 +709,8 @@ export const Desktop: React.FC = () => {
         quickAccessIds={focusModeConfig?.focus_mode_quick_access || ['apps', 'ai_qa', 'notebook']}
         onOpenAiQa={handleOpenAiQa}
         moduleComponents={moduleComponents}
+        canUsePaidFeatures={licenseStatus?.isValid || licenseStatus?.isFreeOpenDay || false}
+        paidFeatures={PAID_STUDENT_FEATURES}
         onCheckAppPermission={async () => {
           if (!effectiveProfile) return false;
           const { data } = await backendClient.from('profiles').select('can_use_app').eq('id', effectiveProfile.id).maybeSingle();
@@ -780,6 +829,7 @@ export const Desktop: React.FC = () => {
               key={icon.id}
               icon={icon}
               onDoubleClick={() => handleIconDoubleClick(icon)}
+              isLocked={licenseLoaded && isPaidFeature(icon.id) && !canUseFeature(icon.id)}
             />
           ))}
         </div>

@@ -9,6 +9,7 @@ interface LicenseStatus {
   isExpiringSoon: boolean;
   daysRemaining: number;
   expiresAt: string | null;
+  isFreeOpenDay: boolean;
 }
 
 interface LicenseGuardProps {
@@ -49,7 +50,9 @@ export function LicenseGuard({ children, featureName, featureIcon }: LicenseGuar
     );
   }
 
-  if (licenseStatus?.isValid) {
+  const canAccess = licenseStatus?.isValid || licenseStatus?.isFreeOpenDay;
+
+  if (canAccess) {
     return <>{children}</>;
   }
 
@@ -68,6 +71,10 @@ export function LicenseGuard({ children, featureName, featureIcon }: LicenseGuar
         <p className="text-sm text-gray-500">
           请联系吴志安老师（QQ：1026913）获取授权码，
           在「系统配置 → 系统授权」中激活后即可使用。
+        </p>
+        <p className="text-sm text-amber-600 mt-3">
+          <i className="fa-solid fa-calendar-day mr-1"></i>
+          每周三免费开放日，当天可免费体验所有功能
         </p>
       </div>
       <div className="flex gap-3">

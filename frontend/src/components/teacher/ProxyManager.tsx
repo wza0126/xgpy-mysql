@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { backendClient } from '../../api/backendClient';
 import { useAuth } from '../../hooks/useAuth';
 import { Class } from '../../types';
+import { LicenseGuard } from '../common/LicenseGuard';
 
 // 上网管理：站点白名单 / 待审核域名 / 访问记录
 
@@ -392,6 +393,7 @@ export const ProxyManager: React.FC = () => {
   );
 
   return (
+    <LicenseGuard featureName="上网管理" featureIcon="fa-earth-asia">
     <div className="p-6 h-full overflow-y-auto bg-gray-50">
       <div className="flex items-center gap-3 mb-4">
         <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-sky-500 to-cyan-600 flex items-center justify-center text-white">
@@ -852,5 +854,6 @@ export const ProxyManager: React.FC = () => {
         </div>
       )}
     </div>
+    </LicenseGuard>
   );
 };
