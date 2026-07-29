@@ -141,6 +141,8 @@ export const SystemSettings: React.FC = () => {
   const [isLicenseValid, setIsLicenseValid] = useState(false);
   const [daysRemaining, setDaysRemaining] = useState(0);
   const [isExpiringSoon, setIsExpiringSoon] = useState(false);
+  const [isFreeOpenDay, setIsFreeOpenDay] = useState(false);
+  const [boundMachineCode, setBoundMachineCode] = useState<string>('');
   const [licenseInput, setLicenseInput] = useState<string>('');
   const [genMachineCode, setGenMachineCode] = useState<string>('');
   const [genLicenseCode, setGenLicenseCode] = useState<string>('');
@@ -795,6 +797,7 @@ export const SystemSettings: React.FC = () => {
         setIsLicenseValid(result.data.isValid || false);
         setDaysRemaining(result.data.daysRemaining || 0);
         setIsExpiringSoon(result.data.isExpiringSoon || false);
+        setIsFreeOpenDay(result.data.isFreeOpenDay || false);
       }
     } catch (error) {
       console.error('获取授权状态失败:', error);
@@ -1977,7 +1980,9 @@ export const SystemSettings: React.FC = () => {
                   ? isExpiringSoon 
                     ? 'bg-amber-50 border-amber-200' 
                     : 'bg-green-50 border-green-200'
-                  : 'bg-red-50 border-red-200'
+                  : isFreeOpenDay && !isActivated
+                    ? 'bg-sky-50 border-sky-200'
+                    : 'bg-red-50 border-red-200'
               }`}>
                 <h4 className="font-medium text-gray-800 mb-4 flex items-center gap-2">
                   <i className="fa-solid fa-shield-halved"></i>授权状态
@@ -1988,19 +1993,27 @@ export const SystemSettings: React.FC = () => {
                   <div className={`text-2xl font-bold mb-2 ${
                     isLicenseValid 
                       ? isExpiringSoon ? 'text-amber-600' : 'text-green-600'
+                      : isFreeOpenDay && !isActivated ? 'text-sky-600'
                       : 'text-red-600'
                   }`}>
-                    {isInTrial ? (
-                      <><i className="fa-solid fa-hourglass-half mr-2"></i>试用中</>
-                    ) : isActivated && isLicenseValid ? (
+                    {isActivated && isLicenseValid ? (
                       <><i className="fa-solid fa-check-circle mr-2"></i>已激活</>
                     ) : isActivated && !isLicenseValid ? (
                       <><i className="fa-solid fa-exclamation-circle mr-2"></i>已过期</>
+                    ) : isFreeOpenDay ? (
+                      <><i className="fa-solid fa-calendar-day mr-2"></i>今日免费开放（每周三）</>
+                    ) : isInTrial ? (
+                      <><i className="fa-solid fa-hourglass-half mr-2"></i>试用中</>
                     ) : (
                       <><i className="fa-solid fa-times-circle mr-2"></i>未激活</>
                     )}
                   </div>
-                  {expiresAt && (
+                  {isFreeOpenDay && (
+                    <p className="text-sm text-sky-600">
+                      每周三免费开放所有付费功能，<span className="font-medium">明天将恢复为未授权状态</span>
+                    </p>
+                  )}
+                  {expiresAt && !isFreeOpenDay && (
                     <p className="text-sm text-gray-600">
                       {isInTrial ? '试用期至' : isLicenseValid ? '授权有效期至' : '已于'}
                       <span className="font-medium ml-1">
@@ -2012,7 +2025,7 @@ export const SystemSettings: React.FC = () => {
                 </div>
 
                 {/* 进度条 */}
-                {expiresAt && (
+                {expiresAt && !isFreeOpenDay && (
                   <div className="mb-6">
                     <div className="flex justify-between text-xs text-gray-500 mb-1">
                       <span>剩余时间</span>
@@ -2035,7 +2048,7 @@ export const SystemSettings: React.FC = () => {
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="p-4 bg-white/50 rounded-lg">
-                    <p className="text-sm text-gray-500 mb-1">本机机器码</p>
+                    <p className="text-sm text-gray-500 mb-1">当前服务器机器码</p>
                     <p className="font-mono text-sm break-all">
                       {licenseMachineCode || '请先获取机器码'}
                     </p>
@@ -2064,11 +2077,16 @@ export const SystemSettings: React.FC = () => {
               {/* 获取机器码 */}
               <div className="p-6 bg-white rounded-xl shadow-sm border border-gray-200">
                 <h4 className="font-medium text-gray-800 mb-4 flex items-center gap-2">
-                  <i className="fa-solid fa-microchip"></i>一、获取本机机器码
+                  <i className="fa-solid fa-microchip"></i>一、获取本服务器机器码
                 </h4>
                 <p className="text-sm text-gray-600 mb-4">
-                  点击下方按钮获取当前服务器的机器码，将此机器码提供给吴志安老师（QQ1026913）生成授权码。
+                  点击下方按钮获取<strong>当前正在访问的这台服务器</strong>的机器码。将此机器码提供给吴志安老师（QQ1026913）生成授权码。
                   生成的授权码内嵌有效期，过期后请重新申请。
+                </p>
+                <p className="text-xs text-amber-600 mb-3">
+                  <i className="fa-solid fa-info-circle mr-1"></i>
+                  注意：机器码是运行后端服务的服务器硬件指纹，不取决于您使用的浏览器或连接的数据库。
+                  如果您有多台服务器，请分别登录各服务器的后台获取各自机器码。
                 </p>
                 <div className="flex items-center gap-4">
                   <button
@@ -2222,8 +2240,10 @@ export const SystemSettings: React.FC = () => {
                   <li>机器码基于服务器硬件信息通过 SHA256 算法生成，更换硬件后变化</li>
                   <li>授权码由 AES-256-CBC 加密生成，内嵌机器码和有效期时间戳</li>
                   <li>系统激活时解密验证机器码匹配且未过期，过期授权码无法使用</li>
-                  <li>清空数据库后旧授权码仍因过期而无法使用，不存在利用历史授权码绕过</li>
-                  <li>授权信息存储在数据库中，迁移服务器后需要重新授权</li>
+                  <li>每台服务器独立授权激活，互不干扰。授权信息以机器码区分保存在数据库中</li>
+                  <li>支持多台服务器连接同一数据库，各自激活、各自管理</li>
+                  <li>每周三为免费开放日，当天所有付费功能无需授权即可使用</li>
+                  <li>「获取机器码」获取的是当前所访问的服务器的硬件机器码</li>
                 </ul>
               </div>
             </div>

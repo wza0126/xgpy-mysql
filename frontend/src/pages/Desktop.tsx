@@ -90,7 +90,7 @@ export const Desktop: React.FC = () => {
   // 代理模式下 profile 由 useAuth 直接设置为目标学生
   const effectiveProfile = profile;
 
-  const PAID_STUDENT_FEATURES = ['taskCenter', 'apps', 'pet', 'exchange', 'proxyBrowser'];
+  const PAID_STUDENT_FEATURES = ['taskCenter', 'apps', 'pet', 'exchange', 'proxyBrowser', 'studentRollCall'];
 
   const isPaidFeature = (featureId: string): boolean => {
     return PAID_STUDENT_FEATURES.includes(featureId);
@@ -757,52 +757,81 @@ export const Desktop: React.FC = () => {
           {isFullscreen ? '退出全屏' : '全屏模式'}
         </button>
         <button
-          onClick={() => openWindow({
-            id: 'taskCenter',
-            title: '课堂任务',
-            icon: 'fa-chalkboard-user',
-            isMinimized: false,
-            isMaximized: false,
-            component: moduleComponents['taskCenter'],
-          })}
+          onClick={() => {
+            if (isPaidFeature('taskCenter') && !canUseFeature('taskCenter')) {
+              alert('课堂任务功能需要系统授权后才能使用，请联系管理员激活授权。');
+              return;
+            }
+            openWindow({
+              id: 'taskCenter',
+              title: '课堂任务',
+              icon: 'fa-chalkboard-user',
+              isMinimized: false,
+              isMaximized: false,
+              component: moduleComponents['taskCenter'],
+            });
+          }}
           className="bg-gray-800/80 hover:bg-gray-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors"
-          title="课堂任务"
+          title={licenseLoaded && isPaidFeature('taskCenter') && !canUseFeature('taskCenter') ? '课堂任务（需授权）' : '课堂任务'}
         >
-          <i className="fa-solid fa-chalkboard-user"></i>
+          <i className={`fa-solid fa-chalkboard-user ${licenseLoaded && isPaidFeature('taskCenter') && !canUseFeature('taskCenter') ? 'text-gray-500' : ''}`}></i>
           课堂任务
+          {licenseLoaded && isPaidFeature('taskCenter') && !canUseFeature('taskCenter') && (
+            <i className="fa-solid fa-lock text-[10px] text-amber-400 ml-1"></i>
+          )}
         </button>
         {effectiveProfile?.role === 'teacher' && (
           <button
-            onClick={() => openWindow({
-              id: 'rollCall',
-              title: '课堂点名',
-              icon: 'fa-hand-pointer',
-              isMinimized: false,
-              isMaximized: false,
-              component: moduleComponents['rollCall'],
-            })}
+            onClick={() => {
+              const teacherRollCallPaid = true;
+              const canUseRollCall = licenseStatus?.isValid || licenseStatus?.isFreeOpenDay || false;
+              if (licenseLoaded && teacherRollCallPaid && !canUseRollCall) {
+                alert('课堂点名功能需要系统授权后才能使用，请联系管理员激活授权。');
+                return;
+              }
+              openWindow({
+                id: 'rollCall',
+                title: '课堂点名',
+                icon: 'fa-hand-pointer',
+                isMinimized: false,
+                isMaximized: false,
+                component: moduleComponents['rollCall'],
+              });
+            }}
             className="bg-gray-800/80 hover:bg-gray-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors"
-            title="课堂点名"
+            title={licenseLoaded && !(licenseStatus?.isValid || licenseStatus?.isFreeOpenDay) ? '课堂点名（需授权）' : '课堂点名'}
           >
-            <i className="fa-solid fa-hand-pointer"></i>
+            <i className={`fa-solid fa-hand-pointer ${licenseLoaded && !(licenseStatus?.isValid || licenseStatus?.isFreeOpenDay) ? 'text-gray-500' : ''}`}></i>
             点名
+            {licenseLoaded && !(licenseStatus?.isValid || licenseStatus?.isFreeOpenDay) && (
+              <i className="fa-solid fa-lock text-[10px] text-amber-400 ml-1"></i>
+            )}
           </button>
         )}
         {!isRollCallHidden && effectiveProfile?.role === 'student' && (
           <button
-            onClick={() => openWindow({
-              id: 'studentRollCall',
-              title: '课堂点名',
-              icon: 'fa-hand-pointer',
-              isMinimized: false,
-              isMaximized: false,
-              component: moduleComponents['studentRollCall'],
-            })}
+            onClick={() => {
+              if (isPaidFeature('studentRollCall') && !canUseFeature('studentRollCall')) {
+                alert('课堂点名功能需要系统授权后才能使用，请联系管理员激活授权。');
+                return;
+              }
+              openWindow({
+                id: 'studentRollCall',
+                title: '课堂点名',
+                icon: 'fa-hand-pointer',
+                isMinimized: false,
+                isMaximized: true,
+                component: moduleComponents['studentRollCall'],
+              });
+            }}
             className="bg-gray-800/80 hover:bg-gray-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors"
-            title="课堂点名"
+            title={licenseLoaded && isPaidFeature('studentRollCall') && !canUseFeature('studentRollCall') ? '课堂点名（需授权）' : '课堂点名'}
           >
-            <i className="fa-solid fa-hand-pointer"></i>
+            <i className={`fa-solid fa-hand-pointer ${licenseLoaded && isPaidFeature('studentRollCall') && !canUseFeature('studentRollCall') ? 'text-gray-500' : ''}`}></i>
             点名
+            {licenseLoaded && isPaidFeature('studentRollCall') && !canUseFeature('studentRollCall') && (
+              <i className="fa-solid fa-lock text-[10px] text-amber-400 ml-1"></i>
+            )}
           </button>
         )}
         {!isPaintBoardHidden && (

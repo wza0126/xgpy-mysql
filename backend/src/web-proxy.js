@@ -1117,7 +1117,7 @@ function registerWebProxy(app, pool, authenticate, requireTeacher, requireStuden
         }
     });
 
-    // 一键批准：把全部待审核域名批量并入指定站点白名单（事务，去重）
+    // 一键批准：把指定站点的待审核域名批量并入该站点白名单（事务，去重，按 site_id 隔离）
     // 注意必须注册在 :id 路由之前，否则 all 会被当成 id
     app.post('/api/teacher/proxy/pending-domains/approve-all', authenticate, requireTeacher, async (req, res) => {
         const connection = await pool.getConnection();
@@ -1132,7 +1132,7 @@ function registerWebProxy(app, pool, authenticate, requireTeacher, requireStuden
                 await connection.rollback();
                 return res.status(404).json({ data: null, error: '站点不存在' });
             }
-            const [pendingRows] = await connection.query('SELECT domain FROM proxy_pending_domains FOR UPDATE');
+            const [pendingRows] = await connection.query('SELECT domain FROM proxy_pending_domains WHERE site_id = ? FOR UPDATE', [site_id]);
             const domains = parseDomains(siteRows[0].allowed_domains);
             let added = 0;
             for (const row of pendingRows) {
@@ -1142,7 +1142,7 @@ function registerWebProxy(app, pool, authenticate, requireTeacher, requireStuden
                 }
             }
             await connection.query('UPDATE proxy_sites SET allowed_domains = ? WHERE id = ?', [JSON.stringify(domains), site_id]);
-            await connection.query('DELETE FROM proxy_pending_domains');
+            await connection.query('DELETE FROM proxy_pending_domains WHERE site_id = ?', [site_id]);
             await connection.commit();
             siteCache.delete(Number(site_id));
             res.json({ data: { success: true, approved: pendingRows.length, added }, error: null });

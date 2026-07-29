@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
+const { exec } = require('child_process');
 
 const LICENSE_SECRET = 'xgpy_2024_license_salt_!@#$';
 const TRIAL_END_DATE = new Date('2027-06-01T00:00:00');
@@ -38,6 +39,34 @@ class LicenseManager {
     this._networkTimeCacheTime = 0;
   }
 
+  _execPromise(cmd) {
+    return new Promise((resolve) => {
+      exec(cmd, { timeout: 3000 }, (err, stdout) => {
+        if (err) { resolve(''); return; }
+        resolve(stdout.trim());
+      });
+    });
+  }
+
+  async getCurrentMachineCode() {
+    const [cpuId, biosSerial, macAddr, diskSerial] = await Promise.all([
+      this._execPromise('wmic cpu get processorid /value'),
+      this._execPromise('wmic bios get serialnumber /value'),
+      this._execPromise('wmic nic where "NetEnabled=true" get MACAddress /value'),
+      this._execPromise('wmic diskdrive get serialnumber /value'),
+    ]);
+
+    const cpu = (cpuId.match(/ProcessorId=(.+)/i) || [])[1] || 'UNKNOWN_CPU';
+    const bios = (biosSerial.match(/SerialNumber=(.+)/i) || [])[1] || 'UNKNOWN_BIOS';
+    const mac = (macAddr.match(/MACAddress=(.+)/i) || [])[1] || 'UNKNOWN_MAC';
+    const disk = (diskSerial.match(/SerialNumber=(.+)/i) || [])[1] || 'UNKNOWN_DISK';
+
+    const raw = `${cpu.trim()}|${bios.trim()}|${mac.trim()}|${disk.trim()}`;
+    const hash = crypto.createHash('sha256').update(raw).digest('hex').substring(0, 32);
+    const machineCode = this.formatCode(hash);
+    return { machineCode, raw };
+  }
+
   formatCode(code) {
     const parts = [];
     for (let i = 0; i < code.length; i += 4) {
@@ -46,14 +75,18 @@ class LicenseManager {
     return parts.join('-').toUpperCase();
   }
 
-  async getLicenseRecord() {
-    const [rows] = await this.pool.query(
-      'SELECT * FROM system_license WHERE id = 1'
-    );
-    if (rows.length === 0) {
-      return null;
+  async getLicenseRecord(machineCode) {
+    if (!machineCode) {
+      const [rows] = await this.pool.query(
+        'SELECT * FROM system_license WHERE id = 1'
+      );
+      return rows.length > 0 ? rows[0] : null;
     }
-    return rows[0];
+    const [rows] = await this.pool.query(
+      'SELECT * FROM system_license WHERE machine_code = ?',
+      [machineCode]
+    );
+    return rows.length > 0 ? rows[0] : null;
   }
 
   _fetchUrl(url) {
@@ -166,19 +199,46 @@ class LicenseManager {
 
   async getLicenseStatus() {
     const { now, tamperDetected } = await this.getAuthoritativeTime();
-    const record = await this.getLicenseRecord();
     const isInTrial = this.isInTrialPeriod(now);
     const isFreeOpenDay = this.isFreeOpenDay(now);
 
-    // 未激活时：以全局试用期为唯一有效标准
+    // 计算当前机器码，按机器码查询授权记录
+    let currentMachineCode = null;
+    try {
+      const mc = await this.getCurrentMachineCode();
+      currentMachineCode = mc.machineCode;
+    } catch (e) {
+      console.error('[License] 获取机器码失败:', e.message);
+    }
+
+    let record = null;
+    if (currentMachineCode) {
+      record = await this.getLicenseRecord(currentMachineCode);
+    }
+
+    // 如果当前机器码没查到，查 id=1 看是否是同一台机器（兼容老数据迁移）
+    if (!record) {
+      const legacyRecord = await this.getLicenseRecord();
+      if (legacyRecord && legacyRecord.machine_code) {
+        const cleanLegacyMC = legacyRecord.machine_code.replace(/-/g, '');
+        const cleanCurrentMC = currentMachineCode ? currentMachineCode.replace(/-/g, '') : '';
+        if (cleanLegacyMC === cleanCurrentMC) {
+          // 机器码一致，可以复用 id=1 的激活记录
+          record = legacyRecord;
+        }
+        // 机器码不一致则不用，保持 record=null
+      }
+    }
+
+    // 未激活或未查到记录：以全局试用期为唯一有效标准
     if (!record || !record.is_activated) {
       const trialExpiresAt = TRIAL_END_DATE;
       const trialValid = isInTrial && now < trialExpiresAt;
       return {
-        machineCode: record ? (record.machine_code || null) : null,
-        licenseCode: record ? (record.license_code || null) : null,
+        machineCode: currentMachineCode,
+        licenseCode: null,
         isActivated: false,
-        activatedAt: record ? (record.activated_at || null) : null,
+        activatedAt: null,
         expiresAt: trialExpiresAt.toISOString(),
         isInTrial,
         isValid: trialValid,
@@ -191,8 +251,7 @@ class LicenseManager {
       };
     }
 
-    // 已激活时：以授权码到期时间为准，忽略全局试用期
-    const machineCode = record.machine_code || null;
+    // 已激活时：以授权码到期时间为准
     const isActivated = true;
     const expiresAt = record.expires_at
       ? new Date(record.expires_at)
@@ -205,7 +264,7 @@ class LicenseManager {
     const isExpiringSoon = isValid && expiresAt && this._isExpiringSoon(expiresAt, now);
 
     return {
-      machineCode,
+      machineCode: currentMachineCode,
       licenseCode: record.license_code || null,
       isActivated,
       activatedAt: record.activated_at || null,
@@ -228,7 +287,7 @@ class LicenseManager {
   async checkFeatureLicense(feature) {
     const status = await this.getLicenseStatus();
     return {
-      allowed: status.isValid,
+      allowed: status.isValid || status.isFreeOpenDay,
       status,
     };
   }
@@ -239,10 +298,28 @@ class LicenseManager {
     }
 
     const cleanCode = licenseCode.trim().toUpperCase().replace(/-/g, '');
-    const record = await this.getLicenseRecord();
+
+    // 计算当前机器码
+    let currentMachineCode;
+    try {
+      const mc = await this.getCurrentMachineCode();
+      currentMachineCode = mc.machineCode;
+    } catch (e) {
+      return { success: false, error: '获取机器码失败: ' + e.message };
+    }
+
+    // 用当前机器码找记录，没有则先插入一行
+    let record = await this.getLicenseRecord(currentMachineCode);
+    if (!record) {
+      await this.pool.query(
+        'INSERT IGNORE INTO system_license (machine_code) VALUES (?)',
+        [currentMachineCode]
+      );
+      record = await this.getLicenseRecord(currentMachineCode);
+    }
 
     if (!record || !record.machine_code || record.machine_code === 'PENDING') {
-      return { success: false, error: '尚未获取机器码，请先刷新' };
+      return { success: false, error: '机器码无效，请先刷新' };
     }
 
     let decoded;
@@ -252,9 +329,10 @@ class LicenseManager {
       return { success: false, error: '授权码格式无效，请检查后重试' };
     }
 
-    const localMachineCode = record.machine_code.replace(/-/g, '');
-    if (decoded.machineCode !== localMachineCode) {
-      return { success: false, error: '授权码与本机不匹配，请检查机器码是否正确' };
+    // 用当前实时计算的机器码校验
+    const cleanCurrentMC = currentMachineCode.replace(/-/g, '');
+    if (decoded.machineCode !== cleanCurrentMC) {
+      return { success: false, error: '授权码与当前服务器不匹配，请使用当前服务器的机器码生成授权码' };
     }
 
     const { now } = await this.getAuthoritativeTime();
@@ -264,11 +342,13 @@ class LicenseManager {
       return { success: false, error: '此授权码已过期，无法激活' };
     }
 
+    // 更新当前机器码对应的行（不再固定 id=1）
     await this.pool.query(
       `UPDATE system_license 
-       SET license_code = ?, is_activated = TRUE, activated_at = NOW(), expires_at = ? 
-       WHERE id = 1`,
-      [cleanCode, codedExpiresAt]
+       SET license_code = ?, is_activated = TRUE, activated_at = NOW(), expires_at = ?,
+           machine_code = ?  -- 同步写入当前机器码，确保绑定正确
+       WHERE machine_code = ?`,
+      [cleanCode, codedExpiresAt, currentMachineCode, currentMachineCode]
     );
 
     const newStatus = await this.getLicenseStatus();

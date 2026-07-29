@@ -3842,39 +3842,16 @@ app.post('/api/import', authenticate, async (req, res) => {
 
 // ===== 系统授权接口 =====
 const crypto = require('crypto');
-const { exec } = require('child_process');
-
-function execPromise(cmd) {
-  return new Promise((resolve) => {
-    exec(cmd, { timeout: 3000 }, (err, stdout) => {
-      if (err) { resolve(''); return; }
-      resolve(stdout.trim());
-    });
-  });
-}
 
 // 获取机器码
 app.get('/api/license/machine-code', async (req, res) => {
   try {
-    const [cpuId, biosSerial, macAddr, diskSerial] = await Promise.all([
-      execPromise('wmic cpu get processorid /value'),
-      execPromise('wmic bios get serialnumber /value'),
-      execPromise('wmic nic where "NetEnabled=true" get MACAddress /value'),
-      execPromise('wmic diskdrive get serialnumber /value'),
-    ]);
+    const { machineCode, raw } = await licenseManager.getCurrentMachineCode();
 
-    const cpu = (cpuId.match(/ProcessorId=(.+)/i) || [])[1] || 'UNKNOWN_CPU';
-    const bios = (biosSerial.match(/SerialNumber=(.+)/i) || [])[1] || 'UNKNOWN_BIOS';
-    const mac = (macAddr.match(/MACAddress=(.+)/i) || [])[1] || 'UNKNOWN_MAC';
-    const disk = (diskSerial.match(/SerialNumber=(.+)/i) || [])[1] || 'UNKNOWN_DISK';
-
-    const raw = `${cpu.trim()}|${bios.trim()}|${mac.trim()}|${disk.trim()}`;
-    const hash = crypto.createHash('sha256').update(raw).digest('hex').substring(0, 32);
-    const machineCode = licenseManager.formatCode(hash);
-
+    // 只在新机器时插入，已激活的行不覆盖（多行支持）
     await pool.query(
-      'INSERT INTO system_license (id, machine_code) VALUES (1, ?) ON DUPLICATE KEY UPDATE machine_code = ?',
-      [machineCode, machineCode]
+      'INSERT IGNORE INTO system_license (machine_code) VALUES (?)',
+      [machineCode]
     );
 
     res.json({ data: { machineCode, raw }, error: null });

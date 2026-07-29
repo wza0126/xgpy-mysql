@@ -126,12 +126,23 @@ export const ProxyBrowser: React.FC = () => {
     loadSites();
   };
 
-  const reload = () => {
-    if (iframeRef.current && iframeSrc) {
-      // 直接重置 src 触发整页刷新（Cookie 仍在有效期内）
-      const src = iframeSrc;
-      setIframeSrc('');
-      setTimeout(() => setIframeSrc(src), 0);
+  const goToSiteHome = () => {
+    if (currentSite) {
+      const u = new URL(currentSite.url);
+      const scheme = u.protocol.replace(':', '');
+      const src = `${API_CONFIG.apiUrl}/api/web-proxy/p/${currentSite.id}/${scheme}/${u.host}/`;
+      setIframeSrc(src);
+      setDisplayUrl(currentSite.url);
+    }
+  };
+
+  const goBack = () => {
+    try {
+      if (iframeRef.current?.contentWindow) {
+        iframeRef.current.contentWindow.history.back();
+      }
+    } catch {
+      // 跨域时静默忽略
     }
   };
 
@@ -150,12 +161,20 @@ export const ProxyBrowser: React.FC = () => {
             主页
           </button>
           <button
-            onClick={reload}
+            onClick={goToSiteHome}
             className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs rounded flex items-center gap-1.5 transition-colors"
-            title="刷新当前页面"
+            title="回到站点首页"
           >
-            <i className="fa-solid fa-rotate-right"></i>
-            刷新
+            <i className="fa-solid fa-house-chimney"></i>
+            首页
+          </button>
+          <button
+            onClick={goBack}
+            className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs rounded flex items-center gap-1.5 transition-colors"
+            title="返回上一页"
+          >
+            <i className="fa-solid fa-arrow-left"></i>
+            返回
           </button>
           <div className="flex-1 flex items-center gap-2 px-3 py-1.5 bg-slate-900/80 border border-slate-700 rounded min-w-0">
             <SiteIcon icon={currentSite.icon} className="text-cyan-400 text-sm w-4 h-4 shrink-0" />
