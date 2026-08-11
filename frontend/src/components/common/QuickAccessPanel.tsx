@@ -29,6 +29,7 @@ const iconMap: Record<string, { icon: string; label: string }> = {
   security: { icon: 'fa-shield-alt', label: '安全设置' },
   ai_qa: { icon: 'fa-robot', label: 'AI答疑' },
   proxyBrowser: { icon: 'fa-earth-asia', label: '上网冲浪' },
+  creative: { icon: 'fa-wand-magic-sparkles', label: 'AI创意工坊' },
 };
 
 export const QuickAccessPanel: React.FC<QuickAccessPanelProps> = ({

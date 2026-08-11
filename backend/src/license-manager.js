@@ -24,6 +24,7 @@ const FEATURES = {
   TASK_MANAGER: 'task_manager',
   PROXY_NET: 'proxy_net',
   GAME: 'game',
+  CREATIVE: 'creative',
 };
 
 const TIME_API_URLS = [
@@ -48,6 +49,23 @@ class LicenseManager {
     });
   }
 
+  _extractAllValues(wmicOutput, keyName) {
+    if (!wmicOutput) return [];
+    const regex = new RegExp(`^${keyName}=(.+)$`, 'gim');
+    const values = [];
+    let match;
+    while ((match = regex.exec(wmicOutput)) !== null) {
+      const v = match[1].trim();
+      if (v) values.push(v);
+    }
+    return values.sort();
+  }
+
+  _hashMachineCode(raw) {
+    const hash = crypto.createHash('sha256').update(raw).digest('hex').substring(0, 32);
+    return this.formatCode(hash);
+  }
+
   async getCurrentMachineCode() {
     const [cpuId, biosSerial, macAddr, diskSerial] = await Promise.all([
       this._execPromise('wmic cpu get processorid /value'),
@@ -56,15 +74,34 @@ class LicenseManager {
       this._execPromise('wmic diskdrive get serialnumber /value'),
     ]);
 
-    const cpu = (cpuId.match(/ProcessorId=(.+)/i) || [])[1] || 'UNKNOWN_CPU';
-    const bios = (biosSerial.match(/SerialNumber=(.+)/i) || [])[1] || 'UNKNOWN_BIOS';
-    const mac = (macAddr.match(/MACAddress=(.+)/i) || [])[1] || 'UNKNOWN_MAC';
-    const disk = (diskSerial.match(/SerialNumber=(.+)/i) || [])[1] || 'UNKNOWN_DISK';
+    // 算法 A（原始/兼容）：只取第一个匹配项，与已激活记录中绑定的 hash 保持一致
+    const cpuA = (cpuId.match(/ProcessorId=(.+)/i) || [])[1] || 'UNKNOWN_CPU';
+    const biosA = (biosSerial.match(/SerialNumber=(.+)/i) || [])[1] || 'UNKNOWN_BIOS';
+    const macA = (macAddr.match(/MACAddress=(.+)/i) || [])[1] || 'UNKNOWN_MAC';
+    const diskA = (diskSerial.match(/SerialNumber=(.+)/i) || [])[1] || 'UNKNOWN_DISK';
+    const rawA = `${cpuA.trim()}|${biosA.trim()}|${macA.trim()}|${diskA.trim()}`;
 
-    const raw = `${cpu.trim()}|${bios.trim()}|${mac.trim()}|${disk.trim()}`;
-    const hash = crypto.createHash('sha256').update(raw).digest('hex').substring(0, 32);
-    const machineCode = this.formatCode(hash);
-    return { machineCode, raw };
+    // 算法 B（稳定）：取全部值后排序拼接，避免多网卡/多磁盘 WMI 枚举顺序波动导致同一台机器结果变化
+    const cpusB = this._extractAllValues(cpuId, 'ProcessorId');
+    const biosesB = this._extractAllValues(biosSerial, 'SerialNumber');
+    const macsB = this._extractAllValues(macAddr, 'MACAddress');
+    const disksB = this._extractAllValues(diskSerial, 'SerialNumber');
+    const cpuB = cpusB.length > 0 ? cpusB.join(',') : 'UNKNOWN_CPU';
+    const biosB = biosesB.length > 0 ? biosesB.join(',') : 'UNKNOWN_BIOS';
+    const macB = macsB.length > 0 ? macsB.join(',') : 'UNKNOWN_MAC';
+    const diskB = disksB.length > 0 ? disksB.join(',') : 'UNKNOWN_DISK';
+    const rawB = `${cpuB}|${biosB}|${macB}|${diskB}`;
+
+    const machineCodeA = this._hashMachineCode(rawA);
+    const machineCodeB = this._hashMachineCode(rawB);
+
+    // 对外暴露稳定算法（B）作为主机器码，避免未来的波动
+    // 但查询授权记录时会同时尝试 algoA 和 algoB，兼容已激活记录中绑定的 algoA
+    return {
+      machineCode: machineCodeB,
+      raw: rawB,
+      machineCodeLegacy: machineCodeA,
+    };
   }
 
   formatCode(code) {
@@ -202,31 +239,45 @@ class LicenseManager {
     const isInTrial = this.isInTrialPeriod(now);
     const isFreeOpenDay = this.isFreeOpenDay(now);
 
-    // 计算当前机器码，按机器码查询授权记录
-    let currentMachineCode = null;
+    // 计算当前机器码（双算法：稳定算法B + 兼容算法A）
+    let currentMachineCode = null;       // 算法B：排序拼接，稳定，对外暴露
+    let currentMachineCodeLegacy = null; // 算法A：仅取第一个，兼容历史激活记录
     try {
       const mc = await this.getCurrentMachineCode();
       currentMachineCode = mc.machineCode;
+      currentMachineCodeLegacy = mc.machineCodeLegacy;
     } catch (e) {
       console.error('[License] 获取机器码失败:', e.message);
     }
 
     let record = null;
+
+    // 1. 优先用算法B（稳定）查询
     if (currentMachineCode) {
       record = await this.getLicenseRecord(currentMachineCode);
     }
 
-    // 如果当前机器码没查到，查 id=1 看是否是同一台机器（兼容老数据迁移）
+    // 2. 算法B没命中，用算法A（兼容历史激活）查询——多网卡/多磁盘WMI枚举顺序波动时，历史激活记录绑定的是当时A的值
+    if (!record && currentMachineCodeLegacy && currentMachineCodeLegacy !== currentMachineCode) {
+      record = await this.getLicenseRecord(currentMachineCodeLegacy);
+    }
+
+    // 3. 仍没命中，fallback 到 id=1 的 legacy 行
     if (!record) {
       const legacyRecord = await this.getLicenseRecord();
       if (legacyRecord && legacyRecord.machine_code) {
         const cleanLegacyMC = legacyRecord.machine_code.replace(/-/g, '');
-        const cleanCurrentMC = currentMachineCode ? currentMachineCode.replace(/-/g, '') : '';
-        if (cleanLegacyMC === cleanCurrentMC) {
-          // 机器码一致，可以复用 id=1 的激活记录
+        const cleanStableMC = currentMachineCode ? currentMachineCode.replace(/-/g, '') : '';
+        const cleanLegacyAlgoMC = currentMachineCodeLegacy ? currentMachineCodeLegacy.replace(/-/g, '') : '';
+
+        // 3a. 严格匹配：算法B或算法A任一与 legacy 行 machine_code 一致 → 直接复用
+        // 说明：算法B内部已对多网卡/多磁盘WMI枚举值做排序拼接，同一台机器的结果稳定；
+        //      若因网卡/磁盘硬件增减导致机器码变化，属于合理的重新激活触发条件，
+        //      不应放宽为「全表只有1条激活就信任id=1」——否则多机共库场景下
+        //      未激活的第二台服务器可直接绕过授权继承第一台的激活状态。
+        if (cleanLegacyMC === cleanStableMC || cleanLegacyMC === cleanLegacyAlgoMC) {
           record = legacyRecord;
         }
-        // 机器码不一致则不用，保持 record=null
       }
     }
 
@@ -299,17 +350,29 @@ class LicenseManager {
 
     const cleanCode = licenseCode.trim().toUpperCase().replace(/-/g, '');
 
-    // 计算当前机器码
-    let currentMachineCode;
+    // 计算当前机器码（双算法）
+    let currentMachineCode;       // 算法B（稳定）
+    let currentMachineCodeLegacy; // 算法A（兼容）
     try {
       const mc = await this.getCurrentMachineCode();
       currentMachineCode = mc.machineCode;
+      currentMachineCodeLegacy = mc.machineCodeLegacy;
     } catch (e) {
       return { success: false, error: '获取机器码失败: ' + e.message };
     }
 
-    // 用当前机器码找记录，没有则先插入一行
+    const cleanStableMC = currentMachineCode.replace(/-/g, '');
+    const cleanLegacyMC = currentMachineCodeLegacy ? currentMachineCodeLegacy.replace(/-/g, '') : '';
+
+    // 先用算法B查询/插入
     let record = await this.getLicenseRecord(currentMachineCode);
+
+    // 算法B没命中，再查算法A对应的行（可能历史上用算法A激活到了独立行）
+    if (!record && currentMachineCodeLegacy && currentMachineCodeLegacy !== currentMachineCode) {
+      record = await this.getLicenseRecord(currentMachineCodeLegacy);
+    }
+
+    // 都没命中：用算法B（稳定）插入新行作为这台机器的永久绑定行
     if (!record) {
       await this.pool.query(
         'INSERT IGNORE INTO system_license (machine_code) VALUES (?)',
@@ -329,9 +392,10 @@ class LicenseManager {
       return { success: false, error: '授权码格式无效，请检查后重试' };
     }
 
-    // 用当前实时计算的机器码校验
-    const cleanCurrentMC = currentMachineCode.replace(/-/g, '');
-    if (decoded.machineCode !== cleanCurrentMC) {
+    // 双算法校验：授权码绑定的机器码只要匹配当前算法B或算法A的clean hash即可
+    // 兼容用户可能用页面显示的稳定机器码（B）或旧版算法（A）生成的授权码
+    const decodedMC = decoded.machineCode;
+    if (decodedMC !== cleanStableMC && decodedMC !== cleanLegacyMC) {
       return { success: false, error: '授权码与当前服务器不匹配，请使用当前服务器的机器码生成授权码' };
     }
 
@@ -342,14 +406,34 @@ class LicenseManager {
       return { success: false, error: '此授权码已过期，无法激活' };
     }
 
-    // 更新当前机器码对应的行（不再固定 id=1）
+    // 如果命中的是算法A的历史行，先把 license 更新到算法B的稳定行，避免后续 WMI 枚举波动再丢激活
+    let targetMachineCode = currentMachineCode; // 目标：始终写入算法B的稳定行
+    if (record.machine_code !== currentMachineCode) {
+      // 先确保算法B的行存在
+      await this.pool.query(
+        'INSERT IGNORE INTO system_license (machine_code) VALUES (?)',
+        [currentMachineCode]
+      );
+    }
+
+    // 更新算法B的稳定行（永久绑定，不受 WMI 枚举顺序影响）
     await this.pool.query(
       `UPDATE system_license 
        SET license_code = ?, is_activated = TRUE, activated_at = NOW(), expires_at = ?,
-           machine_code = ?  -- 同步写入当前机器码，确保绑定正确
+           machine_code = ?
        WHERE machine_code = ?`,
       [cleanCode, codedExpiresAt, currentMachineCode, currentMachineCode]
     );
+
+    // 如果之前的算法A行存在且是激活的，清空其激活标志避免双行混淆（仅当其不是同一行时）
+    if (currentMachineCodeLegacy && currentMachineCodeLegacy !== currentMachineCode) {
+      await this.pool.query(
+        `UPDATE system_license 
+         SET is_activated = FALSE, license_code = NULL, activated_at = NULL, expires_at = NULL
+         WHERE machine_code = ? AND is_activated = TRUE`,
+        [currentMachineCodeLegacy]
+      );
+    }
 
     const newStatus = await this.getLicenseStatus();
 

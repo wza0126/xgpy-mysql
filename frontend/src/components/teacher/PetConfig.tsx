@@ -20,6 +20,7 @@ interface FocusModeConfig {
   focus_mode_show_profile: boolean;
   focus_mode_show_security: boolean;
   focus_mode_show_proxyBrowser: boolean;
+  focus_mode_show_creative: boolean;
   focus_mode_quick_access: string[];
   focus_mode_classes: string[];
 }
@@ -102,6 +103,7 @@ export const PetConfig: React.FC = () => {
           focus_mode_show_profile: toBool(configData.focus_mode_show_profile),
           focus_mode_show_security: toBool(configData.focus_mode_show_security),
           focus_mode_show_proxyBrowser: toBool(configData.focus_mode_show_proxyBrowser),
+          focus_mode_show_creative: toBool(configData.focus_mode_show_creative),
           focus_mode_quick_access: quickAccess,
           focus_mode_classes: focusClasses,
         },
@@ -129,6 +131,7 @@ export const PetConfig: React.FC = () => {
           focus_mode_show_profile: true,
           focus_mode_show_security: true,
           focus_mode_show_proxyBrowser: true,
+          focus_mode_show_creative: true,
           focus_mode_quick_access: ['apps', 'ai_qa', 'notebook'],
           focus_mode_classes: [],
         },
@@ -163,6 +166,7 @@ export const PetConfig: React.FC = () => {
         focus_mode_show_profile: petConfig.focus_mode.focus_mode_show_profile,
         focus_mode_show_security: petConfig.focus_mode.focus_mode_show_security,
         focus_mode_show_proxyBrowser: petConfig.focus_mode.focus_mode_show_proxyBrowser,
+        focus_mode_show_creative: petConfig.focus_mode.focus_mode_show_creative,
         focus_mode_quick_access: JSON.stringify(petConfig.focus_mode.focus_mode_quick_access),
         focus_mode_classes: JSON.stringify(petConfig.focus_mode.focus_mode_classes),
       };
@@ -361,6 +365,7 @@ export const PetConfig: React.FC = () => {
     { id: 'security', label: '安全设置', icon: 'fa-shield-alt' },
     { id: 'ai_qa', label: 'AI答疑', icon: 'fa-robot' },
     { id: 'proxyBrowser', label: '上网冲浪', icon: 'fa-earth-asia' },
+    { id: 'creative', label: 'AI创意工坊', icon: 'fa-wand-magic-sparkles' },
   ];
 
   return (

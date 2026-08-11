@@ -27,6 +27,7 @@ import { PaintBoard } from '../components/student/PaintBoard';
 import { TaskCenter } from '../components/student/TaskCenter';
 import { StudentRollCall } from '../components/student/StudentRollCall';
 import { ProxyBrowser } from '../components/student/ProxyBrowser';
+import { CreativeWorkshop } from '../components/student/CreativeWorkshop';
 import { RollCallApp } from '../components/teacher/RollCallApp';
 import { backendClient } from '../api/backendClient';
 import { API_CONFIG } from '../api/config';
@@ -48,6 +49,7 @@ interface FocusModeConfig {
   focus_mode_show_profile: boolean;
   focus_mode_show_security: boolean;
   focus_mode_show_proxyBrowser: boolean;
+  focus_mode_show_creative: boolean;
   focus_mode_quick_access: string[];
   focus_mode_classes: string[];
 }
@@ -68,6 +70,7 @@ const moduleComponents: Record<string, React.ReactNode> = {
   taskCenter: <TaskCenter />,
   studentRollCall: <StudentRollCall />,
   proxyBrowser: <ProxyBrowser />,
+  creative: <CreativeWorkshop />,
   rollCall: <RollCallApp onClose={() => { const { closeWindow } = useDesktopStore.getState(); closeWindow('rollCall'); }} />,
 };
 
@@ -90,7 +93,7 @@ export const Desktop: React.FC = () => {
   // 代理模式下 profile 由 useAuth 直接设置为目标学生
   const effectiveProfile = profile;
 
-  const PAID_STUDENT_FEATURES = ['taskCenter', 'apps', 'pet', 'exchange', 'proxyBrowser', 'studentRollCall'];
+  const PAID_STUDENT_FEATURES = ['taskCenter', 'apps', 'pet', 'exchange', 'proxyBrowser', 'studentRollCall', 'creative'];
 
   const isPaidFeature = (featureId: string): boolean => {
     return PAID_STUDENT_FEATURES.includes(featureId);
@@ -273,6 +276,7 @@ export const Desktop: React.FC = () => {
           focus_mode_show_profile: toBool(data.focus_mode_show_profile),
           focus_mode_show_security: toBool(data.focus_mode_show_security),
           focus_mode_show_proxyBrowser: toBool(data.focus_mode_show_proxyBrowser),
+          focus_mode_show_creative: toBool(data.focus_mode_show_creative),
           focus_mode_quick_access: quickAccess,
           focus_mode_classes: focusClasses,
         };
@@ -303,6 +307,7 @@ export const Desktop: React.FC = () => {
           focus_mode_show_profile: true,
           focus_mode_show_security: true,
           focus_mode_show_proxyBrowser: true,
+          focus_mode_show_creative: true,
           focus_mode_quick_access: ['apps', 'ai_qa', 'notebook'],
           focus_mode_classes: [],
         });
@@ -785,7 +790,13 @@ export const Desktop: React.FC = () => {
             onClick={() => {
               const teacherRollCallPaid = true;
               const canUseRollCall = licenseStatus?.isValid || licenseStatus?.isFreeOpenDay || false;
-              if (licenseLoaded && teacherRollCallPaid && !canUseRollCall) {
+              // 先处理加载中状态——不能误报「未授权」也不能直接放行，
+              // 而是明确提示加载中，避免 UI 显示正常（无锁图标）但点击报错的不一致。
+              if (!licenseLoaded) {
+                alert('授权状态加载中，请稍候再试...');
+                return;
+              }
+              if (teacherRollCallPaid && !canUseRollCall) {
                 alert('课堂点名功能需要系统授权后才能使用，请联系管理员激活授权。');
                 return;
               }

@@ -20,6 +20,7 @@ import { KnowledgeBaseManager } from '../components/teacher/KnowledgeBaseManager
 import { TaskManager } from '../components/teacher/TaskManager';
 import { RollCallApp } from '../components/teacher/RollCallApp';
 import { ProxyManager } from '../components/teacher/ProxyManager';
+import { CreativeWorkshopManager } from '../components/teacher/CreativeWorkshopManager';
 
 const API_BASE = API_CONFIG.apiUrl;
 
@@ -36,13 +37,14 @@ interface LicenseStatus {
   isExpiringSoon: boolean;
 }
 
-const PAID_MENU_ITEMS = ['apps', 'prizes', 'pets', 'taskManager', 'proxyNet', 'game', 'rollCall', 'analytics'];
+const PAID_MENU_ITEMS = ['apps', 'prizes', 'pets', 'taskManager', 'proxyNet', 'game', 'rollCall', 'analytics', 'creativeWorkshop'];
 
 const menuItems = [
   { id: 'notifications', title: '通知管理', icon: 'fa-bell' },
   { id: 'taskManager', title: '备课工作台', icon: 'fa-chalkboard-user' },
   { id: 'rollCall', title: '课堂点名', icon: 'fa-hand-pointer' },
   { id: 'proxyNet', title: '上网管理', icon: 'fa-earth-asia' },
+  { id: 'creativeWorkshop', title: 'AI创意工坊', icon: 'fa-wand-magic-sparkles' },
   { id: 'mentalHealth', title: '心理健康', icon: 'fa-heart-pulse' },
   { id: 'classes', title: '班级管理', icon: 'fa-users' },
   { id: 'students', title: '学生管理', icon: 'fa-user-graduate' },
@@ -63,6 +65,7 @@ const components: Record<string, React.ReactNode> = {
   taskManager: <TaskManager />,
   rollCall: <RollCallApp />,
   proxyNet: <ProxyManager />,
+  creativeWorkshop: <CreativeWorkshopManager />,
   mentalHealth: <MentalHealthManager />,
   classes: <ClassManager />,
   students: <StudentManager />,

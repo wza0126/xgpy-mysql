@@ -28,6 +28,16 @@ const secureAuth = new SecureAuth(pool);
 const licenseManager = new LicenseManager(pool);
 let notificationScheduler = null;
 
+// SQL 注入防护：校验列名只允许字母、数字、下划线
+// 恶意列名会在拼接进 SQL 前被此函数拦截，防止注入
+const SAFE_COLUMN_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+function sanitizeColumn(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (SAFE_COLUMN_RE.test(trimmed)) return trimmed;
+  return null;
+}
+
 // ===== 进程级异常兜底 =====
 // 教室生产环境：进程活着比严格崩溃重要。单个请求/定时任务的未捕获异常
 // 只打日志不退出，避免一个坏请求把全班的服务端干掉
@@ -875,50 +885,58 @@ app.get('/api/tables/:tableName', authenticate, async (req, res) => {
       
       const conditions = [];
       
-      Object.keys(filterObj).forEach(key => {
+      for (const key of Object.keys(filterObj)) {
         const value = filterObj[key];
+        let column = null;
         
         if (key.endsWith('_in')) {
-          // 处理 _in 操作符: column_in: [v1, v2] -> column IN (v1, v2)
-          const column = key.replace('_in', '');
+          column = sanitizeColumn(key.replace('_in', ''));
+          if (!column) continue;
           const values = Array.isArray(value) ? value : [value];
-          conditions.push(`${column} IN (${values.map(() => '?').join(', ')})`);
-          params.push(...values);
+          conditions.push(`?? IN (${values.map(() => '?').join(', ')})`);
+          params.push(column, ...values);
         } else if (key.endsWith('_neq')) {
-          // 处理 _neq 操作符: column_neq: value -> column != value
-          const column = key.replace('_neq', '');
-          conditions.push(`${column} != ?`);
-          params.push(value);
+          column = sanitizeColumn(key.replace('_neq', ''));
+          if (!column) continue;
+          conditions.push(`?? != ?`);
+          params.push(column, value);
         } else if (key.endsWith('_gt')) {
-          const column = key.replace('_gt', '');
-          conditions.push(`${column} > ?`);
-          params.push(value);
+          column = sanitizeColumn(key.replace('_gt', ''));
+          if (!column) continue;
+          conditions.push(`?? > ?`);
+          params.push(column, value);
         } else if (key.endsWith('_gte')) {
-          const column = key.replace('_gte', '');
-          conditions.push(`${column} >= ?`);
-          params.push(value);
+          column = sanitizeColumn(key.replace('_gte', ''));
+          if (!column) continue;
+          conditions.push(`?? >= ?`);
+          params.push(column, value);
         } else if (key.endsWith('_lt')) {
-          const column = key.replace('_lt', '');
-          conditions.push(`${column} < ?`);
-          params.push(value);
+          column = sanitizeColumn(key.replace('_lt', ''));
+          if (!column) continue;
+          conditions.push(`?? < ?`);
+          params.push(column, value);
         } else if (key.endsWith('_lte')) {
-          const column = key.replace('_lte', '');
-          conditions.push(`${column} <= ?`);
-          params.push(value);
+          column = sanitizeColumn(key.replace('_lte', ''));
+          if (!column) continue;
+          conditions.push(`?? <= ?`);
+          params.push(column, value);
         } else if (key.endsWith('_like')) {
-          const column = key.replace('_like', '');
-          conditions.push(`${column} LIKE ?`);
-          params.push(value);
+          column = sanitizeColumn(key.replace('_like', ''));
+          if (!column) continue;
+          conditions.push(`?? LIKE ?`);
+          params.push(column, value);
         } else if (key.endsWith('_ilike')) {
-          const column = key.replace('_ilike', '');
-          conditions.push(`${column} LIKE ?`);
-          params.push(value);
+          column = sanitizeColumn(key.replace('_ilike', ''));
+          if (!column) continue;
+          conditions.push(`?? LIKE ?`);
+          params.push(column, value);
         } else {
-          // 默认等于操作
-          conditions.push(`${key} = ?`);
-          params.push(value);
+          column = sanitizeColumn(key);
+          if (!column) continue;
+          conditions.push(`?? = ?`);
+          params.push(column, value);
         }
-      });
+      }
       
       if (conditions.length > 0) {
         query += ` WHERE ${conditions.join(' AND ')}`;
@@ -926,7 +944,11 @@ app.get('/api/tables/:tableName', authenticate, async (req, res) => {
     }
     
     if (order) {
-      query += ` ORDER BY ${order}`;
+      const orderCol = sanitizeColumn(order.column || order);
+      if (orderCol) {
+        query += ` ORDER BY ?? ${order.ascending ? 'ASC' : 'DESC'}`;
+        params.push(orderCol);
+      }
     }
     
     if (limit) {
@@ -1190,60 +1212,66 @@ app.post('/api/query', authenticate, async (req, res) => {
       
       console.log('Processing filters:', JSON.stringify(filters, null, 2));
       
-      Object.keys(filters).forEach(key => {
+      for (const key of Object.keys(filters)) {
         const value = filters[key];
         
         console.log('  Processing filter:', key, '=', JSON.stringify(value));
         
         // 处理 _in 后缀: id_in -> id IN (...)
         if (key.endsWith('_in')) {
-          const column = key.replace('_in', '');
-          console.log('    Detected _in suffix, column:', column);
+          const column = sanitizeColumn(key.replace('_in', ''));
+          if (!column) continue;
           
           if (Array.isArray(value)) {
-            conditions.push(`${column} IN (${value.map(() => '?').join(', ')})`);
-            params.push(...value);
+            conditions.push(`?? IN (${value.map(() => '?').join(', ')})`);
+            params.push(column, ...value);
             console.log('    Added IN condition for', column, 'with', value.length, 'values');
           } else {
-            conditions.push(`${column} = ?`);
-            params.push(value);
+            conditions.push(`?? = ?`);
+            params.push(column, value);
           }
         } else if (key.endsWith('_gte')) {
-          // 处理 _gte 后缀: exchanged_at_gte -> exchanged_at >= ?
-          const column = key.replace('_gte', '');
-          params.push(value);
-          conditions.push(`${column} >= ?`);
+          const column = sanitizeColumn(key.replace('_gte', ''));
+          if (!column) continue;
+          conditions.push(`?? >= ?`);
+          params.push(column, value);
         } else if (key.endsWith('_lte')) {
-          // 处理 _lte 后缀: exchanged_at_lte -> exchanged_at <= ?
-          const column = key.replace('_lte', '');
-          params.push(value);
-          conditions.push(`${column} <= ?`);
+          const column = sanitizeColumn(key.replace('_lte', ''));
+          if (!column) continue;
+          conditions.push(`?? <= ?`);
+          params.push(column, value);
         } else if (key.endsWith('_gt')) {
-          // 处理 _gt 后缀: created_at_gt -> created_at > ?
-          const column = key.replace('_gt', '');
-          params.push(value);
-          conditions.push(`${column} > ?`);
+          const column = sanitizeColumn(key.replace('_gt', ''));
+          if (!column) continue;
+          conditions.push(`?? > ?`);
+          params.push(column, value);
         } else if (key.endsWith('_lt')) {
-          // 处理 _lt 后缀: created_at_lt -> created_at < ?
-          const column = key.replace('_lt', '');
-          params.push(value);
-          conditions.push(`${column} < ?`);
+          const column = sanitizeColumn(key.replace('_lt', ''));
+          if (!column) continue;
+          conditions.push(`?? < ?`);
+          params.push(column, value);
         } else if (key.endsWith('_neq')) {
-          // 处理 _neq 后缀: status_neq -> status != ?
-          const column = key.replace('_neq', '');
-          params.push(value);
-          conditions.push(`${column} != ?`);
+          const column = sanitizeColumn(key.replace('_neq', ''));
+          if (!column) continue;
+          conditions.push(`?? != ?`);
+          params.push(column, value);
         } else if (Array.isArray(value)) {
-          // 直接是数组的情况
-          conditions.push(`${key} IN (${value.map(() => '?').join(', ')})`);
-          params.push(...value);
+          const column = sanitizeColumn(key);
+          if (!column) continue;
+          conditions.push(`?? IN (${value.map(() => '?').join(', ')})`);
+          params.push(column, ...value);
         } else if (value === null) {
-          conditions.push(`${key} IS NULL`);
+          const column = sanitizeColumn(key);
+          if (!column) continue;
+          conditions.push(`?? IS NULL`);
+          params.push(column);
         } else {
-          params.push(value);
-          conditions.push(`${key} = ?`);
+          const column = sanitizeColumn(key);
+          if (!column) continue;
+          params.push(column, value);
+          conditions.push(`?? = ?`);
         }
-      });
+      }
       
       query += ` WHERE ${conditions.join(' AND ')}`;
       console.log('Generated query:', query);
@@ -1251,7 +1279,11 @@ app.post('/api/query', authenticate, async (req, res) => {
     }
     
     if (order) {
-      query += ` ORDER BY ${order.column || order} ${order.ascending ? 'ASC' : 'DESC'}`;
+      const orderCol = sanitizeColumn(order.column || order);
+      if (orderCol) {
+        query += ` ORDER BY ?? ${order.ascending ? 'ASC' : 'DESC'}`;
+        params.push(orderCol);
+      }
     }
     
     if (limit) {
@@ -10598,6 +10630,13 @@ app.get('/api/proxy/verify', async (req, res) => {
 // 教师管理 /api/teacher/proxy/*、学生端 /api/student/proxy/*、中转 /api/web-proxy/*
 // （内部自验 HMAC 令牌，不挂授权门 requireLicense）
 registerWebProxy(app, pool, authenticate, requireTeacher, requireStudent);
+
+// ===== AI创意工坊模块 =====
+// 学生端 /api/creative-workshop/*、教师端 /api/creative-workshop/teacher/*
+// 整组挂授权门 requireLicense(FEATURES.CREATIVE)
+const { registerCreativeWorkshop } = require('./creative-workshop');
+app.use('/api/creative-workshop', requireLicense(FEATURES.CREATIVE));
+registerCreativeWorkshop(app, pool, authenticate, requireTeacher, requireStudent, licenseManager, FEATURES);
 
   await runMigrations();
 
