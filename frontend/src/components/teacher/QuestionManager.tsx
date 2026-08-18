@@ -48,6 +48,7 @@ interface FilterState {
   searchText: string;
   practiceEnabled: '' | 'enabled' | 'disabled';
   examEnabled: '' | 'enabled' | 'disabled';
+  clusterId: string; // AI 聚类ID（如「信息系统/分类与类型」），用于按知识点簇筛选题目
 }
 
 interface QuestionAccuracy {
@@ -125,6 +126,7 @@ export const QuestionManager: React.FC = () => {
     searchText: '',
     practiceEnabled: '',
     examEnabled: '',
+    clusterId: '',
   });
   const [searchInput, setSearchInput] = useState('');
   const [tagFilterEnabled, setTagFilterEnabled] = useState(false);
@@ -161,6 +163,8 @@ export const QuestionManager: React.FC = () => {
   const [clusterStats, setClusterStats] = useState<{ total: number; clustered: number; unclustered: number; clusters: { cluster_id: string; cnt: number }[] } | null>(null);
   // 异步任务进度（每 2 秒轮询一次）
   const [clusterProgress, setClusterProgress] = useState<{ processedBatches: number; totalBatches: number; processed: number; total: number; lastBatchError?: string } | null>(null);
+  // 知识树展开状态（记录哪些一级类目被展开）
+  const [expandedClusters, setExpandedClusters] = useState<Record<string, boolean>>({});
   const { profile } = useAuth();
 
   useEffect(() => {
@@ -262,6 +266,10 @@ export const QuestionManager: React.FC = () => {
       result = result.filter((q) =>
         filters.examEnabled === 'enabled' ? q.exam_enabled : !q.exam_enabled
       );
+    }
+
+    if (filters.clusterId) {
+      result = result.filter((q) => q.cluster_id === filters.clusterId);
     }
 
     if (filters.searchText) {
@@ -855,13 +863,14 @@ ${isChoice ? `5. 对于选择题，answers字段必须填写选项字母（A、B
       searchText: '',
       practiceEnabled: '',
       examEnabled: '',
+      clusterId: '',
     });
     setSearchInput('');
     setTagFilterEnabled(false);
   };
 
   const hasActiveFilters = useMemo(() => {
-    return !!(filters.type || filters.knowledgePointId || tagFilterEnabled || filters.searchText || filters.practiceEnabled || filters.examEnabled);
+    return !!(filters.type || filters.knowledgePointId || tagFilterEnabled || filters.searchText || filters.practiceEnabled || filters.examEnabled || filters.clusterId);
   }, [filters, tagFilterEnabled]);
 
   const displayQuestions = useMemo(() => {
@@ -1281,11 +1290,14 @@ ${isChoice ? `5. 对于选择题，answers字段必须填写选项字母（A、B
           <span>已聚类 <b>{clusterStats.clustered}</b> / {clusterStats.total} 题</span>
           <span>剩余未聚类 <b>{clusterStats.unclustered}</b> 题</span>
           <span>聚类簇数 <b>{clusterStats.clusters.length}</b></span>
-          {clusterStats.clusters.length > 0 && (
-            <span className="text-xs">
-              最大簇: {clusterStats.clusters[0].cluster_id} ({clusterStats.clusters[0].cnt}题)
-            </span>
-          )}
+          {clusterStats.clusters.length > 0 && (() => {
+            const largest = clusterStats.clusters.reduce((a, b) => (b.cnt > a.cnt ? b : a));
+            return (
+              <span className="text-xs">
+                最大簇: {largest.cluster_id} ({largest.cnt}题)
+              </span>
+            );
+          })()}
         </div>
       )}
 
@@ -1379,14 +1391,29 @@ ${isChoice ? `5. 对于选择题，answers字段必须填写选项字母（A、B
             </label>
           </div>
 
-          {(filters.type || filters.knowledgePointId || tagFilterEnabled || filters.searchText || filters.practiceEnabled || filters.examEnabled) && (
-            <button
-              onClick={clearFilters}
-              className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-lg transition-colors"
-            >
-              <i className="fa-solid fa-times mr-1"></i>
-              清除筛选
-            </button>
+          {(filters.type || filters.knowledgePointId || tagFilterEnabled || filters.searchText || filters.practiceEnabled || filters.examEnabled || filters.clusterId) && (
+            <>
+              {filters.clusterId && (
+                <span className="px-3 py-1.5 text-sm text-cyan-700 bg-cyan-50 border border-cyan-200 rounded-lg flex items-center gap-2">
+                  <i className="fa-solid fa-layer-group"></i>
+                  筛选簇: {filters.clusterId}
+                  <button
+                    onClick={() => setFilters(prev => ({ ...prev, clusterId: '' }))}
+                    className="text-cyan-500 hover:text-cyan-700 ml-1"
+                    title="取消此筛选"
+                  >
+                    <i className="fa-solid fa-times"></i>
+                  </button>
+                </span>
+              )}
+              <button
+                onClick={clearFilters}
+                className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <i className="fa-solid fa-times mr-1"></i>
+                清除筛选
+              </button>
+            </>
           )}
         </div>
 
@@ -2716,19 +2743,103 @@ ${isChoice ? `5. 对于选择题，answers字段必须填写选项字母（A、B
                       <div className="text-xs text-gray-500">聚类簇数</div>
                     </div>
                   </div>
-                  {clusterStats.clusters.length > 0 && (
-                    <div>
-                      <div className="text-xs text-gray-500 mb-2">聚类分布（按题目数倒序，前 15）:</div>
-                      <div className="space-y-1 max-h-40 overflow-y-auto">
-                        {clusterStats.clusters.slice(0, 15).map((c, i) => (
-                          <div key={i} className="flex items-center justify-between text-xs">
-                            <span className="text-gray-700">{c.cluster_id}</span>
-                            <span className="bg-cyan-100 text-cyan-700 px-2 py-0.5 rounded">{c.cnt} 题</span>
+                  {clusterStats.clusters.length > 0 && (() => {
+                    // 把 cluster_id（"一级/二级"格式）整理为树结构
+                    // 无 "/" 的视为「未分类」一级类目下的兜底子节点
+                    const tree: Record<string, { sub: string; cnt: number }[]> = {};
+                    let unclassifiedTotal = 0;
+                    for (const c of clusterStats.clusters) {
+                      const slashIdx = c.cluster_id.indexOf('/');
+                      if (slashIdx === -1) {
+                        // 无二级，直接挂到「未分类」下
+                        const key = '未分类';
+                        if (!tree[key]) tree[key] = [];
+                        tree[key].push({ sub: c.cluster_id, cnt: c.cnt });
+                        unclassifiedTotal += c.cnt;
+                      } else {
+                        const parent = c.cluster_id.slice(0, slashIdx);
+                        const sub = c.cluster_id.slice(slashIdx + 1);
+                        if (!tree[parent]) tree[parent] = [];
+                        tree[parent].push({ sub, cnt: c.cnt });
+                      }
+                    }
+                    const parents = Object.keys(tree).sort((a, b) => {
+                      // 「未分类」排到最后
+                      if (a === '未分类') return 1;
+                      if (b === '未分类') return -1;
+                      return a.localeCompare(b, 'zh-CN');
+                    });
+                    const toggleExpand = (p: string) => setExpandedClusters(prev => ({ ...prev, [p]: !prev[p] }));
+                    const expandAll = () => {
+                      const all: Record<string, boolean> = {};
+                      parents.forEach(p => { all[p] = true; });
+                      setExpandedClusters(all);
+                    };
+                    const collapseAll = () => setExpandedClusters({});
+                    const handleClusterClick = (clusterId: string) => {
+                      setFilters(prev => ({ ...prev, clusterId }));
+                      setShowClusterModal(false);
+                    };
+                    return (
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="text-xs text-gray-500">知识树（共 {parents.length} 个一级类目）:</div>
+                          <div className="flex gap-2 text-xs">
+                            <button onClick={expandAll} className="text-blue-500 hover:underline">全部展开</button>
+                            <button onClick={collapseAll} className="text-gray-500 hover:underline">全部折叠</button>
                           </div>
-                        ))}
+                        </div>
+                        <div className="space-y-1 max-h-72 overflow-y-auto border border-gray-200 rounded p-2 bg-white">
+                          {parents.map(parent => {
+                            const children = tree[parent].sort((a, b) => b.cnt - a.cnt);
+                            const parentTotal = children.reduce((s, c) => s + c.cnt, 0);
+                            const isExpanded = expandedClusters[parent] || parents.length <= 3;
+                            return (
+                              <div key={parent}>
+                                <div
+                                  className="flex items-center justify-between cursor-pointer hover:bg-cyan-50 px-2 py-1 rounded"
+                                  onClick={() => toggleExpand(parent)}
+                                >
+                                  <div className="flex items-center gap-2 text-sm">
+                                    <i className={`fa-solid ${isExpanded ? 'fa-chevron-down' : 'fa-chevron-right'} text-gray-400 text-xs`}></i>
+                                    <i className="fa-solid fa-folder text-cyan-500"></i>
+                                    <span className="font-medium text-gray-800">{parent}</span>
+                                  </div>
+                                  <span className="bg-cyan-100 text-cyan-700 px-2 py-0.5 rounded text-xs">{parentTotal} 题</span>
+                                </div>
+                                {isExpanded && (
+                                  <div className="ml-6 border-l border-gray-200 pl-2 mt-1 space-y-0.5">
+                                    {children.map((c, idx) => {
+                                      const fullId = parent === '未分类' ? c.sub : `${parent}/${c.sub}`;
+                                      const isActive = filters.clusterId === fullId;
+                                      return (
+                                        <div
+                                          key={idx}
+                                          className={`flex items-center justify-between cursor-pointer px-2 py-1 rounded text-xs ${isActive ? 'bg-blue-100 text-blue-700' : 'hover:bg-gray-50 text-gray-600'}`}
+                                          onClick={() => handleClusterClick(fullId)}
+                                          title={`点击筛选「${fullId}」下的题目`}
+                                        >
+                                          <span className="flex items-center gap-2">
+                                            <i className="fa-regular fa-file-lines text-gray-400"></i>
+                                            {c.sub}
+                                          </span>
+                                          <span className="text-gray-500">{c.cnt} 题</span>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <p className="text-xs text-gray-400 mt-2">
+                          <i className="fa-solid fa-circle-info mr-1"></i>
+                          点击二级类目可筛选该簇下的题目；筛选后列表只显示该知识点题目，便于人工核对 AI 分类是否合理
+                        </p>
                       </div>
-                    </div>
-                  )}
+                    );
+                  })()}
                 </div>
               )}
 

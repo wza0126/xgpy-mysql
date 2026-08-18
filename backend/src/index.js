@@ -6543,8 +6543,7 @@ app.get('/api/teacher/questions/cluster-stats', authenticate, requireTeacher, as
       FROM questions
       WHERE cluster_id IS NOT NULL AND cluster_id <> ''
       GROUP BY cluster_id
-      ORDER BY cnt DESC
-      LIMIT 50
+      ORDER BY cluster_id ASC
     `);
     res.json({
       data: {
