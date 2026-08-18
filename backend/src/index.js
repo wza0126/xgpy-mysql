@@ -6204,6 +6204,100 @@ const CLUSTER_SYSTEM_PROMPT = [
 
 const CLUSTER_BATCH_SIZE = 50;
 
+// 聚类任务内存存储（重启后清空；用于支持长任务异步处理，避免 HTTP 长连接被代理/浏览器掐断）
+const clusterJobs = new Map();
+const CLUSTER_JOB_TTL_MS = 30 * 60 * 1000; // 30 分钟后清理已完成的任务记录
+
+// 清理过期的聚类任务记录（防止 Map 无限增长）
+function cleanupClusterJobs() {
+  const now = Date.now();
+  for (const [id, job] of clusterJobs.entries()) {
+    const age = now - (job.startedAt || 0);
+    if (job.status !== 'running' && age > CLUSTER_JOB_TTL_MS) {
+      clusterJobs.delete(id);
+    }
+  }
+}
+
+// 异步执行聚类任务（不阻塞 HTTP 响应；前端通过 /cluster-status/:jobId 轮询进度）
+async function processClusterJob(jobId, ids, config) {
+  const job = clusterJobs.get(jobId);
+  if (!job) return;
+
+  const batches = [];
+  for (let i = 0; i < ids.length; i += CLUSTER_BATCH_SIZE) {
+    batches.push(ids.slice(i, i + CLUSTER_BATCH_SIZE));
+  }
+  job.totalBatches = batches.length;
+
+  try {
+    for (let bi = 0; bi < batches.length; bi++) {
+      const batchIds = batches[bi];
+      const [rows] = await pool.query(
+        'SELECT id, type, content, options FROM questions WHERE id IN (?)',
+        [batchIds]
+      );
+      if (rows.length === 0) {
+        job.processedBatches = bi + 1;
+        continue;
+      }
+
+      const inputList = rows.map(q => ({
+        question_id: q.id,
+        type: q.type,
+        text: buildQuestionTextForCluster(q),
+      }));
+
+      const userContent = `请为以下 ${inputList.length} 道题目分配知识点聚类。题目列表（JSON）：\n${JSON.stringify(inputList)}`;
+      let aiResponse = '';
+      try {
+        aiResponse = await callAiApi(config, [
+          { role: 'system', content: CLUSTER_SYSTEM_PROMPT },
+          { role: 'user', content: userContent },
+        ]);
+      } catch (err) {
+        console.error(`聚类任务 ${jobId} 批次 ${bi + 1}/${batches.length} AI 调用失败:`, err.message);
+        // 该批失败计入 skipped，继续下一批（部分聚类比全部失败好）
+        for (const id of batchIds) {
+          job.skipped++;
+          job.details.push({ question_id: id, cluster_id: null, sub_topic: null, status: 'ai_error' });
+        }
+        job.processedBatches = bi + 1;
+        job.lastBatchError = err.message;
+        continue;
+      }
+
+      const parsed = parseClusterResponse(aiResponse);
+      const parsedMap = new Map(parsed.map(p => [p.question_id, p]));
+
+      for (const id of batchIds) {
+        const p = parsedMap.get(id);
+        if (p && p.cluster_id) {
+          await pool.query(
+            'UPDATE questions SET cluster_id = ?, sub_topic = ? WHERE id = ?',
+            [String(p.cluster_id).slice(0, 100), p.sub_topic ? String(p.sub_topic).slice(0, 100) : null, id]
+          );
+          job.updated++;
+          job.details.push({ question_id: id, cluster_id: p.cluster_id, sub_topic: p.sub_topic || null, status: 'updated' });
+        } else {
+          job.skipped++;
+          job.details.push({ question_id: id, cluster_id: null, sub_topic: null, status: 'no_result' });
+        }
+      }
+      job.processedBatches = bi + 1;
+      job.updatedAt = Date.now();
+    }
+    job.status = 'completed';
+    job.completedAt = Date.now();
+    console.log(`聚类任务 ${jobId} 完成: 更新 ${job.updated}/${job.total}，跳过 ${job.skipped}`);
+  } catch (err) {
+    console.error(`聚类任务 ${jobId} 失败:`, err);
+    job.status = 'failed';
+    job.error = err.message;
+    job.completedAt = Date.now();
+  }
+}
+
 // 把题目整理成 AI 输入文本
 function buildQuestionTextForCluster(q) {
   let opts = q.options;
@@ -6235,11 +6329,14 @@ function parseClusterResponse(content) {
   }
 }
 
-// 教师端：批量聚类选定题目
+// 教师端：批量聚类选定题目（异步任务模式）
 // 请求体：{ questionIds: string[] } 或 { all: true, type?: 'choice'|'fill_blank'|'code', tag?: string }
-// 响应：{ total, processed, updated, skipped, details: [{question_id, cluster_id, sub_topic, status}] }
+// 响应：{ jobId, total, totalBatches } —— 立即返回，前端通过 /api/teacher/questions/cluster-status/:jobId 轮询进度
+// 设计原因：500+ 题聚类需要数分钟，HTTP 长连接会被浏览器/代理掐断（ERR_EMPTY_RESPONSE），
+// 后端实际仍在处理并消耗 token；改为异步可避免连接超时，且能给前端实时进度反馈
 app.post('/api/teacher/questions/cluster', authenticate, requireTeacher, async (req, res) => {
   try {
+    cleanupClusterJobs();
     const { questionIds, all, type, tag } = req.body || {};
     let ids = Array.isArray(questionIds) ? questionIds.filter(Boolean) : [];
 
@@ -6268,81 +6365,53 @@ app.post('/api/teacher/questions/cluster', authenticate, requireTeacher, async (
       return res.status(400).json({ data: null, error: 'AI 服务未配置，请联系管理员在系统设置中配置 AI API' });
     }
 
-    // 分批处理，每批 CLUSTER_BATCH_SIZE 题
-    const batches = [];
-    for (let i = 0; i < ids.length; i += CLUSTER_BATCH_SIZE) {
-      batches.push(ids.slice(i, i + CLUSTER_BATCH_SIZE));
-    }
+    const totalBatches = Math.ceil(ids.length / CLUSTER_BATCH_SIZE);
+    const jobId = `cluster_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    clusterJobs.set(jobId, {
+      jobId,
+      status: 'running',          // running | completed | failed
+      total: ids.length,
+      totalBatches,
+      processedBatches: 0,
+      updated: 0,
+      skipped: 0,
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+      details: [],
+    });
 
-    const details = [];
-    let updated = 0;
-    let skipped = 0;
-
-    for (let bi = 0; bi < batches.length; bi++) {
-      const batchIds = batches[bi];
-      // 取题目内容（不取 answers，避免泄露答案给 AI 没必要）
-      const [rows] = await pool.query(
-        'SELECT id, type, content, options FROM questions WHERE id IN (?)',
-        [batchIds]
-      );
-      if (rows.length === 0) continue;
-
-      // 构造 AI 输入
-      const inputList = rows.map(q => ({
-        question_id: q.id,
-        type: q.type,
-        text: buildQuestionTextForCluster(q),
-      }));
-
-      const userContent = `请为以下 ${inputList.length} 道题目分配知识点聚类。题目列表（JSON）：\n${JSON.stringify(inputList)}`;
-      let aiResponse = '';
-      try {
-        aiResponse = await callAiApi(config, [
-          { role: 'system', content: CLUSTER_SYSTEM_PROMPT },
-          { role: 'user', content: userContent },
-        ]);
-      } catch (err) {
-        console.error(`聚类批次 ${bi + 1}/${batches.length} AI 调用失败:`, err.message);
-        // AI 调用失败的批次记录为 skipped
-        for (const id of batchIds) {
-          skipped++;
-          details.push({ question_id: id, cluster_id: null, sub_topic: null, status: 'ai_error' });
-        }
-        continue;
+    // 异步执行，不阻塞响应
+    processClusterJob(jobId, ids, config).catch(err => {
+      console.error(`聚类任务 ${jobId} 异常退出:`, err);
+      const job = clusterJobs.get(jobId);
+      if (job) {
+        job.status = 'failed';
+        job.error = err.message;
+        job.completedAt = Date.now();
       }
-
-      const parsed = parseClusterResponse(aiResponse);
-      const parsedMap = new Map(parsed.map(p => [p.question_id, p]));
-
-      // 写入数据库
-      for (const id of batchIds) {
-        const p = parsedMap.get(id);
-        if (p && p.cluster_id) {
-          await pool.query(
-            'UPDATE questions SET cluster_id = ?, sub_topic = ? WHERE id = ?',
-            [String(p.cluster_id).slice(0, 100), p.sub_topic ? String(p.sub_topic).slice(0, 100) : null, id]
-          );
-          updated++;
-          details.push({ question_id: id, cluster_id: p.cluster_id, sub_topic: p.sub_topic || null, status: 'updated' });
-        } else {
-          skipped++;
-          details.push({ question_id: id, cluster_id: null, sub_topic: null, status: 'no_result' });
-        }
-      }
-    }
+    });
 
     res.json({
-      data: {
-        total: ids.length,
-        processed: ids.length,
-        updated,
-        skipped,
-        details,
-      },
+      data: { jobId, total: ids.length, totalBatches },
       error: null,
     });
   } catch (error) {
-    console.error('题目聚类失败:', error);
+    console.error('启动题目聚类任务失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 教师端：查询聚类任务进度（前端 2 秒轮询一次）
+app.get('/api/teacher/questions/cluster-status/:jobId', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    const job = clusterJobs.get(jobId);
+    if (!job) {
+      return res.status(404).json({ data: null, error: '任务不存在或已过期（重启后端会清空任务记录）' });
+    }
+    res.json({ data: job, error: null });
+  } catch (error) {
+    console.error('查询聚类任务状态失败:', error);
     res.status(500).json({ data: null, error: error.message });
   }
 });

@@ -159,6 +159,8 @@ export const QuestionManager: React.FC = () => {
   const [clustering, setClustering] = useState(false);
   const [clusterResult, setClusterResult] = useState<any>(null);
   const [clusterStats, setClusterStats] = useState<{ total: number; clustered: number; unclustered: number; clusters: { cluster_id: string; cnt: number }[] } | null>(null);
+  // 异步任务进度（每 2 秒轮询一次）
+  const [clusterProgress, setClusterProgress] = useState<{ processedBatches: number; totalBatches: number; processed: number; total: number; lastBatchError?: string } | null>(null);
   const { profile } = useAuth();
 
   useEffect(() => {
@@ -409,8 +411,9 @@ export const QuestionManager: React.FC = () => {
     fetchData();
   };
 
-  // AI 批量聚类：调用后端 /api/teacher/questions/cluster
-  // 支持两种模式：聚类选中题 / 聚类全部题（可按 type/tag 过滤）
+  // AI 批量聚类：异步任务模式
+  // 后端 /api/teacher/questions/cluster 立即返回 jobId，前端轮询 /cluster-status/:jobId 进度
+  // 避免长连接被浏览器/代理掐断（500+题需要数分钟，原同步模式会 ERR_EMPTY_RESPONSE）
   const handleAiCluster = async (mode: 'selected' | 'all') => {
     if (mode === 'selected' && selectedIds.length === 0) {
       alert('请先选择要聚类的题目');
@@ -418,27 +421,82 @@ export const QuestionManager: React.FC = () => {
     }
     if (!window.confirm(
       mode === 'selected'
-        ? `确认为选中的 ${selectedIds.length} 道题执行 AI 聚类？每批 50 题，预计消耗少量 Token。`
-        : '确认为题库中所有题目执行 AI 聚类？这可能需要 1~2 分钟，预计消耗约 0.2~0.3 元 Token。'
+        ? `确认为选中的 ${selectedIds.length} 道题执行 AI 聚类？每批 50 题，后台异步处理，请勿刷新页面。`
+        : '确认为题库中所有题目执行 AI 聚类？后台异步处理，预计 1~3 分钟，请勿刷新页面。'
     )) return;
 
     setClustering(true);
     setClusterResult(null);
+    setClusterProgress({ processedBatches: 0, totalBatches: 0, processed: 0, total: 0 });
+
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
+    let abortTimer: ReturnType<typeof setTimeout> | null = null;
+
     try {
       const body = mode === 'selected'
         ? { questionIds: selectedIds }
         : { all: true, type: filters.type || undefined, tag: tagFilterEnabled ? (filters.tags[0] || undefined) : undefined };
-      const result = await backendClient.post('/api/teacher/questions/cluster', body);
-      if (result.error) throw new Error(result.error);
-      setClusterResult(result.data);
-      // 聚类后刷新题库和统计
+      const startResult = await backendClient.post('/api/teacher/questions/cluster', body);
+      if (startResult.error) throw new Error(startResult.error);
+
+      const { jobId, total, totalBatches } = startResult.data;
+      setClusterProgress({ processedBatches: 0, totalBatches, processed: 0, total });
+
+      // 轮询任务状态，直到 completed / failed
+      await new Promise<void>((resolve, reject) => {
+        pollTimer = setInterval(async () => {
+          try {
+            const statusResult = await backendClient.get(`/api/teacher/questions/cluster-status/${jobId}`);
+            if (statusResult.error) {
+              clearInterval(pollTimer!);
+              pollTimer = null;
+              reject(new Error(statusResult.error));
+              return;
+            }
+            const job = statusResult.data;
+            setClusterProgress({
+              processedBatches: job.processedBatches || 0,
+              totalBatches: job.totalBatches || 0,
+              processed: (job.updated || 0) + (job.skipped || 0),
+              total: job.total || 0,
+              lastBatchError: job.lastBatchError,
+            });
+
+            if (job.status === 'completed') {
+              clearInterval(pollTimer!);
+              pollTimer = null;
+              setClusterResult({ updated: job.updated, skipped: job.skipped, total: job.total });
+              resolve();
+            } else if (job.status === 'failed') {
+              clearInterval(pollTimer!);
+              pollTimer = null;
+              reject(new Error(job.error || '聚类任务失败'));
+            }
+          } catch (e) {
+            // 单次轮询请求失败不立即终止，给后端容错空间
+            console.warn('查询聚类状态失败', e);
+          }
+        }, 2000);
+
+        // 超时保护：30 分钟无结果则放弃等待
+        abortTimer = setTimeout(() => {
+          if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+          }
+          reject(new Error('聚类任务超时（30分钟无响应，可能是后端重启或网络异常）'));
+        }, 30 * 60 * 1000);
+      });
+
+      // 完成后刷新
       await fetchData();
       await fetchClusterStats();
-      // 清空选择
       if (mode === 'selected') setSelectedIds([]);
     } catch (e: any) {
       alert('AI 聚类失败: ' + (e.message || e));
     } finally {
+      if (pollTimer) clearInterval(pollTimer);
+      if (abortTimer) clearTimeout(abortTimer);
       setClustering(false);
     }
   };
@@ -2709,7 +2767,27 @@ ${isChoice ? `5. 对于选择题，answers字段必须填写选项字母（A、B
               {clustering && (
                 <div className="flex flex-col items-center justify-center py-8">
                   <i className="fa-solid fa-circle-notch fa-spin text-4xl text-cyan-500 mb-3"></i>
-                  <p className="text-gray-700">AI 正在聚类，请稍候（每批 50 题，预计 1~2 分钟）...</p>
+                  <p className="text-gray-700 mb-3">AI 正在后台异步聚类...</p>
+                  {clusterProgress && clusterProgress.totalBatches > 0 && (
+                    <div className="w-full max-w-md">
+                      <div className="flex justify-between text-xs text-gray-500 mb-1">
+                        <span>批次 {clusterProgress.processedBatches} / {clusterProgress.totalBatches}</span>
+                        <span>题目 {clusterProgress.processed} / {clusterProgress.total}</span>
+                      </div>
+                      <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+                        <div
+                          className="bg-cyan-500 h-2 rounded-full transition-all duration-500"
+                          style={{ width: `${(clusterProgress.processedBatches / clusterProgress.totalBatches * 100).toFixed(1)}%` }}
+                        />
+                      </div>
+                      {clusterProgress.lastBatchError && (
+                        <p className="text-xs text-amber-500 mt-2">最近批次错误: {clusterProgress.lastBatchError}</p>
+                      )}
+                      <p className="text-xs text-gray-400 mt-2 text-center">
+                        后台异步处理，可关闭弹窗做其他操作；切勿刷新或关闭浏览器
+                      </p>
+                    </div>
+                  )}
                 </div>
               )}
 
