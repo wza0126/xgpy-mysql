@@ -108,7 +108,12 @@ export const SimilarPracticeWindow: React.FC<SimilarPracticeWindowProps> = ({ in
       setIsCorrect(false);
       setSessionStats({ correct: 0, total: 0 });
       if (list.length === 0) {
-        setError('暂无同类题，请教师在题库管理模块对题目进行AI聚类后重试');
+        // 根据是否有 cluster_id 给出更精准的提示
+        if (data.cluster_id) {
+          setError('该题所在知识点簇内暂无其他可练习题，且标签/关键词也未匹配到其他题。可尝试练习其他题目。');
+        } else {
+          setError('暂无同类题：该题尚未被教师 AI 聚类，且标签/关键词也未匹配到其他题。');
+        }
       }
     } catch (e: any) {
       setError(e.message || '加载同类题失败');
@@ -246,9 +251,26 @@ export const SimilarPracticeWindow: React.FC<SimilarPracticeWindowProps> = ({ in
             <span className="text-sm text-gray-500">
               本次: {sessionStats.correct} / {sessionStats.total}
             </span>
-            {clusterId && (
+            {/* 推荐来源标识：cluster=同簇命中(最精准)、tag=同标签回退、keyword=关键词回退 */}
+            {source === 'cluster' && (
+              <span className="px-2 py-1 bg-green-100 text-green-700 text-xs rounded-full flex items-center gap-1" title="同 AI 知识点簇命中，最精准">
+                <i className="fa-solid fa-bullseye"></i> 同簇推荐
+              </span>
+            )}
+            {source === 'tag' && (
+              <span className="px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded-full flex items-center gap-1" title="簇内无其他题或未聚类，按同标签回退">
+                <i className="fa-solid fa-tag"></i> 同标签回退
+              </span>
+            )}
+            {source === 'keyword' && (
+              <span className="px-2 py-1 bg-amber-100 text-amber-700 text-xs rounded-full flex items-center gap-1" title="簇/标签均未命中，按题干关键词回退">
+                <i className="fa-solid fa-magnifying-glass"></i> 关键词回退
+              </span>
+            )}
+            {/* 簇路径仅当实际为 cluster 命中时才显示，避免 tag/keyword 时误导 */}
+            {clusterId && source === 'cluster' && (
               <span className="text-xs text-gray-400" title="AI 聚类ID（内部用）">
-                <i className="fa-solid fa-tag"></i> {clusterId}
+                <i className="fa-solid fa-folder-tree"></i> {clusterId}
               </span>
             )}
             {originQuestion && (

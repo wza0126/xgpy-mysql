@@ -6457,10 +6457,14 @@ app.get('/api/practice/similar/:questionId', authenticate, async (req, res) => {
     };
 
     let candidates = [];
+    // 准确追踪实际命中来源（避免簇内仅 1 题时仍标 'cluster' 的误导）
+    // cluster: 同 cluster_id 命中；tag: 同标签命中；keyword: 关键词命中；none: 全部回退失败
+    let actualSource = 'none';
 
-    // 优先级 1：同 cluster_id
+    // 优先级 1：同 cluster_id（簇内只有当前题时此处返回 0 条，自动进入下一级）
     if (cur.cluster_id) {
       candidates = await fetchQuestions(' AND cluster_id = ?', [cur.cluster_id]);
+      if (candidates.length > 0) actualSource = 'cluster';
     }
 
     // 优先级 2：同 tags（取第一个细粒度标签）
@@ -6484,6 +6488,7 @@ app.get('/api/practice/similar/:questionId', authenticate, async (req, res) => {
             existIds.add(r.id);
           }
         }
+        if (tagRows.length > 0 && actualSource === 'none') actualSource = 'tag';
       }
     }
 
@@ -6508,6 +6513,7 @@ app.get('/api/practice/similar/:questionId', authenticate, async (req, res) => {
         params.push(limit - candidates.length);
         const [kwRows] = await pool.query(sql, params);
         candidates = candidates.concat(kwRows);
+        if (kwRows.length > 0 && actualSource === 'none') actualSource = 'keyword';
       }
     }
 
@@ -6517,7 +6523,12 @@ app.get('/api/practice/similar/:questionId', authenticate, async (req, res) => {
     res.json({
       data: {
         questions: formatRows(candidates),
-        source: cur.cluster_id ? 'cluster' : (candidates.length > 0 ? 'fallback' : 'none'),
+        // source 现在准确反映实际命中来源：
+        //   cluster  → 同 AI 簇命中（最精准）
+        //   tag      → 簇内无其他题或未聚类，靠标签回退
+        //   keyword  → 簇/标签都没命中，靠关键词回退
+        //   none     → 三级全失败（极罕见）
+        source: candidates.length > 0 ? actualSource : 'none',
         cluster_id: cur.cluster_id || null,
       },
       error: null,
