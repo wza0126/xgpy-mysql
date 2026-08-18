@@ -8,6 +8,8 @@ import { ExternalLinkApp } from './ExternalLinkApp';
 import { HtmlPageApp } from './HtmlPageApp';
 import { MentalHealthApp } from './MentalHealthApp';
 import { PythonMagicAcademy } from './PythonMagicAcademy';
+import { CodeRealm } from './CodeRealm';
+import { TypingTrainer } from './TypingTrainer';
 import { toDatabaseDateTime } from '../../utils/dateUtils';
 
 interface App {
@@ -329,6 +331,36 @@ export const AppCenter: React.FC = () => {
         isMinimized: false,
         isMaximized: false,
         component: <PythonMagicAcademy onClose={() => closeWindow(windowId)} />
+      });
+      activateWindow(windowId);
+      return;
+    }
+
+    // 代码秘境：免费应用，直接同步打开窗口
+    if (app.type === 'code_realm' || app.id === 'app_code_realm') {
+      const windowId = `app_${app.id}`;
+      openWindow({
+        id: windowId,
+        title: app.name,
+        icon: 'fa-book-open',
+        isMinimized: false,
+        isMaximized: false,
+        component: <CodeRealm onClose={() => closeWindow(windowId)} />
+      });
+      activateWindow(windowId);
+      return;
+    }
+
+    // 键盘星域：盲打练习，免费应用直接打开
+    if (app.type === 'typing_trainer' || app.id === 'app_typing_trainer') {
+      const windowId = `app_${app.id}`;
+      openWindow({
+        id: windowId,
+        title: app.name,
+        icon: 'fa-keyboard',
+        isMinimized: false,
+        isMaximized: false,
+        component: <TypingTrainer onClose={() => closeWindow(windowId)} />
       });
       activateWindow(windowId);
       return;

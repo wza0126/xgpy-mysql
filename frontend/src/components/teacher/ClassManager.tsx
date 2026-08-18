@@ -56,7 +56,7 @@ export const ClassManager: React.FC = () => {
 
     await backendClient
       .from('classes')
-      .update({ name: editingClass.name, allow_login: editingClass.allow_login, ai_enabled: editingClass.ai_enabled })
+      .update({ name: editingClass.name, allow_login: editingClass.allow_login, ai_enabled: editingClass.ai_enabled, dm_enabled: editingClass.dm_enabled })
       .eq('id', editingClass.id);
 
     setEditingClass(null);
@@ -99,6 +99,20 @@ export const ClassManager: React.FC = () => {
       .eq('id', cls.id);
     if (error) {
       console.error('更新班级AI答疑状态失败:', error);
+      alert('更新失败: ' + error.message);
+    }
+    fetchClasses();
+  };
+
+  const toggleDmEnabled = async (cls: Class) => {
+    const newValue = !cls.dm_enabled;
+
+    const { error } = await backendClient
+      .from('classes')
+      .update({ dm_enabled: newValue })
+      .eq('id', cls.id);
+    if (error) {
+      console.error('更新班级数字消息状态失败:', error);
       alert('更新失败: ' + error.message);
     }
     fetchClasses();
@@ -191,6 +205,7 @@ export const ClassManager: React.FC = () => {
               <th className="px-6 py-4 text-left text-sm font-medium text-gray-600">班级名称</th>
               <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">允许登录</th>
               <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">AI答疑</th>
+              <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">数字消息</th>
               <th className="px-6 py-4 text-left text-sm font-medium text-gray-600">创建时间</th>
               <th className="px-6 py-4 text-right text-sm font-medium text-gray-600">操作</th>
             </tr>
@@ -269,6 +284,33 @@ export const ClassManager: React.FC = () => {
                     >
                       <i className={`fa-solid mr-2 ${cls.ai_enabled ? 'fa-check' : 'fa-times'}`}></i>
                       {cls.ai_enabled ? '已启用' : '已禁用'}
+                    </button>
+                  )}
+                </td>
+                <td className="px-6 py-4 text-center">
+                  {editingClass?.id === cls.id ? (
+                    <label className="flex items-center justify-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={editingClass!.dm_enabled ?? false}
+                        onChange={(e) => setEditingClass({ ...editingClass!, dm_enabled: e.target.checked })}
+                        className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      />
+                      <span className="text-sm text-gray-600">
+                        {editingClass!.dm_enabled ? '启用' : '禁用'}
+                      </span>
+                    </label>
+                  ) : (
+                    <button
+                      onClick={() => toggleDmEnabled(cls)}
+                      className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
+                        cls.dm_enabled
+                          ? 'bg-green-100 text-green-700 hover:bg-green-200'
+                          : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                      }`}
+                    >
+                      <i className={`fa-solid mr-2 ${cls.dm_enabled ? 'fa-check' : 'fa-times'}`}></i>
+                      {cls.dm_enabled ? '已启用' : '已禁用'}
                     </button>
                   )}
                 </td>

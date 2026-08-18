@@ -1,7 +1,8 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useNotificationStore, Notification } from '../../store/notificationStore';
 import { useAuth } from '../../hooks/useAuth';
+import { backendClient } from '../../api/backendClient';
 import { formatRelativeTime, formatDate } from '../../utils/dateUtils';
 
 export const NotificationCenter: React.FC = () => {
@@ -19,6 +20,16 @@ export const NotificationCenter: React.FC = () => {
     clearPopup 
   } = useNotificationStore();
   const { profile } = useAuth();
+  const [dmTab, setDmTab] = useState<'notifications' | 'send' | 'inbox'>('notifications');
+  const [dmReceiver, setDmReceiver] = useState('');
+  const [dmContent, setDmContent] = useState('');
+  const [dmSending, setDmSending] = useState(false);
+  const [dmResult, setDmResult] = useState<string | null>(null);
+  const [dmSentToday, setDmSentToday] = useState(0);
+  const [dmRemaining, setDmRemaining] = useState(10);
+  const [dmInbox, setDmInbox] = useState<any[]>([]);
+  const [classmates, setClassmates] = useState<{ id: string; username: string; real_name: string }[]>([]);
+  const [dmEnabled, setDmEnabled] = useState(false);
 
   useEffect(() => {
     if (profile) {
@@ -27,7 +38,73 @@ export const NotificationCenter: React.FC = () => {
     }
   }, [profile, fetchNotifications, fetchUnreadCount]);
 
+  // 打开通知中心时加载数字消息数据和同班同学
+  useEffect(() => {
+    if (showNotificationCenter && profile) {
+      loadDigitalMessages();
+      loadClassmates();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showNotificationCenter, profile?.id]);
+
+  const loadClassmates = async () => {
+    try {
+      const res = await backendClient.get('/api/student/classmates');
+      setClassmates(res?.data || []);
+    } catch {
+      setClassmates([]);
+    }
+  };
+
+  const loadDigitalMessages = async () => {
+    try {
+      const res = await backendClient.get('/api/student/digital-messages/my');
+      const d = res?.data;
+      setDmInbox(d?.messages || []);
+      setDmSentToday(d?.sent_today || 0);
+      setDmRemaining(d?.remaining ?? Math.max(10 - (d?.sent_today || 0), 0));
+      setDmEnabled(!!d?.dm_enabled);
+    } catch {
+      // 忽略加载失败
+    }
+  };
+
+  const sendDigitalMessage = async () => {
+    setDmResult(null);
+    if (!dmReceiver.trim()) { setDmResult('请输入对方账号'); return; }
+    if (!/^\d{1,8}$/.test(dmContent)) { setDmResult('内容仅限数字，最长 8 位'); return; }
+    setDmSending(true);
+    try {
+      const res = await backendClient.post('/api/student/digital-messages/send', {
+        receiver_username: dmReceiver.trim(),
+        content: dmContent,
+      });
+      if (res?.error) { setDmResult(res.error); return; }
+      const d = res?.data;
+      setDmResult(`发送成功！今日已发 ${d?.sent_today} 条，剩余 ${d?.remaining} 条`);
+      setDmReceiver('');
+      setDmContent('');
+      await loadDigitalMessages();
+    } catch (e: any) {
+      setDmResult(e?.message || '发送失败，请重试');
+    } finally {
+      setDmSending(false);
+    }
+  };
+
   const handleNotificationClick = async (notification: Notification) => {
+    // 数字消息弹窗点击：标记已读 + 打开通知中心并切换到"收到的消息"tab
+    if ((notification as any).notification_type === 'digital_message') {
+      // 自动标记已读
+      try {
+        const token = localStorage.getItem('xgpy_token');
+        if (token) {
+          await backendClient.post('/api/student/digital-messages/read', { id: (notification as any).id });
+        }
+      } catch {}
+      setDmTab('inbox');
+      return;
+    }
     if (!notification.is_read && profile) {
       await markAsRead(notification.id, profile.id);
     }
@@ -57,8 +134,14 @@ export const NotificationCenter: React.FC = () => {
             <div className="p-4">
               <div className="flex items-start justify-between mb-2">
                 <div className="flex items-center gap-2">
-                  <i className="fa-solid fa-bell text-blue-500 text-lg"></i>
-                  <span className="font-semibold text-gray-800">新通知</span>
+                  {(showNotificationPopup as any).notification_type === 'digital_message' ? (
+                    <i className="fa-solid fa-envelope text-emerald-500 text-lg"></i>
+                  ) : (
+                    <i className="fa-solid fa-bell text-blue-500 text-lg"></i>
+                  )}
+                  <span className="font-semibold text-gray-800">
+                    {(showNotificationPopup as any).notification_type === 'digital_message' ? '新数字消息' : '新通知'}
+                  </span>
                 </div>
                 <button 
                   onClick={(e) => {
@@ -73,7 +156,11 @@ export const NotificationCenter: React.FC = () => {
               <h4 className="font-medium text-gray-900 mb-1">{showNotificationPopup.title}</h4>
               <p className="text-sm text-gray-600 whitespace-pre-wrap break-words">{showNotificationPopup.content}</p>
               <p className="text-xs text-gray-400 mt-2">
-                来自：{showNotificationPopup.teacher_name || '老师'} · {formatDate(showNotificationPopup.published_at || showNotificationPopup.created_at)}
+                {(showNotificationPopup as any).notification_type === 'digital_message'
+                  ? `来自：${showNotificationPopup.teacher_name || '同学'}`
+                  : `来自：${showNotificationPopup.teacher_name || '老师'}`}
+                {' · '}
+                {formatDate(showNotificationPopup.published_at || showNotificationPopup.created_at)}
               </p>
             </div>
           </motion.div>
@@ -115,22 +202,156 @@ export const NotificationCenter: React.FC = () => {
                   </button>
                 </div>
                 <p className="text-blue-100 text-sm">共 {notifications.length} 条通知，{unreadCount} 条未读</p>
+
+                {/* Tab 切换 */}
+                <div className="mt-3 flex gap-1 bg-blue-800/40 rounded-lg p-1">
+                  <button
+                    onClick={() => setDmTab('notifications')}
+                    className={`flex-1 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                      dmTab === 'notifications' ? 'bg-white text-blue-700' : 'text-blue-100 hover:bg-white/10'
+                    }`}
+                  >
+                    <i className="fa-solid fa-bell mr-1"></i>通知
+                  </button>
+                  {dmEnabled && (
+                    <button
+                      onClick={() => setDmTab('send')}
+                      className={`flex-1 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                        dmTab === 'send' ? 'bg-white text-blue-700' : 'text-blue-100 hover:bg-white/10'
+                      }`}
+                    >
+                      <i className="fa-solid fa-paper-plane mr-1"></i>发送数字消息
+                    </button>
+                  )}
+                  <button
+                    onClick={() => setDmTab('inbox')}
+                    className={`flex-1 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                      dmTab === 'inbox' ? 'bg-white text-blue-700' : 'text-blue-100 hover:bg-white/10'
+                    }`}
+                  >
+                    <i className="fa-solid fa-envelope mr-1"></i>收到的消息{dmInbox.length > 0 ? `(${dmInbox.length})` : ''}
+                  </button>
+                </div>
               </div>
 
-              {/* 操作栏 */}
-              <div className="p-3 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
-                {unreadCount > 0 && profile && (
+              {/* 操作栏（仅通知 tab） */}
+              {dmTab === 'notifications' && (
+                <div className="p-3 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
+                  {unreadCount > 0 && profile && (
+                    <button
+                      onClick={() => markAllAsRead(profile.id)}
+                      className="text-sm text-blue-600 hover:text-blue-800 flex items-center gap-1"
+                    >
+                      <i className="fa-solid fa-check-double"></i>
+                      全部标为已读
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* 发送数字消息 tab */}
+              {dmTab === 'send' && (
+                <div className="p-4 border-b border-gray-100 bg-gray-50">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-sm font-semibold text-gray-700">
+                      <i className="fa-solid fa-paper-plane text-blue-500 mr-1"></i>发送数字消息
+                    </h3>
+                    <span className={`text-xs font-medium px-2 py-1 rounded-full ${
+                      dmRemaining > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-600'
+                    }`}>
+                      今日剩余 {dmRemaining} 条
+                    </span>
+                  </div>
+                  <div className="mb-3">
+                    <label className="block text-xs text-gray-500 mb-1">从同班同学中选择</label>
+                    <select
+                      value={dmReceiver ? classmates.find(c => c.username === dmReceiver)?.id || '' : ''}
+                      onChange={e => {
+                        const selected = classmates.find(c => c.id === e.target.value);
+                        if (selected) {
+                          setDmReceiver(selected.username);
+                          setDmResult(null);
+                        }
+                      }}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-white"
+                    >
+                      <option value="">-- 选择同学 --</option>
+                      {classmates.map(c => (
+                        <option key={c.id} value={c.id}>
+                          {c.real_name} ({c.username})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="mb-3">
+                    <label className="block text-xs text-gray-500 mb-1">对方账号（也可手动输入）</label>
+                    <input
+                      type="text"
+                      value={dmReceiver}
+                      onChange={e => { setDmReceiver(e.target.value); setDmResult(null); }}
+                      placeholder="对方学生账号"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                    />
+                  </div>
+                  <div className="mb-3">
+                    <label className="block text-xs text-gray-500 mb-1">发送内容（仅数字，最长 8 位）</label>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      maxLength={8}
+                      value={dmContent}
+                      onChange={e => setDmContent(e.target.value.replace(/\D/g, '').slice(0, 8))}
+                      placeholder="例如：12345678"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm tracking-widest focus:ring-2 focus:ring-blue-500 outline-none"
+                    />
+                  </div>
                   <button
-                    onClick={() => markAllAsRead(profile.id)}
-                    className="text-sm text-blue-600 hover:text-blue-800 flex items-center gap-1"
+                    onClick={sendDigitalMessage}
+                    disabled={dmSending}
+                    className="w-full py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
                   >
-                    <i className="fa-solid fa-check-double"></i>
-                    全部标为已读
+                    {dmSending ? '发送中...' : '发送'}
                   </button>
-                )}
-              </div>
+                  {dmResult && (
+                    <p className={`mt-2 text-xs ${dmResult.startsWith('发送成功') ? 'text-emerald-600' : 'text-red-500'}`}>
+                      {dmResult}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* 收到的数字消息 tab */}
+              {dmTab === 'inbox' && (
+                <div className="flex-1 overflow-y-auto">
+                  {dmInbox.length === 0 ? (
+                    <div className="p-8 text-center text-gray-500">
+                      <i className="fa-regular fa-envelope text-4xl mb-2"></i>
+                      <p>暂无收到消息</p>
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-gray-100">
+                      {dmInbox.map(m => (
+                        <div key={m.id} className={`p-4 ${m.is_read ? 'bg-white' : 'bg-blue-50/50'}`}>
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-sm font-medium text-gray-800">
+                              <i className="fa-solid fa-user text-blue-500 mr-1"></i>
+                              {m.sender_real_name || m.sender_username}
+                              <span className="text-xs text-gray-400 ml-1">({m.sender_username})</span>
+                            </span>
+                            <span className="text-xs text-gray-400">
+                              {formatDate(m.sent_at)}
+                            </span>
+                          </div>
+                          <p className="text-lg font-mono font-bold text-blue-700 tracking-widest">{m.content}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* 通知列表 */}
+              {dmTab === 'notifications' && (
               <div className="flex-1 overflow-y-auto">
                 {isLoading ? (
                   <div className="p-8 text-center text-gray-500">
@@ -180,6 +401,7 @@ export const NotificationCenter: React.FC = () => {
                   </div>
                 )}
               </div>
+              )}
             </motion.div>
           </>
         )}

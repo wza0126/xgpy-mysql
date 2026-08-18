@@ -46,6 +46,13 @@ const getBuffStyle = (buffType: string) => {
         text: 'text-blue-700',
         label: '勤学好问',
       };
+    case 'typing_fast_crit':
+      return {
+        border: 'border-cyan-500',
+        bg: 'bg-cyan-50',
+        text: 'text-cyan-700',
+        label: '运指如飞',
+      };
     default:
       return {
         border: 'border-gray-500',

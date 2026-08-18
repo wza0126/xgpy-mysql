@@ -105,7 +105,7 @@ export const BuffBadge: React.FC<BuffBadgeProps> = ({ studentId, compact = false
                   {buff.crit_modifier > 0 ? '+' : ''}{buff.crit_modifier}% 暴击率
                 </span>
                 <span className="text-xs text-gray-500">
-                  ({buff.buff_type === 'perfect_crit' ? '十全十美' : buff.buff_type === 'critstreak_crit' ? '暴击新星' : buff.buff_type === 'wrong_debuff' ? '屡败屡战' : buff.buff_type === 'teacher_crit' ? '师恩赋能' : buff.buff_type === 'studious_crit' ? '勤学好问' : buff.buff_type})
+                  ({buff.buff_type === 'perfect_crit' ? '十全十美' : buff.buff_type === 'critstreak_crit' ? '暴击新星' : buff.buff_type === 'wrong_debuff' ? '屡败屡战' : buff.buff_type === 'teacher_crit' ? '师恩赋能' : buff.buff_type === 'studious_crit' ? '勤学好问' : buff.buff_type === 'typing_fast_crit' ? '运指如飞' : buff.buff_type})
                 </span>
               </div>
               <span className="text-xs text-orange-600">

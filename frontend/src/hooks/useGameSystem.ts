@@ -34,6 +34,7 @@ export interface HonorStats {
   triple_crit_times: number;
   wrong_3_times: number;
   studious_times: number;
+  typing_fast_times: number;
 }
 
 export interface SubmitResult {

@@ -8,7 +8,7 @@ interface App {
   name: string;
   description: string;
   icon: string;
-  type: 'learning_tool' | 'coding_practice' | 'game' | 'simulation' | 'external_link' | 'html_page' | 'ai_qa';
+  type: 'learning_tool' | 'coding_practice' | 'game' | 'simulation' | 'external_link' | 'html_page' | 'ai_qa' | 'mental_health' | 'python_magic_academy' | 'code_realm' | 'typing_trainer';
   price_type: 'free' | 'points' | 'per_use';
   points_price: number;
   category: string;
@@ -42,7 +42,9 @@ const appTypes: AppTypeOption[] = [
   { value: 'simulation', label: '模拟' },
   { value: 'external_link', label: '外部链接' },
   { value: 'html_page', label: 'HTML 网页' },
-  { value: 'python_magic_academy', label: 'Python魔法学院' }
+  { value: 'python_magic_academy', label: 'Python魔法学院' },
+  { value: 'code_realm', label: '代码秘境' },
+  { value: 'typing_trainer', label: '键盘星域' }
 ];
 
 interface Equipment {
@@ -51,6 +53,36 @@ interface Equipment {
   icon: string;
   drop_rate: number;
   crit_bonus: number;
+}
+
+interface ProgressRow {
+  user_id: string;
+  name: string;
+  class_name: string;
+  chapterNo: number;      // 当前章节序号（用于排序/展示）
+  completed: boolean;     // 是否通关/毕业
+  count: number;          // 已完成项数（图鉴 或 挑战）
+  countTotal: number;     // 总数（36 或 14）
+  xp: number;
+  badges: number;         // 徽章数
+  badgeTotal: number;     // 7
+  reward_claimed: boolean;
+}
+
+type ProgressSortKey = 'xp' | 'name' | 'class' | 'chapter' | 'count' | 'badges' | 'reward';
+
+interface TypingRoomRow {
+  id: string;
+  table_no: number;
+  status: string;
+  player1_id: string | null;
+  player2_id: string | null;
+  p1_name: string | null;
+  p2_name: string | null;
+  p1_ready: boolean;
+  p2_ready: boolean;
+  p1_score: number;
+  p2_score: number;
 }
 
 export function AppManager() {
@@ -65,6 +97,25 @@ export function AppManager() {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedIcon, setSelectedIcon] = useState('📚');
   const [equipments, setEquipments] = useState<Equipment[]>([]);
+  // 游戏进度查看（代码秘境 / Python魔法学院）
+  const [progressApp, setProgressApp] = useState<App | null>(null);
+  const [realmProgress, setRealmProgress] = useState<ProgressRow[]>([]);
+  const [progressLoading, setProgressLoading] = useState(false);
+  const [progressError, setProgressError] = useState<string | null>(null);
+  const [progressClassFilter, setProgressClassFilter] = useState('all');
+  const [progressSortKey, setProgressSortKey] = useState<ProgressSortKey>('xp');
+  const [progressSortDir, setProgressSortDir] = useState<'asc' | 'desc'>('desc');
+  // 键盘星域对战桌查看
+  const [showTypingRooms, setShowTypingRooms] = useState(false);
+  const [typingRooms, setTypingRooms] = useState<TypingRoomRow[]>([]);
+  const [typingRoomsLoading, setTypingRoomsLoading] = useState(false);
+  // 键盘星域历史对战记录
+  const [showDuelHistory, setShowDuelHistory] = useState(false);
+  const [duelHistory, setDuelHistory] = useState<any[]>([]);
+  const [duelHistoryLoading, setDuelHistoryLoading] = useState(false);
+  const [duelClassFilter, setDuelClassFilter] = useState('all');
+  // 键盘星域双人对决奖励档位（动态行）
+  const [rewardRows, setRewardRows] = useState<{ score: number; points: number; equipment_id: string }[]>([]);
 
   // 常用 emoji 图标选项
   const iconOptions = [
@@ -142,21 +193,30 @@ export function AppManager() {
         await backendClient.from('apps').insert(appData);
       }
 
-      // 更新可见性
-      for (const cls of classes) {
-        const existing = appVisibility.find(v => v.app_id === appId && v.class_id === cls.id);
-        const isVisible = selectedClasses.includes(cls.id);
-        
-        if (existing) {
-          await backendClient.from('app_visibility').update({ is_visible: isVisible }).eq('id', existing.id);
-        } else if (isVisible) {
-          const visId = `av_${timestamp}_${cls.id.slice(-8)}`;
-          await backendClient.from('app_visibility').insert({
-            id: visId.length > 50 ? visId.slice(0, 50) : visId,
-            app_id: appId,
-            class_id: cls.id,
-            is_visible: true
-          });
+      // 更新可见性：不勾选任何班级 = 全部班级可见
+      if (selectedClasses.length === 0) {
+        for (const cls of classes) {
+          const existing = appVisibility.find(v => v.app_id === appId && v.class_id === cls.id);
+          if (existing) {
+            await backendClient.from('app_visibility').update({ is_visible: true }).eq('id', existing.id);
+          }
+        }
+      } else {
+        for (const cls of classes) {
+          const existing = appVisibility.find(v => v.app_id === appId && v.class_id === cls.id);
+          const isVisible = selectedClasses.includes(cls.id);
+
+          if (existing) {
+            await backendClient.from('app_visibility').update({ is_visible: isVisible }).eq('id', existing.id);
+          } else if (isVisible) {
+            const visId = `av_${timestamp}_${cls.id.slice(-8)}`;
+            await backendClient.from('app_visibility').insert({
+              id: visId.length > 50 ? visId.slice(0, 50) : visId,
+              app_id: appId,
+              class_id: cls.id,
+              is_visible: true
+            });
+          }
         }
       }
 
@@ -206,11 +266,21 @@ export function AppManager() {
 
   const openEditModal = (app: App) => {
     setEditingApp(app);
-    const visibleClasses = appVisibility
-      .filter(v => v.app_id === app.id && v.is_visible)
-      .map(v => v.class_id);
+    const rows = appVisibility.filter(v => v.app_id === app.id);
+    // 全部可见（无隐藏记录）→ 默认全选所有班级；部分隐藏 → 只预选可见班级
+    const visibleClasses = rows.some(v => !v.is_visible)
+      ? rows.filter(v => v.is_visible).map(v => v.class_id)
+      : classes.map(c => c.id);
     setSelectedClasses(visibleClasses);
     setSelectedIcon(app.icon || '📚');
+    const cfg = getParsedConfig(app);
+    setRewardRows(
+      (Array.isArray(cfg.rewards) ? cfg.rewards : []).map((r: any) => ({
+        score: parseInt(r.score) || 0,
+        points: parseInt(r.points) || 0,
+        equipment_id: r.equipment_id || '',
+      }))
+    );
     setShowModal(true);
   };
 
@@ -218,7 +288,98 @@ export function AppManager() {
     setEditingApp(null);
     setSelectedClasses(classes.map(c => c.id));
     setSelectedIcon('📚');
+    setRewardRows([]);
     setShowModal(true);
+  };
+
+  // 查看游戏学生通关进度（代码秘境 / Python魔法学院）
+  const openProgressModal = async (app: App) => {
+    setProgressApp(app);
+    setProgressLoading(true);
+    setProgressError(null);
+    setRealmProgress([]);
+    setProgressClassFilter('all');
+    setProgressSortKey('xp');
+    setProgressSortDir('desc');
+    try {
+      const url = app.type === 'python_magic_academy'
+        ? '/api/python-magic/teacher/progress'
+        : '/api/code-realm/teacher/progress';
+      const { data } = await backendClient.get(url);
+      const rows: ProgressRow[] = (data || []).map((r: any) => {
+        if (app.type === 'python_magic_academy') {
+          return {
+            user_id: r.user_id,
+            name: r.real_name || r.username || '未知学生',
+            class_name: r.class_name || '',
+            chapterNo: r.current_chapter || 0,
+            completed: r.current_step === 'completed' && r.current_chapter >= 7,
+            count: Array.isArray(r.completed_challenges) ? r.completed_challenges.length : 0,
+            countTotal: 14,
+            xp: r.total_xp || 0,
+            badges: Array.isArray(r.badges) ? r.badges.length : 0,
+            badgeTotal: 7,
+            reward_claimed: !!r.reward_claimed,
+          };
+        }
+        return {
+          user_id: r.user_id,
+          name: r.real_name || r.username || '未知学生',
+          class_name: r.class_name || '',
+          chapterNo: r.current_chapter || 0,
+          completed: r.current_step === 'completed',
+          count: Array.isArray(r.completed_keywords) ? r.completed_keywords.length : 0,
+          countTotal: 36,
+          xp: r.total_xp || 0,
+          badges: Array.isArray(r.badges) ? r.badges.length : 0,
+          badgeTotal: 7,
+          reward_claimed: !!r.reward_claimed,
+        };
+      });
+      setRealmProgress(rows);
+    } catch (error) {
+      console.error('获取学生进度失败:', error);
+      setProgressError('获取学生进度失败，请稍后重试');
+    } finally {
+      setProgressLoading(false);
+    }
+  };
+
+  // 查看键盘星域对战桌状态
+  const openTypingRooms = async () => {
+    setShowTypingRooms(true);
+    setTypingRoomsLoading(true);
+    try {
+      const { data } = await backendClient.get('/api/typing/teacher/rooms');
+      setTypingRooms(data || []);
+    } catch (error) {
+      console.error('获取键盘星域对战桌失败:', error);
+    } finally {
+      setTypingRoomsLoading(false);
+    }
+  };
+
+  // 查看键盘星域历史对战记录（可按班级筛选）
+  const fetchDuelHistory = async (classId: string) => {
+    setDuelHistoryLoading(true);
+    try {
+      const params = classId !== 'all' ? `?class_id=${encodeURIComponent(classId)}` : '';
+      const { data } = await backendClient.get(`/api/typing/teacher/duels${params}`);
+      setDuelHistory(data || []);
+    } catch (error) {
+      console.error('获取键盘星域对战记录失败:', error);
+    } finally {
+      setDuelHistoryLoading(false);
+    }
+  };
+  const openDuelHistory = async () => {
+    setShowDuelHistory(true);
+    setDuelClassFilter('all');
+    await fetchDuelHistory('all');
+  };
+  const changeDuelClassFilter = async (classId: string) => {
+    setDuelClassFilter(classId);
+    await fetchDuelHistory(classId);
   };
 
   // 解析 config 配置
@@ -234,15 +395,61 @@ export function AppManager() {
   };
 
   const getVisibleClasses = (appId: string) => {
-    return appVisibility
-      .filter(v => v.app_id === appId && v.is_visible)
+    const rows = appVisibility.filter(v => v.app_id === appId);
+    // 没有隐藏记录 = 全部班级可见
+    if (!rows.some(v => !v.is_visible)) return '全部班级';
+    const visibleNames = rows
+      .filter(v => v.is_visible)
       .map(v => classes.find(c => c.id === v.class_id)?.name)
-      .join(', ') || '全部班级';
+      .filter(Boolean);
+    return visibleNames.length > 0 ? visibleNames.join(', ') : '无（已全部隐藏）';
   };
 
   const filteredApps = apps.filter(app =>
     app.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
     app.description.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
+  // ===== 进度弹窗：班级筛选 + 字段排序 =====
+  const isRealmGame = progressApp?.type === 'code_realm';
+  const countLabel = isRealmGame ? '图鉴' : '挑战';
+  const progressClasses = Array.from(new Set(realmProgress.map(r => r.class_name).filter(Boolean)));
+  const filteredProgress = realmProgress.filter(r => progressClassFilter === 'all' || r.class_name === progressClassFilter);
+  const sortedProgress = [...filteredProgress].sort((a, b) => {
+    let cmp = 0;
+    switch (progressSortKey) {
+      case 'name': cmp = a.name.localeCompare(b.name, 'zh'); break;
+      case 'class': cmp = a.class_name.localeCompare(b.class_name, 'zh'); break;
+      case 'chapter': cmp = (a.completed ? 999 : a.chapterNo) - (b.completed ? 999 : b.chapterNo); break;
+      case 'count': cmp = a.count - b.count; break;
+      case 'xp': cmp = a.xp - b.xp; break;
+      case 'badges': cmp = a.badges - b.badges; break;
+      case 'reward': cmp = Number(a.reward_claimed) - Number(b.reward_claimed); break;
+      default: cmp = 0;
+    }
+    return progressSortDir === 'asc' ? cmp : -cmp;
+  });
+  const toggleProgressSort = (key: ProgressSortKey) => {
+    if (progressSortKey === key) {
+      setProgressSortDir(d => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setProgressSortKey(key);
+      setProgressSortDir('desc');
+    }
+  };
+  const renderProgressTh = (key: ProgressSortKey, label: string) => (
+    <th className="py-2 pr-4 whitespace-nowrap">
+      <button
+        type="button"
+        onClick={() => toggleProgressSort(key)}
+        className={`inline-flex items-center gap-1 font-medium transition-colors ${progressSortKey === key ? 'text-indigo-600' : 'hover:text-indigo-600'}`}
+      >
+        {label}
+        {progressSortKey === key && (
+          <span className="text-[10px]">{progressSortDir === 'asc' ? '▲' : '▼'}</span>
+        )}
+      </button>
+    </th>
   );
 
   return (
@@ -366,6 +573,22 @@ export function AppManager() {
                   >
                     删除
                   </button>
+                  {(app.type === 'code_realm' || app.type === 'python_magic_academy') && (
+                    <button
+                      onClick={() => openProgressModal(app)}
+                      className="px-3 py-1 text-sm bg-purple-100 text-purple-700 rounded-lg hover:bg-purple-200"
+                    >
+                      查看进度
+                    </button>
+                  )}
+                  {app.type === 'typing_trainer' && (
+                    <button
+                      onClick={openTypingRooms}
+                      className="px-3 py-1 text-sm bg-purple-100 text-purple-700 rounded-lg hover:bg-purple-200"
+                    >
+                      查看对战桌
+                    </button>
+                  )}
                   <button
                     onClick={async () => {
                       await backendClient.from('apps').update({ is_active: !app.is_active }).eq('id', app.id);
@@ -440,15 +663,32 @@ export function AppManager() {
                   isFree: formData.get('isFree') === 'true',
                   systemPrompt: formData.get('systemPrompt') as string
                 };
-              } else if (appType === 'python_magic_academy') {
+              } else if (appType === 'python_magic_academy' || appType === 'code_realm') {
                 config = {
                   chapters: 7,
                   aiAssistant: true,
                   xpSystem: true,
                   badgeSystem: true,
+                  keywordCount: appType === 'code_realm' ? 36 : undefined,
                   reward_enabled: formData.get('reward_enabled') === 'on',
                   points_reward: parseInt(formData.get('points_reward') as string) || 100,
                   equipment_id: formData.get('equipment_id') as string || ''
+                };
+              } else if (appType === 'typing_trainer') {
+                config = {
+                  tables: parseInt(formData.get('tables') as string) || 6,
+                  difficulty: formData.get('difficulty') as string || 'standard',
+                  duel_seconds: parseInt(formData.get('duel_seconds') as string) || 180,
+                  duel_speed: parseInt(formData.get('duel_speed') as string) || 85,
+                  duel_spawn_ms: parseInt(formData.get('duel_spawn_ms') as string) || 1800,
+                  duel_step_pct: parseInt(formData.get('duel_step_pct') as string) || 20,
+                  duel_min_wpm: parseInt(formData.get('duel_min_wpm') as string) || 0,
+                  duel_entry_fee: parseInt(formData.get('duel_entry_fee') as string) || 0,
+                  single_reward: {
+                    wpm: parseInt(formData.get('single_reward_wpm') as string) || 0,
+                    points: parseInt(formData.get('single_reward_points') as string) || 0,
+                  },
+                  rewards: rewardRows.filter(r => (r.score > 0 && (r.points > 0 || r.equipment_id)))
                 };
               }
               
@@ -845,10 +1085,11 @@ export function AppManager() {
                       </p>
                     </div>
                   );
-                } else if (currentType === 'python_magic_academy') {
+                } else if (currentType === 'python_magic_academy' || currentType === 'code_realm') {
+                  const gameLabel = currentType === 'code_realm' ? '代码秘境（7大秘境36考点）' : 'Python魔法学院（7大章节）';
                   return (
                     <div className="space-y-4 mb-4">
-                      <h4 className="font-medium text-gray-800">毕业奖励配置</h4>
+                      <h4 className="font-medium text-gray-800">通关奖励配置</h4>
                       <div className="flex items-center gap-2">
                         <input
                           type="checkbox"
@@ -856,7 +1097,7 @@ export function AppManager() {
                           defaultChecked={config.reward_enabled !== false}
                           className="rounded"
                         />
-                        <span className="text-sm text-gray-700">启用毕业奖励</span>
+                        <span className="text-sm text-gray-700">启用通关奖励</span>
                       </div>
                       <div className="grid grid-cols-2 gap-4">
                         <div>
@@ -871,7 +1112,7 @@ export function AppManager() {
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                           />
                           <p className="text-xs text-gray-500 mt-1">
-                            学生完成7章后获得的积分数量
+                            学生通关{gameLabel}后获得的积分数量
                           </p>
                         </div>
                         <div>
@@ -893,6 +1134,260 @@ export function AppManager() {
                           <p className="text-xs text-gray-500 mt-1">
                             从打怪系统的装备中选择一件作为奖励
                           </p>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                } else if (currentType === 'typing_trainer') {
+                  return (
+                    <div className="space-y-4 mb-4">
+                      <h4 className="font-medium text-gray-800">键盘星域配置</h4>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                            双人对战桌子数量
+                          </label>
+                          <input
+                            type="number"
+                            name="tables"
+                            defaultValue={config.tables || 6}
+                            min="1"
+                            max="50"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                          />
+                          <p className="text-xs text-gray-500 mt-1">
+                            双人大厅显示的桌子数，每桌 2 个座位
+                          </p>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                            单人游戏默认难度
+                          </label>
+                          <select
+                            name="difficulty"
+                            defaultValue={config.difficulty || 'standard'}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                          >
+                            <option value="easy">轻松</option>
+                            <option value="standard">标准</option>
+                            <option value="extreme">极限</option>
+                          </select>
+                          <p className="text-xs text-gray-500 mt-1">
+                            作为单人 5 关的速度/密度基准档
+                          </p>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                            双人对局时长（秒）
+                          </label>
+                          <input
+                            type="number"
+                            name="duel_seconds"
+                            defaultValue={config.duel_seconds || 180}
+                            min="60"
+                            max="600"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                          />
+                          <p className="text-xs text-gray-500 mt-1">
+                            每局时长，时间到无人死亡则按分数判定，平分比 WPM
+                          </p>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                            入座门槛 WPM
+                          </label>
+                          <input
+                            type="number"
+                            name="duel_min_wpm"
+                            defaultValue={config.duel_min_wpm ?? 0}
+                            min="0"
+                            max="300"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                          />
+                          <p className="text-xs text-gray-500 mt-1">
+                            单人模式最高打字速度达到该值才可入座（0 表示不限）
+                          </p>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                            双人基础速度（px/s）
+                          </label>
+                          <input
+                            type="number"
+                            name="duel_speed"
+                            defaultValue={config.duel_speed || 85}
+                            min="30"
+                            max="300"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                          />
+                          <p className="text-xs text-gray-500 mt-1">
+                            开局 30 秒内的下落速度
+                          </p>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                            双人基础生成间隔（毫秒）
+                          </label>
+                          <input
+                            type="number"
+                            name="duel_spawn_ms"
+                            defaultValue={config.duel_spawn_ms || 1800}
+                            min="500"
+                            max="5000"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                          />
+                          <p className="text-xs text-gray-500 mt-1">
+                            开局 30 秒内新词出现的间隔，越小密度越大
+                          </p>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                            每 30 秒增幅（%）
+                          </label>
+                          <input
+                            type="number"
+                            name="duel_step_pct"
+                            defaultValue={config.duel_step_pct ?? 20}
+                            min="0"
+                            max="100"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                          />
+                          <p className="text-xs text-gray-500 mt-1">
+                            每过 30 秒，速度与密度（1/间隔）按该百分比提升
+                          </p>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                            双人对局门票（积分/人/局）
+                          </label>
+                          <input
+                            type="number"
+                            name="duel_entry_fee"
+                            defaultValue={config.duel_entry_fee ?? 0}
+                            min="0"
+                            max="10000"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                          />
+                          <p className="text-xs text-gray-500 mt-1">
+                            每局每位玩家扣除的积分，双方同意开赛时自动扣除（0 表示免费）
+                          </p>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                            单人达标速度（WPM）
+                          </label>
+                          <input
+                            type="number"
+                            name="single_reward_wpm"
+                            defaultValue={config.single_reward?.wpm ?? 0}
+                            min="0"
+                            max="300"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                          />
+                          <p className="text-xs text-gray-500 mt-1">
+                            单人游戏本局打字速度达到该值，发放下方奖励（0 表示不启用）
+                          </p>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                            单人达标积分奖励
+                          </label>
+                          <input
+                            type="number"
+                            name="single_reward_points"
+                            defaultValue={config.single_reward?.points ?? 0}
+                            min="0"
+                            max="10000"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                          />
+                          <p className="text-xs text-gray-500 mt-1">
+                            达标后奖励的积分，同时获得「运指如飞」荣誉与暴击 Buff
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* 双人对决奖励档位 */}
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <label className="block text-sm font-medium text-gray-700">
+                            双人对决奖励档位
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => setRewardRows([...rewardRows, { score: 0, points: 0, equipment_id: '' }])}
+                            className="px-2.5 py-1 rounded-lg text-xs bg-blue-100 text-blue-700 hover:bg-blue-200 transition-colors"
+                          >
+                            <i className="fa-solid fa-plus mr-1"></i>添加档位
+                          </button>
+                        </div>
+                        <p className="text-xs text-gray-500 mb-2">
+                          对局得分达到档位阈值即发放奖励（积分/装备，可叠加）。未达标时结算页会显示条件。
+                        </p>
+                        {rewardRows.length === 0 && (
+                          <p className="text-xs text-gray-400">暂无奖励档位</p>
+                        )}
+                        <div className="space-y-2">
+                          {rewardRows.map((row, idx) => (
+                            <div key={idx} className="flex items-center gap-2">
+                              <div className="flex-1">
+                                <label className="block text-[10px] text-gray-500">得分 ≥</label>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={row.score || ''}
+                                  onChange={e => {
+                                    const rows = [...rewardRows];
+                                    rows[idx] = { ...rows[idx], score: parseInt(e.target.value) || 0 };
+                                    setRewardRows(rows);
+                                  }}
+                                  placeholder="100"
+                                  className="w-full px-2 py-1.5 border border-gray-300 rounded-lg text-sm"
+                                />
+                              </div>
+                              <div className="flex-1">
+                                <label className="block text-[10px] text-gray-500">积分</label>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={row.points || ''}
+                                  onChange={e => {
+                                    const rows = [...rewardRows];
+                                    rows[idx] = { ...rows[idx], points: parseInt(e.target.value) || 0 };
+                                    setRewardRows(rows);
+                                  }}
+                                  placeholder="20"
+                                  className="w-full px-2 py-1.5 border border-gray-300 rounded-lg text-sm"
+                                />
+                              </div>
+                              <div className="flex-1">
+                                <label className="block text-[10px] text-gray-500">装备（可选）</label>
+                                <select
+                                  value={row.equipment_id}
+                                  onChange={e => {
+                                    const rows = [...rewardRows];
+                                    rows[idx] = { ...rows[idx], equipment_id: e.target.value };
+                                    setRewardRows(rows);
+                                  }}
+                                  className="w-full px-2 py-1.5 border border-gray-300 rounded-lg text-sm"
+                                >
+                                  <option value="">不发放装备</option>
+                                  {equipments.map(eq => (
+                                    <option key={eq.id} value={eq.id}>
+                                      {eq.icon} {eq.name} (暴击 +{eq.crit_bonus}%)
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setRewardRows(rewardRows.filter((_, i) => i !== idx))}
+                                className="px-2 py-1.5 rounded-lg text-xs text-red-500 hover:bg-red-50 transition-colors"
+                                title="删除档位"
+                              >
+                                <i className="fa-solid fa-trash"></i>
+                              </button>
+                            </div>
+                          ))}
                         </div>
                       </div>
                     </div>
@@ -942,6 +1437,9 @@ export function AppManager() {
                     </button>
                   ))}
                 </div>
+                <p className="text-xs text-amber-600 mt-2">
+                  💡 一个都不勾选 = 全部班级可见；勾选部分班级时，未勾选的班级将被隐藏
+                </p>
               </div>
 
               <div className="flex justify-end gap-4">
@@ -964,6 +1462,215 @@ export function AppManager() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {progressApp && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl p-6 w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-6">
+              <h3 className="text-xl font-semibold">
+                {progressApp.icon} {progressApp.name} · 学生通关进度
+              </h3>
+              <button
+                onClick={() => setProgressApp(null)}
+                className="text-gray-500 hover:text-gray-700"
+              >
+                ✕
+              </button>
+            </div>
+
+            {progressLoading && <p className="text-gray-500 text-center py-8">加载中...</p>}
+            {progressError && <p className="text-red-500 text-center py-8">{progressError}</p>}
+
+            {!progressLoading && !progressError && (
+              realmProgress.length === 0 ? (
+                <p className="text-gray-500 text-center py-8">
+                  暂无学生游玩记录，学生开始游戏后进度会自动上报
+                </p>
+              ) : (
+                <>
+                  <div className="flex items-center gap-3 mb-4">
+                    <label className="text-sm text-gray-500">班级筛选</label>
+                    <select
+                      value={progressClassFilter}
+                      onChange={(e) => setProgressClassFilter(e.target.value)}
+                      className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm"
+                    >
+                      <option value="all">全部班级（{realmProgress.length} 人）</option>
+                      {progressClasses.map(c => (
+                        <option key={c} value={c}>
+                          {c}（{realmProgress.filter(r => r.class_name === c).length} 人）
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-xs text-gray-400">当前显示 {sortedProgress.length} 人 · 点击表头可排序</span>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-gray-200 text-left text-gray-500">
+                          {renderProgressTh('name', '学生')}
+                          {renderProgressTh('class', '班级')}
+                          {renderProgressTh('chapter', '进度')}
+                          {renderProgressTh('count', countLabel)}
+                          {renderProgressTh('xp', '经验')}
+                          {renderProgressTh('badges', '徽章')}
+                          {renderProgressTh('reward', '奖励')}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sortedProgress.map(row => (
+                          <tr key={row.user_id} className="border-b border-gray-100">
+                            <td className="py-2 pr-4 font-medium whitespace-nowrap">{row.name}</td>
+                            <td className="py-2 pr-4">{row.class_name || '-'}</td>
+                            <td className="py-2 pr-4 whitespace-nowrap">
+                              {row.completed
+                                ? '🏆 已通关'
+                                : `第 ${Math.min(Math.max(row.chapterNo, 1), 7)} 章`}
+                            </td>
+                            <td className="py-2 pr-4">
+                              <span className="inline-flex items-center gap-1">
+                                <span className="w-16 bg-gray-100 rounded-full h-1.5 overflow-hidden">
+                                  <span
+                                    className={`block h-full rounded-full ${row.completed ? 'bg-emerald-500' : 'bg-indigo-500'}`}
+                                    style={{ width: `${row.countTotal ? Math.min((row.count / row.countTotal) * 100, 100) : 0}%` }}
+                                  ></span>
+                                </span>
+                                {row.count} / {row.countTotal}
+                              </span>
+                            </td>
+                            <td className="py-2 pr-4">{row.xp}</td>
+                            <td className="py-2 pr-4">{row.badges} / {row.badgeTotal}</td>
+                            <td className="py-2">
+                              {row.completed
+                                ? (row.reward_claimed ? '✅ 已发放' : '⏳ 待发放')
+                                : '-'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )
+            )}
+          </div>
+        </div>
+      )}
+
+      {showTypingRooms && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl p-6 w-full max-w-3xl max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-6">
+              <h3 className="text-xl font-semibold">⌨️ 键盘星域 · 对战桌状态</h3>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={openDuelHistory}
+                  className="px-3 py-1.5 text-sm bg-blue-100 text-blue-700 rounded-lg hover:bg-blue-200"
+                >
+                  🕘 历史对战记录
+                </button>
+                <button onClick={() => setShowTypingRooms(false)} className="text-gray-500 hover:text-gray-700">✕</button>
+              </div>
+            </div>
+            {typingRoomsLoading ? (
+              <p className="text-gray-500 text-center py-8">加载中...</p>
+            ) : (
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-200 text-left text-gray-500">
+                    <th className="py-2 pr-4">桌子</th>
+                    <th className="py-2 pr-4">左座</th>
+                    <th className="py-2 pr-4">右座</th>
+                    <th className="py-2 pr-4">状态</th>
+                    <th className="py-2">比分</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {typingRooms.map(r => (
+                    <tr key={r.id} className="border-b border-gray-100">
+                      <td className="py-2 pr-4 font-medium">#{r.table_no}</td>
+                      <td className="py-2 pr-4">{r.player1_id ? (r.p1_name || '玩家') : '-'}</td>
+                      <td className="py-2 pr-4">{r.player2_id ? (r.p2_name || '玩家') : '-'}</td>
+                      <td className="py-2 pr-4">
+                        <span className={`px-2 py-0.5 rounded-full text-xs ${
+                          r.status === 'playing' ? 'bg-red-100 text-red-700'
+                          : r.status === 'ready' ? 'bg-amber-100 text-amber-700'
+                          : r.status === 'waiting' ? 'bg-blue-100 text-blue-700'
+                          : 'bg-gray-100 text-gray-600'
+                        }`}>
+                          {{ idle: '空闲', waiting: '等待对手', ready: '双方就绪', playing: '🔥 比赛中', finished: '已结束' }[r.status] || r.status}
+                        </span>
+                      </td>
+                      <td className="py-2">
+                        {r.status === 'playing' ? `${r.p1_score} : ${r.p2_score}` : '-'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      )}
+
+      {showDuelHistory && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
+          <div className="bg-white rounded-xl p-6 w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xl font-semibold">🕘 键盘星域 · 历史对战记录</h3>
+              <div className="flex items-center gap-3">
+                <select
+                  value={duelClassFilter}
+                  onChange={(e) => changeDuelClassFilter(e.target.value)}
+                  className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg bg-white"
+                >
+                  <option value="all">全部班级</option>
+                  {classes.map(c => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+                <button onClick={() => setShowDuelHistory(false)} className="text-gray-500 hover:text-gray-700">✕</button>
+              </div>
+            </div>
+            {duelHistoryLoading ? (
+              <p className="text-gray-500 text-center py-8">加载中...</p>
+            ) : duelHistory.length === 0 ? (
+              <p className="text-gray-500 text-center py-8">暂无对战记录</p>
+            ) : (
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-200 text-left text-gray-500">
+                    <th className="py-2 pr-4">桌子</th>
+                    <th className="py-2 pr-4">对战双方</th>
+                    <th className="py-2 pr-4">比分</th>
+                    <th className="py-2">时间</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {duelHistory.map(d => (
+                    <tr key={d.id} className="border-b border-gray-100">
+                      <td className="py-2 pr-4 font-medium">{d.table_no ? `#${d.table_no}` : '—'}</td>
+                      <td className="py-2 pr-4">
+                        <span className="font-medium text-gray-800">{d.p1_name || d.p1_username || '玩家'}</span>
+                        <span className="text-gray-400 mx-1">vs</span>
+                        <span className="font-medium text-gray-800">{d.p2_name || d.p2_username || '玩家'}</span>
+                      </td>
+                      <td className="py-2 pr-4">
+                        <span className="font-mono font-bold text-emerald-600">{d.p1_score}</span>
+                        <span className="text-gray-400 mx-1">:</span>
+                        <span className="font-mono font-bold text-red-500">{d.p2_score}</span>
+                      </td>
+                      <td className="py-2 text-gray-500">
+                        {d.created_at ? String(d.created_at).replace('T', ' ').slice(0, 19) : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
         </div>
       )}

@@ -303,7 +303,7 @@ export const ProfileModule: React.FC = () => {
                 {(gameSystem.gameStats?.active_buffs || []).length > 0 ? (
                   <div className="space-y-1">
                     {gameSystem.gameStats?.active_buffs.map((buff) => {
-                      const buffName = buff.buff_type === 'perfect_crit' ? '十全十美' : buff.buff_type === 'critstreak_crit' ? '暴击新星' : buff.buff_type === 'wrong_debuff' ? '屡败屡战' : buff.buff_type === 'teacher_crit' ? '师恩赋能' : buff.buff_type === 'studious_crit' ? '勤学好问' : buff.buff_type;
+                      const buffName = buff.buff_type === 'perfect_crit' ? '十全十美' : buff.buff_type === 'critstreak_crit' ? '暴击新星' : buff.buff_type === 'wrong_debuff' ? '屡败屡战' : buff.buff_type === 'teacher_crit' ? '师恩赋能' : buff.buff_type === 'studious_crit' ? '勤学好问' : buff.buff_type === 'typing_fast_crit' ? '运指如飞' : buff.buff_type;
                       const buffSign = (buff.crit_modifier || 0) >= 0 ? '+' : '';
                       return (
                       <div key={buff.id} className="flex justify-between text-sm">
@@ -539,7 +539,7 @@ export const ProfileModule: React.FC = () => {
               荣誉图鉴
             </h3>
             {gameSystem.honorStats ? (
-              <div className="grid grid-cols-4 gap-3">
+              <div className="grid grid-cols-4 md:grid-cols-5 gap-3">
                 <div className="text-center p-3 bg-yellow-50 rounded-lg border border-yellow-200 group relative cursor-help">
                   <div className="text-2xl mb-1">🏆</div>
                   <p className="text-lg font-bold text-yellow-700">{gameSystem.honorStats.perfect_10_times}</p>
@@ -573,6 +573,15 @@ export const ProfileModule: React.FC = () => {
                   <p className="text-xs text-gray-600">屡败屡战</p>
                   <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 bg-gray-800 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10 pointer-events-none shadow-lg">
                     练习时连错3题
+                    <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-800"></div>
+                  </div>
+                </div>
+                <div className="text-center p-3 bg-emerald-50 rounded-lg border border-emerald-200 group relative cursor-help">
+                  <div className="text-2xl mb-1">⚡</div>
+                  <p className="text-lg font-bold text-emerald-700">{gameSystem.honorStats.typing_fast_times ?? 0}</p>
+                  <p className="text-xs text-gray-600">运指如飞</p>
+                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 bg-gray-800 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10 pointer-events-none shadow-lg">
+                    键盘星域单人模式速度达标
                     <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-800"></div>
                   </div>
                 </div>

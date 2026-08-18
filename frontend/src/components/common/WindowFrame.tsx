@@ -12,8 +12,8 @@ interface WindowFrameProps {
   zIndex: number;
 }
 
-const MIN_WIDTH = 400;
-const MIN_HEIGHT = 300;
+const MIN_WIDTH = 280;
+const MIN_HEIGHT = 200;
 
 // 生成星点（星河璀璨皮肤用）
 function generateStars(count: number) {
@@ -293,36 +293,37 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({
 
       {!isMaximized && (
         <>
+          {/* 手柄 z-40：保证位于内容滚动条之上，否则右下角等区域会被滚动条挡住无法调整大小 */}
           <div
-            className={`absolute top-0 left-0 right-0 h-2 ${getCursorStyle('n')}`}
+            className={`absolute top-0 left-0 right-0 h-2 z-40 ${getCursorStyle('n')}`}
             onMouseDown={(e) => handleResizeStart('n', e)}
           />
           <div
-            className={`absolute bottom-0 left-0 right-0 h-2 ${getCursorStyle('s')}`}
+            className={`absolute bottom-0 left-0 right-0 h-2 z-40 ${getCursorStyle('s')}`}
             onMouseDown={(e) => handleResizeStart('s', e)}
           />
           <div
-            className={`absolute top-0 bottom-0 left-0 w-2 ${getCursorStyle('w')}`}
+            className={`absolute top-0 bottom-0 left-0 w-2 z-40 ${getCursorStyle('w')}`}
             onMouseDown={(e) => handleResizeStart('w', e)}
           />
           <div
-            className={`absolute top-0 bottom-0 right-0 w-2 ${getCursorStyle('e')}`}
+            className={`absolute top-0 bottom-0 right-0 w-2 z-40 ${getCursorStyle('e')}`}
             onMouseDown={(e) => handleResizeStart('e', e)}
           />
           <div
-            className={`absolute top-0 left-0 w-4 h-4 ${getCursorStyle('nw')}`}
+            className={`absolute top-0 left-0 w-4 h-4 z-40 ${getCursorStyle('nw')}`}
             onMouseDown={(e) => handleResizeStart('nw', e)}
           />
           <div
-            className={`absolute top-0 right-0 w-4 h-4 ${getCursorStyle('ne')}`}
+            className={`absolute top-0 right-0 w-4 h-4 z-40 ${getCursorStyle('ne')}`}
             onMouseDown={(e) => handleResizeStart('ne', e)}
           />
           <div
-            className={`absolute bottom-0 left-0 w-4 h-4 ${getCursorStyle('sw')}`}
+            className={`absolute bottom-0 left-0 w-4 h-4 z-40 ${getCursorStyle('sw')}`}
             onMouseDown={(e) => handleResizeStart('sw', e)}
           />
           <div
-            className={`absolute bottom-0 right-0 w-4 h-4 ${getCursorStyle('se')}`}
+            className={`absolute bottom-0 right-0 w-4 h-4 z-40 ${getCursorStyle('se')}`}
             onMouseDown={(e) => handleResizeStart('se', e)}
           />
         </>

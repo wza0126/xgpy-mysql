@@ -1454,6 +1454,28 @@ async function getIpViolation(userId, req, deviceInfo) {
   }
 }
 
+// 发放/刷新同类型 Buff：已有生效中的同类型 Buff 时不叠加暴击率，仅刷新持续时间与暴击值
+// 需在事务内调用（conn 为事务连接），FOR UPDATE 锁防止并发重复插入
+async function grantOrRefreshBuff(conn, studentId, buffType, critModifier, minutes) {
+  const [rows] = await conn.query(
+    'SELECT id FROM student_buffs WHERE student_id = ? AND buff_type = ? AND expires_at > NOW() FOR UPDATE',
+    [studentId, buffType]
+  );
+  if (rows.length > 0) {
+    await conn.query(
+      'UPDATE student_buffs SET crit_modifier = ?, expires_at = DATE_ADD(NOW(), INTERVAL ? MINUTE) WHERE id = ?',
+      [critModifier, minutes, rows[0].id]
+    );
+    return { refreshed: true };
+  }
+  const buffId = `buff_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  await conn.query(
+    'INSERT INTO student_buffs (id, student_id, buff_type, crit_modifier, expires_at, created_at) VALUES (?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL ? MINUTE), NOW())',
+    [buffId, studentId, buffType, critModifier, minutes]
+  );
+  return { refreshed: false };
+}
+
 // ============ 安全认证 API ============
 
 app.post('/api/auth/secure-login', async (req, res) => {
@@ -2297,21 +2319,13 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
 
         // 荣誉 —— 十连对（每满10连对触发一次）
         if (newStreak >= 10 && Math.floor(newStreak / 10) > Math.floor(oldStreak / 10)) {
-          const buffId = `buff_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-          await connection.query(
-            'INSERT INTO student_buffs (id, student_id, buff_type, crit_modifier, expires_at, created_at) VALUES (?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL ? MINUTE), NOW())',
-            [buffId, student_id, 'perfect_crit', honorPerfectBuffCrit, honorPerfectBuffMinutes]
-          );
+          await grantOrRefreshBuff(connection, student_id, 'perfect_crit', honorPerfectBuffCrit, honorPerfectBuffMinutes);
           newHonor = { type: 'perfect_10', name: '十全十美', buff_crit: honorPerfectBuffCrit, buff_minutes: honorPerfectBuffMinutes };
         }
 
         // 荣誉 —— 三连暴击
         if (is_crit && newCritStreak >= 3 && oldCritStreak < 3) {
-          const buffId = `buff_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-          await connection.query(
-            'INSERT INTO student_buffs (id, student_id, buff_type, crit_modifier, expires_at, created_at) VALUES (?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL ? MINUTE), NOW())',
-            [buffId, student_id, 'critstreak_crit', honorCritstreakBuffCrit, honorCritstreakBuffMinutes]
-          );
+          await grantOrRefreshBuff(connection, student_id, 'critstreak_crit', honorCritstreakBuffCrit, honorCritstreakBuffMinutes);
           newHonor = { type: 'triple_crit', name: '三连暴击', buff_crit: honorCritstreakBuffCrit, buff_minutes: honorCritstreakBuffMinutes };
         }
 
@@ -2340,11 +2354,7 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
 
         // 荣誉 —— 三连错
         if (newWrong >= 3 && oldWrong < 3) {
-          const buffId = `buff_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-          await connection.query(
-            'INSERT INTO student_buffs (id, student_id, buff_type, crit_modifier, expires_at, created_at) VALUES (?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL ? MINUTE), NOW())',
-            [buffId, student_id, 'wrong_debuff', -honorWrongDebuffCrit, honorWrongDebuffMinutes]
-          );
+          await grantOrRefreshBuff(connection, student_id, 'wrong_debuff', -honorWrongDebuffCrit, honorWrongDebuffMinutes);
           newHonor = { type: 'wrong_3', name: '三连错', debuff_crit: -honorWrongDebuffCrit, debuff_minutes: honorWrongDebuffMinutes };
         }
       }
@@ -4587,13 +4597,9 @@ async function processNotificationDelivery(connection, notificationId, options) 
       `, updateParams);
     }
 
-    // 如果有buff，给学生发放buff
+    // 如果有buff，给学生发放buff（同类型不叠加，仅刷新时间）
     if (has_buff && buff_modifier && buff_duration) {
-      const buffId = `buff_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      await connection.query(`
-        INSERT INTO student_buffs (id, student_id, buff_type, crit_modifier, expires_at, created_at)
-        VALUES (?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL ? MINUTE), NOW())
-      `, [buffId, studentId, buff_type || 'teacher_crit', buff_modifier, buff_duration]);
+      await grantOrRefreshBuff(connection, studentId, buff_type || 'teacher_crit', buff_modifier, buff_duration);
     }
   }
 
@@ -4812,6 +4818,139 @@ app.get('/api/notifications/check-scheduled', async (req, res) => {
     res.status(500).json({ data: null, error: result.error });
   } else {
     res.json({ data: { published_count: result.published_count }, error: null });
+  }
+});
+
+// ==================== 学生数字消息（同学间发送，仅数字、最长8位、每日3条） ====================
+
+// 发送数字消息
+app.post('/api/student/digital-messages/send', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const role = req.user.role;
+    if (role !== 'student') {
+      return res.status(403).json({ data: null, error: '仅学生可使用数字消息' });
+    }
+    // 检查所在班级是否启用了数字消息功能
+    const [clsRows] = await pool.query(
+      'SELECT c.dm_enabled FROM profiles p LEFT JOIN classes c ON p.class_id = c.id WHERE p.id = ?',
+      [userId]
+    );
+    if (!clsRows[0]?.dm_enabled) {
+      return res.status(403).json({ data: null, error: '所在班级未开启数字消息功能' });
+    }
+    const { receiver_username, content } = req.body || {};
+    // 内容校验：仅数字，1-8 位
+    const text = String(content || '').trim();
+    if (!text) return res.status(400).json({ data: null, error: '请输入发送内容' });
+    if (!/^\d{1,8}$/.test(text)) {
+      return res.status(400).json({ data: null, error: '内容仅限数字，最长 8 位' });
+    }
+    if (!receiver_username) return res.status(400).json({ data: null, error: '请输入对方账号' });
+    // 查找接收者（必须是学生）
+    const [recvRows] = await pool.query(
+      "SELECT id, username, real_name FROM profiles WHERE username = ? AND role = 'student'",
+      [String(receiver_username).trim()]
+    );
+    if (recvRows.length === 0) {
+      return res.status(404).json({ data: null, error: '未找到该学生账号，请确认对方账号' });
+    }
+    const receiver = recvRows[0];
+    if (receiver.id === userId) {
+      return res.status(400).json({ data: null, error: '不能给自己发送消息' });
+    }
+    // 每日限发 10 条
+    const [cntRows] = await pool.query(
+      'SELECT COUNT(*) AS cnt FROM student_messages WHERE sender_id = ? AND DATE(sent_at) = CURDATE()',
+      [userId]
+    );
+    const sentToday = cntRows[0]?.cnt || 0;
+    if (sentToday >= 10) {
+      return res.status(429).json({ data: null, error: `今日已发送 ${sentToday} 条，每人每天最多发送 10 条` });
+    }
+    const [senderRows] = await pool.query('SELECT id, username, real_name FROM profiles WHERE id = ?', [userId]);
+    const sender = senderRows[0] || { username: '', real_name: '' };
+    await pool.query(
+      `INSERT INTO student_messages (sender_id, sender_username, sender_real_name, receiver_id, receiver_username, receiver_real_name, content)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [userId, sender.username, sender.real_name || sender.username, receiver.id, receiver.username, receiver.real_name || receiver.username, text]
+    );
+    const remaining = 10 - sentToday;
+    res.json({ data: { ok: true, sent_today: sentToday + 1, remaining: Math.max(remaining, 0) }, error: null });
+  } catch (error) {
+    console.error('发送数字消息失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 获取我收到的数字消息 + 今日已发/剩余条数
+app.get('/api/student/digital-messages/my', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const [messages] = await pool.query(
+      `SELECT id, sender_id, sender_username, sender_real_name, content, sent_at, is_read
+       FROM student_messages
+       WHERE receiver_id = ?
+       ORDER BY sent_at DESC
+       LIMIT 50`,
+      [userId]
+    );
+    const [cntRows] = await pool.query(
+      'SELECT COUNT(*) AS cnt FROM student_messages WHERE sender_id = ? AND DATE(sent_at) = CURDATE()',
+      [userId]
+    );
+    const sentToday = cntRows[0]?.cnt || 0;
+    // 查询所在班级是否启用了数字消息功能
+    const [clsRows] = await pool.query(
+      'SELECT c.dm_enabled FROM profiles p LEFT JOIN classes c ON p.class_id = c.id WHERE p.id = ?',
+      [userId]
+    );
+    const dmEnabled = !!clsRows[0]?.dm_enabled;
+    res.json({ data: { messages, sent_today: sentToday, remaining: Math.max(10 - sentToday, 0), dm_enabled: dmEnabled }, error: null });
+  } catch (error) {
+    console.error('获取数字消息失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 标记收到的数字消息已读
+app.post('/api/student/digital-messages/read', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { id } = req.body || {};
+    if (!id) return res.status(400).json({ data: null, error: '缺少消息ID' });
+    await pool.query('UPDATE student_messages SET is_read = TRUE WHERE id = ? AND receiver_id = ?', [id, userId]);
+    res.json({ data: { ok: true }, error: null });
+  } catch (error) {
+    console.error('标记数字消息已读失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 获取当前学生的同班同学列表（用于数字消息的接收者下拉选择）
+app.get('/api/student/classmates', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const role = req.user.role;
+    if (role !== 'student') {
+      return res.status(403).json({ data: [], error: '仅学生可使用' });
+    }
+    const [me] = await pool.query('SELECT class_id FROM profiles WHERE id = ?', [userId]);
+    const classId = me[0]?.class_id;
+    if (!classId) {
+      return res.json({ data: [], error: null });
+    }
+    const [students] = await pool.query(
+      `SELECT id, username, real_name
+       FROM profiles
+       WHERE class_id = ? AND role = 'student' AND id != ?
+       ORDER BY real_name ASC`,
+      [classId, userId]
+    );
+    res.json({ data: students, error: null });
+  } catch (error) {
+    console.error('获取同班同学失败:', error);
+    res.status(500).json({ data: [], error: error.message });
   }
 });
 
@@ -5696,6 +5835,22 @@ async function callAiApi(config, messages) {
 
   const apiUrl = `${config.ai_api_base_url}/chat/completions`;
   
+  // 过滤消息，确保所有内容都是纯文本格式
+  const sanitizedMessages = messages.map(msg => {
+    if (typeof msg.content === 'string') {
+      return { role: msg.role, content: msg.content };
+    } else if (Array.isArray(msg.content)) {
+      // 如果 content 是数组（可能包含 image_url 等类型），提取纯文本部分
+      const textParts = msg.content
+        .filter(item => item.type === 'text')
+        .map(item => item.text);
+      const textContent = textParts.length > 0 ? textParts.join('\n') : '';
+      return { role: msg.role, content: textContent };
+    } else {
+      return { role: msg.role, content: String(msg.content || '') };
+    }
+  });
+
   const response = await fetch(apiUrl, {
     method: 'POST',
     headers: {
@@ -5703,7 +5858,7 @@ async function callAiApi(config, messages) {
       'Authorization': `Bearer ${config.ai_api_key}`,
     },
     body: JSON.stringify({
-      messages,
+      messages: sanitizedMessages,
       model: config.ai_model,
       temperature: config.ai_temperature,
       stream: false,
@@ -6642,7 +6797,7 @@ app.get('/api/student/honors', authenticate, async (req, res) => {
   try {
     const userId = req.user.userId || req.user.id;
     const [rows] = await pool.query(
-      'SELECT perfect_10_times, triple_crit_times, wrong_3_times, studious_times FROM profiles WHERE id = ?',
+      'SELECT perfect_10_times, triple_crit_times, wrong_3_times, studious_times, typing_fast_times FROM profiles WHERE id = ?',
       [userId]
     );
 
@@ -6656,11 +6811,13 @@ app.get('/api/student/honors', authenticate, async (req, res) => {
         triple_crit_times: rows[0].triple_crit_times || 0,
         wrong_3_times: rows[0].wrong_3_times || 0,
         studious_times: rows[0].studious_times || 0,
+        typing_fast_times: rows[0].typing_fast_times || 0,
         honors: [
           { type: 'perfect_10', name: '十全十美', times: rows[0].perfect_10_times || 0 },
           { type: 'triple_crit', name: '三连暴击', times: rows[0].triple_crit_times || 0 },
           { type: 'wrong_3', name: '三连错', times: rows[0].wrong_3_times || 0 },
-          { type: 'studious', name: '勤学好问', times: rows[0].studious_times || 0 }
+          { type: 'studious', name: '勤学好问', times: rows[0].studious_times || 0 },
+          { type: 'typing_fast', name: '运指如飞', times: rows[0].typing_fast_times || 0 }
         ]
       },
       error: null
@@ -6779,12 +6936,8 @@ app.post('/api/student/learn-studious-checkin', authenticate, async (req, res) =
       const studiousBuffCrit = parseFloat(cfg['honor_studious_buff_crit']) || 8;
       const studiousBuffMinutes = parseInt(cfg['honor_studious_buff_minutes']) || 30;
 
-      // 发放buff
-      const buffId = `buff_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      await connection.query(
-        'INSERT INTO student_buffs (id, student_id, buff_type, crit_modifier, expires_at, created_at) VALUES (?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL ? MINUTE), NOW())',
-        [buffId, userId, 'studious_crit', studiousBuffCrit, studiousBuffMinutes]
-      );
+      // 发放buff（同类型不叠加，仅刷新时间）
+      await grantOrRefreshBuff(connection, userId, 'studious_crit', studiousBuffCrit, studiousBuffMinutes);
 
       // 增加勤学好问荣誉次数
       await connection.query(
@@ -8130,6 +8283,1109 @@ app.post('/api/python-magic/progress', authenticate, async (req, res) => {
     res.status(500).json({ data: null, error: error.message });
   }
 });
+
+// 教师端查看全部学生通关进度（Python魔法学院）
+app.get('/api/python-magic/teacher/progress', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT pmp.user_id, p.real_name, p.username, c.name AS class_name,
+              pmp.current_chapter, pmp.current_step, pmp.total_xp,
+              pmp.completed_challenges, pmp.badges,
+              pmp.reward_claimed, pmp.updated_at
+       FROM python_magic_progress pmp
+       LEFT JOIN profiles p ON p.id = pmp.user_id
+       LEFT JOIN classes c ON c.id = p.class_id
+       ORDER BY pmp.total_xp DESC, pmp.updated_at DESC`
+    );
+    const data = rows.map(r => {
+      const row = { ...r };
+      for (const key of ['completed_challenges', 'badges']) {
+        if (typeof row[key] === 'string') {
+          try { row[key] = JSON.parse(row[key]); } catch { row[key] = []; }
+        }
+      }
+      return row;
+    });
+    res.json({ data, error: null });
+  } catch (error) {
+    console.error('获取Python魔法学院进度列表失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// ==================== 代码秘境 API 开始 ====================
+
+// 获取游戏进度
+app.get('/api/code-realm/progress', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const [rows] = await pool.query(
+      'SELECT * FROM code_realm_progress WHERE user_id = ?',
+      [userId]
+    );
+    if (rows.length === 0) {
+      const id = `cr_${userId}_${Date.now()}`;
+      await pool.query(
+        'INSERT INTO code_realm_progress (id, user_id, current_chapter, current_step, completed_keywords, completed_chapters, badges, total_xp, reward_claimed) VALUES (?, ?, 0, ?, ?, ?, ?, 0, FALSE)',
+        [id, userId, 'intro', '[]', '[]', '[]']
+      );
+      const [newRows] = await pool.query(
+        'SELECT * FROM code_realm_progress WHERE user_id = ?',
+        [userId]
+      );
+      return res.json({ data: parseRealmProgress(newRows[0]), error: null });
+    }
+    res.json({ data: parseRealmProgress(rows[0]), error: null });
+  } catch (error) {
+    console.error('获取代码秘境进度失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+function parseRealmProgress(p) {
+  const r = { ...p };
+  for (const key of ['completed_keywords', 'completed_chapters', 'badges']) {
+    if (typeof r[key] === 'string') {
+      try { r[key] = JSON.parse(r[key]); } catch { r[key] = []; }
+    }
+  }
+  return r;
+}
+
+// 发放通关奖励（积分 + 装备）
+async function grantCodeRealmReward(userId, progressId) {
+  const [rewardCheck] = await pool.query(
+    'SELECT reward_claimed FROM code_realm_progress WHERE id = ?',
+    [progressId]
+  );
+  if (rewardCheck.length === 0 || rewardCheck[0].reward_claimed) {
+    return { granted: false };
+  }
+  const [appConfig] = await pool.query(
+    'SELECT config FROM apps WHERE id = ?',
+    ['app_code_realm']
+  );
+  if (appConfig.length === 0) return { granted: false };
+  let config;
+  try {
+    config = typeof appConfig[0].config === 'string' ? JSON.parse(appConfig[0].config) : appConfig[0].config;
+  } catch {
+    return { granted: false };
+  }
+  if (!config.reward_enabled) return { granted: false };
+
+  const pointsReward = config.points_reward || 0;
+  const equipmentId = config.equipment_id || '';
+  let grantedPoints = 0;
+  let grantedEquipment = null;
+
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    if (pointsReward > 0) {
+      await connection.query(
+        'UPDATE profiles SET current_points = current_points + ?, max_points = GREATEST(max_points, current_points + ?), total_points_earned = total_points_earned + ? WHERE id = ?',
+        [pointsReward, pointsReward, pointsReward, userId]
+      );
+      await connection.query(
+        'INSERT INTO point_transactions (student_id, amount, reason, source_type, created_at) VALUES (?, ?, ?, ?, NOW())',
+        [userId, pointsReward, '代码秘境通关奖励', 'system']
+      );
+      grantedPoints = pointsReward;
+    }
+    if (equipmentId) {
+      const [equipments] = await connection.query(
+        'SELECT id, name, icon, crit_bonus FROM equipments WHERE id = ? AND is_active = true',
+        [equipmentId]
+      );
+      if (equipments.length > 0) {
+        const equipment = equipments[0];
+        const [existing] = await connection.query(
+          'SELECT id, quantity FROM student_equipments WHERE student_id = ? AND equipment_id = ?',
+          [userId, equipmentId]
+        );
+        if (existing.length > 0) {
+          await connection.query(
+            'UPDATE student_equipments SET quantity = quantity + 1 WHERE id = ?',
+            [existing[0].id]
+          );
+        } else {
+          const seId = `se_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+          await connection.query(
+            'INSERT INTO student_equipments (id, student_id, equipment_id, quantity) VALUES (?, ?, ?, 1)',
+            [seId, userId, equipmentId]
+          );
+        }
+        grantedEquipment = equipment;
+      }
+    }
+    await connection.query(
+      'UPDATE code_realm_progress SET reward_claimed = TRUE WHERE id = ?',
+      [progressId]
+    );
+    await connection.commit();
+    return { granted: true, points: grantedPoints, equipment: grantedEquipment };
+  } catch (error) {
+    try { await connection.rollback(); } catch (_) {}
+    console.error('发放代码秘境奖励失败:', error);
+    return { granted: false };
+  } finally {
+    connection.release();
+  }
+}
+
+// 代码秘境真实章节 ID（共 7 个章节，必须全部通关才允许领取通关奖励）
+const REALM_VALID_CHAPTER_IDS = Object.freeze([1, 2, 3, 4, 5, 6, 7]);
+
+// 校验提交的进度是否达到通关（必须完成全部 7 个真实章节，且 ID 必须合法，防刷奖励）
+function validateCompletionClaimed(payload) {
+  if (payload.current_step !== 'completed') return null;
+  const chapters = Array.isArray(payload.completed_chapters) ? payload.completed_chapters : [];
+  if (chapters.length !== REALM_VALID_CHAPTER_IDS.length) {
+    return '通关校验失败：完成章节数不足 7 章，无法领取通关奖励';
+  }
+  // 服务端硬校验：必须覆盖全部 7 个真实章节 ID，拒绝任何伪造 ID 的通关提交
+  const submitted = new Set(chapters);
+  for (const id of REALM_VALID_CHAPTER_IDS) {
+    if (!submitted.has(id)) {
+      return '通关校验失败：章节数据非法，请完成所有 7 大秘境后再提交通关';
+    }
+  }
+  // 额外防御：禁止提交章节数超出 7（异常重放/拼接攻击）
+  if (submitted.size !== REALM_VALID_CHAPTER_IDS.length) {
+    return '通关校验失败：章节数据存在重复，无法领取通关奖励';
+  }
+  return null;
+}
+
+// 保存游戏进度
+app.post('/api/code-realm/progress', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { current_chapter, current_step, completed_keywords, completed_chapters, badges, total_xp } = req.body || {};
+    const [existing] = await pool.query(
+      'SELECT id, reward_claimed FROM code_realm_progress WHERE user_id = ?',
+      [userId]
+    );
+
+    // 服务端硬校验：若客户端声称已通关，必须提交完成全部 7 个章节的证据，阻止直接刷奖励
+    const completionErr = validateCompletionClaimed({ current_step, completed_chapters });
+    if (completionErr) {
+      return res.status(400).json({ data: null, error: completionErr });
+    }
+
+    let progressId = null;
+    let shouldGrantReward = false;
+    const keywordsJson = JSON.stringify(completed_keywords || []);
+    const chaptersJson = JSON.stringify(completed_chapters || []);
+    const badgesJson = JSON.stringify(badges || []);
+
+    if (existing.length === 0) {
+      progressId = `cr_${userId}_${Date.now()}`;
+      await pool.query(
+        'INSERT INTO code_realm_progress (id, user_id, current_chapter, current_step, completed_keywords, completed_chapters, badges, total_xp, reward_claimed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, FALSE)',
+        [progressId, userId, current_chapter || 0, current_step || 'intro', keywordsJson, chaptersJson, badgesJson, total_xp || 0]
+      );
+    } else {
+      progressId = existing[0].id;
+      shouldGrantReward = !existing[0].reward_claimed && current_step === 'completed';
+      await pool.query(
+        'UPDATE code_realm_progress SET current_chapter = ?, current_step = ?, completed_keywords = ?, completed_chapters = ?, badges = ?, total_xp = ? WHERE user_id = ?',
+        [current_chapter || 0, current_step || 'intro', keywordsJson, chaptersJson, badgesJson, total_xp || 0, userId]
+      );
+    }
+
+    let rewardResult = null;
+    if (shouldGrantReward && progressId) {
+      rewardResult = await grantCodeRealmReward(userId, progressId);
+    }
+
+    const [rows] = await pool.query(
+      'SELECT * FROM code_realm_progress WHERE user_id = ?',
+      [userId]
+    );
+    res.json({ data: parseRealmProgress(rows[0]), reward: rewardResult, error: null });
+  } catch (error) {
+    console.error('保存代码秘境进度失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 教师端查看全部学生通关进度
+app.get('/api/code-realm/teacher/progress', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT crp.user_id, p.real_name, p.username, c.name AS class_name,
+              crp.current_chapter, crp.current_step, crp.total_xp,
+              crp.completed_keywords, crp.completed_chapters, crp.badges,
+              crp.reward_claimed, crp.updated_at
+       FROM code_realm_progress crp
+       LEFT JOIN profiles p ON p.id = crp.user_id
+       LEFT JOIN classes c ON c.id = p.class_id
+       ORDER BY crp.total_xp DESC, crp.updated_at DESC`
+    );
+    const data = rows.map(r => parseRealmProgress(r));
+    res.json({ data, error: null });
+  } catch (error) {
+    console.error('获取代码秘境进度列表失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// ==================== 代码秘境 API 结束 ====================
+
+// ==================== 键盘星域 API 开始 ====================
+
+// 读取键盘星域应用配置（桌子数量、赛制、速度密度、门槛、门票、奖励等）
+async function getTypingConfig() {
+  try {
+    const [rows] = await pool.query('SELECT config FROM apps WHERE id = ?', ['app_typing_trainer']);
+    if (rows.length === 0) return { tables: 6, difficulty: 'standard', duel_seconds: 180, duel_speed: 85, duel_spawn_ms: 1800, duel_step_pct: 20, duel_min_wpm: 40, duel_entry_fee: 0, rewards: [] };
+    let config;
+    try {
+      config = typeof rows[0].config === 'string' ? JSON.parse(rows[0].config) : rows[0].config;
+    } catch {
+      config = {};
+    }
+    // 奖励档位：补充装备名称/图标
+    let rewards = Array.isArray(config.rewards) ? config.rewards : [];
+    rewards = rewards.map(r => ({ ...r }));
+    const eqIds = rewards.map(r => r.equipment_id).filter(Boolean);
+    let eqMap = {};
+    if (eqIds.length > 0) {
+      try {
+        const [eqs] = await pool.query('SELECT id, name, icon FROM equipments WHERE id IN (?)', [eqIds]);
+        eqs.forEach(e => { eqMap[e.id] = e; });
+      } catch { /* 忽略装备查询失败 */ }
+    }
+    rewards = rewards.map(r => ({
+      score: parseInt(r.score) || 0,
+      points: parseInt(r.points) || 0,
+      equipment_id: r.equipment_id || '',
+      equipment_name: eqMap[r.equipment_id]?.name || '',
+      equipment_icon: eqMap[r.equipment_id]?.icon || '',
+    }));
+    return {
+      tables: parseInt(config.tables) || 6,
+      difficulty: config.difficulty || 'standard',
+      duel_seconds: parseInt(config.duel_seconds) || 180,
+      duel_speed: parseInt(config.duel_speed) || 85,
+      duel_spawn_ms: parseInt(config.duel_spawn_ms) || 1800,
+      duel_step_pct: parseInt(config.duel_step_pct) || 20,
+      duel_min_wpm: parseInt(config.duel_min_wpm) || 0,
+      duel_entry_fee: parseInt(config.duel_entry_fee) || 0,
+      single_reward: {
+        wpm: parseInt(config.single_reward?.wpm) || 0,
+        points: parseInt(config.single_reward?.points) || 0,
+      },
+      rewards,
+    };
+  } catch {
+    return { tables: 6, difficulty: 'standard', duel_seconds: 180, duel_speed: 85, duel_spawn_ms: 1800, duel_step_pct: 20, duel_min_wpm: 40, duel_entry_fee: 0, single_reward: { wpm: 0, points: 0 }, rewards: [] };
+  }
+}
+
+// 键盘星域配置（前端双人对战/入座门槛使用）
+app.get('/api/typing/config', authenticate, async (req, res) => {
+  try {
+    const config = await getTypingConfig();
+    res.json({ data: config, error: null });
+  } catch (error) {
+    console.error('获取键盘星域配置失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 确保 table_no 1..N 的房间记录存在（按桌号复用），返回带玩家信息的房间列表
+async function ensureTypingRooms() {
+  const { tables } = await getTypingConfig();
+  for (let i = 1; i <= tables; i++) {
+    await pool.query(
+      `INSERT IGNORE INTO typing_rooms (id, table_no, status, seed, p1_score, p2_score, p1_hp, p2_hp, chapter, winner, last_seen)
+       VALUES (?, ?, 'idle', '', 0, 0, 3, 3, 1, '', NOW())`,
+      [`typing_room_${i}`, i]
+    );
+  }
+  const [rows] = await pool.query(
+    `SELECT r.id, r.table_no, r.status, r.seed, r.p1_score, r.p2_score, r.p1_hp, r.p2_hp, r.chapter,
+            r.winner, r.start_at, r.ended_at, r.last_seen,
+            r.player1_id, r.player2_id, p1.real_name AS p1_name, p2.real_name AS p2_name,
+            p1.username AS p1_username, p2.username AS p2_username,
+            (r.password IS NOT NULL AND r.password != '') AS has_password
+     FROM typing_rooms r
+     LEFT JOIN profiles p1 ON p1.id = r.player1_id
+     LEFT JOIN profiles p2 ON p2.id = r.player2_id
+     ORDER BY r.table_no ASC`
+  );
+  return rows;
+}
+
+// 双人对局奖励发放：按得分匹配奖励档位（积分/装备），幂等（结算只会执行一次）
+async function grantTypingDuelRewards(userId, score, rewards) {
+  if (!userId || score < 0) return [];
+  const granted = [];
+  for (const rw of (Array.isArray(rewards) ? rewards : [])) {
+    const threshold = parseInt(rw.score) || 0;
+    if (score < threshold) continue;
+    const points = parseInt(rw.points) || 0;
+    const equipmentId = rw.equipment_id || '';
+    try {
+      if (points > 0) {
+        // 事务保护：积分更新 + 流水记录必须原子完成
+        const conn = await pool.getConnection();
+        try {
+          await conn.beginTransaction();
+          await conn.query(
+            'UPDATE profiles SET current_points = current_points + ?, max_points = GREATEST(max_points, current_points + ?), total_points_earned = total_points_earned + ? WHERE id = ?',
+            [points, points, points, userId]
+          );
+          await conn.query(
+            'INSERT INTO point_transactions (student_id, amount, reason, source_type, created_at) VALUES (?, ?, ?, ?, NOW())',
+            [userId, points, '键盘星域双人对决奖励', 'system']
+          );
+          await conn.commit();
+        } catch (txErr) {
+          try { await conn.rollback(); } catch {}
+          throw txErr;
+        } finally {
+          conn.release();
+        }
+      }
+      if (equipmentId) {
+        const [equipments] = await pool.query(
+          'SELECT id, name, icon FROM equipments WHERE id = ? AND is_active = true',
+          [equipmentId]
+        );
+        if (equipments.length > 0) {
+          const [existing] = await pool.query(
+            'SELECT id, quantity FROM student_equipments WHERE student_id = ? AND equipment_id = ?',
+            [userId, equipmentId]
+          );
+          if (existing.length > 0) {
+            await pool.query('UPDATE student_equipments SET quantity = quantity + 1 WHERE id = ?', [existing[0].id]);
+          } else {
+            const seId = `se_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+            await pool.query(
+              'INSERT INTO student_equipments (id, student_id, equipment_id, quantity) VALUES (?, ?, ?, 1)',
+              [seId, userId, equipmentId]
+            );
+          }
+        }
+      }
+      granted.push({ score: threshold, points, equipment_id: equipmentId });
+    } catch (e) {
+      console.error('键盘星域发放奖励失败:', userId, e);
+    }
+  }
+  return granted;
+}
+
+// 结算双人对局：写战绩、清座位、归 idle、发放奖励
+// 判定规则：一方死亡 → 死亡方输；都存活/都死亡 → 按分数；分数相同 → 按 WPM；再相同 → 平局
+async function finalizeTypingDuel(room) {
+  const [rows] = await pool.query('SELECT * FROM typing_rooms WHERE id = ?', [room.id]);
+  if (rows.length === 0) return null;
+  const r = rows[0];
+  if (r.status !== 'playing') return null; // 已结算过
+
+  const p1Dead = (r.p1_hp || 0) <= 0;
+  const p2Dead = (r.p2_hp || 0) <= 0;
+  let winner = '';
+  if (p1Dead && !p2Dead) winner = 'p2';
+  else if (p2Dead && !p1Dead) winner = 'p1';
+  else if ((r.p1_score || 0) > (r.p2_score || 0)) winner = 'p1';
+  else if ((r.p2_score || 0) > (r.p1_score || 0)) winner = 'p2';
+  else if ((r.p1_wpm || 0) > (r.p2_wpm || 0)) winner = 'p1';
+  else if ((r.p2_wpm || 0) > (r.p1_wpm || 0)) winner = 'p2';
+  else winner = 'draw';
+
+  // 原子抢占结算：并发请求只有一个能成功（status 由 playing → finished）
+  // 同时重置双方 ready 状态，防止"一方返回大厅点击同意后独自开赛"的 bug
+  const [upd] = await pool.query(
+    "UPDATE typing_rooms SET status = 'finished', winner = ?, ended_at = NOW(), last_seen = NOW(), p1_ready = FALSE, p2_ready = FALSE WHERE id = ? AND status = 'playing'",
+    [winner, room.id]
+  );
+  if (upd.affectedRows === 0) return null; // 已被并发请求结算
+
+  const p1Score = r.p1_score || 0;
+  const p2Score = r.p2_score || 0;
+
+  // 写双方战绩（记录桌号，供教师端历史对战记录展示）
+  if (r.player1_id) {
+    await pool.query(
+      'INSERT INTO typing_duel_records (id, user_id, opponent_id, result, score, opponent_score, table_no) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [`td_${Date.now()}_${Math.random().toString(36).substr(2, 6)}_1`, r.player1_id, r.player2_id,
+        winner === 'p1' ? 'win' : winner === 'p2' ? 'lose' : 'draw', p1Score, p2Score, r.table_no]
+    );
+  }
+  if (r.player2_id) {
+    await pool.query(
+      'INSERT INTO typing_duel_records (id, user_id, opponent_id, result, score, opponent_score, table_no) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [`td_${Date.now()}_${Math.random().toString(36).substr(2, 6)}_2`, r.player2_id, r.player1_id,
+        winner === 'p2' ? 'win' : winner === 'p1' ? 'lose' : 'draw', p2Score, p1Score, r.table_no]
+    );
+  }
+
+  // 发放奖励（按个人得分，不区分输赢；失败不影响对局结算）
+  const typingConfig = await getTypingConfig();
+  let p1Rewards = [], p2Rewards = [];
+  if (r.player1_id) p1Rewards = await grantTypingDuelRewards(r.player1_id, p1Score, typingConfig.rewards);
+  if (r.player2_id) p2Rewards = await grantTypingDuelRewards(r.player2_id, p2Score, typingConfig.rewards);
+
+  // 注意：不再清空房间数据。原子抢占已把 status 置为 'finished' 并保留玩家/分数，
+  // 这样存活方在后续 sync/finish 时仍能读到正确结果（不会因房间被重置而误判为输）。
+  // 房间数据由 cleanupTypingRooms 在结算完成 15 秒后统一重置。
+
+  const result = { winner, p1_score: p1Score, p2_score: p2Score };
+  return result;
+}
+
+// 掉线清理：last_seen 超过 30s 视为掉线
+async function cleanupTypingRooms() {
+  const [rows] = await pool.query(
+    'SELECT * FROM typing_rooms WHERE status != ? OR player1_id IS NOT NULL OR player2_id IS NOT NULL',
+    ['idle']
+  );
+  const now = Date.now();
+  for (const r of rows) {
+    // 已结算完成的房间：15 秒后统一重置，释放座位供下一局使用
+    if (r.status === 'finished') {
+      const ended = r.ended_at ? new Date(r.ended_at).getTime() : 0;
+      if (!ended || now - ended > 15000) {
+        await pool.query(
+          `UPDATE typing_rooms SET player1_id = NULL, player2_id = NULL, p1_ready = FALSE, p2_ready = FALSE,
+           p1_score = 0, p2_score = 0, p1_hp = 3, p2_hp = 3, p1_wpm = 0, p2_wpm = 0,
+           chapter = 1, seed = '', winner = '', status = 'idle', ended_at = NULL, password = NULL
+           WHERE id = ?`,
+          [r.id]
+        );
+      }
+      continue;
+    }
+    const staleP1 = r.player1_id && (!r.last_seen || now - new Date(r.last_seen).getTime() > 30000);
+    const staleP2 = r.player2_id && (!r.last_seen || now - new Date(r.last_seen).getTime() > 30000);
+    if (r.status === 'playing') {
+      // 对局中一方掉线 → 判另一方获胜
+      if (staleP1 || staleP2) {
+        if (staleP1) await pool.query('UPDATE typing_rooms SET p1_hp = 0 WHERE id = ?', [r.id]);
+        if (staleP2) await pool.query('UPDATE typing_rooms SET p2_hp = 0 WHERE id = ?', [r.id]);
+        const [fresh] = await pool.query('SELECT * FROM typing_rooms WHERE id = ?', [r.id]);
+        if (fresh.length && fresh[0].status === 'playing') {
+          await finalizeTypingDuel(fresh[0]);
+        }
+      }
+    } else if (staleP1 || staleP2) {
+      // 非对局中：释放掉线玩家的座位
+      const sets = [];
+      if (staleP1) { sets.push('player1_id = NULL, p1_ready = FALSE'); }
+      if (staleP2) { sets.push('player2_id = NULL, p2_ready = FALSE'); }
+      if (sets.length) {
+        const remaining = staleP1 ? !!r.player2_id : !!r.player1_id;
+        sets.push('status = ?');
+        await pool.query(`UPDATE typing_rooms SET ${sets.join(', ')} WHERE id = ?`, [remaining ? 'waiting' : 'idle', r.id]);
+      }
+    }
+  }
+}
+
+// 单人成绩上报
+app.post('/api/typing/scores', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const rawScore = req.body?.score;
+    if (rawScore === undefined || rawScore === null || rawScore === '') {
+      return res.status(400).json({ data: null, error: '缺少得分参数' });
+    }
+    const score = parseInt(rawScore);
+    const wpm = parseInt(req.body?.wpm) || 0;
+    const words = parseInt(req.body?.words) || 0;
+    const chapter = parseInt(req.body?.chapter) || 0;
+    const accuracyRaw = parseFloat(req.body?.accuracy);
+
+    // 边界校验（合理值区间）：防止客户端随意构造异常分数污染排行榜
+    if (!Number.isFinite(score) || score < 0 || score > 100000) {
+      return res.status(400).json({ data: null, error: '得分超出合法范围 (0-100000)' });
+    }
+    if (!Number.isFinite(wpm) || wpm < 0 || wpm > 500) {
+      return res.status(400).json({ data: null, error: '打字速度超出合法范围 (0-500)' });
+    }
+    if (!Number.isFinite(words) || words < 0 || words > 10000) {
+      return res.status(400).json({ data: null, error: '击落单词数超出合法范围' });
+    }
+    if (!Number.isFinite(chapter) || chapter < 0 || chapter > 7) {
+      return res.status(400).json({ data: null, error: '关卡超出合法范围 (0-7)' });
+    }
+    if (accuracyRaw !== undefined && accuracyRaw !== null && accuracyRaw !== '') {
+      if (!Number.isFinite(accuracyRaw) || accuracyRaw < 0 || accuracyRaw > 100) {
+        return res.status(400).json({ data: null, error: '正确率超出合法范围 (0-100)' });
+      }
+    }
+    const accuracy = accuracyRaw !== undefined && accuracyRaw !== null && accuracyRaw !== '' ? accuracyRaw : 0;
+
+    const id = `ts_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
+    await pool.query(
+      'INSERT INTO typing_scores (id, user_id, score, wpm, accuracy, words, chapter) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [id, userId, score, wpm, accuracy, words, chapter]
+    );
+
+    // 单人达标奖励：速度达到配置的 WPM 门槛 → 积分 + 运指如飞荣誉 + 暴击 Buff
+    let reward = null;
+    try {
+      const typingCfg = await getTypingConfig();
+      const sr = typingCfg.single_reward || {};
+      const rewardWpm = parseInt(sr.wpm) || 0;
+      const rewardPoints = parseInt(sr.points) || 0;
+      if (rewardWpm > 0 && wpm >= rewardWpm) {
+        // 读取「运指如飞」Buff 配置（打怪系统设置）
+        const [cfgRows] = await pool.query(
+          "SELECT config_key, value FROM system_config WHERE config_key IN ('honor_typingfast_buff_crit', 'honor_typingfast_buff_minutes')"
+        );
+        const cfg = {};
+        cfgRows.forEach(row => {
+          let val = row.value;
+          if (typeof val === 'string') { try { val = JSON.parse(val); } catch {} }
+          if (typeof val === 'object' && val !== null && val.value !== undefined) val = val.value;
+          cfg[row.config_key] = val;
+        });
+        const buffCrit = parseFloat(cfg['honor_typingfast_buff_crit']) || 10;
+        const buffMinutes = parseInt(cfg['honor_typingfast_buff_minutes']) || 30;
+
+        const conn = await pool.getConnection();
+        try {
+          await conn.beginTransaction();
+          if (rewardPoints > 0) {
+            await conn.query(
+              'UPDATE profiles SET current_points = current_points + ?, max_points = GREATEST(max_points, current_points + ?), total_points_earned = total_points_earned + ? WHERE id = ?',
+              [rewardPoints, rewardPoints, rewardPoints, userId]
+            );
+            await conn.query(
+              'INSERT INTO point_transactions (student_id, amount, reason, source_type, created_at) VALUES (?, ?, ?, ?, NOW())',
+              [userId, rewardPoints, '键盘星域单人达标奖励（运指如飞）', 'system']
+            );
+          }
+          // 荣誉计数 + 暴击 Buff（同类型不叠加，仅刷新时间）
+          await grantOrRefreshBuff(conn, userId, 'typing_fast_crit', buffCrit, buffMinutes);
+          await conn.query('UPDATE profiles SET typing_fast_times = typing_fast_times + 1 WHERE id = ?', [userId]);
+          await conn.commit();
+          reward = { wpm: rewardWpm, points: rewardPoints, buff_crit: buffCrit, buff_minutes: buffMinutes };
+        } catch (e) {
+          await conn.rollback();
+          console.error('发放键盘星域单人达标奖励失败:', e);
+        } finally {
+          conn.release();
+        }
+      }
+    } catch (e) {
+      console.error('键盘星域单人达标奖励处理异常:', e);
+    }
+
+    res.json({ data: { id, reward }, error: null });
+  } catch (error) {
+    console.error('上报键盘星域成绩失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 班级排行榜（取每名学生最高得分）
+app.get('/api/typing/leaderboard', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const [me] = await pool.query('SELECT class_id FROM profiles WHERE id = ?', [userId]);
+    const classId = me[0]?.class_id;
+    const params = [];
+    let where = '';
+    if (classId) {
+      where = 'WHERE p.class_id = ?';
+      params.push(classId);
+    }
+    const [rows] = await pool.query(
+      `SELECT t.user_id, p.real_name, p.username, p.class_id, c.name AS class_name,
+              MAX(t.wpm) AS best_wpm,
+              MAX(t.score) AS best_score,
+              MAX(t.accuracy) AS best_accuracy,
+              MAX(t.chapter) AS best_chapter
+       FROM typing_scores t
+       LEFT JOIN profiles p ON p.id = t.user_id
+       LEFT JOIN classes c ON c.id = p.class_id
+       ${where}
+       GROUP BY t.user_id, p.real_name, p.username, p.class_id, c.name
+       ORDER BY best_wpm DESC, best_score DESC, best_accuracy DESC
+       LIMIT 100`,
+      params
+    );
+    let myRank = -1;
+    rows.forEach((r, i) => { if (r.user_id === userId) myRank = i + 1; });
+    res.json({ data: { rows, my_rank: myRank, class_id: classId }, error: null });
+  } catch (error) {
+    console.error('获取键盘星域排行榜失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 大厅桌位状态
+app.get('/api/typing/rooms', authenticate, async (req, res) => {
+  try {
+    await cleanupTypingRooms();
+    const rooms = await ensureTypingRooms();
+    res.json({ data: rooms, error: null });
+  } catch (error) {
+    console.error('获取键盘星域大厅失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 坐下（首位入座可设置 4 位数字密码；若桌已有密码，次位须输入正确密码才能入座）
+app.post('/api/typing/rooms/:id/sit', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { side, password } = req.body || {};
+    if (side !== 'L' && side !== 'R') {
+      return res.status(400).json({ data: null, error: '座位参数错误' });
+    }
+    // 入座门槛：单人模式最高 WPM 需达到阈值
+    const typingConfig = await getTypingConfig();
+    const minWpm = parseInt(typingConfig.duel_min_wpm) || 0;
+    if (minWpm > 0) {
+      const [scoreRows] = await pool.query(
+        'SELECT MAX(wpm) AS best FROM typing_scores WHERE user_id = ?',
+        [userId]
+      );
+      const bestWpm = scoreRows[0]?.best || 0;
+      if (bestWpm < minWpm) {
+        return res.status(400).json({
+          data: null,
+          error: `你的单人模式最高打字速度为 ${bestWpm} WPM，未达到双人对决入座门槛（${minWpm} WPM）。先去单人游戏练练手吧！`
+        });
+      }
+    }
+    const [rows] = await pool.query('SELECT * FROM typing_rooms WHERE id = ?', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ data: null, error: '桌子不存在' });
+    const r = rows[0];
+    // 校验 4 位数字密码格式（仅当传入时）
+    const setPassword = (password !== undefined && password !== null && password !== '');
+    if (setPassword && !/^\d{4}$/.test(String(password))) {
+      return res.status(400).json({ data: null, error: '密码需为 4 位数字' });
+    }
+    const isFirstSeat = !r.player1_id && !r.player2_id;
+    const isSecondSeat = (!!r.player1_id) !== (!!r.player2_id);
+    if (isSecondSeat && r.password) {
+      // 桌已有密码：次位必须输入正确密码
+      const provided = String(password || '');
+      if (provided !== r.password) {
+        return res.status(403).json({ data: null, error: '桌子密码错误，无法入座' });
+      }
+    } else if (!isFirstSeat) {
+      // 桌已满或比赛中等其他情况，交给下方状态判断处理
+    }
+    // 是否允许设置密码：只有首位入座时允许（且当前桌无密码）
+    const canSetPassword = isFirstSeat && !r.password;
+    if (r.status === 'playing') return res.status(400).json({ data: null, error: '该桌正在比赛中' });
+    const sideCol = side === 'L' ? 'player1_id' : 'player2_id';
+    if (r[sideCol]) return res.status(409).json({ data: null, error: '该座位已被占用' });
+    const passwordVal = canSetPassword && setPassword ? String(password) : r.password || null;
+    // 原子抢占：只有座位仍为空时才能入座（防止并发竞态覆盖）
+    const [upd] = await pool.query(
+      `UPDATE typing_rooms SET ${sideCol} = ?, password = ?, last_seen = NOW(), status = 'waiting' WHERE id = ? AND ${sideCol} IS NULL`,
+      [userId, passwordVal, req.params.id]
+    );
+    if (upd.affectedRows === 0) {
+      return res.status(409).json({ data: null, error: '该座位已被其他玩家抢先入座' });
+    }
+    res.json({ data: { ok: true, hasPassword: !!passwordVal }, error: null });
+  } catch (error) {
+    console.error('键盘星域坐下失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 离开座位（对局中 = 中途退出，判对方胜）
+app.post('/api/typing/rooms/:id/leave', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const [rows] = await pool.query('SELECT * FROM typing_rooms WHERE id = ?', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ data: null, error: '桌子不存在' });
+    const r = rows[0];
+    const isP1 = r.player1_id === userId;
+    const isP2 = r.player2_id === userId;
+    if (!isP1 && !isP2) return res.json({ data: { ok: true }, error: null });
+
+    if (r.status === 'playing') {
+      // 中途退出 → 强制自己血量归 0，判对手胜
+      if (isP1) await pool.query('UPDATE typing_rooms SET p1_hp = 0 WHERE id = ?', [req.params.id]);
+      else await pool.query('UPDATE typing_rooms SET p2_hp = 0 WHERE id = ?', [req.params.id]);
+      const [fresh] = await pool.query('SELECT * FROM typing_rooms WHERE id = ?', [req.params.id]);
+      const result = await finalizeTypingDuel(fresh[0]);
+      return res.json({ data: { ok: true, result }, error: null });
+    }
+
+    const sets = [];
+    if (isP1) sets.push('player1_id = NULL, p1_ready = FALSE');
+    if (isP2) sets.push('player2_id = NULL, p2_ready = FALSE');
+    const otherOccupied = isP1 ? !!r.player2_id : !!r.player1_id;
+    if (!otherOccupied) {
+      // 桌子变空时，清空密码以便下次入座（下一个人可以重新设置或直接坐下）
+      sets.push('password = NULL');
+    }
+    sets.push('status = ?');
+    await pool.query(`UPDATE typing_rooms SET ${sets.join(', ')} WHERE id = ?`, [otherOccupied ? 'waiting' : 'idle', req.params.id]);
+    res.json({ data: { ok: true }, error: null });
+  } catch (error) {
+    console.error('键盘星域离开失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 标记同意开始（双方都同意后自动开赛，双方下一次轮询会同时进入倒计时）
+// 开赛并扣除双人门票（每局每人）：事务内锁定房间与双方积分行，
+// 门票 > 0 时余额不足则阻止开赛；已开赛（并发）则跳过不重复扣费
+async function startTypingDuel(roomId) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [rows] = await conn.query('SELECT * FROM typing_rooms WHERE id = ? FOR UPDATE', [roomId]);
+    if (rows.length === 0) { await conn.rollback(); return { ok: false, error: '桌子不存在' }; }
+    const r = rows[0];
+    if (r.status === 'playing') { await conn.rollback(); return { ok: true, alreadyStarted: true }; }
+    if (!r.player1_id || !r.player2_id || !r.p1_ready || !r.p2_ready) {
+      await conn.rollback();
+      return { ok: false, error: '双方尚未就绪' };
+    }
+
+    const typingConfig = await getTypingConfig();
+    const fee = parseInt(typingConfig.duel_entry_fee) || 0;
+
+    if (fee > 0) {
+      // 锁定双方积分行并检查余额
+      const [p1] = await conn.query('SELECT current_points FROM profiles WHERE id = ? FOR UPDATE', [r.player1_id]);
+      const [p2] = await conn.query('SELECT current_points FROM profiles WHERE id = ? FOR UPDATE', [r.player2_id]);
+      const p1pts = p1[0]?.current_points || 0;
+      const p2pts = p2[0]?.current_points || 0;
+      if (p1pts < fee || p2pts < fee) {
+        await conn.rollback();
+        return { ok: false, error: `有玩家积分不足（每局门票 ${fee} 积分），无法开始对战`, resetReady: true };
+      }
+      // 扣除双方积分并记录流水
+      await conn.query('UPDATE profiles SET current_points = GREATEST(current_points - ?, 0) WHERE id = ?', [fee, r.player1_id]);
+      await conn.query('UPDATE profiles SET current_points = GREATEST(current_points - ?, 0) WHERE id = ?', [fee, r.player2_id]);
+      await conn.query(
+        'INSERT INTO point_transactions (student_id, amount, reason, source_type, created_at) VALUES (?, ?, ?, ?, NOW())',
+        [r.player1_id, -fee, '键盘星域双人对局门票', 'system']
+      );
+      await conn.query(
+        'INSERT INTO point_transactions (student_id, amount, reason, source_type, created_at) VALUES (?, ?, ?, ?, NOW())',
+        [r.player2_id, -fee, '键盘星域双人对局门票', 'system']
+      );
+    }
+
+    // 开赛
+    const seed = Math.random().toString(36).substr(2, 10) + Date.now().toString(36);
+    await conn.query(
+      `UPDATE typing_rooms SET status = 'playing', seed = ?, p1_score = 0, p2_score = 0,
+       p1_hp = 3, p2_hp = 3, p1_wpm = 0, p2_wpm = 0, chapter = 1, winner = '', start_at = NOW(), ended_at = NULL, last_seen = NOW()
+       WHERE id = ?`,
+      [seed, roomId]
+    );
+    await conn.commit();
+    return { ok: true, seed };
+  } catch (e) {
+    try { await conn.rollback(); } catch {}
+    console.error('键盘星域开赛扣除门票失败:', e);
+    return { ok: false, error: e.message };
+  } finally {
+    conn.release();
+  }
+}
+
+app.post('/api/typing/rooms/:id/ready', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const [rows] = await pool.query('SELECT * FROM typing_rooms WHERE id = ?', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ data: null, error: '桌子不存在' });
+    const r = rows[0];
+    if (r.player1_id !== userId && r.player2_id !== userId) {
+      return res.status(400).json({ data: null, error: '你未坐在这张桌子' });
+    }
+    if (r.status === 'playing') {
+      // 已开赛，直接返回当前 seed
+      return res.json({ data: { ok: true, both_ready: true, seed: r.seed }, error: null });
+    }
+    // 标记本人同意前先校验积分是否足够支付门票
+    const typingConfig = await getTypingConfig();
+    const fee = parseInt(typingConfig.duel_entry_fee) || 0;
+    if (fee > 0) {
+      const [prows] = await pool.query('SELECT current_points FROM profiles WHERE id = ?', [userId]);
+      const pts = prows[0]?.current_points || 0;
+      if (pts < fee) {
+        return res.status(400).json({ data: null, error: `你的积分不足（每局门票 ${fee} 积分），请先赚取积分再来对战` });
+      }
+    }
+    if (r.player1_id === userId) await pool.query('UPDATE typing_rooms SET p1_ready = TRUE, last_seen = NOW() WHERE id = ?', [req.params.id]);
+    else await pool.query('UPDATE typing_rooms SET p2_ready = TRUE, last_seen = NOW() WHERE id = ?', [req.params.id]);
+    const [fresh] = await pool.query('SELECT * FROM typing_rooms WHERE id = ?', [req.params.id]);
+    const bothReady = !!(fresh[0].player1_id && fresh[0].player2_id && fresh[0].p1_ready && fresh[0].p2_ready);
+    let seed = null;
+    if (bothReady) {
+      // 后端统一开赛：生成种子、扣除门票、重置数据，双方下一帧轮询到 playing 同时进入 3 秒倒计时
+      const result = await startTypingDuel(req.params.id);
+      if (!result.ok) {
+        // 开赛失败（如余额不足），重置双方同意状态，避免卡在"等待对方"导致无法重试
+        if (result.resetReady) {
+          await pool.query('UPDATE typing_rooms SET p1_ready = FALSE, p2_ready = FALSE WHERE id = ?', [req.params.id]);
+        }
+        return res.status(400).json({ data: null, error: result.error });
+      }
+      seed = result.seed || null;
+      if (result.alreadyStarted) {
+        const [cur] = await pool.query('SELECT seed, status FROM typing_rooms WHERE id = ?', [req.params.id]);
+        seed = cur[0]?.seed || null;
+      }
+    }
+    res.json({ data: { ok: true, both_ready: bothReady, seed: bothReady ? seed : null }, error: null });
+  } catch (error) {
+    console.error('键盘星域同意失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 开始对局（双方 ready 后，任一方便可发起）
+app.post('/api/typing/rooms/:id/start', authenticate, async (req, res) => {
+  try {
+    const result = await startTypingDuel(req.params.id);
+    if (!result.ok) return res.status(400).json({ data: null, error: result.error });
+    const [fresh] = await pool.query('SELECT id, seed, status FROM typing_rooms WHERE id = ?', [req.params.id]);
+    res.json({ data: fresh[0], error: null });
+  } catch (error) {
+    console.error('键盘星域开赛失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 心跳续期
+app.post('/api/typing/rooms/:id/heartbeat', authenticate, async (req, res) => {
+  try {
+    await pool.query('UPDATE typing_rooms SET last_seen = NOW() WHERE id = ?', [req.params.id]);
+    res.json({ data: { ok: true }, error: null });
+  } catch (error) {
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 对局同步（携带本人最新状态，返回对手最新状态）
+app.post('/api/typing/rooms/:id/sync', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    await pool.query('UPDATE typing_rooms SET last_seen = NOW() WHERE id = ?', [req.params.id]);
+    const { score, hp, chapter, wpm } = req.body || {};
+    const [rows] = await pool.query('SELECT * FROM typing_rooms WHERE id = ?', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ data: null, error: '桌子不存在' });
+    const r = rows[0];
+    const isP1 = r.player1_id === userId;
+    const isP2 = r.player2_id === userId;
+    if (!isP1 && !isP2) return res.status(400).json({ data: null, error: '你不在该桌' });
+
+    if (r.status === 'playing') {
+      // 防作弊：校验客户端提交值的合法范围
+      const curScore = isP1 ? r.p1_score : r.p2_score;
+      const curHp = isP1 ? r.p1_hp : r.p2_hp;
+      const curWpm = isP1 ? r.p1_wpm : r.p2_wpm;
+      const curChapter = r.chapter;
+      const safeScore = Math.max(0, Math.min(100000, parseInt(score) || curScore));
+      const safeHp = Math.max(0, Math.min(3, parseInt(hp) <= curHp ? parseInt(hp) : curHp)); // HP 只能减少
+      const safeWpm = Math.max(0, Math.min(500, parseInt(wpm) || curWpm));
+      const safeChapter = Math.max(1, Math.min(7, parseInt(chapter) || curChapter));
+      if (isP1) await pool.query('UPDATE typing_rooms SET p1_score = ?, p1_hp = ?, p1_wpm = ?, chapter = ? WHERE id = ?', [safeScore, safeHp, safeWpm, safeChapter, req.params.id]);
+      else await pool.query('UPDATE typing_rooms SET p2_score = ?, p2_hp = ?, p2_wpm = ?, chapter = ? WHERE id = ?', [safeScore, safeHp, safeWpm, safeChapter, req.params.id]);
+      const [fresh] = await pool.query('SELECT * FROM typing_rooms WHERE id = ?', [req.params.id]);
+      // 血量归零 → 判负结算
+      if (fresh[0].p1_hp <= 0 || fresh[0].p2_hp <= 0) {
+        const result = await finalizeTypingDuel(fresh[0]);
+        return res.json({
+          data: {
+            status: 'finished',
+            result,
+            me: isP1 ? fresh[0].p1_score : fresh[0].p2_score,
+            opponent: isP1 ? fresh[0].p2_score : fresh[0].p1_score,
+          },
+          error: null
+        });
+      }
+      // 时间到兜底：无死亡时按分数/WPM 判定
+      const typingConfig = await getTypingConfig();
+      const duelSeconds = parseInt(typingConfig.duel_seconds) || 180;
+      if (fresh[0].start_at) {
+        const [timeRows] = await pool.query(
+          'SELECT TIMESTAMPDIFF(SECOND, start_at, NOW()) AS elapsed FROM typing_rooms WHERE id = ?',
+          [req.params.id]
+        );
+        const elapsed = timeRows[0]?.elapsed || 0;
+        if (elapsed >= duelSeconds) {
+          const result = await finalizeTypingDuel(fresh[0]);
+          if (result) {
+            return res.json({
+              data: {
+                status: 'finished',
+                result,
+                me: isP1 ? fresh[0].p1_score : fresh[0].p2_score,
+                opponent: isP1 ? fresh[0].p2_score : fresh[0].p1_score,
+              },
+              error: null
+            });
+          }
+        }
+      }
+      return res.json({
+        data: {
+          status: 'playing',
+          me: isP1 ? fresh[0].p1_score : fresh[0].p2_score,
+          opponent: isP1 ? fresh[0].p2_score : fresh[0].p1_score,
+          opponent_hp: isP1 ? fresh[0].p2_hp : fresh[0].p1_hp,
+          chapter: fresh[0].chapter,
+        },
+        error: null
+      });
+    }
+    // 非对局中：若已结算，返回结果供存活方读取（避免其继续游戏后被误判为输）
+    if (r.status === 'finished' && r.winner) {
+      return res.json({
+        data: {
+          status: 'finished',
+          result: { winner: r.winner, p1_score: r.p1_score || 0, p2_score: r.p2_score || 0 },
+          me: isP1 ? r.p1_score || 0 : r.p2_score || 0,
+          opponent: isP1 ? r.p2_score || 0 : r.p1_score || 0,
+        },
+        error: null
+      });
+    }
+    res.json({ data: { status: r.status, winner: r.winner }, error: null });
+  } catch (error) {
+    console.error('键盘星域同步失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 结束对局（时间到/打完 5 关/主动终止 → 按当前积分判定）
+app.post('/api/typing/rooms/:id/finish', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const [rows] = await pool.query('SELECT * FROM typing_rooms WHERE id = ?', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ data: null, error: '桌子不存在' });
+    const r = rows[0];
+    if (r.status !== 'playing') {
+      // 已结算但房间数据尚存：返回真实结果，避免存活方继续游戏后误判为输
+      if (r.status === 'finished' && r.winner) {
+        return res.json({
+          data: {
+            status: 'finished',
+            result: { winner: r.winner, p1_score: r.p1_score || 0, p2_score: r.p2_score || 0 },
+          },
+          error: null
+        });
+      }
+      return res.json({ data: { status: 'finished', result: null }, error: null });
+    }
+    const { score, hp, chapter, wpm } = req.body || {};
+    // 防作弊：校验客户端提交值的合法范围
+    const isP1 = r.player1_id === userId;
+    const curScore = isP1 ? r.p1_score : r.p2_score;
+    const curHp = isP1 ? r.p1_hp : r.p2_hp;
+    const curWpm = isP1 ? r.p1_wpm : r.p2_wpm;
+    const curChapter = r.chapter;
+    const safeScore = Math.max(0, Math.min(100000, parseInt(score) || curScore));
+    const safeHp = Math.max(0, Math.min(3, parseInt(hp) <= curHp ? parseInt(hp) : curHp));
+    const safeWpm = Math.max(0, Math.min(500, parseInt(wpm) || curWpm));
+    const safeChapter = Math.max(1, Math.min(7, parseInt(chapter) || curChapter));
+    if (isP1) await pool.query('UPDATE typing_rooms SET p1_score = ?, p1_hp = ?, p1_wpm = ?, chapter = ? WHERE id = ?', [safeScore, safeHp, safeWpm, safeChapter, req.params.id]);
+    else if (r.player2_id === userId) await pool.query('UPDATE typing_rooms SET p2_score = ?, p2_hp = ?, p2_wpm = ?, chapter = ? WHERE id = ?', [safeScore, safeHp, safeWpm, safeChapter, req.params.id]);
+    const [fresh] = await pool.query('SELECT * FROM typing_rooms WHERE id = ?', [req.params.id]);
+    const result = await finalizeTypingDuel(fresh[0]);
+    res.json({ data: { status: 'finished', result }, error: null });
+  } catch (error) {
+    console.error('键盘星域结束对局失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 我的最近战绩（含累计胜负统计）
+app.get('/api/typing/duels', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const [rows] = await pool.query(
+      `SELECT d.id, d.result, d.score, d.opponent_score, d.created_at,
+              p.real_name AS opponent_name, p.username AS opponent_username
+       FROM typing_duel_records d
+       LEFT JOIN profiles p ON p.id = d.opponent_id
+       WHERE d.user_id = ?
+       ORDER BY d.created_at DESC
+       LIMIT 20`,
+      [userId]
+    );
+    // 真实累计战绩（对所有记录统计，不受 LIMIT 影响，只增不减）
+    const [totals] = await pool.query(
+      `SELECT
+         SUM(result = 'win') AS win,
+         SUM(result = 'lose') AS lose,
+         SUM(result = 'draw') AS draw
+       FROM typing_duel_records
+       WHERE user_id = ?`,
+      [userId]
+    );
+    const t = totals[0] || {};
+    res.json({
+      data: {
+        records: rows,
+        totals: { win: +t.win || 0, lose: +t.lose || 0, draw: +t.draw || 0 },
+      },
+      error: null
+    });
+  } catch (error) {
+    console.error('获取键盘星域战绩失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 教师端：查看当前对战桌状态
+app.get('/api/typing/teacher/rooms', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const rooms = await ensureTypingRooms();
+    res.json({ data: rooms, error: null });
+  } catch (error) {
+    console.error('获取键盘星域对战桌失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 教师端：历史对战记录（每局一行，从左座玩家视角展示双方；可按班级筛选）
+app.get('/api/typing/teacher/duels', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const classId = req.query.class_id;
+    let sql = `
+      SELECT d.id, d.table_no, d.created_at,
+             d.score AS p1_score, d.opponent_score AS p2_score,
+             p1.real_name AS p1_name, p1.username AS p1_username, p1.class_id AS p1_class_id,
+             p2.real_name AS p2_name, p2.username AS p2_username, p2.class_id AS p2_class_id,
+             c1.name AS p1_class_name, c2.name AS p2_class_name
+      FROM typing_duel_records d
+      LEFT JOIN profiles p1 ON p1.id = d.user_id
+      LEFT JOIN profiles p2 ON p2.id = d.opponent_id
+      LEFT JOIN classes c1 ON c1.id = p1.class_id
+      LEFT JOIN classes c2 ON c2.id = p2.class_id
+      WHERE d.id LIKE '%\\_1'
+    `;
+    const params = [];
+    if (classId) {
+      sql += ' AND (p1.class_id = ? OR p2.class_id = ?)';
+      params.push(classId, classId);
+    }
+    sql += ' ORDER BY d.created_at DESC LIMIT 300';
+    const [rows] = await pool.query(sql, params);
+    res.json({ data: rows, error: null });
+  } catch (error) {
+    console.error('获取键盘星域对战记录失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// ==================== 键盘星域 API 结束 ====================
 
 // 小智AI对话
 app.post('/api/python-magic/chat', authenticate, async (req, res) => {

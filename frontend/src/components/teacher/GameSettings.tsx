@@ -20,6 +20,8 @@ export const GameSettings: React.FC = () => {
     honor_wrong_debuff_minutes: 1,
     honor_studious_buff_crit: 8,
     honor_studious_buff_minutes: 30,
+    honor_typingfast_buff_crit: 10,
+    honor_typingfast_buff_minutes: 30,
   };
 
   const [configs, setConfigs] = useState<Record<string, any>>(defaultConfigs);
@@ -148,6 +150,8 @@ export const GameSettings: React.FC = () => {
       honor_critstreak_buff_minutes: '三连暴击Buff时长(分钟)',
       honor_studious_buff_crit: '勤学好问Buff暴击加成(%)',
       honor_studious_buff_minutes: '勤学好问Buff时长(分钟)',
+      honor_typingfast_buff_crit: '运指如飞Buff暴击加成(%)',
+      honor_typingfast_buff_minutes: '运指如飞Buff时长(分钟)',
       honor_wrong_debuff_crit: '三连错Debuff暴击降低(%)',
       honor_wrong_debuff_minutes: '三连错Debuff时长(分钟)',
     };
@@ -389,6 +393,27 @@ export const GameSettings: React.FC = () => {
                         min="1"
                         value={configs.honor_studious_buff_minutes ?? 30}
                         onChange={(e) => setConfigs({ ...configs, honor_studious_buff_minutes: parseInt(e.target.value) || 30 })}
+                        className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">运指如飞Buff暴击加成(%)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="30"
+                        value={configs.honor_typingfast_buff_crit ?? 10}
+                        onChange={(e) => setConfigs({ ...configs, honor_typingfast_buff_crit: parseFloat(e.target.value) || 0 })}
+                        className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">运指如飞Buff时长(分钟)</label>
+                      <input
+                        type="number"
+                        min="1"
+                        value={configs.honor_typingfast_buff_minutes ?? 30}
+                        onChange={(e) => setConfigs({ ...configs, honor_typingfast_buff_minutes: parseInt(e.target.value) || 30 })}
                         className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
                       />
                     </div>

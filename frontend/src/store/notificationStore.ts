@@ -43,6 +43,8 @@ interface NotificationState {
   setShowNotificationPopup: (notification: Notification | null) => void;
   clearPopup: () => void;
   checkForNewNotifications: (studentId: number | string) => Promise<void>;
+  digitalUnreadCount: number;
+  lastDigitalId: number | null;
 }
 
 export const useNotificationStore = create<NotificationState>((set, get) => ({
@@ -51,6 +53,8 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
   isLoading: false,
   showNotificationCenter: false,
   showNotificationPopup: null,
+  digitalUnreadCount: 0,
+  lastDigitalId: null,
 
   fetchNotifications: async (studentId: number | string) => {
     try {
@@ -175,7 +179,7 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
       const newCount = get().unreadCount;
       const newNotifications = get().notifications;
       
-      // 如果有新通知，显示弹窗
+      // 如果有新教师通知，显示弹窗
       if (newCount > oldCount && newNotifications.length > 0) {
         const latestNotification = newNotifications[0];
         if (!latestNotification.is_read) {
@@ -188,6 +192,57 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
             }
           }, 5000);
         }
+      }
+
+      // 同时检查学生数字消息（新消息也弹窗提示）
+      try {
+        const token = localStorage.getItem('xgpy_token');
+        if (token) {
+          const res = await fetch(`${API_CONFIG.apiUrl}/api/student/digital-messages/my`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          if (res.ok) {
+            const result = await res.json();
+            if (!result.error && result.data) {
+              const messages: any[] = result.data.messages || [];
+              const unreadDigital = messages.filter(m => !m.is_read);
+              const oldDigitalCount = get().digitalUnreadCount;
+              const oldLastId = get().lastDigitalId;
+
+              if (unreadDigital.length > 0) {
+                const latestMsg = unreadDigital[0];
+                const latestId = latestMsg.id;
+                // 有新未读（数量增加 或 最新ID 变化）
+                if (latestId !== oldLastId || unreadDigital.length > oldDigitalCount) {
+                  set({ digitalUnreadCount: unreadDigital.length, lastDigitalId: latestId });
+                  // 构造一个"虚拟通知"用于弹窗提示（用数字消息的 id 做临时标识）
+                  const popupNotif: any = {
+                    id: latestId,
+                    title: '📨 新数字消息',
+                    content: `${latestMsg.sender_real_name || latestMsg.sender_username} 发来消息：${latestMsg.content}`,
+                    teacher_name: latestMsg.sender_real_name || latestMsg.sender_username,
+                    published_at: latestMsg.sent_at,
+                    is_read: false,
+                    point_change: 0,
+                    notification_type: 'digital_message',
+                  };
+                  set({ showNotificationPopup: popupNotif });
+                  // 5秒后自动隐藏（用 notification_type 字段区分数字消息弹窗）
+                  setTimeout(() => {
+                    const cur = get().showNotificationPopup as any;
+                    if (cur?.notification_type === 'digital_message' && cur?.id === latestId) {
+                      set({ showNotificationPopup: null });
+                    }
+                  }, 5000);
+                }
+              } else {
+                set({ digitalUnreadCount: 0 });
+              }
+            }
+          }
+        }
+      } catch {
+        // 数字消息检查失败不影响主流程
       }
     } catch (error) {
       console.error('Failed to check for new notifications:', error);

@@ -98,6 +98,22 @@ async function callAiApi(config, messages) {
     throw new Error('AI API未配置，请联系管理员');
   }
   const apiUrl = `${config.ai_api_base_url}/chat/completions`;
+  
+  // 过滤消息，确保所有内容都是纯文本格式
+  const sanitizedMessages = messages.map(msg => {
+    if (typeof msg.content === 'string') {
+      return { role: msg.role, content: msg.content };
+    } else if (Array.isArray(msg.content)) {
+      const textParts = msg.content
+        .filter(item => item.type === 'text')
+        .map(item => item.text);
+      const textContent = textParts.length > 0 ? textParts.join('\n') : '';
+      return { role: msg.role, content: textContent };
+    } else {
+      return { role: msg.role, content: String(msg.content || '') };
+    }
+  });
+  
   const response = await fetch(apiUrl, {
     method: 'POST',
     headers: {
@@ -105,7 +121,7 @@ async function callAiApi(config, messages) {
       'Authorization': `Bearer ${config.ai_api_key}`,
     },
     body: JSON.stringify({
-      messages,
+      messages: sanitizedMessages,
       model: config.ai_model,
       temperature: config.ai_temperature,
       stream: false,
