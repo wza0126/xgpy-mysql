@@ -154,10 +154,16 @@ export const QuestionManager: React.FC = () => {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const [deleteTargetIds, setDeleteTargetIds] = useState<string[]>([]);
+  // AI 聚类相关状态
+  const [showClusterModal, setShowClusterModal] = useState(false);
+  const [clustering, setClustering] = useState(false);
+  const [clusterResult, setClusterResult] = useState<any>(null);
+  const [clusterStats, setClusterStats] = useState<{ total: number; clustered: number; unclustered: number; clusters: { cluster_id: string; cnt: number }[] } | null>(null);
   const { profile } = useAuth();
 
   useEffect(() => {
     fetchData();
+    fetchClusterStats();
   }, []);
 
   useEffect(() => {
@@ -401,6 +407,52 @@ export const QuestionManager: React.FC = () => {
     setBatchTagInput('');
     setSelectedIds([]);
     fetchData();
+  };
+
+  // AI 批量聚类：调用后端 /api/teacher/questions/cluster
+  // 支持两种模式：聚类选中题 / 聚类全部题（可按 type/tag 过滤）
+  const handleAiCluster = async (mode: 'selected' | 'all') => {
+    if (mode === 'selected' && selectedIds.length === 0) {
+      alert('请先选择要聚类的题目');
+      return;
+    }
+    if (!window.confirm(
+      mode === 'selected'
+        ? `确认为选中的 ${selectedIds.length} 道题执行 AI 聚类？每批 50 题，预计消耗少量 Token。`
+        : '确认为题库中所有题目执行 AI 聚类？这可能需要 1~2 分钟，预计消耗约 0.2~0.3 元 Token。'
+    )) return;
+
+    setClustering(true);
+    setClusterResult(null);
+    try {
+      const body = mode === 'selected'
+        ? { questionIds: selectedIds }
+        : { all: true, type: filters.type || undefined, tag: tagFilterEnabled ? (filters.tags[0] || undefined) : undefined };
+      const result = await backendClient.post('/api/teacher/questions/cluster', body);
+      if (result.error) throw new Error(result.error);
+      setClusterResult(result.data);
+      // 聚类后刷新题库和统计
+      await fetchData();
+      await fetchClusterStats();
+      // 清空选择
+      if (mode === 'selected') setSelectedIds([]);
+    } catch (e: any) {
+      alert('AI 聚类失败: ' + (e.message || e));
+    } finally {
+      setClustering(false);
+    }
+  };
+
+  // 拉取聚类统计
+  const fetchClusterStats = async () => {
+    try {
+      const result = await backendClient.get('/api/teacher/questions/cluster-stats');
+      if (!result.error && result.data) {
+        setClusterStats(result.data);
+      }
+    } catch {
+      // 静默失败
+    }
   };
 
   const generateAIQuestions = async () => {
@@ -1150,8 +1202,34 @@ ${isChoice ? `5. 对于选择题，answers字段必须填写选项字母（A、B
             <i className="fa-solid fa-plus mr-2"></i>
             添加题目
           </button>
+          <button
+            onClick={() => {
+              setShowClusterModal(true);
+              fetchClusterStats();
+            }}
+            className="px-4 py-2 bg-cyan-500 text-white rounded-lg hover:bg-cyan-600 transition-colors"
+            title="使用 AI 为题目自动分类知识点，便于学生端做错后推荐同类题"
+          >
+            <i className="fa-solid fa-layer-group mr-2"></i>
+            AI聚类
+          </button>
         </div>
       </div>
+
+      {/* 聚类统计概览（仅在有聚类数据时显示） */}
+      {clusterStats && clusterStats.clustered > 0 && (
+        <div className="bg-cyan-50 border border-cyan-200 rounded-lg p-3 mb-4 text-sm text-cyan-800 flex items-center gap-4 flex-wrap">
+          <i className="fa-solid fa-circle-info"></i>
+          <span>已聚类 <b>{clusterStats.clustered}</b> / {clusterStats.total} 题</span>
+          <span>剩余未聚类 <b>{clusterStats.unclustered}</b> 题</span>
+          <span>聚类簇数 <b>{clusterStats.clusters.length}</b></span>
+          {clusterStats.clusters.length > 0 && (
+            <span className="text-xs">
+              最大簇: {clusterStats.clusters[0].cluster_id} ({clusterStats.clusters[0].cnt}题)
+            </span>
+          )}
+        </div>
+      )}
 
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-4">
         <div className="flex flex-wrap gap-3 items-center">
@@ -1325,6 +1403,15 @@ ${isChoice ? `5. 对于选择题，answers字段必须填写选项字母（A、B
             >
               <i className="fa-solid fa-book mr-1"></i>
               批量知识点
+            </button>
+            <button
+              onClick={() => handleAiCluster('selected')}
+              disabled={clustering}
+              className="px-3 py-1 bg-cyan-500 text-white rounded text-sm hover:bg-cyan-600 transition-colors disabled:opacity-50"
+              title="使用 AI 为选中题自动分类知识点"
+            >
+              <i className="fa-solid fa-layer-group mr-1"></i>
+              {clustering ? '聚类中...' : 'AI聚类选中'}
             </button>
             <button
               onClick={() => {
@@ -2518,6 +2605,153 @@ ${isChoice ? `5. 对于选择题，answers字段必须填写选项字母（A、B
                   确定删除
                 </button>
               </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* AI 聚类弹窗 */}
+      <AnimatePresence>
+        {showClusterModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+            onClick={() => !clustering && setShowClusterModal(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.9 }}
+              animate={{ scale: 1 }}
+              exit={{ scale: 0.9 }}
+              className="bg-white rounded-2xl p-6 max-w-2xl w-full max-h-[80vh] overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-bold text-gray-800 flex items-center gap-2">
+                  <i className="fa-solid fa-layer-group text-cyan-500"></i>
+                  AI 题目聚类
+                </h3>
+                <button
+                  onClick={() => !clustering && setShowClusterModal(false)}
+                  disabled={clustering}
+                  className="text-gray-400 hover:text-gray-600 disabled:opacity-30"
+                >
+                  <i className="fa-solid fa-times text-xl"></i>
+                </button>
+              </div>
+
+              {/* 当前聚类状态 */}
+              {clusterStats && (
+                <div className="bg-gray-50 rounded-lg p-4 mb-4">
+                  <div className="grid grid-cols-3 gap-3 text-center mb-3">
+                    <div>
+                      <div className="text-2xl font-bold text-cyan-600">{clusterStats.clustered}</div>
+                      <div className="text-xs text-gray-500">已聚类</div>
+                    </div>
+                    <div>
+                      <div className="text-2xl font-bold text-amber-600">{clusterStats.unclustered}</div>
+                      <div className="text-xs text-gray-500">未聚类</div>
+                    </div>
+                    <div>
+                      <div className="text-2xl font-bold text-purple-600">{clusterStats.clusters.length}</div>
+                      <div className="text-xs text-gray-500">聚类簇数</div>
+                    </div>
+                  </div>
+                  {clusterStats.clusters.length > 0 && (
+                    <div>
+                      <div className="text-xs text-gray-500 mb-2">聚类分布（按题目数倒序，前 15）:</div>
+                      <div className="space-y-1 max-h-40 overflow-y-auto">
+                        {clusterStats.clusters.slice(0, 15).map((c, i) => (
+                          <div key={i} className="flex items-center justify-between text-xs">
+                            <span className="text-gray-700">{c.cluster_id}</span>
+                            <span className="bg-cyan-100 text-cyan-700 px-2 py-0.5 rounded">{c.cnt} 题</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 操作按钮 */}
+              {!clustering && !clusterResult && (
+                <div className="space-y-3">
+                  <p className="text-sm text-gray-600">
+                    AI 聚类会为每道题分配一个「一级类目/二级类目」格式的知识点路径（如「信息系统/分类与类型」），
+                    存入 cluster_id 字段。<b>此字段不暴露给学生筛选页</b>，仅用于学生做错后推荐同类题。
+                  </p>
+                  <div className="flex gap-3">
+                    <button
+                      onClick={() => handleAiCluster('selected')}
+                      disabled={selectedIds.length === 0}
+                      className="flex-1 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      <i className="fa-solid fa-check-double mr-1"></i>
+                      聚类选中题 ({selectedIds.length})
+                    </button>
+                    <button
+                      onClick={() => handleAiCluster('all')}
+                      className="flex-1 py-3 bg-cyan-500 text-white rounded-lg hover:bg-cyan-600 transition-colors"
+                    >
+                      <i className="fa-solid fa-database mr-1"></i>
+                      聚类全部题
+                    </button>
+                  </div>
+                  <p className="text-xs text-gray-400">
+                    参考 Token 消耗：1000 题约 16 万 token，DeepSeek 价格约 ¥0.25。
+                    分批 50 题/次，支持失败重试。
+                  </p>
+                </div>
+              )}
+
+              {/* 进行中 */}
+              {clustering && (
+                <div className="flex flex-col items-center justify-center py-8">
+                  <i className="fa-solid fa-circle-notch fa-spin text-4xl text-cyan-500 mb-3"></i>
+                  <p className="text-gray-700">AI 正在聚类，请稍候（每批 50 题，预计 1~2 分钟）...</p>
+                </div>
+              )}
+
+              {/* 完成结果 */}
+              {clusterResult && !clustering && (
+                <div className="space-y-3">
+                  <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                    <div className="flex items-center gap-2 text-green-700 font-medium mb-2">
+                      <i className="fa-solid fa-circle-check"></i>
+                      聚类完成
+                    </div>
+                    <div className="grid grid-cols-3 gap-3 text-center text-sm">
+                      <div>
+                        <div className="text-xl font-bold text-green-700">{clusterResult.updated}</div>
+                        <div className="text-xs text-gray-500">成功</div>
+                      </div>
+                      <div>
+                        <div className="text-xl font-bold text-amber-700">{clusterResult.skipped}</div>
+                        <div className="text-xs text-gray-500">跳过</div>
+                      </div>
+                      <div>
+                        <div className="text-xl font-bold text-gray-700">{clusterResult.total}</div>
+                        <div className="text-xs text-gray-500">总计</div>
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setClusterResult(null);
+                    }}
+                    className="w-full py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
+                  >
+                    继续聚类其他题目
+                  </button>
+                  <button
+                    onClick={() => setShowClusterModal(false)}
+                    className="w-full py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
+                  >
+                    关闭
+                  </button>
+                </div>
+              )}
             </motion.div>
           </motion.div>
         )}

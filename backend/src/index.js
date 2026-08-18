@@ -6184,6 +6184,316 @@ app.delete('/api/ai-qa-kb/:id', authenticate, async (req, res) => {
 
 // ==================== AI 答疑模块 API 结束 ====================
 
+// ==================== 题目聚类 / 同类题推荐 API 开始 ====================
+//
+// 设计：
+// 1. questions 表新增 cluster_id（知识点路径，如 "信息系统/分类与类型"）和 sub_topic（子主题）字段
+// 2. 教师在题库管理模块选取题目后调用 /api/teacher/questions/cluster 批量聚类（AI 分批处理）
+// 3. 学生练习做错后调用 /api/practice/similar/:questionId 获取同 cluster_id 的同类题
+// 4. cluster_id 不暴露给学生筛选页，仅用于内部检索
+
+const CLUSTER_SYSTEM_PROMPT = [
+  '你是江苏省高中信息技术、Python编程题库分类专家。',
+  '给定一组题目（含题干和选项），请为每道题分配一个知识点聚类ID。',
+  '聚类ID采用「一级类目/二级类目」路径格式，例如：「信息系统/分类与类型」、「Python基础/循环结构」、「数据与信息/数据编码」。',
+  '一级类目参考：信息技术基础、信息系统、Python基础、数据与信息、网络基础、人工智能、多媒体、信息安全、信息技术与社会、数据与数据结构、算法与程序设计、其他。',
+  '若题目属于同一知识点，应分配相同的 cluster_id，便于同类题推荐。',
+  '请严格输出 JSON 数组，不要包裹在代码块中，格式为：',
+  '[{"question_id":"题目ID","cluster_id":"一级/二级","sub_topic":"一句话子主题"}]',
+].join('\n');
+
+const CLUSTER_BATCH_SIZE = 50;
+
+// 把题目整理成 AI 输入文本
+function buildQuestionTextForCluster(q) {
+  let opts = q.options;
+  if (typeof opts === 'string') {
+    try { opts = JSON.parse(opts); } catch { opts = null; }
+  }
+  const optArr = Array.isArray(opts?.options) ? opts.options : (Array.isArray(opts) ? opts : []);
+  const optText = optArr.length > 0 ? optArr.map((o, i) => `${String.fromCharCode(65 + i)}. ${o}`).join(' ') : '';
+  // 去除 HTML 标签，避免干扰 AI 分类
+  const content = (q.content || '').replace(/<[^>]+>/g, '').trim();
+  return `${content}${optText ? ' ' + optText : ''}`.slice(0, 500);
+}
+
+// 解析 AI 聚类返回的 JSON 数组（容错处理）
+function parseClusterResponse(content) {
+  if (!content) return [];
+  let text = content.trim();
+  // 去掉可能的 ```json ... ``` 代码块包裹
+  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenceMatch && fenceMatch[1]) text = fenceMatch[1].trim();
+  // 提取第一个 JSON 数组
+  const arrMatch = text.match(/\[[\s\S]*\]/);
+  if (!arrMatch) return [];
+  try {
+    const parsed = JSON.parse(arrMatch[0]);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+// 教师端：批量聚类选定题目
+// 请求体：{ questionIds: string[] } 或 { all: true, type?: 'choice'|'fill_blank'|'code', tag?: string }
+// 响应：{ total, processed, updated, skipped, details: [{question_id, cluster_id, sub_topic, status}] }
+app.post('/api/teacher/questions/cluster', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { questionIds, all, type, tag } = req.body || {};
+    let ids = Array.isArray(questionIds) ? questionIds.filter(Boolean) : [];
+
+    // 模式二：聚类全部题目（可按 type/tag 过滤）
+    if (all) {
+      let sql = 'SELECT id FROM questions WHERE 1=1';
+      const params = [];
+      if (type && type !== 'all') {
+        sql += ' AND type = ?';
+        params.push(type);
+      }
+      if (tag) {
+        sql += ' AND (tags IS NOT NULL AND JSON_CONTAINS(tags, JSON_QUOTE(?)))';
+        params.push(tag);
+      }
+      const [rows] = await pool.query(sql, params);
+      ids = rows.map(r => r.id);
+    }
+
+    if (ids.length === 0) {
+      return res.status(400).json({ data: null, error: '没有可聚类的题目，请先选择题目' });
+    }
+
+    const config = await getAiQaConfig(pool);
+    if (!config.ai_api_base_url || !config.ai_api_key) {
+      return res.status(400).json({ data: null, error: 'AI 服务未配置，请联系管理员在系统设置中配置 AI API' });
+    }
+
+    // 分批处理，每批 CLUSTER_BATCH_SIZE 题
+    const batches = [];
+    for (let i = 0; i < ids.length; i += CLUSTER_BATCH_SIZE) {
+      batches.push(ids.slice(i, i + CLUSTER_BATCH_SIZE));
+    }
+
+    const details = [];
+    let updated = 0;
+    let skipped = 0;
+
+    for (let bi = 0; bi < batches.length; bi++) {
+      const batchIds = batches[bi];
+      // 取题目内容（不取 answers，避免泄露答案给 AI 没必要）
+      const [rows] = await pool.query(
+        'SELECT id, type, content, options FROM questions WHERE id IN (?)',
+        [batchIds]
+      );
+      if (rows.length === 0) continue;
+
+      // 构造 AI 输入
+      const inputList = rows.map(q => ({
+        question_id: q.id,
+        type: q.type,
+        text: buildQuestionTextForCluster(q),
+      }));
+
+      const userContent = `请为以下 ${inputList.length} 道题目分配知识点聚类。题目列表（JSON）：\n${JSON.stringify(inputList)}`;
+      let aiResponse = '';
+      try {
+        aiResponse = await callAiApi(config, [
+          { role: 'system', content: CLUSTER_SYSTEM_PROMPT },
+          { role: 'user', content: userContent },
+        ]);
+      } catch (err) {
+        console.error(`聚类批次 ${bi + 1}/${batches.length} AI 调用失败:`, err.message);
+        // AI 调用失败的批次记录为 skipped
+        for (const id of batchIds) {
+          skipped++;
+          details.push({ question_id: id, cluster_id: null, sub_topic: null, status: 'ai_error' });
+        }
+        continue;
+      }
+
+      const parsed = parseClusterResponse(aiResponse);
+      const parsedMap = new Map(parsed.map(p => [p.question_id, p]));
+
+      // 写入数据库
+      for (const id of batchIds) {
+        const p = parsedMap.get(id);
+        if (p && p.cluster_id) {
+          await pool.query(
+            'UPDATE questions SET cluster_id = ?, sub_topic = ? WHERE id = ?',
+            [String(p.cluster_id).slice(0, 100), p.sub_topic ? String(p.sub_topic).slice(0, 100) : null, id]
+          );
+          updated++;
+          details.push({ question_id: id, cluster_id: p.cluster_id, sub_topic: p.sub_topic || null, status: 'updated' });
+        } else {
+          skipped++;
+          details.push({ question_id: id, cluster_id: null, sub_topic: null, status: 'no_result' });
+        }
+      }
+    }
+
+    res.json({
+      data: {
+        total: ids.length,
+        processed: ids.length,
+        updated,
+        skipped,
+        details,
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('题目聚类失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 学生端：获取某题的同类题（用于做错后强化练习）
+// 查询逻辑（按优先级）：
+// 1. 同 cluster_id 的题（AI 聚类，最精准）
+// 2. 同 tags 中的某个细粒度标签的题（回退方案）
+// 3. 内容 LIKE 关键词的题（最后回退，关键词从题干提取）
+// 排除当前题本身，排除已掌握题（可选，由前端传 masteredIds），随机取 limit 题
+app.get('/api/practice/similar/:questionId', authenticate, async (req, res) => {
+  try {
+    const { questionId } = req.params;
+    const limit = Math.min(parseInt(req.query.limit) || 5, 20);
+    const excludeIds = Array.isArray(req.query.excludeIds) ? req.query.excludeIds : [];
+
+    // 1. 查询当前题
+    const [curRows] = await pool.query(
+      'SELECT id, type, content, options, answers, tags, cluster_id FROM questions WHERE id = ?',
+      [questionId]
+    );
+    if (curRows.length === 0) {
+      return res.status(404).json({ data: null, error: '题目不存在' });
+    }
+    const cur = curRows[0];
+
+    // 排除当前题 + 已掌握题
+    const excludeSet = new Set([questionId, ...excludeIds]);
+
+    // 候选题库：必须是练习可用题（practice_enabled）
+    const fetchQuestions = async (whereClause, params) => {
+      const allExcluded = Array.from(excludeSet);
+      let sql = `SELECT id, type, content, options, answers, tags, explanation FROM questions WHERE practice_enabled = 1 ${whereClause}`;
+      const queryParams = [...params];
+      if (allExcluded.length > 0) {
+        sql += ' AND id NOT IN (?)';
+        queryParams.push(allExcluded);
+      }
+      sql += ' ORDER BY RAND() LIMIT ?';
+      queryParams.push(limit);
+      const [rows] = await pool.query(sql, queryParams);
+      return rows;
+    };
+
+    let candidates = [];
+
+    // 优先级 1：同 cluster_id
+    if (cur.cluster_id) {
+      candidates = await fetchQuestions(' AND cluster_id = ?', [cur.cluster_id]);
+    }
+
+    // 优先级 2：同 tags（取第一个细粒度标签）
+    if (candidates.length < limit) {
+      let tags = cur.tags;
+      if (typeof tags === 'string') {
+        try { tags = JSON.parse(tags); } catch { tags = []; }
+      }
+      const tagList = Array.isArray(tags) ? tags.filter(Boolean) : [];
+      if (tagList.length > 0) {
+        const tag = tagList[0];
+        const tagRows = await fetchQuestions(
+          ' AND (tags IS NOT NULL AND JSON_CONTAINS(tags, JSON_QUOTE(?)))',
+          [tag]
+        );
+        // 合并去重
+        const existIds = new Set(candidates.map(c => c.id));
+        for (const r of tagRows) {
+          if (!existIds.has(r.id)) {
+            candidates.push(r);
+            existIds.add(r.id);
+          }
+        }
+      }
+    }
+
+    // 优先级 3：从题干提取关键词做 LIKE 检索（去掉标点和常见虚词）
+    if (candidates.length < limit) {
+      const plainContent = (cur.content || '').replace(/<[^>]+>/g, '').trim();
+      // 提取 2~6 字的中文词组（粗略，不分词）
+      const keywordMatch = plainContent.match(/[\u4e00-\u9fa5]{2,6}/g) || [];
+      // 取前 3 个关键词
+      const keywords = keywordMatch.slice(0, 3);
+      if (keywords.length > 0) {
+        let sql = `SELECT id, type, content, options, answers, tags, explanation FROM questions WHERE practice_enabled = 1 AND (`;
+        const ors = keywords.map(() => 'content LIKE ?').join(' OR ');
+        sql += ors + ')';
+        const params = keywords.map(k => `%${k}%`);
+        const allExcluded = Array.from(excludeSet).concat(candidates.map(c => c.id));
+        if (allExcluded.length > 0) {
+          sql += ' AND id NOT IN (?)';
+          params.push(allExcluded);
+        }
+        sql += ' ORDER BY RAND() LIMIT ?';
+        params.push(limit - candidates.length);
+        const [kwRows] = await pool.query(sql, params);
+        candidates = candidates.concat(kwRows);
+      }
+    }
+
+    // 截断到 limit
+    candidates = candidates.slice(0, limit);
+
+    res.json({
+      data: {
+        questions: formatRows(candidates),
+        source: cur.cluster_id ? 'cluster' : (candidates.length > 0 ? 'fallback' : 'none'),
+        cluster_id: cur.cluster_id || null,
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('获取同类题失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 教师端：查询题库聚类情况（用于题库管理模块展示统计）
+app.get('/api/teacher/questions/cluster-stats', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const [stats] = await pool.query(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN cluster_id IS NOT NULL AND cluster_id <> '' THEN 1 ELSE 0 END) AS clustered,
+        SUM(CASE WHEN cluster_id IS NULL OR cluster_id = '' THEN 1 ELSE 0 END) AS unclustered
+      FROM questions
+    `);
+    const [clusters] = await pool.query(`
+      SELECT cluster_id, COUNT(*) AS cnt
+      FROM questions
+      WHERE cluster_id IS NOT NULL AND cluster_id <> ''
+      GROUP BY cluster_id
+      ORDER BY cnt DESC
+      LIMIT 50
+    `);
+    res.json({
+      data: {
+        total: stats[0].total,
+        clustered: stats[0].clustered,
+        unclustered: stats[0].unclustered,
+        clusters,
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('获取聚类统计失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// ==================== 题目聚类 / 同类题推荐 API 结束 ====================
+
 // ==================== 心理健康模块 API 开始 ====================
 
 // 心理健康咨询系统提示词

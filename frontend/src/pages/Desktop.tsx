@@ -28,6 +28,7 @@ import { TaskCenter } from '../components/student/TaskCenter';
 import { StudentRollCall } from '../components/student/StudentRollCall';
 import { ProxyBrowser } from '../components/student/ProxyBrowser';
 import { CreativeWorkshop } from '../components/student/CreativeWorkshop';
+import { SimilarPracticeWindow } from '../components/student/SimilarPracticeWindow';
 import { RollCallApp } from '../components/teacher/RollCallApp';
 import { backendClient } from '../api/backendClient';
 import { API_CONFIG } from '../api/config';
@@ -627,6 +628,33 @@ export const Desktop: React.FC = () => {
       delete (window as any).openAiQaWindow;
     };
   }, [handleOpenAiQa]);
+
+  // 同类题强化练习窗口（独立窗口，不影响当前练习）
+  const handleOpenSimilarPractice = (initialData?: { questionId?: string }) => {
+    if (!initialData?.questionId) return;
+    openWindow({
+      id: 'app_similar_practice',
+      title: '同类题强化练习',
+      icon: 'fa-layer-group',
+      isMinimized: false,
+      isMaximized: false,
+      initialData,
+      component: <SimilarPracticeWindow
+        initialData={initialData}
+        onClose={() => {
+          const { closeWindow } = useDesktopStore.getState();
+          closeWindow('app_similar_practice');
+        }}
+      />,
+    });
+  };
+
+  useEffect(() => {
+    (window as any).openSimilarPracticeWindow = handleOpenSimilarPractice;
+    return () => {
+      delete (window as any).openSimilarPracticeWindow;
+    };
+  }, [handleOpenSimilarPractice]);
 
   const getFilteredIcons = () => {
     if (!isFocusModeActive || !focusModeConfig) {

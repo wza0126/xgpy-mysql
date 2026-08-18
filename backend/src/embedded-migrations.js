@@ -261,7 +261,7 @@ module.exports = [
     "sql": "-- 键盘星域：对战桌增加密码列（首位入座设置，次位需输入正确才能入座）\nALTER TABLE typing_rooms ADD COLUMN IF NOT EXISTS password VARCHAR(4) DEFAULT NULL COMMENT '4位数字密码，NULL表示无密码';\n\n-- 学生对学生数字消息表：每条记录保存发送人、接收人、数字内容、时间\n-- 每日限发 3 条，仅支持数字，最长 8 位\nCREATE TABLE IF NOT EXISTS student_messages (\n  id INT AUTO_INCREMENT PRIMARY KEY,\n  sender_id VARCHAR(50) NOT NULL COMMENT '发送人学生ID',\n  sender_username VARCHAR(100) NOT NULL COMMENT '发送人账号',\n  sender_real_name VARCHAR(100) COMMENT '发送人姓名',\n  receiver_id VARCHAR(50) NOT NULL COMMENT '接收人学生ID',\n  receiver_username VARCHAR(100) NOT NULL COMMENT '接收人账号',\n  receiver_real_name VARCHAR(100) COMMENT '接收人姓名',\n  content VARCHAR(8) NOT NULL COMMENT '数字内容，长度 1-8位',\n  sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '发送时间',\n  is_read BOOLEAN DEFAULT FALSE COMMENT '是否已读',\n  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n  INDEX idx_sender_id (sender_id),\n  INDEX idx_receiver_id (receiver_id),\n  INDEX idx_sent_at (sent_at)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='学生间数字消息发送记录';\n"
   },
   {
-    "version": "063_add_class_dm_enabled.sql",
-    "sql": "-- classes 表添加 数字消息开关字段\nALTER TABLE classes ADD COLUMN IF NOT EXISTS dm_enabled BOOLEAN NOT NULL DEFAULT FALSE COMMENT '是否允许该班级学生发送数字消息';\n"
+    "version": "063_add_question_cluster.sql",
+    "sql": "-- 题目聚类：为同类题推荐功能提供依据\n-- cluster_id 形如 \"信息系统/分类与类型\"，由 AI 自动聚类生成，不暴露给学生筛选页\n-- 教师可在题库管理模块批量选取题目后点击「AI 聚类」按钮生成\n\nALTER TABLE questions\n  ADD COLUMN IF NOT EXISTS cluster_id VARCHAR(100) DEFAULT NULL COMMENT 'AI 聚类ID（知识点路径，内部用）';\n\nALTER TABLE questions\n  ADD COLUMN IF NOT EXISTS sub_topic VARCHAR(100) DEFAULT NULL COMMENT 'AI 子主题（更细的知识点描述）';\n\nALTER TABLE questions\n  ADD INDEX IF NOT EXISTS idx_cluster (cluster_id);\n"
   }
 ];

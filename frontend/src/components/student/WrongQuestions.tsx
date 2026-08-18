@@ -799,6 +799,19 @@ export const WrongQuestions: React.FC = () => {
                     AI答疑
                   </button>
                 )}
+                {/* 练习同类题按钮 - 仅在提交答案后显示 */}
+                {showResult && selectedQuestion && (
+                  <button
+                    onClick={() => {
+                      (window as any).openSimilarPracticeWindow?.({ questionId: selectedQuestion.question.id });
+                    }}
+                    className="px-4 py-2 bg-cyan-500 text-white rounded-lg hover:bg-cyan-600 transition-colors flex items-center gap-2"
+                    title="基于AI聚类推荐同知识点的题目进行强化练习"
+                  >
+                    <i className="fa-solid fa-layer-group"></i>
+                    练习同类题
+                  </button>
+                )}
                 {!showResult ? (
                   <button
                     onClick={handleSubmit}
