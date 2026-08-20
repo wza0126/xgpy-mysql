@@ -263,5 +263,9 @@ module.exports = [
   {
     "version": "063_add_question_cluster.sql",
     "sql": "-- 题目聚类：为同类题推荐功能提供依据\n-- cluster_id 形如 \"信息系统/分类与类型\"，由 AI 自动聚类生成，不暴露给学生筛选页\n-- 教师可在题库管理模块批量选取题目后点击「AI 聚类」按钮生成\n\nALTER TABLE questions\n  ADD COLUMN IF NOT EXISTS cluster_id VARCHAR(100) DEFAULT NULL COMMENT 'AI 聚类ID（知识点路径，内部用）';\n\nALTER TABLE questions\n  ADD COLUMN IF NOT EXISTS sub_topic VARCHAR(100) DEFAULT NULL COMMENT 'AI 子主题（更细的知识点描述）';\n\nALTER TABLE questions\n  ADD INDEX IF NOT EXISTS idx_cluster (cluster_id);\n"
+  },
+  {
+    "version": "064_add_classes_dm_enabled.sql",
+    "sql": "-- classes 表添加数字消息开关字段\n-- 该列此前仅存在于开发库中（手动添加），未纳入迁移，导致数据库恢复/重建后缺失\nALTER TABLE classes ADD COLUMN IF NOT EXISTS dm_enabled BOOLEAN NOT NULL DEFAULT TRUE COMMENT '是否允许该班级学生使用数字消息功能';\n"
   }
 ];

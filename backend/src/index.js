@@ -6419,8 +6419,8 @@ app.get('/api/teacher/questions/cluster-status/:jobId', authenticate, requireTea
 // 学生端：获取某题的同类题（用于做错后强化练习）
 // 查询逻辑（按优先级）：
 // 1. 同 cluster_id 的题（AI 聚类，最精准）
-// 2. 同 tags 中的某个细粒度标签的题（回退方案）
-// 3. 内容 LIKE 关键词的题（最后回退，关键词从题干提取）
+// 2. 内容 LIKE 关键词的题（关键词从题干提取，2~6 字中文词组）
+// 3. 同 tags 中的某个细粒度标签的题（最后回退方案）
 // 排除当前题本身，排除已掌握题（可选，由前端传 masteredIds），随机取 limit 题
 app.get('/api/practice/similar/:questionId', authenticate, async (req, res) => {
   try {
@@ -6458,7 +6458,7 @@ app.get('/api/practice/similar/:questionId', authenticate, async (req, res) => {
 
     let candidates = [];
     // 准确追踪实际命中来源（避免簇内仅 1 题时仍标 'cluster' 的误导）
-    // cluster: 同 cluster_id 命中；tag: 同标签命中；keyword: 关键词命中；none: 全部回退失败
+    // cluster: 同 cluster_id 命中；keyword: 关键词命中；tag: 同标签命中；none: 全部回退失败
     let actualSource = 'none';
 
     // 优先级 1：同 cluster_id（簇内只有当前题时此处返回 0 条，自动进入下一级）
@@ -6467,7 +6467,39 @@ app.get('/api/practice/similar/:questionId', authenticate, async (req, res) => {
       if (candidates.length > 0) actualSource = 'cluster';
     }
 
-    // 优先级 2：同 tags（取第一个细粒度标签）
+    // 优先级 2：从题干提取关键词做 LIKE 检索（去掉标点和常见虚词）
+    if (candidates.length < limit) {
+      const plainContent = (cur.content || '').replace(/<[^>]+>/g, '').trim();
+      // 提取 2~6 字的中文词组（粗略，不分词）
+      const keywordMatch = plainContent.match(/[\u4e00-\u9fa5]{2,6}/g) || [];
+      // 取前 3 个关键词
+      const keywords = keywordMatch.slice(0, 3);
+      if (keywords.length > 0) {
+        let sql = `SELECT id, type, content, options, answers, tags, explanation FROM questions WHERE practice_enabled = 1 AND (`;
+        const ors = keywords.map(() => 'content LIKE ?').join(' OR ');
+        sql += ors + ')';
+        const params = keywords.map(k => `%${k}%`);
+        const allExcluded = Array.from(excludeSet).concat(candidates.map(c => c.id));
+        if (allExcluded.length > 0) {
+          sql += ' AND id NOT IN (?)';
+          params.push(allExcluded);
+        }
+        sql += ' ORDER BY RAND() LIMIT ?';
+        params.push(limit - candidates.length);
+        const [kwRows] = await pool.query(sql, params);
+        // 合并去重
+        const existIds = new Set(candidates.map(c => c.id));
+        for (const r of kwRows) {
+          if (!existIds.has(r.id)) {
+            candidates.push(r);
+            existIds.add(r.id);
+          }
+        }
+        if (kwRows.length > 0 && actualSource === 'none') actualSource = 'keyword';
+      }
+    }
+
+    // 优先级 3：同 tags（取第一个细粒度标签）
     if (candidates.length < limit) {
       let tags = cur.tags;
       if (typeof tags === 'string') {
@@ -6492,31 +6524,6 @@ app.get('/api/practice/similar/:questionId', authenticate, async (req, res) => {
       }
     }
 
-    // 优先级 3：从题干提取关键词做 LIKE 检索（去掉标点和常见虚词）
-    if (candidates.length < limit) {
-      const plainContent = (cur.content || '').replace(/<[^>]+>/g, '').trim();
-      // 提取 2~6 字的中文词组（粗略，不分词）
-      const keywordMatch = plainContent.match(/[\u4e00-\u9fa5]{2,6}/g) || [];
-      // 取前 3 个关键词
-      const keywords = keywordMatch.slice(0, 3);
-      if (keywords.length > 0) {
-        let sql = `SELECT id, type, content, options, answers, tags, explanation FROM questions WHERE practice_enabled = 1 AND (`;
-        const ors = keywords.map(() => 'content LIKE ?').join(' OR ');
-        sql += ors + ')';
-        const params = keywords.map(k => `%${k}%`);
-        const allExcluded = Array.from(excludeSet).concat(candidates.map(c => c.id));
-        if (allExcluded.length > 0) {
-          sql += ' AND id NOT IN (?)';
-          params.push(allExcluded);
-        }
-        sql += ' ORDER BY RAND() LIMIT ?';
-        params.push(limit - candidates.length);
-        const [kwRows] = await pool.query(sql, params);
-        candidates = candidates.concat(kwRows);
-        if (kwRows.length > 0 && actualSource === 'none') actualSource = 'keyword';
-      }
-    }
-
     // 截断到 limit
     candidates = candidates.slice(0, limit);
 
@@ -6525,8 +6532,8 @@ app.get('/api/practice/similar/:questionId', authenticate, async (req, res) => {
         questions: formatRows(candidates),
         // source 现在准确反映实际命中来源：
         //   cluster  → 同 AI 簇命中（最精准）
-        //   tag      → 簇内无其他题或未聚类，靠标签回退
-        //   keyword  → 簇/标签都没命中，靠关键词回退
+        //   keyword  → 簇内无其他题或未聚类，靠题干关键词命中
+        //   tag      → 簇/关键词都没命中，靠标签回退
         //   none     → 三级全失败（极罕见）
         source: candidates.length > 0 ? actualSource : 'none',
         cluster_id: cur.cluster_id || null,
@@ -8995,6 +9002,12 @@ async function ensureTypingRooms() {
       [`typing_room_${i}`, i]
     );
   }
+  // 配置调小后清理超出的空闲桌子：只删无人入座的房间，避免打断进行中的对局
+  await pool.query(
+    `DELETE FROM typing_rooms
+     WHERE table_no > ? AND player1_id IS NULL AND player2_id IS NULL`,
+    [tables]
+  );
   const [rows] = await pool.query(
     `SELECT r.id, r.table_no, r.status, r.seed, r.p1_score, r.p2_score, r.p1_hp, r.p2_hp, r.chapter,
             r.winner, r.start_at, r.ended_at, r.last_seen,

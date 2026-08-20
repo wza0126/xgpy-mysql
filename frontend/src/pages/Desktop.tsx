@@ -77,7 +77,7 @@ const moduleComponents: Record<string, React.ReactNode> = {
 
 export const Desktop: React.FC = () => {
   const { profile, signOut, checkAndEnforceLoginRestriction, isProxyMode, loading, proxyError } = useAuth();
-  const { windows, background, openWindow, setBackground } = useDesktopStore();
+  const { windows, background, openWindow, activateWindow, setBackground } = useDesktopStore();
   const { setActiveSkin } = useSkinStore();
   const { checkForNewNotifications } = useNotificationStore();
   const siteConfig = useSiteConfig();
@@ -571,6 +571,7 @@ export const Desktop: React.FC = () => {
       isMaximized: false,
       component: moduleComponents[icon.id],
     });
+    activateWindow(icon.id);
   };
 
   const handleOpenAiQa = async (initialData?: { question?: string }) => {
@@ -592,9 +593,9 @@ export const Desktop: React.FC = () => {
         }
       }
     }
-    
+
     const existing = windows.find(w => w.id === 'app_ai_qa');
-    
+
     openWindow({
       id: 'app_ai_qa',
       title: 'AI答疑',
@@ -602,15 +603,16 @@ export const Desktop: React.FC = () => {
       isMinimized: false,
       isMaximized: false,
       initialData,
-      component: <AiQaApp 
+      component: <AiQaApp
         initialData={initialData}
         onClose={() => {
           const { closeWindow } = useDesktopStore.getState();
           closeWindow('app_ai_qa');
-        }} 
+        }}
       />,
     });
-    
+    activateWindow('app_ai_qa');
+
     // 如果窗口已存在，通过自定义事件传递问题并自动发送
     if (existing && initialData?.question) {
       setTimeout(() => {
@@ -632,8 +634,9 @@ export const Desktop: React.FC = () => {
   // 同类题强化练习窗口（独立窗口，不影响当前练习）
   const handleOpenSimilarPractice = (initialData?: { questionId?: string }) => {
     if (!initialData?.questionId) return;
+    const windowId = 'app_similar_practice';
     openWindow({
-      id: 'app_similar_practice',
+      id: windowId,
       title: '同类题强化练习',
       icon: 'fa-layer-group',
       isMinimized: false,
@@ -643,10 +646,12 @@ export const Desktop: React.FC = () => {
         initialData={initialData}
         onClose={() => {
           const { closeWindow } = useDesktopStore.getState();
-          closeWindow('app_similar_practice');
+          closeWindow(windowId);
         }}
       />,
     });
+    // 显式激活到最前，防止父窗口（练习/错题集）的 click 冒泡导致二次抢前
+    activateWindow(windowId);
   };
 
   useEffect(() => {

@@ -374,14 +374,16 @@ export const AppCenter: React.FC = () => {
     }
     
     if (app.type === 'learning_tool' && app.id === 'app_word') {
+      const wid = `app_${app.id}`;
       openWindow({
-        id: `app_${app.id}`,
+        id: wid,
         title: app.name,
         icon: 'fa-book',
         isMinimized: false,
         isMaximized: false,
-        component: <WordApp onClose={() => closeWindow(`app_${app.id}`)} />
+        component: <WordApp onClose={() => closeWindow(wid)} />
       });
+      activateWindow(wid);
     } else if (app.type === 'ai_qa') {
       // 检查班级 AI 答疑权限
       if (profile) {
@@ -402,46 +404,52 @@ export const AppCenter: React.FC = () => {
           }
         }
       }
+      const wid = `app_${app.id}`;
       openWindow({
-        id: `app_${app.id}`,
+        id: wid,
         title: app.name,
         icon: 'fa-robot',
         isMinimized: false,
         isMaximized: false,
-        component: <AiQaApp onClose={() => closeWindow(`app_${app.id}`)} />
+        component: <AiQaApp onClose={() => closeWindow(wid)} />
       });
+      activateWindow(wid);
     } else if (app.type === 'mental_health') {
+      const wid = `app_${app.id}`;
       openWindow({
-        id: `app_${app.id}`,
+        id: wid,
         title: app.name,
         icon: 'fa-heart-pulse',
         isMinimized: false,
         isMaximized: false,
-        component: <MentalHealthApp onClose={() => closeWindow(`app_${app.id}`)} />
+        component: <MentalHealthApp onClose={() => closeWindow(wid)} />
       });
+      activateWindow(wid);
     } else if (app.type === 'external_link' && app.external_url) {
+      const wid = `app_${app.id}`;
       openWindow({
-        id: `app_${app.id}`,
+        id: wid,
         title: app.name,
         icon: 'fa-globe',
         isMinimized: false,
         isMaximized: false,
         component: (
-          <ExternalLinkApp 
-            url={app.external_url} 
-            title={app.name} 
+          <ExternalLinkApp
+            url={app.external_url}
+            title={app.name}
             useIframe={app.iframe_enabled}
-            onClose={() => closeWindow(`app_${app.id}`)} 
+            onClose={() => closeWindow(wid)}
           />
         )
       });
+      activateWindow(wid);
     } else if (app.type === 'html_page') {
       // 调试信息
       console.log('HTML Page App - app:', app);
       console.log('HTML Page App - config:', app.config);
-      
+
       let htmlContent = '<html><body><h1>内容加载中...</h1></body></html>';
-      
+
       // 尝试获取 HTML 内容
       if (app.config) {
         if (typeof app.config === 'string') {
@@ -452,23 +460,25 @@ export const AppCenter: React.FC = () => {
           htmlContent = app.config.htmlContent;
         }
       }
-      
+
       console.log('HTML Page App - final content:', htmlContent);
-      
+
+      const wid = `app_${app.id}`;
       openWindow({
-        id: `app_${app.id}`,
+        id: wid,
         title: app.name,
         icon: 'fa-code',
         isMinimized: false,
         isMaximized: false,
         component: (
-          <HtmlPageApp 
-            htmlContent={htmlContent} 
-            title={app.name} 
-            onClose={() => closeWindow(`app_${app.id}`)} 
+          <HtmlPageApp
+            htmlContent={htmlContent}
+            title={app.name}
+            onClose={() => closeWindow(wid)}
           />
         )
       });
+      activateWindow(wid);
     } else {
       alert(`应用 "${app.name}" 正在开发中...`);
     }

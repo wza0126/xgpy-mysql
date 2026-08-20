@@ -1,4 +1,4 @@
-﻿# XGPY 前后端服务一键管理脚本
+# XGPY 前后端服务一键管理脚本
 # 用法: dev.bat start|stop|restart|status|logs|open [backend|frontend|all]
 param(
     [string]$Action = "start",
@@ -13,6 +13,46 @@ $BackendPort  = 3101
 $FrontendPort = 3266
 $BackendLog   = Join-Path $BackendDir "server.log"
 $FrontendLog  = Join-Path $FrontendDir "vite.log"
+
+# 定位 node/npm：优先用 PATH，其次自动发现 mise（版本管理器）的安装目录
+# 背景：普通 cmd 窗口的 PATH 可能不含 mise 的 shims/installs，导致 'npm' 未识别
+$nodeExe = $null
+try { $nodeExe = Get-Command node -ErrorAction Stop } catch { }
+
+if (-not $nodeExe) {
+    $miseRoot = Join-Path $env:USERPROFILE "AppData\Local\mise"
+    # 1) mise shims 目录（含 node.exe / npm.exe）
+    $miseShims = Join-Path $miseRoot "shims"
+    if (Test-Path (Join-Path $miseShims "node.exe")) {
+        $env:PATH = "$miseShims;$env:PATH"
+        $nodeExe = Get-Command node -ErrorAction SilentlyContinue
+    }
+    # 2) mise installs 目录下按版本目录找最新 node.exe
+    if (-not $nodeExe) {
+        $installs = Get-ChildItem (Join-Path $miseRoot "installs\node\*\node.exe") -ErrorAction SilentlyContinue |
+            Sort-Object { [version]($_.Directory.Name -replace '[^0-9.]', '') } -Descending
+        $first = $installs | Select-Object -First 1
+        if ($first) {
+            $env:PATH = "$($first.DirectoryName);$env:PATH"
+            $nodeExe = Get-Command node -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+if ($nodeExe) {
+    $NodeDir = Split-Path -Parent $nodeExe.Source
+    if ($NodeDir -and ($env:PATH -notlike "*$NodeDir*")) {
+        $env:PATH = "$NodeDir;$env:PATH"
+    }
+    # 解析 npm 绝对路径（shims 目录下是 npm.exe，installs 目录下是 npm.cmd）
+    $npmCmd = Join-Path $NodeDir "npm.cmd"
+    if (-not (Test-Path $npmCmd)) { $npmCmd = Join-Path $NodeDir "npm.exe" }
+    if (-not (Test-Path $npmCmd)) { $npmCmd = (Get-Command npm.cmd -ErrorAction SilentlyContinue).Source }
+    if (-not $npmCmd) { $npmCmd = "npm.cmd" }
+} else {
+    Write-Warning "未找到可用的 node/npm，请安装 Node.js 或将其加入 PATH 后重试。"
+    $npmCmd = "npm.cmd"
+}
 
 function Test-PortListening([int]$Port) {
     return [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
@@ -36,7 +76,8 @@ function Start-Backend {
         return
     }
     Write-Host "[后端] 正在启动..."
-    Start-Process -FilePath "cmd.exe" -ArgumentList '/c npm run dev > server.log 2>&1' -WorkingDirectory $BackendDir -WindowStyle Hidden
+    $cmdArgs = "/c set PATH=$NodeDir;%PATH% && ""$npmCmd"" run dev > server.log 2>&1"
+    Start-Process -FilePath "cmd.exe" -ArgumentList $cmdArgs -WorkingDirectory $BackendDir -WindowStyle Hidden
     if (Wait-HttpOk "http://127.0.0.1:$BackendPort/api/health") {
         Write-Host "[后端] 启动成功  http://127.0.0.1:$BackendPort  (日志: backend\server.log)" -ForegroundColor Green
     } else {
@@ -50,7 +91,8 @@ function Start-Frontend {
         return
     }
     Write-Host "[前端] 正在启动..."
-    Start-Process -FilePath "cmd.exe" -ArgumentList '/c npm run dev > vite.log 2>&1' -WorkingDirectory $FrontendDir -WindowStyle Hidden
+    $cmdArgs = "/c set PATH=$NodeDir;%PATH% && ""$npmCmd"" run dev > vite.log 2>&1"
+    Start-Process -FilePath "cmd.exe" -ArgumentList $cmdArgs -WorkingDirectory $FrontendDir -WindowStyle Hidden
     if (Wait-HttpOk "http://127.0.0.1:$FrontendPort/") {
         Write-Host "[前端] 启动成功  http://127.0.0.1:$FrontendPort  (日志: frontend\vite.log)" -ForegroundColor Green
     } else {

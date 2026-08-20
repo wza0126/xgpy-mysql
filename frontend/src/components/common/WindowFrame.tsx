@@ -202,7 +202,11 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({
         width: isMaximized ? undefined : size.width,
         height: isMaximized ? undefined : size.height,
       }}
-      onClick={() => !isMinimized && activateWindow(id)}
+      // 用 onMouseDown 激活窗口而不是 onClick：
+      // 点击窗口内的按钮（如 AppCenter 里"代码秘境"按钮）会先触发 openWindow 把新窗口置于顶层，
+      // 紧接着 click 事件会冒泡到本根 div；若用 onClick，会让当前窗口"二次抢前"盖住刚打开的新窗口。
+      // 改为 onMouseDown 后，激活发生在 click 之前，按钮的 click 不会再让父窗口被激活到顶层。
+      onMouseDown={() => !isMinimized && activateWindow(id)}
     >
       <div
         className={`relative h-10 ${skin.titleBarClass} ${titleBarAnimClass} flex items-center justify-between px-4 select-none overflow-hidden`}

@@ -19,7 +19,24 @@ type QuestionOrder = 'random' | 'sequential';
 interface PracticeConfig {
   order: QuestionOrder;
   selectedTags: string[];
+  selectedClusterPrimary: string[];   // 选中的 AI 聚类一级类目
+  selectedClusterSecondary: string[]; // 选中的 AI 聚类二级类目（full key：一级/二级）
 }
+
+// 聚类树：一级类目 → 二级类目集合
+type ClusterTree = Record<string, Set<string>>;
+
+// 把 cluster_id 拆成 [一级, 二级]；无斜杠时二级为空串
+const splitCluster = (clusterId: string | null | undefined): [string, string] | null => {
+  if (!clusterId || typeof clusterId !== 'string') return null;
+  const trimmed = clusterId.trim();
+  if (!trimmed) return null;
+  const idx = trimmed.indexOf('/');
+  if (idx < 0) return [trimmed, ''];
+  const primary = trimmed.slice(0, idx).trim();
+  const secondary = trimmed.slice(idx + 1).trim();
+  return primary ? [primary, secondary] : null;
+};
 
 const parseJsonField = (field: any) => {
   if (typeof field === 'string') {
@@ -96,6 +113,7 @@ export const PracticeModule: React.FC = () => {
   const [questions, setQuestions] = useState<Question[]>([]);
   const [filteredQuestions, setFilteredQuestions] = useState<Question[]>([]);
   const [allTags, setAllTags] = useState<string[]>([]);
+  const [clusterTree, setClusterTree] = useState<ClusterTree>({}); // AI 聚类一级→二级集合
   const [currentIndex, setCurrentIndex] = useState(0);
   const [selectedAnswer, setSelectedAnswer] = useState('');
   const [compositeAnswers, setCompositeAnswers] = useState<Record<number, string>>({});
@@ -110,6 +128,8 @@ export const PracticeModule: React.FC = () => {
   const [config, setConfig] = useState<PracticeConfig>({
     order: 'random',
     selectedTags: [],
+    selectedClusterPrimary: [],
+    selectedClusterSecondary: [],
   });
   const [masteredQuestionIds, setMasteredQuestionIds] = useState<Set<string>>(new Set());
   const [masterThreshold, setMasterThreshold] = useState(3);
@@ -224,11 +244,25 @@ export const PracticeModule: React.FC = () => {
     if (questionsData) {
       setQuestions(questionsData as Question[]);
       const tagsSet = new Set<string>();
+      const tree: ClusterTree = {};
       questionsData.forEach((q: Question) => {
         const tags = parseTags(q.tags);
         tags.forEach((tag) => tagsSet.add(tag));
+        // 聚合 AI 聚类：cluster_id 形如 "信息系统/分类与类型"
+        const parts = splitCluster((q as any).cluster_id);
+        if (parts) {
+          const [primary, secondary] = parts;
+          if (!tree[primary]) tree[primary] = new Set();
+          if (secondary) tree[primary].add(secondary);
+        }
       });
       setAllTags(Array.from(tagsSet).sort());
+      // 转成普通对象数组，便于渲染与排序
+      const sortedTree: ClusterTree = {};
+      Object.keys(tree).sort().forEach((p) => {
+        sortedTree[p] = new Set(Array.from(tree[p]).sort());
+      });
+      setClusterTree(sortedTree);
     }
     setLoading(false);
   };
@@ -252,18 +286,41 @@ export const PracticeModule: React.FC = () => {
     }
   };
 
-  const applyFiltersAndStart = async () => {
-    const mastered = await fetchMasteredQuestions();
-    let filtered = [...questions];
-
-    filtered = filtered.filter((q) => !mastered.has(q.id));
-
+  // 应用当前筛选条件（标签 + AI 聚类一级/二级）到题目列表
+  const applyFiltersToList = (list: Question[]): Question[] => {
+    let filtered = [...list];
     if (config.selectedTags.length > 0) {
       filtered = filtered.filter((q) => {
         const tags = parseTags(q.tags);
         return config.selectedTags.some((tag) => tags.includes(tag));
       });
     }
+    if (config.selectedClusterPrimary.length > 0 || config.selectedClusterSecondary.length > 0) {
+      filtered = filtered.filter((q) => {
+        const parts = splitCluster((q as any).cluster_id);
+        if (!parts) return false;
+        const [primary, secondary] = parts;
+        // 一级类目匹配（若选了一级则必须命中）
+        const primaryHit = config.selectedClusterPrimary.length === 0 || config.selectedClusterPrimary.includes(primary);
+        if (!primaryHit) return false;
+        // 二级类目匹配：未选二级时不限（命中一级即可）；选了二级则二级必须命中且非空
+        if (config.selectedClusterSecondary.length > 0) {
+          if (!secondary) return false;
+          const fullKey = `${primary}/${secondary}`;
+          if (!config.selectedClusterSecondary.includes(fullKey)) return false;
+        }
+        return true;
+      });
+    }
+    return filtered;
+  };
+
+  const applyFiltersAndStart = async () => {
+    const mastered = await fetchMasteredQuestions();
+    let filtered = [...questions];
+
+    filtered = filtered.filter((q) => !mastered.has(q.id));
+    filtered = applyFiltersToList(filtered);
 
     if (config.order === 'random') {
       filtered = shuffleArray(filtered);
@@ -528,10 +585,37 @@ export const PracticeModule: React.FC = () => {
     }));
   };
 
+  // 切换一级类目：取消选中时同步移除其下属的所有已选二级
+  const toggleClusterPrimary = (primary: string) => {
+    setConfig((prev) => {
+      if (prev.selectedClusterPrimary.includes(primary)) {
+        const prefix = `${primary}/`;
+        return {
+          ...prev,
+          selectedClusterPrimary: prev.selectedClusterPrimary.filter((p) => p !== primary),
+          selectedClusterSecondary: prev.selectedClusterSecondary.filter((s) => !s.startsWith(prefix)),
+        };
+      }
+      return { ...prev, selectedClusterPrimary: [...prev.selectedClusterPrimary, primary] };
+    });
+  };
+
+  // 切换二级类目（full key 形如 "一级/二级"）
+  const toggleClusterSecondary = (fullKey: string) => {
+    setConfig((prev) => ({
+      ...prev,
+      selectedClusterSecondary: prev.selectedClusterSecondary.includes(fullKey)
+        ? prev.selectedClusterSecondary.filter((s) => s !== fullKey)
+        : [...prev.selectedClusterSecondary, fullKey],
+    }));
+  };
+
   const resetConfig = () => {
     setConfig({
       order: 'random',
       selectedTags: [],
+      selectedClusterPrimary: [],
+      selectedClusterSecondary: [],
     });
   };
 
@@ -607,18 +691,114 @@ export const PracticeModule: React.FC = () => {
               </div>
             )}
 
+            {Object.keys(clusterTree).length > 0 && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-3">
+                  AI 聚类筛选（可选）
+                  {(config.selectedClusterPrimary.length > 0 || config.selectedClusterSecondary.length > 0) && (
+                    <span className="ml-2 text-violet-600">
+                      已选 一级 {config.selectedClusterPrimary.length} / 二级 {config.selectedClusterSecondary.length}
+                    </span>
+                  )}
+                </label>
+
+                <div className="grid grid-cols-2 gap-3">
+                  {/* 一级类目 */}
+                  <div className="border border-gray-200 rounded-lg p-3">
+                    <div className="text-xs text-gray-500 mb-2 font-semibold">一级类目</div>
+                    <div className="flex flex-wrap gap-2">
+                      {Object.keys(clusterTree).map((primary) => {
+                        const active = config.selectedClusterPrimary.includes(primary);
+                        // 当前一级下未被一级筛选排除的二级列表（用于联动展示）
+                        const secondaryList = Array.from(clusterTree[primary] || []);
+                        const selectableSecondary = secondaryList.length;
+                        return (
+                          <button
+                            key={primary}
+                            onClick={() => toggleClusterPrimary(primary)}
+                            className={`px-3 py-1.5 rounded-full text-sm transition-all ${
+                              active
+                                ? 'bg-violet-500 text-white'
+                                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                            }`}
+                            title={selectableSecondary > 0 ? `${selectableSecondary} 个二级类目` : '仅一级'}
+                          >
+                            {primary}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* 二级类目：仅当选中一级类目时才显示对应二级，避免列表过长 */}
+                  <div className="border border-gray-200 rounded-lg p-3">
+                    <div className="text-xs text-gray-500 mb-2 font-semibold">
+                      二级类目
+                      <span className="ml-1 text-gray-400">
+                        {config.selectedClusterPrimary.length === 0
+                          ? '（请先选择一级类目）'
+                          : '（仅显示已选一级下的二级）'}
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap gap-2 min-h-[40px]">
+                      {config.selectedClusterPrimary.length === 0 ? (
+                        <span className="text-xs text-gray-400 self-center">未选一级类目</span>
+                      ) : (() => {
+                        // 二级按钮：只显示已选一级下的二级（不再回退到全部一级）
+                        const primaries = config.selectedClusterPrimary;
+                        const list: { fullKey: string; label: string }[] = [];
+                        primaries.forEach((p) => {
+                          Array.from(clusterTree[p] || []).forEach((s) => {
+                            list.push({ fullKey: `${p}/${s}`, label: s });
+                          });
+                        });
+                        if (list.length === 0) {
+                          return <span className="text-xs text-gray-400 self-center">所选一级下无二级类目</span>;
+                        }
+                        // 去重（按 fullKey）
+                        const seen = new Set<string>();
+                        return list.filter((item) => {
+                          if (seen.has(item.fullKey)) return false;
+                          seen.add(item.fullKey);
+                          return true;
+                        }).map((item) => {
+                          const active = config.selectedClusterSecondary.includes(item.fullKey);
+                          return (
+                            <button
+                              key={item.fullKey}
+                              onClick={() => toggleClusterSecondary(item.fullKey)}
+                              className={`px-3 py-1.5 rounded-full text-sm transition-all ${
+                                active
+                                  ? 'bg-indigo-500 text-white'
+                                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                              }`}
+                            >
+                              {item.label}
+                            </button>
+                          );
+                        });
+                      })()}
+                    </div>
+                  </div>
+                </div>
+
+                {(config.selectedClusterPrimary.length > 0 || config.selectedClusterSecondary.length > 0) && (
+                  <button
+                    onClick={() => setConfig({ ...config, selectedClusterPrimary: [], selectedClusterSecondary: [] })}
+                    className="mt-2 text-sm text-gray-500 hover:text-gray-700"
+                  >
+                    清除聚类筛选
+                  </button>
+                )}
+              </div>
+            )}
+
             <div className="bg-gray-50 p-4 rounded-lg">
               <p className="text-sm text-gray-600">
                 <i className="fa-solid fa-info-circle mr-1"></i>
                 当前符合条件的题目：
                 <span className="font-bold text-blue-600">
-                  {questions.filter((q) => {
-                    if (config.selectedTags.length > 0) {
-                      const tags = parseTags(q.tags);
-                      if (!config.selectedTags.some((t) => tags.includes(t))) return false;
-                    }
-                    return true;
-                  }).length}
+                  {applyFiltersToList(questions).length}
                 </span>
                 道
               </p>
@@ -633,15 +813,7 @@ export const PracticeModule: React.FC = () => {
               </button>
               <button
                 onClick={applyFiltersAndStart}
-                disabled={
-                  questions.filter((q) => {
-                    if (config.selectedTags.length > 0) {
-                      const tags = parseTags(q.tags);
-                      if (!config.selectedTags.some((t) => tags.includes(t))) return false;
-                    }
-                    return true;
-                  }).length === 0
-                }
+                disabled={applyFiltersToList(questions).length === 0}
                 className="flex-1 px-6 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
                 开始练习

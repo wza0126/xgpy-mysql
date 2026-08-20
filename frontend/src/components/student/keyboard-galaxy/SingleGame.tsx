@@ -104,11 +104,18 @@ export const SingleGame: React.FC = () => {
   const fieldHRef = useRef(FIELD_H_FALLBACK);
 
   // 指法学堂 4 章全部完成才解锁单人游戏
+  // 兼容两种存储格式：
+  //   旧：number[]           （已完成章节 id 列表）
+  //   新：{ ch: number[], sub: Record<number, number[]> }（第 2 章拆分小节后的结构）
   useEffect(() => {
     try {
       const raw = localStorage.getItem(`${LESSON_SAVE_KEY}_${user?.id || 'guest'}`);
-      const done: number[] = raw ? JSON.parse(raw) : [];
-      setLessonsDone(Array.isArray(done) && done.length >= 4 && [1, 2, 3, 4].every(id => done.includes(id)));
+      if (!raw) { setLessonsDone(false); return; }
+      const parsed = JSON.parse(raw);
+      const done: number[] = Array.isArray(parsed)
+        ? parsed
+        : (parsed && Array.isArray(parsed.ch) ? parsed.ch : []);
+      setLessonsDone(done.length >= 4 && [1, 2, 3, 4].every(id => done.includes(id)));
     } catch {
       setLessonsDone(false);
     }
