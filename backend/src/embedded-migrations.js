@@ -271,5 +271,9 @@ module.exports = [
   {
     "version": "065_add_profiles_deepseek_apikey.sql",
     "sql": "-- profiles 表添加学生自绑 DeepSeek API Key 字段\n-- 背景：DeepSeek 涨价后允许学生绑定自有 Key 创作，绑定后不扣积分、无次数限制\n-- NULL 表示走平台 Key + 扣积分流程；非 NULL 表示用学生 Key + 跳过扣分\nALTER TABLE profiles ADD COLUMN IF NOT EXISTS deepseek_api_key VARCHAR(128) NULL\n  COMMENT '学生自绑的 DeepSeek API Key（明文存储，NULL 表示走平台 Key）';\n"
+  },
+  {
+    "version": "066_add_classes_workshop_enabled.sql",
+    "sql": "-- classes 表添加工坊开关字段（与 classes.ai_enabled / dm_enabled 保持一致）\n-- 说明：教师在班级管理切换该开关时，后端同步写入 ai_workshop_config.enabled_classes JSON 数组\n-- classAllowed() 判定仍走 ai_workshop_config.enabled_classes，无需改逻辑\nALTER TABLE classes ADD COLUMN IF NOT EXISTS workshop_enabled TINYINT(1) NOT NULL DEFAULT 1\n  COMMENT '是否允许该班级使用 AI 创意工坊（1允许 0禁止），默认允许；切换时后端同步更新 ai_workshop_config.enabled_classes';\n"
   }
 ];

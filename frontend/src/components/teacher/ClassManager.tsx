@@ -59,6 +59,19 @@ export const ClassManager: React.FC = () => {
       .update({ name: editingClass.name, allow_login: editingClass.allow_login, ai_enabled: editingClass.ai_enabled, dm_enabled: editingClass.dm_enabled })
       .eq('id', editingClass.id);
 
+    // workshop_enabled 需要走工坊专用接口（同步 ai_workshop_config.enabled_classes）
+    const curEnabled = cls => cls.workshop_enabled === true || cls.workshop_enabled === 1 || cls.workshop_enabled === '1';
+    const newVal = isClassWorkshopEnabled(editingClass);
+    // 找到原始班级对象对比一下；如果变了就调同步接口
+    const original = classes.find(c => c.id === editingClass.id);
+    if (!original || curEnabled(original) !== newVal) {
+      const { error: wsError } = await backendClient.put(
+        `/api/creative-workshop/teacher/class/${editingClass.id}/workshop-enabled`,
+        { enabled: newVal }
+      );
+      if (wsError) console.error('同步班级工坊开关失败:', wsError);
+    }
+
     setEditingClass(null);
     fetchClasses();
   };
@@ -117,6 +130,23 @@ export const ClassManager: React.FC = () => {
     }
     fetchClasses();
   };
+
+  const toggleWorkshopEnabled = async (cls: Class) => {
+    const cur = cls.workshop_enabled === true || cls.workshop_enabled === 1 || cls.workshop_enabled === '1';
+    const newValue = !cur;
+    const { error } = await backendClient.put(
+      `/api/creative-workshop/teacher/class/${cls.id}/workshop-enabled`,
+      { enabled: newValue }
+    );
+    if (error) {
+      console.error('更新班级工坊开关失败:', error);
+      alert('更新失败: ' + error.message);
+    }
+    fetchClasses();
+  };
+
+  const isClassWorkshopEnabled = (cls: Class) =>
+    cls.workshop_enabled === true || cls.workshop_enabled === 1 || cls.workshop_enabled === '1';
 
   const handleDelete = async (id: string) => {
     setDeleteTargetId(id);
@@ -206,6 +236,7 @@ export const ClassManager: React.FC = () => {
               <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">允许登录</th>
               <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">AI答疑</th>
               <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">数字消息</th>
+              <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">工坊</th>
               <th className="px-6 py-4 text-left text-sm font-medium text-gray-600">创建时间</th>
               <th className="px-6 py-4 text-right text-sm font-medium text-gray-600">操作</th>
             </tr>
@@ -311,6 +342,33 @@ export const ClassManager: React.FC = () => {
                     >
                       <i className={`fa-solid mr-2 ${cls.dm_enabled ? 'fa-check' : 'fa-times'}`}></i>
                       {cls.dm_enabled ? '已启用' : '已禁用'}
+                    </button>
+                  )}
+                </td>
+                <td className="px-6 py-4 text-center">
+                  {editingClass?.id === cls.id ? (
+                    <label className="flex items-center justify-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={isClassWorkshopEnabled(editingClass!)}
+                        onChange={(e) => setEditingClass({ ...editingClass!, workshop_enabled: e.target.checked })}
+                        className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      />
+                      <span className="text-sm text-gray-600">
+                        {isClassWorkshopEnabled(editingClass!) ? '启用' : '禁用'}
+                      </span>
+                    </label>
+                  ) : (
+                    <button
+                      onClick={() => toggleWorkshopEnabled(cls)}
+                      className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
+                        isClassWorkshopEnabled(cls)
+                          ? 'bg-green-100 text-green-700 hover:bg-green-200'
+                          : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                      }`}
+                    >
+                      <i className={`fa-solid mr-2 ${isClassWorkshopEnabled(cls) ? 'fa-check' : 'fa-times'}`}></i>
+                      {isClassWorkshopEnabled(cls) ? '已启用' : '已禁用'}
                     </button>
                   )}
                 </td>

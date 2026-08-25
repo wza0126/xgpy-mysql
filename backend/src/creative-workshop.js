@@ -1079,6 +1079,65 @@ function registerCreativeWorkshop(app, pool, authenticate, requireTeacher, requi
 
   // ==================== 教师端 ====================
 
+  // 班级管理：切换单个班级的工坊开关（同步更新 classes.workshop_enabled 与 ai_workshop_config.enabled_classes）
+  app.put('/api/creative-workshop/teacher/class/:id/workshop-enabled', authenticate, requireTeacher, async (req, res) => {
+    const connection = await pool.getConnection();
+    try {
+      const classId = String(req.params.id || '');
+      const { enabled } = req.body || {};
+      const newValue = enabled === true || enabled === 1 || enabled === '1' || enabled === 'true';
+      if (!classId) return res.status(400).json({ data: null, error: '缺少班级ID' });
+
+      // 1. 校验：必须是本班教师（或管理员）才允许改
+      const [clsRows] = await connection.query('SELECT id, teacher_id, name FROM classes WHERE id = ?', [classId]);
+      if (clsRows.length === 0) return res.status(404).json({ data: null, error: '班级不存在' });
+      const cls = clsRows[0];
+      const isAdmin = (req.user || {}).role === 'admin' || (req.user || {}).role === 'super_admin';
+      if (!isAdmin && String(cls.teacher_id || '') !== String(((req.user || {}).userId || (req.user || {}).id || ''))) {
+        return res.status(403).json({ data: null, error: '只能管理自己创建的班级' });
+      }
+
+      // 2. 更新 classes 表字段
+      await connection.query('UPDATE classes SET workshop_enabled = ? WHERE id = ?', [newValue ? 1 : 0, classId]);
+
+      // 3. 同步更新 ai_workshop_config.enabled_classes（JSON 数组），保持与工坊设置全局配置一致
+      //    思路：enabled_classes = (所有 workshop_enabled=1 的班级 id) 的数组
+      //    这样工坊设置页面打开时看到的"开放班级"与班级管理保持一致
+      const [allEnabled] = await connection.query(
+        `SELECT id FROM classes WHERE COALESCE(workshop_enabled, 1) = 1`
+      );
+      const enabledIds = allEnabled.map(r => String(r.id));
+      // 如果所有班级都开启 → 存 NULL（表示全校开放，与 classAllowed() 的 "空数组=全开放" 保持一致）
+      const [allClasses] = await connection.query('SELECT COUNT(*) AS cnt FROM classes');
+      const total = Number((allClasses[0] || {}).cnt || 0);
+      const storedValue = (total > 0 && enabledIds.length === total) ? null : JSON.stringify(enabledIds);
+
+      // 保证 ai_workshop_config 有主键行存在（极少数新部署可能没行）
+      const [cfgRow] = await connection.query('SELECT id FROM ai_workshop_config WHERE id = 1');
+      if (cfgRow.length === 0) {
+        await connection.query(
+          `INSERT INTO ai_workshop_config (id, enabled, enabled_classes, created_at, updated_at) VALUES (1, 1, ?, NOW(), NOW())`,
+          [storedValue]
+        );
+      } else {
+        await connection.query(
+          `UPDATE ai_workshop_config SET enabled_classes = ?, updated_at = NOW() WHERE id = 1`,
+          [storedValue]
+        );
+      }
+
+      res.json({
+        data: { success: true, workshop_enabled: newValue, enabled_classes: storedValue === null ? null : enabledIds },
+        error: null,
+      });
+    } catch (error) {
+      console.error('切换班级工坊开关失败:', error);
+      res.status(500).json({ data: null, error: error && error.message ? error.message : String(error) });
+    } finally {
+      connection.release();
+    }
+  });
+
   // 获取/更新配置
   app.get('/api/creative-workshop/teacher/config', authenticate, requireTeacher, async (req, res) => {
     try {
@@ -1108,9 +1167,34 @@ function registerCreativeWorkshop(app, pool, authenticate, requireTeacher, requi
       if (modify_cost !== undefined) { sets.push('modify_cost = ?'); values.push(Math.max(0, Math.floor(Number(modify_cost) || 0))); }
       if (open_cost !== undefined) { sets.push('open_cost = ?'); values.push(Math.max(0, Math.floor(Number(open_cost) || 0))); }
       if (min_requirement_chars !== undefined) { sets.push('min_requirement_chars = ?'); values.push(Math.max(1, Math.floor(Number(min_requirement_chars) || 1))); }
+      let enabledIdsToStore = null;
       if (enabled_classes !== undefined) {
         const classes = Array.isArray(enabled_classes) ? enabled_classes : [];
-        sets.push('enabled_classes = ?'); values.push(JSON.stringify(classes));
+        enabledIdsToStore = classes.map(String);
+        const [allClassIds] = await pool.query('SELECT id FROM classes');
+        const total = Number((allClassIds || []).length || 0);
+        const enabledAll = total > 0 && enabledIdsToStore.length >= total;
+        sets.push('enabled_classes = ?');
+        values.push(enabledAll ? null : JSON.stringify(enabledIdsToStore));
+        // 反向同步到 classes.workshop_enabled：让班级管理页的开关显示与工坊设置页保持一致
+        try {
+          if (enabledAll) {
+            // 全校开放 → 所有班级 workshop_enabled=1
+            await pool.query('UPDATE classes SET workshop_enabled = 1 WHERE COALESCE(workshop_enabled, 1) <> 1');
+          } else {
+            // 选择了部分班级 → 选中的1，其他0
+            if (enabledIdsToStore.length > 0) {
+              const placeholders = enabledIdsToStore.map(() => '?').join(',');
+              await pool.query(`UPDATE classes SET workshop_enabled = CASE WHEN id IN (${placeholders}) THEN 1 ELSE 0 END`, [...enabledIdsToStore]);
+            } else {
+              // 空数组：全校不开放
+              await pool.query('UPDATE classes SET workshop_enabled = 0');
+            }
+          }
+        } catch (syncErr) {
+          console.error('同步 classes.workshop_enabled 失败（工坊设置反向同步）:', syncErr);
+          // 仍然返回主流程成功（因为 ai_workshop_config 已更新），只在日志报错
+        }
       }
       if (sets.length === 0) {
         return res.status(400).json({ data: null, error: '没有需要更新的配置' });
