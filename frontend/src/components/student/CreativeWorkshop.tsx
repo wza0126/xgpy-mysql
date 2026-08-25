@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useAuth } from '../../hooks/useAuth';
 import { backendClient } from '../../api/backendClient';
+import { AuthorApiKey } from './AuthorApiKey';
 
 type Tab = 'create' | 'works' | 'market' | 'myapps' | 'revenue';
 
@@ -89,6 +90,35 @@ export const CreativeWorkshop: React.FC = () => {
   const [notice, setNotice] = useState<string | null>(null);
   const [previewWork, setPreviewWork] = useState<Work | null>(null);
   const [purchasing, setPurchasing] = useState(false);
+  // 代码搜索条
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchIndex, setSearchIndex] = useState(-1);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const codeTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const previewIframeRef = useRef<HTMLIFrameElement>(null);
+  // 代码搜索匹配（随 code + searchQuery 变化重算）
+  const searchMatches = useMemo<number[]>(() => {
+    if (!searchQuery || !code) return [];
+    if (searchQuery.length > 100) return []; // 防性能
+    const q = searchQuery.toLowerCase();
+    const src = code.toLowerCase();
+    const result: number[] = [];
+    let i = 0;
+    while (i < src.length) {
+      const idx = src.indexOf(q, i);
+      if (idx < 0) break;
+      result.push(idx);
+      i = idx + (q.length || 1);
+    }
+    return result;
+  }, [code, searchQuery]);
+  const searchMatchCount = searchMatches.length;
+  const searchMatchLabel = searchMatchCount === 0
+    ? '0/0'
+    : searchIndex < 0
+    ? `${searchMatchCount}匹配`
+    : `${searchIndex + 1}/${searchMatchCount}`;
   // 应用中心筛选排序
   const [marketCategory, setMarketCategory] = useState('all');
   const [marketFeatured, setMarketFeatured] = useState(false);
@@ -137,6 +167,132 @@ export const CreativeWorkshop: React.FC = () => {
   };
 
   const refresh = useCallback(() => setRefreshKey(k => k + 1), []);
+
+  // ========== 代码搜索：定位 + 滚动 ==========
+  // 把 textarea 滚动到 [start, end) 字符位置，start 位于视图 1/3 处
+  const scrollTextareaToRange = useCallback((start: number, end: number) => {
+    const ta = codeTextareaRef.current;
+    if (!ta) return;
+    ta.focus();
+    ta.setSelectionRange(start, end);
+    // 估算行高
+    const styles = window.getComputedStyle(ta);
+    let lineHeight = parseInt(styles.lineHeight || '0', 10);
+    if (!lineHeight || Number.isNaN(lineHeight)) {
+      const fontSize = parseInt(styles.fontSize || '14', 10);
+      lineHeight = Math.round((fontSize || 14) * 1.4);
+    }
+    const lineIndex = code.slice(0, start).split('\n').length - 1;
+    const viewHeight = ta.clientHeight;
+    const desiredTop = Math.max(0, lineIndex * lineHeight - Math.floor(viewHeight / 3));
+    ta.scrollTop = desiredTop;
+  }, [code]);
+
+  // 跳到第 n 个匹配（0-based）
+  const jumpToMatch = useCallback((i: number) => {
+    if (searchMatchCount === 0) return;
+    const clamped = ((i % searchMatchCount) + searchMatchCount) % searchMatchCount;
+    const start = searchMatches[clamped];
+    const end = start + searchQuery.length;
+    setSearchIndex(clamped);
+    scrollTextareaToRange(start, end);
+  }, [searchMatchCount, searchMatches, searchQuery.length, scrollTextareaToRange]);
+
+  // 匹配数变化 / query 变化时：仅更新索引合法性，不自动滚动，不抢焦点（否则会导致输入第二个字母改到代码里）
+  // 滚动/跳转 仅在 Enter/↑/↓ 被用户显式触发时（jumpToMatch）执行
+  useEffect(() => {
+    if (searchMatchCount === 0) {
+      if (searchIndex !== -1) setSearchIndex(-1);
+      return;
+    }
+    if (searchIndex < 0 || searchIndex >= searchMatchCount) {
+      // 不主动定位到 0；只设为"待定位"状态。用户按 Enter 时自然跳到 0（因为 jumpToMatch(searchIndex+1) 当 searchIndex=-1 时到第 0 个）
+      setSearchIndex(-1);
+    }
+  }, [searchMatchCount, searchQuery, searchIndex]);
+
+  // query 改变：重置索引，保证第一次 Enter 从头开始匹配
+  useEffect(() => {
+    setSearchIndex(-1);
+    // 不滚动、不 focus：避免抢搜索框焦点导致后续输入错写入 textarea
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery]);
+
+  // 打开搜索条（聚焦搜索框）
+  const openSearch = useCallback(() => {
+    setSearchOpen(true);
+    // 下一帧聚焦，避免被后续事件抢走
+    setTimeout(() => searchInputRef.current?.focus(), 0);
+  }, []);
+
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false);
+  }, []);
+
+  // ========== 快捷键：Ctrl/Cmd+F 打开搜索，Esc 关闭，Enter/Shift+Enter 下一个/上一个 ==========
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // Ctrl/Cmd+F：只要当前组件在渲染（tab 为 create 且有编辑作品 / 任意时间均可），拦截
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        openSearch();
+        return;
+      }
+      if (e.key === 'Escape') {
+        if (searchOpen) {
+          e.preventDefault();
+          closeSearch();
+          return;
+        }
+      }
+      if (searchOpen && e.key === 'Enter' && document.activeElement === searchInputRef.current) {
+        e.preventDefault();
+        if (searchMatchCount > 0) jumpToMatch(e.shiftKey ? searchIndex - 1 : searchIndex + 1);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [searchOpen, searchMatchCount, searchIndex, jumpToMatch, openSearch, closeSearch]);
+
+  // 切换编辑作品时：关闭搜索条（旧搜索结果没意义）
+  useEffect(() => {
+    if (!editingWork) {
+      setSearchOpen(false);
+      setSearchIndex(-1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingWork?.id]);
+
+  // ========== 预览选中文字 → 定位代码 ==========
+  // 每次 iframe onLoad 后给新 contentDocument 绑定 mouseup 监听
+  const bindPreviewSelectionListener = useCallback(() => {
+    const iframe = previewIframeRef.current;
+    if (!iframe) return;
+    try {
+      const doc = iframe.contentDocument;
+      if (!doc) return;
+      const onUp = () => {
+        try {
+          const sel = iframe.contentWindow?.getSelection();
+          const text = sel?.toString()?.trim();
+          if (!text || text.length < 2) return;
+          // 精确匹配
+          const idx = code.indexOf(text);
+          if (idx < 0) return;
+          const end = idx + text.length;
+          setNotice('已定位到代码对应位置');
+          setTimeout(() => setNotice(null), 1200);
+          scrollTextareaToRange(idx, end);
+        } catch { /* iframe 同源下安全；非同源静默 */ }
+      };
+      doc.removeEventListener('mouseup', onUp as any);
+      doc.addEventListener('mouseup', onUp as any);
+    } catch { /* 跨域时 contentDocument 不可访问 */ }
+  }, [code, scrollTextareaToRange]);
+
+  const onPreviewIframeLoad = useCallback(() => {
+    bindPreviewSelectionListener();
+  }, [bindPreviewSelectionListener]);
 
   useEffect(() => {
     fetchConfig();
@@ -226,7 +382,7 @@ export const CreativeWorkshop: React.FC = () => {
         category,
       });
       if (err) throw new Error(err);
-      setNotice(`生成成功！消耗 ${data.pointsCost} 积分`);
+      setNotice(data.usedUserKey ? '生成成功！（使用你的 API Key，未扣积分）' : `生成成功！消耗 ${data.pointsCost} 积分`);
       if (profile) await refreshProfile();
       setRequirement('');
       // 打开生成的作品进行编辑
@@ -260,7 +416,7 @@ export const CreativeWorkshop: React.FC = () => {
         request: modifyRequest.trim(),
       });
       if (err) throw new Error(err);
-      setNotice(`修改成功！消耗 ${data.pointsCost} 积分`);
+      setNotice(data.usedUserKey ? '修改成功！（使用你的 API Key，未扣积分）' : `修改成功！消耗 ${data.pointsCost} 积分`);
       if (profile) await refreshProfile();
       setModifyRequest('');
       const { data: detail } = await backendClient.get(`/api/creative-workshop/my-works/${editingWork.id}`);
@@ -605,10 +761,12 @@ export const CreativeWorkshop: React.FC = () => {
                   </div>
                   <div className="flex-1 min-h-0">
                     <iframe
+                      ref={previewIframeRef}
                       title="作品预览"
                       srcDoc={code}
                       sandbox="allow-scripts allow-same-origin allow-forms"
                       className="w-full h-full border-0"
+                      onLoad={onPreviewIframeLoad}
                     />
                   </div>
                 </div>
@@ -617,8 +775,64 @@ export const CreativeWorkshop: React.FC = () => {
                   <div className="px-3 py-2 border-b border-gray-200 text-sm text-gray-600 flex items-center gap-2 shrink-0">
                     <i className="fa-solid fa-code text-indigo-500"></i>
                     代码编辑
+                    <span className="ml-auto flex items-center gap-1">
+                      {!searchOpen && (
+                        <button
+                          onClick={openSearch}
+                          className="px-2 py-1 text-xs text-gray-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-md transition-colors"
+                          title="搜索代码（Ctrl/Cmd+F）"
+                        >
+                          <i className="fa-solid fa-magnifying-glass mr-1"></i>搜索
+                        </button>
+                      )}
+                      {searchOpen && (
+                        <span className="text-xs text-gray-400">Ctrl/Cmd+F · Esc 关闭</span>
+                      )}
+                    </span>
                   </div>
+                  {/* 搜索条 */}
+                  {searchOpen && (
+                    <div className="px-3 py-2 border-b border-gray-200 flex items-center gap-2 bg-slate-50 shrink-0">
+                      <i className="fa-solid fa-magnifying-glass text-gray-400 text-xs"></i>
+                      <input
+                        ref={searchInputRef}
+                        value={searchQuery}
+                        onChange={e => setSearchQuery(e.target.value)}
+                        placeholder="搜索代码..."
+                        className="flex-1 min-w-0 px-2 py-1 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white"
+                      />
+                      <span className={`text-xs font-mono whitespace-nowrap ${
+                        searchMatchCount === 0 ? 'text-gray-400' : 'text-indigo-600'
+                      }`}>
+                        {searchMatchLabel}
+                      </span>
+                      <button
+                        onClick={() => jumpToMatch(searchIndex - 1)}
+                        disabled={searchMatchCount === 0}
+                        className="px-2 py-1 text-xs bg-white border border-gray-300 rounded-md text-gray-600 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                        title="上一个匹配（Shift+Enter）"
+                      >
+                        <i className="fa-solid fa-chevron-up"></i>
+                      </button>
+                      <button
+                        onClick={() => jumpToMatch(searchIndex + 1)}
+                        disabled={searchMatchCount === 0}
+                        className="px-2 py-1 text-xs bg-white border border-gray-300 rounded-md text-gray-600 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                        title="下一个匹配（Enter）"
+                      >
+                        <i className="fa-solid fa-chevron-down"></i>
+                      </button>
+                      <button
+                        onClick={closeSearch}
+                        className="px-2 py-1 text-xs text-gray-500 hover:text-gray-700 hover:bg-gray-200 rounded-md"
+                        title="关闭（Esc）"
+                      >
+                        <i className="fa-solid fa-xmark"></i>
+                      </button>
+                    </div>
+                  )}
                   <textarea
+                    ref={codeTextareaRef}
                     value={code}
                     onChange={e => setCode(e.target.value)}
                     spellCheck={false}
@@ -964,6 +1178,9 @@ export const CreativeWorkshop: React.FC = () => {
 
         {tab === 'revenue' && (
           <div className="space-y-4">
+            {/* DeepSeek API Key 绑定：绑了不扣积分、无次限 */}
+            <AuthorApiKey />
+
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-200">
                 <div className="text-xs text-gray-500 mb-1">累计提成收入</div>

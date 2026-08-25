@@ -93,12 +93,14 @@ async function getAIConfig(pool) {
 }
 
 // 调用 AI 生成 HTML
-async function callAiApi(config, messages) {
-  if (!config.ai_api_base_url || !config.ai_api_key) {
+// keyOverride 可选：学生自绑的 DeepSeek API Key，传入时覆盖 config.ai_api_key
+async function callAiApi(config, messages, keyOverride) {
+  const apiKey = keyOverride || config.ai_api_key;
+  if (!config.ai_api_base_url || !apiKey) {
     throw new Error('AI API未配置，请联系管理员');
   }
   const apiUrl = `${config.ai_api_base_url}/chat/completions`;
-  
+
   // 过滤消息，确保所有内容都是纯文本格式
   const sanitizedMessages = messages.map(msg => {
     if (typeof msg.content === 'string') {
@@ -113,12 +115,12 @@ async function callAiApi(config, messages) {
       return { role: msg.role, content: String(msg.content || '') };
     }
   });
-  
+
   const response = await fetch(apiUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${config.ai_api_key}`,
+      'Authorization': `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
       messages: sanitizedMessages,
@@ -130,6 +132,12 @@ async function callAiApi(config, messages) {
   if (!response.ok) {
     const errorText = await response.text();
     console.error('AI API调用失败:', response.status, errorText);
+    // 学生 key 失败时给出更友好的错误（区分 401/402/其他）
+    if (keyOverride) {
+      if (response.status === 401) throw new Error('你的 API Key 无效，请检查或重新绑定');
+      if (response.status === 402) throw new Error('你的 API Key 余额不足，请充值或解绑后用平台积分');
+      throw new Error(`你的 API Key 调用失败（${response.status}），请稍后重试或解绑`);
+    }
     throw new Error(`AI API调用失败: ${response.status}`);
   }
   const data = await response.json();
@@ -147,6 +155,35 @@ async function countDailyUsage(connection, studentId) {
     [studentId]
   );
   return rows[0]?.cnt || 0;
+}
+
+// ===== 学生自绑 DeepSeek API Key：工具函数 + 限流 =====
+// masked 规则：保留前 3 + 后 4，中间星号；长度 < 8 时全星号
+function maskApiKey(key) {
+  if (!key || typeof key !== 'string') return null;
+  if (key.length < 8) return '*'.repeat(key.length);
+  return `${key.slice(0, 3)}${'*'.repeat(Math.max(4, key.length - 7))}${key.slice(-4)}`;
+}
+
+// 简单的内存级限流：每学生每分钟最多 N 次（按 userId + 分钟桶）
+// 仅用于 /apikey/test 防薅，重启后清空（够用）
+const APIKEY_TEST_BUCKETS = new Map(); // key: `${userId}:${minuteEpoch}` → count
+function checkAndConsumeTestQuota(userId, maxPerMinute = 5) {
+  const now = Date.now();
+  const minuteBucket = Math.floor(now / 60000);
+  const key = `${userId}:${minuteBucket}`;
+  const current = APIKEY_TEST_BUCKETS.get(key) || 0;
+  if (current >= maxPerMinute) return false;
+  APIKEY_TEST_BUCKETS.set(key, current + 1);
+  // 清理超过 5 分钟的旧桶（避免内存泄漏）
+  if (APIKEY_TEST_BUCKETS.size > 1000) {
+    const cutoff = minuteBucket - 5;
+    for (const k of APIKEY_TEST_BUCKETS.keys()) {
+      const m = Number(k.split(':')[1]);
+      if (m < cutoff) APIKEY_TEST_BUCKETS.delete(k);
+    }
+  }
+  return true;
 }
 
 // 扣减积分（事务内调用）
@@ -226,7 +263,7 @@ function registerCreativeWorkshop(app, pool, authenticate, requireTeacher, requi
         return res.status(403).json({ data: null, error: 'AI创意工坊暂未开放' });
       }
       const [profileRows] = await pool.query(
-        'SELECT id, role, class_id, current_points FROM profiles WHERE id = ?',
+        'SELECT id, role, class_id, current_points, deepseek_api_key FROM profiles WHERE id = ?',
         [userId]
       );
       const profile = profileRows[0];
@@ -240,14 +277,18 @@ function registerCreativeWorkshop(app, pool, authenticate, requireTeacher, requi
       if (!requirement || requirement.trim().length < config.min_requirement_chars) {
         return res.status(400).json({ data: null, error: `需求描述至少 ${config.min_requirement_chars} 个字` });
       }
-      if (profile.current_points < config.gen_cost) {
-        return res.status(400).json({ data: null, error: `积分不足！AI生成需要 ${config.gen_cost} 积分` });
-      }
 
-      // Phase 1: 快速预检查（无锁），过滤明显超出限额的请求
-      const preUsage = await countDailyUsage(pool, userId);
-      if (preUsage >= config.daily_gen_limit) {
-        return res.status(400).json({ data: null, error: `今日生成/修改次数已达上限（${config.daily_gen_limit}次），请明天再来` });
+      // 学生绑定自有 Key 时：跳过积分检查、限额校验、扣减，且无次数限制
+      const useUserKey = !!profile.deepseek_api_key;
+      if (!useUserKey) {
+        if (profile.current_points < config.gen_cost) {
+          return res.status(400).json({ data: null, error: `积分不足！AI生成需要 ${config.gen_cost} 积分` });
+        }
+        // Phase 1: 快速预检查（无锁），过滤明显超出限额的请求
+        const preUsage = await countDailyUsage(pool, userId);
+        if (preUsage >= config.daily_gen_limit) {
+          return res.status(400).json({ data: null, error: `今日生成/修改次数已达上限（${config.daily_gen_limit}次），请明天再来` });
+        }
       }
 
       // AI 生成（慢操作，在事务外执行以避免长时间持有行锁）
@@ -255,7 +296,7 @@ function registerCreativeWorkshop(app, pool, authenticate, requireTeacher, requi
       const content = await callAiApi(aiConfig, [
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: `需求描述：${requirement}` },
-      ]);
+      ], useUserKey ? profile.deepseek_api_key : null);
       const html = extractHtml(content);
       if (!html) {
         return res.status(500).json({ data: null, error: 'AI返回内容无效，请重试' });
@@ -264,32 +305,61 @@ function registerCreativeWorkshop(app, pool, authenticate, requireTeacher, requi
       const workId = 'aw_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
       const workTitle = title.trim() || (requirement.trim().slice(0, 20) || '未命名作品');
 
-      // Phase 2: 事务内加锁重检 + 写入，防止并发超限
-      // 锁 profile 行使同一学生的所有操作串行化，countDailyUsage 读到一致的快照
-      await connection.beginTransaction();
-      await connection.query('SELECT id FROM profiles WHERE id = ? FOR UPDATE', [userId]);
-      const finalUsage = await countDailyUsage(connection, userId);
-      if (finalUsage >= config.daily_gen_limit) {
-        await connection.rollback();
-        return res.status(400).json({ data: null, error: `今日生成/修改次数已达上限（${config.daily_gen_limit}次），请明天再来` });
+      if (useUserKey) {
+        // 用学生 Key：不扣分、不限次，但仍记录作品
+        await connection.beginTransaction();
+        try {
+          const workCategory = validCategory(category) || '创意工具';
+          await connection.query(
+            `INSERT INTO ai_works (id, student_id, title, description, icon, requirement, code, price, status, category)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)`,
+            [workId, userId, workTitle, '', '🧩', requirement.trim(), html, 0, workCategory]
+          );
+          await connection.query(
+            `INSERT INTO ai_work_versions (work_id, code, note, created_at) VALUES (?, ?, ?, NOW())`,
+            [workId, html, 'AI首次生成（自有Key）']
+          );
+          await connection.commit();
+        } catch (e) {
+          await connection.rollback();
+          throw e;
+        }
+      } else {
+        // Phase 2: 事务内加锁重检 + 写入，防止并发超限
+        // 锁 profile 行使同一学生的所有操作串行化，countDailyUsage 读到一致的快照
+        await connection.beginTransaction();
+        await connection.query('SELECT id FROM profiles WHERE id = ? FOR UPDATE', [userId]);
+        const finalUsage = await countDailyUsage(connection, userId);
+        if (finalUsage >= config.daily_gen_limit) {
+          await connection.rollback();
+          return res.status(400).json({ data: null, error: `今日生成/修改次数已达上限（${config.daily_gen_limit}次），请明天再来` });
+        }
+
+        await deductPoints(connection, userId, config.gen_cost, `AI创意工坊生成（${workTitle}）`, workId);
+        const workCategory = validCategory(category) || '创意工具';
+        await connection.query(
+          `INSERT INTO ai_works (id, student_id, title, description, icon, requirement, code, price, status, category)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)`,
+          [workId, userId, workTitle, '', '🧩', requirement.trim(), html, 0, workCategory]
+        );
+        await connection.query(
+          `INSERT INTO ai_work_versions (work_id, code, note, created_at) VALUES (?, ?, ?, NOW())`,
+          [workId, html, 'AI首次生成']
+        );
+        await connection.commit();
       }
 
-      await deductPoints(connection, userId, config.gen_cost, `AI创意工坊生成（${workTitle}）`, workId);
-      const workCategory = validCategory(category) || '创意工具';
-      await connection.query(
-        `INSERT INTO ai_works (id, student_id, title, description, icon, requirement, code, price, status, category)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)`,
-        [workId, userId, workTitle, '', '🧩', requirement.trim(), html, 0, workCategory]
-      );
-      await connection.query(
-        `INSERT INTO ai_work_versions (work_id, code, note, created_at) VALUES (?, ?, ?, NOW())`,
-        [workId, html, 'AI首次生成']
-      );
-      await connection.commit();
-
-      res.json({ data: { id: workId, title: workTitle, pointsCost: config.gen_cost }, error: null });
+      res.json({
+        data: {
+          id: workId,
+          title: workTitle,
+          pointsCost: useUserKey ? 0 : config.gen_cost,
+          usedUserKey: useUserKey,
+        },
+        error: null,
+      });
     } catch (error) {
-      await connection.rollback();
+      await connection.rollback().catch(() => {});
       console.error('AI创意工坊生成失败:', error);
       res.status(500).json({ data: null, error: error.message });
     } finally {
@@ -317,15 +387,19 @@ function registerCreativeWorkshop(app, pool, authenticate, requireTeacher, requi
         return res.status(404).json({ data: null, error: '作品不存在' });
       }
       const work = workRows[0];
-      const [profileRows] = await pool.query('SELECT id, current_points FROM profiles WHERE id = ?', [userId]);
-      if (profileRows[0].current_points < config.modify_cost) {
-        return res.status(400).json({ data: null, error: `积分不足！AI修改需要 ${config.modify_cost} 积分` });
-      }
+      const [profileRows] = await pool.query('SELECT id, current_points, deepseek_api_key FROM profiles WHERE id = ?', [userId]);
 
-      // Phase 1: 快速预检查（无锁）
-      const preUsage = await countDailyUsage(pool, userId);
-      if (preUsage >= config.daily_gen_limit) {
-        return res.status(400).json({ data: null, error: `今日生成/修改次数已达上限（${config.daily_gen_limit}次），请明天再来` });
+      // 学生绑定自有 Key 时：跳过积分检查、限额校验、扣减
+      const useUserKey = !!profileRows[0].deepseek_api_key;
+      if (!useUserKey) {
+        if (profileRows[0].current_points < config.modify_cost) {
+          return res.status(400).json({ data: null, error: `积分不足！AI修改需要 ${config.modify_cost} 积分` });
+        }
+        // Phase 1: 快速预检查（无锁）
+        const preUsage = await countDailyUsage(pool, userId);
+        if (preUsage >= config.daily_gen_limit) {
+          return res.status(400).json({ data: null, error: `今日生成/修改次数已达上限（${config.daily_gen_limit}次），请明天再来` });
+        }
       }
 
       // AI 生成（慢操作，事务外执行）
@@ -333,36 +407,176 @@ function registerCreativeWorkshop(app, pool, authenticate, requireTeacher, requi
       const content = await callAiApi(aiConfig, [
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: `现有代码如下：\n\n${work.code}\n\n用户的新需求：${request}` },
-      ]);
+      ], useUserKey ? profileRows[0].deepseek_api_key : null);
       const html = extractHtml(content);
       if (!html) {
         return res.status(500).json({ data: null, error: 'AI返回内容无效，请重试' });
       }
 
-      // Phase 2: 事务内加锁重检 + 写入
-      await connection.beginTransaction();
-      await connection.query('SELECT id FROM profiles WHERE id = ? FOR UPDATE', [userId]);
-      const finalUsage = await countDailyUsage(connection, userId);
-      if (finalUsage >= config.daily_gen_limit) {
-        await connection.rollback();
-        return res.status(400).json({ data: null, error: `今日生成/修改次数已达上限（${config.daily_gen_limit}次），请明天再来` });
+      if (useUserKey) {
+        // 用学生 Key：不扣分、不限次
+        await connection.beginTransaction();
+        try {
+          await connection.query('UPDATE ai_works SET code = ?, status = IF(status = \'approved\', \'draft\', status) WHERE id = ?', [html, workId]);
+          await connection.query(
+            `INSERT INTO ai_work_versions (work_id, code, note, created_at) VALUES (?, ?, ?, NOW())`,
+            [workId, html, request.trim().slice(0, 200)]
+          );
+          await connection.commit();
+        } catch (e) {
+          await connection.rollback();
+          throw e;
+        }
+      } else {
+        // Phase 2: 事务内加锁重检 + 写入
+        await connection.beginTransaction();
+        await connection.query('SELECT id FROM profiles WHERE id = ? FOR UPDATE', [userId]);
+        const finalUsage = await countDailyUsage(connection, userId);
+        if (finalUsage >= config.daily_gen_limit) {
+          await connection.rollback();
+          return res.status(400).json({ data: null, error: `今日生成/修改次数已达上限（${config.daily_gen_limit}次），请明天再来` });
+        }
+
+        await deductPoints(connection, userId, config.modify_cost, `AI创意工坊修改（${work.title}）`, workId);
+        await connection.query('UPDATE ai_works SET code = ?, status = IF(status = \'approved\', \'draft\', status) WHERE id = ?', [html, workId]);
+        await connection.query(
+          `INSERT INTO ai_work_versions (work_id, code, note, created_at) VALUES (?, ?, ?, NOW())`,
+          [workId, html, request.trim().slice(0, 200)]
+        );
+        await connection.commit();
       }
 
-      await deductPoints(connection, userId, config.modify_cost, `AI创意工坊修改（${work.title}）`, workId);
-      await connection.query('UPDATE ai_works SET code = ?, status = IF(status = \'approved\', \'draft\', status) WHERE id = ?', [html, workId]);
-      await connection.query(
-        `INSERT INTO ai_work_versions (work_id, code, note, created_at) VALUES (?, ?, ?, NOW())`,
-        [workId, html, request.trim().slice(0, 200)]
-      );
-      await connection.commit();
-
-      res.json({ data: { id: workId, pointsCost: config.modify_cost }, error: null });
+      res.json({
+        data: {
+          id: workId,
+          pointsCost: useUserKey ? 0 : config.modify_cost,
+          usedUserKey: useUserKey,
+        },
+        error: null,
+      });
     } catch (error) {
-      await connection.rollback();
+      await connection.rollback().catch(() => {});
       console.error('AI创意工坊修改失败:', error);
       res.status(500).json({ data: null, error: error.message });
     } finally {
       connection.release();
+    }
+  });
+
+  // ===== 学生自绑 DeepSeek API Key：4 个路由 =====
+  // 全部走 authenticate + requireStudent，整组在 requireLicense(FEATURES.CREATIVE) 门后
+
+  // GET /api/creative-workshop/me/apikey - 查询当前学生绑定的 Key 状态（不返回明文）
+  app.get('/api/creative-workshop/me/apikey', authenticate, requireStudent, async (req, res) => {
+    try {
+      const [rows] = await pool.query(
+        'SELECT deepseek_api_key FROM profiles WHERE id = ?',
+        [req.user.userId]
+      );
+      const key = rows[0]?.deepseek_api_key;
+      res.json({
+        data: { has_key: !!key, masked: key ? maskApiKey(key) : null },
+        error: null,
+      });
+    } catch (error) {
+      console.error('获取 API Key 状态失败:', error);
+      res.status(500).json({ data: null, error: error.message });
+    }
+  });
+
+  // PUT /api/creative-workshop/me/apikey - 绑定/更新 Key
+  app.put('/api/creative-workshop/me/apikey', authenticate, requireStudent, async (req, res) => {
+    try {
+      const { key } = req.body || {};
+      if (!key || typeof key !== 'string') {
+        return res.status(400).json({ data: null, error: '请输入 API Key' });
+      }
+      const trimmed = key.trim();
+      if (trimmed.length < 20 || trimmed.length > 128) {
+        return res.status(400).json({ data: null, error: 'API Key 长度应为 20-128 个字符' });
+      }
+      if (!trimmed.startsWith('sk-')) {
+        return res.status(400).json({ data: null, error: 'DeepSeek API Key 以 sk- 开头' });
+      }
+      await pool.query(
+        'UPDATE profiles SET deepseek_api_key = ? WHERE id = ?',
+        [trimmed, req.user.userId]
+      );
+      res.json({
+        data: { has_key: true, masked: maskApiKey(trimmed) },
+        error: null,
+      });
+    } catch (error) {
+      console.error('绑定 API Key 失败:', error);
+      res.status(500).json({ data: null, error: error.message });
+    }
+  });
+
+  // DELETE /api/creative-workshop/me/apikey - 解绑 Key（回到平台 Key + 扣积分模式）
+  app.delete('/api/creative-workshop/me/apikey', authenticate, requireStudent, async (req, res) => {
+    try {
+      await pool.query(
+        'UPDATE profiles SET deepseek_api_key = NULL WHERE id = ?',
+        [req.user.userId]
+      );
+      res.json({ data: { has_key: false, masked: null }, error: null });
+    } catch (error) {
+      console.error('解绑 API Key 失败:', error);
+      res.status(500).json({ data: null, error: error.message });
+    }
+  });
+
+  // POST /api/creative-workshop/me/apikey/test - 测试 Key 有效性（后端代理调用 DeepSeek，学生机不直连外网）
+  app.post('/api/creative-workshop/me/apikey/test', authenticate, requireStudent, async (req, res) => {
+    try {
+      // 限流：每学生每分钟 5 次
+      if (!checkAndConsumeTestQuota(req.user.userId, 5)) {
+        return res.status(429).json({ data: { ok: false, error: '测试次数过多，请稍后再试' }, error: null });
+      }
+      const { key: providedKey } = req.body || {};
+      let keyToTest = providedKey;
+      if (!keyToTest) {
+        // 没传则用已保存的 Key
+        const [rows] = await pool.query(
+          'SELECT deepseek_api_key FROM profiles WHERE id = ?',
+          [req.user.userId]
+        );
+        keyToTest = rows[0]?.deepseek_api_key;
+      }
+      if (!keyToTest) {
+        return res.status(400).json({ data: { ok: false, error: '未绑定 Key，且未提供测试 Key' }, error: null });
+      }
+      const aiConfig = await getAIConfig(pool);
+      if (!aiConfig.ai_api_base_url) {
+        return res.status(500).json({ data: { ok: false, error: '平台未配置 API 地址' }, error: null });
+      }
+      // 用最小请求测试：messages=[{role:user, content:'ping'}], max_tokens=5
+      const apiUrl = `${aiConfig.ai_api_base_url}/chat/completions`;
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${keyToTest}`,
+        },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'ping' }],
+          model: aiConfig.ai_model,
+          max_tokens: 5,
+          stream: false,
+        }),
+      });
+      if (response.ok) {
+        res.json({ data: { ok: true }, error: null });
+      } else {
+        let error;
+        if (response.status === 401) error = 'API Key 无效，请检查或重新绑定';
+        else if (response.status === 402) error = 'API Key 余额不足，请充值或解绑后用平台积分';
+        else error = `测试失败（${response.status}）`;
+        res.json({ data: { ok: false, error }, error: null });
+      }
+    } catch (error) {
+      console.error('测试 API Key 失败:', error);
+      res.json({ data: { ok: false, error: '网络异常，请稍后重试' }, error: null });
     }
   });
 

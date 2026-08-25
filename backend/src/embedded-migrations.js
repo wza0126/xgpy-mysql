@@ -267,5 +267,9 @@ module.exports = [
   {
     "version": "064_add_classes_dm_enabled.sql",
     "sql": "-- classes 表添加数字消息开关字段\n-- 该列此前仅存在于开发库中（手动添加），未纳入迁移，导致数据库恢复/重建后缺失\nALTER TABLE classes ADD COLUMN IF NOT EXISTS dm_enabled BOOLEAN NOT NULL DEFAULT TRUE COMMENT '是否允许该班级学生使用数字消息功能';\n"
+  },
+  {
+    "version": "065_add_profiles_deepseek_apikey.sql",
+    "sql": "-- profiles 表添加学生自绑 DeepSeek API Key 字段\n-- 背景：DeepSeek 涨价后允许学生绑定自有 Key 创作，绑定后不扣积分、无次数限制\n-- NULL 表示走平台 Key + 扣积分流程；非 NULL 表示用学生 Key + 跳过扣分\nALTER TABLE profiles ADD COLUMN IF NOT EXISTS deepseek_api_key VARCHAR(128) NULL\n  COMMENT '学生自绑的 DeepSeek API Key（明文存储，NULL 表示走平台 Key）';\n"
   }
 ];
