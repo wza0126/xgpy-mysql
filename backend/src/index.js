@@ -9076,6 +9076,63 @@ app.get('/api/code-realm/teacher/progress', authenticate, requireTeacher, async 
 
 // ==================== 键盘星域 API 开始 ====================
 
+// 指法学堂：读取练习进度（按 user_id 关联，跨浏览器同步）
+// 进度结构：{ ch: number[], sub: Record<number, number[]> }
+app.get('/api/keyboard-galaxy/lesson/progress', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const [rows] = await pool.query(
+      'SELECT progress_json FROM keyboard_lesson_progress WHERE user_id = ?',
+      [userId]
+    );
+    if (rows.length === 0) {
+      return res.json({ data: { progress: { ch: [], sub: {} } }, error: null });
+    }
+    let progress = { ch: [], sub: {} };
+    try {
+      const raw = typeof rows[0].progress_json === 'string'
+        ? JSON.parse(rows[0].progress_json)
+        : rows[0].progress_json;
+      if (raw && Array.isArray(raw.ch)) {
+        progress = { ch: raw.ch, sub: raw.sub || {} };
+      }
+    } catch { /* 损坏数据返回空进度 */ }
+    res.json({ data: { progress }, error: null });
+  } catch (error) {
+    console.error('获取键盘星域指法学堂进度失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 指法学堂：保存练习进度（upsert by user_id）
+app.put('/api/keyboard-galaxy/lesson/progress', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const incoming = req.body?.progress;
+    // 服务端硬校验：ch 必须是 number[]，sub 必须是 Record<number, number[]>
+    if (!incoming || !Array.isArray(incoming.ch) || typeof incoming.sub !== 'object' || !incoming.sub) {
+      return res.status(400).json({ data: null, error: '进度数据格式非法' });
+    }
+    // 过滤非法值
+    const ch = Array.from(new Set(incoming.ch.filter(v => typeof v === 'number' && v > 0)));
+    const sub = {};
+    for (const [k, v] of Object.entries(incoming.sub)) {
+      if (Array.isArray(v)) sub[Number(k)] = Array.from(new Set(v.filter(x => typeof x === 'number' && x > 0)));
+    }
+    const progressJson = JSON.stringify({ ch, sub });
+    const progressId = `klp_${userId}_${Date.now()}`;
+    await pool.query(
+      `INSERT INTO keyboard_lesson_progress (id, user_id, progress_json) VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE progress_json = VALUES(progress_json)`,
+      [progressId, userId, progressJson]
+    );
+    res.json({ data: { progress: { ch, sub } }, error: null });
+  } catch (error) {
+    console.error('保存键盘星域指法学堂进度失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
 // 读取键盘星域应用配置（桌子数量、赛制、速度密度、门槛、门票、奖励等）
 async function getTypingConfig() {
   try {

@@ -59,6 +59,7 @@ const DELETE_STUDENT_TABLES = [
 const DELETE_STUDENT_BY_USER_ID = [
   'python_magic_progress', // user_id（魔法学院存档）
   'code_realm_progress',   // user_id（代码秘境存档）
+  'keyboard_lesson_progress', // user_id（键盘星域指法学堂进度）
   'typing_scores',         // user_id（键盘星域成绩/排行榜）
   'user_roles',            // user_id（用户角色）
   'login_sessions',        // user_id（登录会话）

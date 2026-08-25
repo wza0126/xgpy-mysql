@@ -109,10 +109,33 @@ function loadProgress(userId: string | undefined): LessonProgress {
   return { ch: [], sub: {} };
 }
 
-function saveProgress(userId: string | undefined, prog: LessonProgress) {
+function writeLocalProgress(userId: string | undefined, prog: LessonProgress) {
   try {
     localStorage.setItem(`${LESSON_SAVE_KEY}_${userId || 'guest'}`, JSON.stringify(prog));
   } catch { /* ignore */ }
+}
+
+// 合并两份进度（取并集）：用户在多个浏览器分别完成不同章节时，合并后保留全部进度
+function mergeProgress(a: LessonProgress, b: LessonProgress): LessonProgress {
+  const ch = Array.from(new Set([...(a.ch || []), ...(b.ch || [])]));
+  const sub: Record<number, number[]> = {};
+  const keys = new Set<number>([...Object.keys(a.sub || {}).map(Number), ...Object.keys(b.sub || {}).map(Number)]);
+  for (const k of keys) {
+    sub[k] = Array.from(new Set([...(a.sub?.[k] || []), ...(b.sub?.[k] || [])]));
+  }
+  return { ch, sub };
+}
+
+// 上报进度到后端（账号级同步，跨浏览器共享）
+function syncProgressRemote(userId: string | undefined, prog: LessonProgress) {
+  if (!userId) return;
+  backendClient.put('/api/keyboard-galaxy/lesson/progress', { progress: prog })
+    .catch(() => { /* 静默失败，本地仍有数据 */ });
+}
+
+function saveProgress(userId: string | undefined, prog: LessonProgress) {
+  writeLocalProgress(userId, prog);
+  syncProgressRemote(userId, prog);
 }
 
 export const LessonView: React.FC = () => {
@@ -145,9 +168,27 @@ export const LessonView: React.FC = () => {
       .catch(() => {});
   }, []);
 
-  // 从 localStorage 读取/迁移进度
+  // 启动时：先用本地缓存快速渲染，再从后端拉取云端进度合并（跨浏览器同步）
   useEffect(() => {
-    setProg(loadProgress(user?.id));
+    if (!user?.id) {
+      setProg(loadProgress(user?.id));
+      return;
+    }
+    const local = loadProgress(user.id);
+    setProg(local);
+    let cancelled = false;
+    backendClient.get('/api/keyboard-galaxy/lesson/progress')
+      .then(res => {
+        if (cancelled) return;
+        const remote = res?.data?.progress;
+        if (!remote || !Array.isArray(remote.ch)) return;
+        // 取并集：用户在多个浏览器分别完成不同章节时，合并保留全部进度
+        const merged = mergeProgress(local, remote);
+        writeLocalProgress(user.id, merged);
+        setProg(merged);
+      })
+      .catch(() => { /* 网络失败时本地缓存仍可用 */ });
+    return () => { cancelled = true; };
   }, [user?.id]);
 
   // 生成练习串

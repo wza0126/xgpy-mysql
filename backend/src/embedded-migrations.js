@@ -279,5 +279,9 @@ module.exports = [
   {
     "version": "067_add_classes_quick_toggles.sql",
     "sql": "-- 班级管理快捷开关（与通知、点名模块对应学生级开关双向同步）\n-- 班级级开关默认 1（允许），切换时会同步改该班所有学生的 profiles 对应字段；\n-- 反之在通知分发/点名批量操作时，如果作用对象是全班，也会反向同步更新 classes 对应字段。\nALTER TABLE classes ADD COLUMN IF NOT EXISTS app_center_enabled TINYINT(1) NOT NULL DEFAULT 1\n  COMMENT '是否允许该班级学生使用应用中心（同步 profiles.can_use_app）';\nALTER TABLE classes ADD COLUMN IF NOT EXISTS exchange_enabled TINYINT(1) NOT NULL DEFAULT 1\n  COMMENT '是否允许该班级学生打开积分兑换模块（同步 profiles.can_open_exchange_module）';\nALTER TABLE classes ADD COLUMN IF NOT EXISTS internet_enabled TINYINT(1) NOT NULL DEFAULT 1\n  COMMENT '是否允许该班级学生上网冲浪（同步 profiles.can_use_browser）';\n"
+  },
+  {
+    "version": "068_add_keyboard_lesson_progress.sql",
+    "sql": "-- 键盘星域：指法学堂练习进度迁移到数据库（按 user_id 关联，跨浏览器同步）\n-- 背景：原进度仅存于浏览器 localStorage（key: keyboard_galaxy_lesson_<userId>），\n--       导致同一账号在不同浏览器进度不一致。迁到数据库后实现账号级同步。\n-- 存储结构（progress_json）：\n--   { ch: number[]          // 已完成章节 ID 列表\n--     sub: { [chapterId]: number[] } }  // 各章已完成小节 ID 列表\nCREATE TABLE IF NOT EXISTS keyboard_lesson_progress (\n  id VARCHAR(50) PRIMARY KEY,\n  user_id VARCHAR(36) NOT NULL COMMENT '用户ID',\n  progress_json JSON COMMENT '进度数据 { ch: number[], sub: Record<number, number[]> }',\n  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,\n  UNIQUE KEY uk_user_id (user_id),\n  INDEX idx_user_id (user_id)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='键盘星域指法学堂练习进度';\n"
   }
 ];
