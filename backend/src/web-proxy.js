@@ -1244,9 +1244,10 @@ function registerWebProxy(app, pool, authenticate, requireTeacher, requireStuden
             );
             permCache.clear(); // 批量变更，整体失效缓存
             // 同步班级级开关：保证班级管理页「上网」列与点名操作一致
+            // 注意：classes 表没有 updated_at 列，不能带
             try {
                 await pool.query(
-                    `UPDATE classes SET internet_enabled = ?, updated_at = NOW() WHERE id = ?`,
+                    `UPDATE classes SET internet_enabled = ? WHERE id = ?`,
                     [canUse ? 1 : 0, classId]
                 );
             } catch (e) {

@@ -913,8 +913,7 @@ app.put('/api/classes/:id/toggles', authenticate, async (req, res) => {
 
     await connection.beginTransaction();
 
-    // 1. 更新 classes
-    classSets.push('updated_at = NOW()');
+    // 1. 更新 classes（classes 表无 updated_at 列，勿加）
     await connection.query(
       `UPDATE classes SET ${classSets.join(', ')} WHERE id = ?`,
       [...classValues, classId]
@@ -4736,7 +4735,6 @@ async function processNotificationDelivery(connection, notificationId, options) 
         classValues.push(1);
       }
       if (classSets.length > 0) {
-        classSets.push('updated_at = NOW()');
         classValues.push(target_class_id);
         await connection.query(
           `UPDATE classes SET ${classSets.join(', ')} WHERE id = ?`,
