@@ -110,12 +110,30 @@ const parseTags = (tags: any): string[] => {
   return [];
 };
 
+// 聚类树：一级类目 → 二级类目集合（参考 PracticeModule 实现）
+type ClusterTree = Record<string, Set<string>>;
+
+// 把 cluster_id 拆成 [一级, 二级]；无斜杠时二级为空串
+const splitCluster = (clusterId: string | null | undefined): [string, string] | null => {
+  if (!clusterId || typeof clusterId !== 'string') return null;
+  const trimmed = clusterId.trim();
+  if (!trimmed) return null;
+  const idx = trimmed.indexOf('/');
+  if (idx < 0) return [trimmed, ''];
+  const primary = trimmed.slice(0, idx).trim();
+  const secondary = trimmed.slice(idx + 1).trim();
+  return primary ? [primary, secondary] : null;
+};
+
 export const ExamManager: React.FC = () => {
   const [tests, setTests] = useState<ExamTest[]>([]);
   const [examRecords, setExamRecords] = useState<ExamRecord[]>([]);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [questionMap, setQuestionMap] = useState<QuestionMap>({});
   const [allTags, setAllTags] = useState<string[]>([]);
+  const [clusterTree, setClusterTree] = useState<ClusterTree>({});  // AI 聚类：一级→二级集合
+  const [filterClusterPrimary, setFilterClusterPrimary] = useState<string[]>([]);
+  const [filterClusterSecondary, setFilterClusterSecondary] = useState<string[]>([]);
   const [classes, setClasses] = useState<ClassInfo[]>([]);
   const [students, setStudents] = useState<StudentInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -191,13 +209,27 @@ export const ExamManager: React.FC = () => {
       setQuestions(questionsData as Question[]);
       const map: QuestionMap = {};
       const tagsSet = new Set<string>();
+      const tree: ClusterTree = {};
       (questionsData as Question[]).forEach((q) => {
         map[q.id] = q;
         const tags = parseTags(q.tags);
         tags.forEach(tag => tagsSet.add(tag));
+        // 聚合 AI 聚类：cluster_id 形如 "信息系统/分类与类型"
+        const parts = splitCluster((q as any).cluster_id);
+        if (parts) {
+          const [primary, secondary] = parts;
+          if (!tree[primary]) tree[primary] = new Set();
+          if (secondary) tree[primary].add(secondary);
+        }
       });
       setQuestionMap(map);
       setAllTags(Array.from(tagsSet).sort());
+      // 转成普通对象，便于渲染与排序
+      const sortedTree: ClusterTree = {};
+      Object.keys(tree).sort().forEach((p) => {
+        sortedTree[p] = new Set(Array.from(tree[p]).sort());
+      });
+      setClusterTree(sortedTree);
     }
 
     if (classesData) {
@@ -452,6 +484,27 @@ export const ExamManager: React.FC = () => {
     }
   };
 
+  // 切换 AI 聚类一级类目：取消选中时同步移除其下属所有已选二级
+  const toggleClusterPrimary = (primary: string) => {
+    setFilterClusterPrimary((prev) => {
+      if (prev.includes(primary)) {
+        const prefix = `${primary}/`;
+        setFilterClusterSecondary((sec) => sec.filter((s) => !s.startsWith(prefix)));
+        return prev.filter((p) => p !== primary);
+      }
+      return [...prev, primary];
+    });
+  };
+
+  // 切换 AI 聚类二级类目（full key 形如 "一级/二级"）
+  const toggleClusterSecondary = (fullKey: string) => {
+    setFilterClusterSecondary((prev) =>
+      prev.includes(fullKey)
+        ? prev.filter((s) => s !== fullKey)
+        : [...prev, fullKey]
+    );
+  };
+
   const filteredQuestions = questions.filter((q) => {
     const matchesSearch = q.content.toLowerCase().includes(searchText.toLowerCase());
     let matchesType = true;
@@ -464,7 +517,26 @@ export const ExamManager: React.FC = () => {
     }
     const tags = parseTags(q.tags);
     const matchesTags = filterTags.length === 0 || filterTags.some(tag => tags.includes(tag));
-    return matchesSearch && matchesType && matchesTags;
+    // AI 聚类筛选：一级 OR、二级 OR；选了二级时必须命中二级且非空，仅选一级时命中一级即可
+    let matchesCluster = true;
+    if (filterClusterPrimary.length > 0 || filterClusterSecondary.length > 0) {
+      const parts = splitCluster((q as any).cluster_id);
+      if (!parts) { matchesCluster = false; }
+      else {
+        const [primary, secondary] = parts;
+        const primaryHit = filterClusterPrimary.length === 0 || filterClusterPrimary.includes(primary);
+        if (!primaryHit) {
+          matchesCluster = false;
+        } else if (filterClusterSecondary.length > 0) {
+          if (!secondary) { matchesCluster = false; }
+          else {
+            const fullKey = `${primary}/${secondary}`;
+            matchesCluster = filterClusterSecondary.includes(fullKey);
+          }
+        }
+      }
+    }
+    return matchesSearch && matchesType && matchesTags && matchesCluster;
   });
 
   const getQuestionTypeName = (type: string) => {
@@ -1042,6 +1114,99 @@ export const ExamManager: React.FC = () => {
                         </button>
                       )}
                     </div>
+                  </div>
+                )}
+                {Object.keys(clusterTree).length > 0 && (
+                  <div className="mt-3">
+                    <p className="text-sm text-gray-600 mb-2">
+                      AI 聚类筛选：
+                      {(filterClusterPrimary.length > 0 || filterClusterSecondary.length > 0) && (
+                        <span className="ml-2 text-violet-600">
+                          已选 一级 {filterClusterPrimary.length} / 二级 {filterClusterSecondary.length}
+                        </span>
+                      )}
+                    </p>
+                    <div className="grid grid-cols-2 gap-3">
+                      {/* 一级类目 */}
+                      <div className="border border-gray-200 rounded-lg p-3">
+                        <div className="text-xs text-gray-500 mb-2 font-semibold">一级类目</div>
+                        <div className="flex flex-wrap gap-2">
+                          {Object.keys(clusterTree).map((primary) => {
+                            const active = filterClusterPrimary.includes(primary);
+                            const secondaryCount = (clusterTree[primary] || new Set()).size;
+                            return (
+                              <button
+                                key={primary}
+                                onClick={() => toggleClusterPrimary(primary)}
+                                className={`px-3 py-1.5 rounded-full text-sm transition-all ${
+                                  active
+                                    ? 'bg-violet-500 text-white'
+                                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                }`}
+                                title={secondaryCount > 0 ? `${secondaryCount} 个二级类目` : '仅一级'}
+                              >
+                                {primary}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      {/* 二级类目：仅当选中一级类目时才显示对应二级 */}
+                      <div className="border border-gray-200 rounded-lg p-3">
+                        <div className="text-xs text-gray-500 mb-2 font-semibold">
+                          二级类目
+                          <span className="ml-1 text-gray-400">
+                            {filterClusterPrimary.length === 0
+                              ? '（请先选择一级类目）'
+                              : '（仅显示已选一级下的二级）'}
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap gap-2 min-h-[40px]">
+                          {filterClusterPrimary.length === 0 ? (
+                            <span className="text-xs text-gray-400 self-center">未选一级类目</span>
+                          ) : (() => {
+                            const list: { fullKey: string; label: string }[] = [];
+                            filterClusterPrimary.forEach((p) => {
+                              Array.from(clusterTree[p] || []).forEach((s) => {
+                                list.push({ fullKey: `${p}/${s}`, label: s });
+                              });
+                            });
+                            if (list.length === 0) {
+                              return <span className="text-xs text-gray-400 self-center">所选一级下无二级类目</span>;
+                            }
+                            const seen = new Set<string>();
+                            return list.filter((item) => {
+                              if (seen.has(item.fullKey)) return false;
+                              seen.add(item.fullKey);
+                              return true;
+                            }).map((item) => {
+                              const active = filterClusterSecondary.includes(item.fullKey);
+                              return (
+                                <button
+                                  key={item.fullKey}
+                                  onClick={() => toggleClusterSecondary(item.fullKey)}
+                                  className={`px-3 py-1.5 rounded-full text-sm transition-all ${
+                                    active
+                                      ? 'bg-indigo-500 text-white'
+                                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                  }`}
+                                >
+                                  {item.label}
+                                </button>
+                              );
+                            });
+                          })()}
+                        </div>
+                      </div>
+                    </div>
+                    {(filterClusterPrimary.length > 0 || filterClusterSecondary.length > 0) && (
+                      <button
+                        onClick={() => { setFilterClusterPrimary([]); setFilterClusterSecondary([]); }}
+                        className="mt-2 text-sm text-gray-500 hover:text-gray-700"
+                      >
+                        清除聚类筛选
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
