@@ -1161,7 +1161,7 @@ export const ExamManager: React.FC = () => {
                               : '（仅显示已选一级下的二级）'}
                           </span>
                         </div>
-                        <div className="flex flex-wrap gap-2 min-h-[40px]">
+                        <div className="flex flex-wrap gap-2 min-h-[40px] max-h-[160px] overflow-y-auto pr-1">
                           {filterClusterPrimary.length === 0 ? (
                             <span className="text-xs text-gray-400 self-center">未选一级类目</span>
                           ) : (() => {
