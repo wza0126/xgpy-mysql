@@ -856,6 +856,124 @@ app.get('/api/classes', async (req, res) => {
   }
 });
 
+// 班级管理快捷开关（4 项：应用中心/兑换/上网/工坊）
+// body: { app_center_enabled?, exchange_enabled?, internet_enabled?, workshop_enabled? }
+//   1) 更新 classes 表对应字段；2) 批量 UPDATE 该班所有学生的 profiles 对应字段；
+//   3) 切换 workshop_enabled 时同步 ai_workshop_config.enabled_classes（走 workshop 模块专用函数，若可用则回退内嵌逻辑）
+app.put('/api/classes/:id/toggles', authenticate, async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    const classId = String(req.params.id || '');
+    if (!classId) return res.status(400).json({ data: null, error: '缺少班级ID' });
+    const u = req.user || {};
+    const userId = String(u.userId || u.id || '');
+    const role = u.role;
+
+    // 取班级
+    const [clsRows] = await connection.query('SELECT id, teacher_id FROM classes WHERE id = ?', [classId]);
+    if (clsRows.length === 0) return res.status(404).json({ data: null, error: '班级不存在' });
+    const cls = clsRows[0];
+    const isAdmin = role === 'admin' || role === 'super_admin';
+    if (!isAdmin && userId && String(cls.teacher_id || '') !== userId) {
+      return res.status(403).json({ data: null, error: '只能管理自己创建的班级' });
+    }
+    // 教师 role 兜底（如果 userId 取不出来时要求 role=teacher 且与 teacher_id 匹配比较会被上面跳过，但 requireTeacher 又没挂，所以兜底：若未传 user 拒绝）
+    if (!role && !userId) {
+      return res.status(401).json({ data: null, error: '未登录' });
+    }
+
+    const body = req.body || {};
+    const toBool = v => v === true || v === 1 || v === '1' || v === 'true';
+    const fields = [
+      { key: 'app_center_enabled', profileField: 'can_use_app',               label: '应用中心' },
+      { key: 'exchange_enabled',   profileField: 'can_open_exchange_module', label: '兑换模块' },
+      { key: 'internet_enabled',   profileField: 'can_use_browser',          label: '上网冲浪' },
+      { key: 'workshop_enabled',   profileField: null,                        label: '工坊开关' },
+    ];
+
+    const classSets = [];
+    const classValues = [];
+    const profileUpdates = [];
+    let needInvalidateProxyPerm = false;
+    let workshopChangedTo = null; // null=没改, true/false=目标值
+    for (const f of fields) {
+      if (!(f.key in body)) continue;
+      const v = toBool(body[f.key]);
+      classSets.push('?? = ?');
+      classValues.push(f.key, v ? 1 : 0);
+      if (f.profileField) {
+        profileUpdates.push({ field: f.profileField, value: v ? 1 : 0 });
+      }
+      if (f.key === 'internet_enabled') needInvalidateProxyPerm = true;
+      if (f.key === 'workshop_enabled') workshopChangedTo = v;
+    }
+    if (classSets.length === 0) {
+      return res.status(400).json({ data: null, error: '没有需要更新的开关' });
+    }
+
+    await connection.beginTransaction();
+
+    // 1. 更新 classes
+    classSets.push('updated_at = NOW()');
+    await connection.query(
+      `UPDATE classes SET ${classSets.join(', ')} WHERE id = ?`,
+      [...classValues, classId]
+    );
+
+    // 2. 批量更新学生 profiles
+    for (const p of profileUpdates) {
+      await connection.query(
+        `UPDATE profiles SET ?? = ? WHERE class_id = ? AND role = 'student'`,
+        [p.field, p.value, classId]
+      );
+    }
+    if (needInvalidateProxyPerm) {
+      // 批量上网权限变更 → 整体失效缓存
+      try {
+        const { invalidateProxyPerm } = require('./web-proxy');
+        invalidateProxyPerm && invalidateProxyPerm();
+      } catch (_) { /* ignore */ }
+    }
+
+    // 3. 工坊开关同步：重新计算全校 enabled_classes（与 PUT /creative-workshop/teacher/class/:id/workshop-enabled 同款逻辑）
+    if (workshopChangedTo !== null) {
+      const [allEnabled] = await connection.query(
+        `SELECT id FROM classes WHERE COALESCE(workshop_enabled, 1) = 1`
+      );
+      const enabledIds = (allEnabled || []).map(r => String(r.id));
+      const [allClasses] = await connection.query('SELECT COUNT(*) AS cnt FROM classes');
+      const total = Number(((allClasses || [])[0] || {}).cnt || 0);
+      const storeNull = total > 0 && enabledIds.length >= total;
+      const storedValue = storeNull ? null : JSON.stringify(enabledIds);
+
+      const [cfgRow] = await connection.query('SELECT id FROM ai_workshop_config WHERE id = 1');
+      if (cfgRow.length === 0) {
+        await connection.query(
+          `INSERT INTO ai_workshop_config (id, enabled, enabled_classes, created_at, updated_at) VALUES (1, 1, ?, NOW(), NOW())`,
+          [storedValue]
+        );
+      } else {
+        await connection.query(
+          `UPDATE ai_workshop_config SET enabled_classes = ?, updated_at = NOW() WHERE id = 1`,
+          [storedValue]
+        );
+      }
+    }
+
+    await connection.commit();
+    res.json({ data: { success: true }, error: null });
+  } catch (error) {
+    try { await connection.rollback(); } catch (_) {}
+    console.error('PUT /api/classes/:id/toggles 失败:', error);
+    res.status(500).json({
+      data: null,
+      error: error && error.message ? error.message : String(error),
+    });
+  } finally {
+    connection.release();
+  }
+});
+
 app.get('/api/tables/:tableName', authenticate, async (req, res) => {
   try {
     const { tableName } = req.params;
@@ -4596,10 +4714,38 @@ async function processNotificationDelivery(connection, notificationId, options) 
         WHERE id = ?
       `, updateParams);
     }
+  }
 
-    // 如果有buff，给学生发放buff（同类型不叠加，仅刷新时间）
-    if (has_buff && buff_modifier && buff_duration) {
-      await grantOrRefreshBuff(connection, studentId, buff_type || 'teacher_crit', buff_modifier, buff_duration);
+  // 如果通知是发送给整个班级（target_class_id 明确），把勾选的权限同步回 classes 对应班级字段，
+  // 保证班级管理页快捷开关与通知管理勾选一致（未勾选/undefined 的字段不覆盖）
+  if (target_class_id && notification_type === 'class') {
+    try {
+      const classSets = [];
+      const classValues = [];
+      if (enable_app_access !== undefined) {
+        classSets.push('app_center_enabled = ?');
+        classValues.push(enable_app_access ? 1 : 0);
+      }
+      if (can_open_exchange_module !== undefined) {
+        classSets.push('exchange_enabled = ?');
+        classValues.push(can_open_exchange_module ? 1 : 0);
+      }
+      if (grant_browser) {
+        // 通知里 grant_browser 只有"开通"这一种语义（没勾选就是不开通，不做反向关闭）
+        classSets.push('internet_enabled = ?');
+        classValues.push(1);
+      }
+      if (classSets.length > 0) {
+        classSets.push('updated_at = NOW()');
+        classValues.push(target_class_id);
+        await connection.query(
+          `UPDATE classes SET ${classSets.join(', ')} WHERE id = ?`,
+          classValues
+        );
+      }
+    } catch (e) {
+      console.error('同步权限反写 classes 失败（通知分发）:', e);
+      // 不影响主流程
     }
   }
 

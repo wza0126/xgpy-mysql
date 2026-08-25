@@ -60,16 +60,52 @@ export const ClassManager: React.FC = () => {
       .eq('id', editingClass.id);
 
     // workshop_enabled 需要走工坊专用接口（同步 ai_workshop_config.enabled_classes）
-    const curEnabled = cls => cls.workshop_enabled === true || cls.workshop_enabled === 1 || cls.workshop_enabled === '1';
-    const newVal = isClassWorkshopEnabled(editingClass);
+    const curEnabled = (cls: Class) => cls.workshop_enabled === true || cls.workshop_enabled === 1 || cls.workshop_enabled === '1';
+    const newVal = isClassBoolEnabled(editingClass, 'workshop_enabled');
     // 找到原始班级对象对比一下；如果变了就调同步接口
     const original = classes.find(c => c.id === editingClass.id);
     if (!original || curEnabled(original) !== newVal) {
-      const { error: wsError } = await backendClient.put(
-        `/api/creative-workshop/teacher/class/${editingClass.id}/workshop-enabled`,
-        { enabled: newVal }
-      );
-      if (wsError) console.error('同步班级工坊开关失败:', wsError);
+      try {
+        const { error: wsError } = await backendClient.put(
+          `/api/creative-workshop/teacher/class/${editingClass.id}/workshop-enabled`,
+          { enabled: newVal }
+        );
+        if (wsError) console.error('同步班级工坊开关失败:', wsError);
+      } catch (wsErr) {
+        console.error('同步班级工坊开关异常:', wsErr);
+        alert('工坊开关保存失败: ' + ((wsErr as Error).message || String(wsErr)));
+        return;
+      }
+    }
+
+    // 应用中心/兑换/上网 3 个开关：走统一批量接口，同步改学生 profiles
+    const quickKeys: Array<'app_center_enabled' | 'exchange_enabled' | 'internet_enabled'> = [
+      'app_center_enabled',
+      'exchange_enabled',
+      'internet_enabled',
+    ];
+    const quickToggles: Record<string, boolean> = {};
+    for (const k of quickKeys) {
+      const origOn = original ? isClassBoolEnabled(original, k) : true;
+      const newOn = isClassBoolEnabled(editingClass, k);
+      if (origOn !== newOn) quickToggles[k] = newOn;
+    }
+    if (Object.keys(quickToggles).length > 0) {
+      try {
+        const { error: qkErr } = await backendClient.put(
+          `/api/classes/${editingClass.id}/toggles`,
+          quickToggles
+        );
+        if (qkErr) {
+          console.error('同步班级快捷开关失败:', qkErr);
+          alert('快捷开关保存失败: ' + (qkErr.message || JSON.stringify(qkErr)));
+          return;
+        }
+      } catch (qkErr) {
+        console.error('同步班级快捷开关异常:', qkErr);
+        alert('快捷开关保存失败: ' + ((qkErr as Error).message || String(qkErr)));
+        return;
+      }
     }
 
     setEditingClass(null);
@@ -134,19 +170,47 @@ export const ClassManager: React.FC = () => {
   const toggleWorkshopEnabled = async (cls: Class) => {
     const cur = cls.workshop_enabled === true || cls.workshop_enabled === 1 || cls.workshop_enabled === '1';
     const newValue = !cur;
-    const { error } = await backendClient.put(
-      `/api/creative-workshop/teacher/class/${cls.id}/workshop-enabled`,
-      { enabled: newValue }
-    );
-    if (error) {
-      console.error('更新班级工坊开关失败:', error);
-      alert('更新失败: ' + error.message);
+    try {
+      const { error } = await backendClient.put(
+        `/api/creative-workshop/teacher/class/${cls.id}/workshop-enabled`,
+        { enabled: newValue }
+      );
+      if (error) {
+        console.error('更新班级工坊开关失败:', error);
+        alert('更新失败: ' + (error.message || JSON.stringify(error)));
+        return;
+      }
+    } catch (e) {
+      console.error('更新班级工坊开关异常:', e);
+      alert('更新失败: ' + ((e as Error).message || String(e)));
+      return;
     }
     fetchClasses();
   };
 
-  const isClassWorkshopEnabled = (cls: Class) =>
-    cls.workshop_enabled === true || cls.workshop_enabled === 1 || cls.workshop_enabled === '1';
+  const isClassBoolEnabled = (cls: Class, key: string) => {
+    const v = (cls as any)[key];
+    return v === true || v === 1 || v === '1';
+  };
+
+  // 班级快捷开关（应用中心/兑换/上网）—— 走统一批量接口，同步改学生 profiles 对应字段
+  const toggleClassQuickSwitch = async (cls: Class, key: 'app_center_enabled' | 'exchange_enabled' | 'internet_enabled') => {
+    const cur = isClassBoolEnabled(cls, key);
+    const newValue = !cur;
+    try {
+      const { error } = await backendClient.put(`/api/classes/${cls.id}/toggles`, { [key]: newValue });
+      if (error) {
+        console.error(`切换班级开关 ${key} 失败:`, error);
+        alert('更新失败: ' + (error.message || JSON.stringify(error)));
+        return;
+      }
+    } catch (e) {
+      console.error(`切换班级开关 ${key} 异常:`, e);
+      alert('更新失败: ' + ((e as Error).message || String(e)));
+      return;
+    }
+    fetchClasses();
+  };
 
   const handleDelete = async (id: string) => {
     setDeleteTargetId(id);
@@ -237,6 +301,9 @@ export const ClassManager: React.FC = () => {
               <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">AI答疑</th>
               <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">数字消息</th>
               <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">工坊</th>
+              <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">应用中心</th>
+              <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">兑换</th>
+              <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">上网</th>
               <th className="px-6 py-4 text-left text-sm font-medium text-gray-600">创建时间</th>
               <th className="px-6 py-4 text-right text-sm font-medium text-gray-600">操作</th>
             </tr>
@@ -350,25 +417,109 @@ export const ClassManager: React.FC = () => {
                     <label className="flex items-center justify-center gap-2 cursor-pointer">
                       <input
                         type="checkbox"
-                        checked={isClassWorkshopEnabled(editingClass!)}
+                        checked={isClassBoolEnabled(editingClass!, 'workshop_enabled')}
                         onChange={(e) => setEditingClass({ ...editingClass!, workshop_enabled: e.target.checked })}
                         className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                       />
                       <span className="text-sm text-gray-600">
-                        {isClassWorkshopEnabled(editingClass!) ? '启用' : '禁用'}
+                        {isClassBoolEnabled(editingClass!, 'workshop_enabled') ? '启用' : '禁用'}
                       </span>
                     </label>
                   ) : (
                     <button
                       onClick={() => toggleWorkshopEnabled(cls)}
                       className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
-                        isClassWorkshopEnabled(cls)
+                        isClassBoolEnabled(cls, 'workshop_enabled')
                           ? 'bg-green-100 text-green-700 hover:bg-green-200'
                           : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
                       }`}
                     >
-                      <i className={`fa-solid mr-2 ${isClassWorkshopEnabled(cls) ? 'fa-check' : 'fa-times'}`}></i>
-                      {isClassWorkshopEnabled(cls) ? '已启用' : '已禁用'}
+                      <i className={`fa-solid mr-2 ${isClassBoolEnabled(cls, 'workshop_enabled') ? 'fa-check' : 'fa-times'}`}></i>
+                      {isClassBoolEnabled(cls, 'workshop_enabled') ? '已启用' : '已禁用'}
+                    </button>
+                  )}
+                </td>
+                {/* 应用中心 */}
+                <td className="px-6 py-4 text-center">
+                  {editingClass?.id === cls.id ? (
+                    <label className="flex items-center justify-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={isClassBoolEnabled(editingClass!, 'app_center_enabled')}
+                        onChange={(e) => setEditingClass({ ...editingClass!, app_center_enabled: e.target.checked })}
+                        className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      />
+                      <span className="text-sm text-gray-600">
+                        {isClassBoolEnabled(editingClass!, 'app_center_enabled') ? '启用' : '禁用'}
+                      </span>
+                    </label>
+                  ) : (
+                    <button
+                      onClick={() => toggleClassQuickSwitch(cls, 'app_center_enabled')}
+                      className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
+                        isClassBoolEnabled(cls, 'app_center_enabled')
+                          ? 'bg-green-100 text-green-700 hover:bg-green-200'
+                          : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                      }`}
+                    >
+                      <i className={`fa-solid mr-2 ${isClassBoolEnabled(cls, 'app_center_enabled') ? 'fa-check' : 'fa-times'}`}></i>
+                      {isClassBoolEnabled(cls, 'app_center_enabled') ? '已启用' : '已禁用'}
+                    </button>
+                  )}
+                </td>
+                {/* 兑换 */}
+                <td className="px-6 py-4 text-center">
+                  {editingClass?.id === cls.id ? (
+                    <label className="flex items-center justify-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={isClassBoolEnabled(editingClass!, 'exchange_enabled')}
+                        onChange={(e) => setEditingClass({ ...editingClass!, exchange_enabled: e.target.checked })}
+                        className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      />
+                      <span className="text-sm text-gray-600">
+                        {isClassBoolEnabled(editingClass!, 'exchange_enabled') ? '启用' : '禁用'}
+                      </span>
+                    </label>
+                  ) : (
+                    <button
+                      onClick={() => toggleClassQuickSwitch(cls, 'exchange_enabled')}
+                      className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
+                        isClassBoolEnabled(cls, 'exchange_enabled')
+                          ? 'bg-green-100 text-green-700 hover:bg-green-200'
+                          : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                      }`}
+                    >
+                      <i className={`fa-solid mr-2 ${isClassBoolEnabled(cls, 'exchange_enabled') ? 'fa-check' : 'fa-times'}`}></i>
+                      {isClassBoolEnabled(cls, 'exchange_enabled') ? '已启用' : '已禁用'}
+                    </button>
+                  )}
+                </td>
+                {/* 上网 */}
+                <td className="px-6 py-4 text-center">
+                  {editingClass?.id === cls.id ? (
+                    <label className="flex items-center justify-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={isClassBoolEnabled(editingClass!, 'internet_enabled')}
+                        onChange={(e) => setEditingClass({ ...editingClass!, internet_enabled: e.target.checked })}
+                        className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      />
+                      <span className="text-sm text-gray-600">
+                        {isClassBoolEnabled(editingClass!, 'internet_enabled') ? '启用' : '禁用'}
+                      </span>
+                    </label>
+                  ) : (
+                    <button
+                      onClick={() => toggleClassQuickSwitch(cls, 'internet_enabled')}
+                      className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
+                        isClassBoolEnabled(cls, 'internet_enabled')
+                          ? 'bg-green-100 text-green-700 hover:bg-green-200'
+                          : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                      }`}
+                    >
+                      <i className={`fa-solid mr-2 ${isClassBoolEnabled(cls, 'internet_enabled') ? 'fa-check' : 'fa-times'}`}></i>
+                      {isClassBoolEnabled(cls, 'internet_enabled') ? '已启用' : '已禁用'}
                     </button>
                   )}
                 </td>

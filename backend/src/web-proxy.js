@@ -1243,6 +1243,15 @@ function registerWebProxy(app, pool, authenticate, requireTeacher, requireStuden
                 [canUse ? 1 : 0, classId]
             );
             permCache.clear(); // 批量变更，整体失效缓存
+            // 同步班级级开关：保证班级管理页「上网」列与点名操作一致
+            try {
+                await pool.query(
+                    `UPDATE classes SET internet_enabled = ?, updated_at = NOW() WHERE id = ?`,
+                    [canUse ? 1 : 0, classId]
+                );
+            } catch (e) {
+                console.error('同步 classes.internet_enabled 失败（点名批量上网）:', e);
+            }
             res.json({ data: { success: true, can_use_browser: canUse, affected: result.affectedRows }, error: null });
         } catch (error) {
             console.error('Error in POST /api/teacher/proxy/classes/:classId/permission:', error);

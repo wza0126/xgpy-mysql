@@ -275,5 +275,9 @@ module.exports = [
   {
     "version": "066_add_classes_workshop_enabled.sql",
     "sql": "-- classes 表添加工坊开关字段（与 classes.ai_enabled / dm_enabled 保持一致）\n-- 说明：教师在班级管理切换该开关时，后端同步写入 ai_workshop_config.enabled_classes JSON 数组\n-- classAllowed() 判定仍走 ai_workshop_config.enabled_classes，无需改逻辑\nALTER TABLE classes ADD COLUMN IF NOT EXISTS workshop_enabled TINYINT(1) NOT NULL DEFAULT 1\n  COMMENT '是否允许该班级使用 AI 创意工坊（1允许 0禁止），默认允许；切换时后端同步更新 ai_workshop_config.enabled_classes';\n"
+  },
+  {
+    "version": "067_add_classes_quick_toggles.sql",
+    "sql": "-- 班级管理快捷开关（与通知、点名模块对应学生级开关双向同步）\n-- 班级级开关默认 1（允许），切换时会同步改该班所有学生的 profiles 对应字段；\n-- 反之在通知分发/点名批量操作时，如果作用对象是全班，也会反向同步更新 classes 对应字段。\nALTER TABLE classes ADD COLUMN IF NOT EXISTS app_center_enabled TINYINT(1) NOT NULL DEFAULT 1\n  COMMENT '是否允许该班级学生使用应用中心（同步 profiles.can_use_app）';\nALTER TABLE classes ADD COLUMN IF NOT EXISTS exchange_enabled TINYINT(1) NOT NULL DEFAULT 1\n  COMMENT '是否允许该班级学生打开积分兑换模块（同步 profiles.can_open_exchange_module）';\nALTER TABLE classes ADD COLUMN IF NOT EXISTS internet_enabled TINYINT(1) NOT NULL DEFAULT 1\n  COMMENT '是否允许该班级学生上网冲浪（同步 profiles.can_use_browser）';\n"
   }
 ];
