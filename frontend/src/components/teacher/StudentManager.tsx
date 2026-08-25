@@ -18,6 +18,52 @@ interface StudentWithStats extends Profile {
 type SortField = 'real_name' | 'username' | 'current_points' | 'max_points' | 'total_answers' | 'accuracy' | 'is_online';
 type SortOrder = 'asc' | 'desc';
 
+// 删除学生时需清理的关联表（按 student_id 字段关联）
+// 注意：notifications 为教师共享通知，不删（只删 notification_recipients）；
+//      login_history / proxy_access_log 为审计日志，保留。
+const DELETE_STUDENT_TABLES = [
+  // 原有关联表
+  'app_reviews',
+  'app_usage_logs',
+  'code_snippets',
+  'exam_records',
+  'exchange_records',
+  'notes',
+  'notification_recipients',
+  'point_transactions',
+  'student_answers',
+  'student_app_usage',
+  'student_pets',
+  'student_word_progress',
+  'test_records',
+  'wrong_questions',
+  // 新增：游戏/进度/皮肤/装备
+  'student_buffs',
+  'learn_visited_records',
+  'studious_checkins',
+  'student_skins',
+  'student_equipments',
+  // 新增：编程练习 / AI 答疑
+  'python_drafts',
+  'python_submissions',
+  'python_gradings',
+  'python_run_logs',
+  'python_wrong_problems',
+  'ai_qa_history',
+  // 新增：课堂任务 / 点名座位
+  'task_study_log',
+  'roll_call_seating',
+];
+
+// 删除学生时需清理、但关联字段不是 student_id 的表（分组）
+const DELETE_STUDENT_BY_USER_ID = [
+  'python_magic_progress', // user_id（魔法学院存档）
+  'code_realm_progress',   // user_id（代码秘境存档）
+  'typing_scores',         // user_id（键盘星域成绩/排行榜）
+  'user_roles',            // user_id（用户角色）
+  'login_sessions',        // user_id（登录会话）
+];
+
 export const StudentManager: React.FC = () => {
   const [classes, setClasses] = useState<Class[]>([]);
   const [students, setStudents] = useState<StudentWithStats[]>([]);
@@ -494,36 +540,76 @@ export const StudentManager: React.FC = () => {
     setShowBatchDeleteConfirm(true);
   };
 
+  // 删除单个学生的所有关联数据（不含 profiles 本身）
+  const deleteStudentData = async (studentId: string) => {
+    // 1. AI 创意工坊：先查该生作品 → 级联删 work 子表 → 再删作品与购买/评分
+    try {
+      const { data: works, error: worksErr } = await backendClient
+        .from('ai_works')
+        .select('id')
+        .eq('student_id', studentId);
+      if (!worksErr && works && works.length > 0) {
+        const workIds = (works as any[]).map((w: any) => w.id);
+        for (const workId of workIds) {
+          for (const table of ['ai_work_versions', 'ai_work_ratings', 'ai_work_purchases']) {
+            try {
+              await backendClient.from(table).delete().eq('work_id', workId);
+            } catch (e) {
+              console.warn(`级联删除表 ${table} 失败或表不存在:`, e);
+            }
+          }
+        }
+      }
+      await backendClient.from('ai_works').delete().eq('student_id', studentId);
+      // 该生购买的作品、打的评分（与 work 级联可能重叠，重复删除无害）
+      await backendClient.from('ai_work_purchases').delete().eq('buyer_id', studentId);
+      await backendClient.from('ai_work_ratings').delete().eq('student_id', studentId);
+    } catch (e) {
+      console.warn('删除 AI 创意工坊数据失败:', e);
+    }
+
+    // 2. student_id 关联表
+    for (const table of DELETE_STUDENT_TABLES) {
+      try {
+        await backendClient.from(table).delete().eq('student_id', studentId);
+      } catch (e) {
+        console.warn(`删除表 ${table} 失败或表不存在:`, e);
+      }
+    }
+
+    // 3. user_id 关联表
+    for (const table of DELETE_STUDENT_BY_USER_ID) {
+      try {
+        await backendClient.from(table).delete().eq('user_id', studentId);
+      } catch (e) {
+        console.warn(`删除表 ${table} 失败或表不存在:`, e);
+      }
+    }
+
+    // 4. 特殊多字段关联表
+    const tryDeleteBy = async (table: string, field: string) => {
+      try {
+        await backendClient.from(table).delete().eq(field, studentId);
+      } catch (e) {
+        console.warn(`删除表 ${table}（${field}）失败或表不存在:`, e);
+      }
+    };
+    // 键盘星域对战
+    await tryDeleteBy('typing_rooms', 'player1_id');
+    await tryDeleteBy('typing_rooms', 'player2_id');
+    await tryDeleteBy('typing_duel_records', 'user_id');
+    await tryDeleteBy('typing_duel_records', 'opponent_id');
+    // 数字消息（发送/接收）
+    await tryDeleteBy('student_messages', 'sender_id');
+    await tryDeleteBy('student_messages', 'receiver_id');
+    // 兑换码（已兑换人）
+    await tryDeleteBy('internet_codes', 'used_by');
+  };
+
   const confirmBatchDelete = async () => {
     let success = 0;
     for (const studentId of selectedStudents) {
-      // 先删除关联数据（添加错误处理，防止某个表不存在导致删除失败）
-      const tablesToDelete = [
-        'app_reviews',
-        'app_usage_logs',
-        'code_snippets',
-        'exam_records',
-        'exchange_records',
-        'notes',
-        'notification_recipients',
-        'notifications',
-        'point_transactions',
-        'student_answers',
-        'student_app_usage',
-        'student_pets',
-        'student_word_progress',
-        'test_records',
-        'wrong_questions'
-      ];
-
-      for (const table of tablesToDelete) {
-        try {
-          await backendClient.from(table).delete().eq('student_id', studentId);
-        } catch (e) {
-          console.warn(`删除表 ${table} 失败或表不存在:`, e);
-        }
-      }
-
+      await deleteStudentData(studentId);
       const { error } = await backendClient.from('profiles').delete().eq('id', studentId);
       if (!error) success++;
     }
@@ -655,32 +741,7 @@ export const StudentManager: React.FC = () => {
   const confirmDeleteStudent = async () => {
     if (!deleteTargetId) return;
 
-    // 先删除关联数据（添加错误处理，防止某个表不存在导致删除失败）
-    const tablesToDelete = [
-      'app_reviews',
-      'app_usage_logs',
-      'code_snippets',
-      'exam_records',
-      'exchange_records',
-      'notes',
-      'notification_recipients',
-      'notifications',
-      'point_transactions',
-      'student_answers',
-      'student_app_usage',
-      'student_pets',
-      'student_word_progress',
-      'test_records',
-      'wrong_questions'
-    ];
-
-    for (const table of tablesToDelete) {
-      try {
-        await backendClient.from(table).delete().eq('student_id', deleteTargetId);
-      } catch (e) {
-        console.warn(`删除表 ${table} 失败或表不存在:`, e);
-      }
-    }
+    await deleteStudentData(deleteTargetId);
 
     // 再删除学生资料
     const { error } = await backendClient.from('profiles').delete().eq('id', deleteTargetId);
