@@ -37,6 +37,8 @@ export const TestManager: React.FC = () => {
     allow_internet_code: false,
     internet_code_reward: 1,
     pass_grant_browser: false,
+    pass_grant_exchange: false,
+    pass_grant_app_center: false,
     allow_equipment_drop: false,
     qualification_correct_count: 0,
   });
@@ -138,6 +140,8 @@ export const TestManager: React.FC = () => {
       allow_internet_code: false,
       internet_code_reward: 1,
       pass_grant_browser: false,
+      pass_grant_exchange: false,
+      pass_grant_app_center: false,
       allow_equipment_drop: false,
       qualification_correct_count: 0,
     });
@@ -196,6 +200,8 @@ export const TestManager: React.FC = () => {
       allow_internet_code: testData.allow_internet_code === true || testData.allow_internet_code === 1,
       internet_code_reward: testData.internet_code_reward || 1,
       pass_grant_browser: testData.pass_grant_browser === true || testData.pass_grant_browser === 1,
+      pass_grant_exchange: testData.pass_grant_exchange === true || testData.pass_grant_exchange === 1,
+      pass_grant_app_center: testData.pass_grant_app_center === true || testData.pass_grant_app_center === 1,
       allow_equipment_drop: testData.allow_equipment_drop === true || testData.allow_equipment_drop === 1,
       qualification_correct_count: testData.qualification_correct_count || 0,
     });
@@ -546,6 +552,32 @@ export const TestManager: React.FC = () => {
                     <span className="font-medium text-sky-700">及格后允许上网</span>
                   </label>
                   <p className="text-xs text-gray-500 mt-2">学生测试及格后自动开通上网权限，并收到系统通知</p>
+                </div>
+
+                <div className="p-4 bg-emerald-50 rounded-xl">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={formData.pass_grant_exchange}
+                      onChange={(e) => setFormData({ ...formData, pass_grant_exchange: e.target.checked })}
+                      className="w-4 h-4 text-emerald-500"
+                    />
+                    <span className="font-medium text-emerald-700">及格后允许兑换</span>
+                  </label>
+                  <p className="text-xs text-gray-500 mt-2">学生测试及格后自动开通积分兑换模块，并收到系统通知</p>
+                </div>
+
+                <div className="p-4 bg-violet-50 rounded-xl">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={formData.pass_grant_app_center}
+                      onChange={(e) => setFormData({ ...formData, pass_grant_app_center: e.target.checked })}
+                      className="w-4 h-4 text-violet-500"
+                    />
+                    <span className="font-medium text-violet-700">及格后允许访问应用中心</span>
+                  </label>
+                  <p className="text-xs text-gray-500 mt-2">学生测试及格后自动开通应用中心访问权限，并收到系统通知</p>
                 </div>
 
                 <div className="p-4 bg-amber-50 rounded-xl">
