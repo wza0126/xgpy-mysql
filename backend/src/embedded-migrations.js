@@ -283,5 +283,9 @@ module.exports = [
   {
     "version": "068_add_keyboard_lesson_progress.sql",
     "sql": "-- 键盘星域：指法学堂练习进度迁移到数据库（按 user_id 关联，跨浏览器同步）\n-- 背景：原进度仅存于浏览器 localStorage（key: keyboard_galaxy_lesson_<userId>），\n--       导致同一账号在不同浏览器进度不一致。迁到数据库后实现账号级同步。\n-- 存储结构（progress_json）：\n--   { ch: number[]          // 已完成章节 ID 列表\n--     sub: { [chapterId]: number[] } }  // 各章已完成小节 ID 列表\nCREATE TABLE IF NOT EXISTS keyboard_lesson_progress (\n  id VARCHAR(50) PRIMARY KEY,\n  user_id VARCHAR(36) NOT NULL COMMENT '用户ID',\n  progress_json JSON COMMENT '进度数据 { ch: number[], sub: Record<number, number[]> }',\n  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,\n  UNIQUE KEY uk_user_id (user_id),\n  INDEX idx_user_id (user_id)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='键盘星域指法学堂练习进度';\n"
+  },
+  {
+    "version": "069_add_pass_grant_exchange_app_center.sql",
+    "sql": "-- 测试/考试及格后允许兑换、允许访问应用中心两个开关\n-- 与 pass_grant_browser 同模式：学生及格后自动开通对应权限并收到系统通知\n-- 字段对应通知管理中创建通知的\"允许兑换(can_open_exchange_module)\"和\"允许使用应用(enable_app_access / profiles.can_use_app)\"\nALTER TABLE tests\n  ADD COLUMN IF NOT EXISTS pass_grant_exchange TINYINT(1) NOT NULL DEFAULT 0\n    COMMENT '学生及格后允许兑换（同步 profiles.can_open_exchange_module = 1）',\n  ADD COLUMN IF NOT EXISTS pass_grant_app_center TINYINT(1) NOT NULL DEFAULT 0\n    COMMENT '学生及格后允许访问应用中心（同步 profiles.can_use_app = 1）';\n"
   }
 ];

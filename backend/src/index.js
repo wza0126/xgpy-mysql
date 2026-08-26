@@ -2896,8 +2896,10 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
     // 及格后开通上网权限（勾选 pass_grant_browser 时生效，首次开通会发系统通知）
     if (isPassed) {
       await grantBrowserOnPass(connection, test, student_id, '测试');
+      await grantExchangeOnPass(connection, test, student_id, '测试');
+      await grantAppCenterOnPass(connection, test, student_id, '测试');
     }
-    
+
     // 处理积分
     if (pointsEarned > 0) {
       // 检查学生积分（带锁）
@@ -2905,14 +2907,14 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
         'SELECT * FROM profiles WHERE id = ? FOR UPDATE',
         [student_id]
       );
-      
+
       if (students.length > 0) {
         // 增加积分
         await connection.query(
           'UPDATE profiles SET current_points = current_points + ?, total_points_earned = total_points_earned + ? WHERE id = ?',
           [pointsEarned, pointsEarned, student_id]
         );
-        
+
         // 记录积分流水
         await connection.query(
           'INSERT INTO point_transactions (student_id, amount, reason, source_type, created_at) VALUES (?, ?, ?, \'test\', NOW())',
@@ -2920,7 +2922,7 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
         );
       }
     }
-    
+
     // 处理学生答案和错题
     for (const q of questions) {
       const userAnswer = (answers[q.id] || '').trim();
@@ -3282,8 +3284,10 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
     // 及格后开通上网权限（勾选 pass_grant_browser 时生效，首次开通会发系统通知）
     if (isPassed) {
       await grantBrowserOnPass(connection, test, student_id, '考试');
+      await grantExchangeOnPass(connection, test, student_id, '考试');
+      await grantAppCenterOnPass(connection, test, student_id, '考试');
     }
-    
+
     if (pointsEarned > 0) {
       const [students] = await connection.query(
         'SELECT * FROM profiles WHERE id = ? FOR UPDATE',
@@ -4621,6 +4625,56 @@ async function grantBrowserOnPass(connection, test, studentId, sourceLabel) {
     [notifResult.insertId, studentId]
   );
   console.log(`🌐 学生 ${studentId} 通过${sourceLabel}《${test.title || ''}》，已开通上网权限`);
+}
+
+// 测试/考试及格后允许兑换（pass_grant_exchange 开关）
+// 与 pass_grant_browser 同模式：已开通则跳过；开通同时发一条系统通知告知学生
+// 同步字段：profiles.can_open_exchange_module（与通知管理"允许兑换"开关一致）
+async function grantExchangeOnPass(connection, test, studentId, sourceLabel) {
+  if (!test || !test.pass_grant_exchange) return;
+  const [rows] = await connection.query('SELECT can_open_exchange_module FROM profiles WHERE id = ?', [studentId]);
+  if (rows.length === 0) return;
+  if (rows[0].can_open_exchange_module === 1 || rows[0].can_open_exchange_module === true) return;
+
+  await connection.query('UPDATE profiles SET can_open_exchange_module = 1 WHERE id = ?', [studentId]);
+  invalidateProxyPerm(studentId);
+
+  const title = '🎁 兑换权限已开通';
+  const content = `恭喜通过${sourceLabel}《${test.title || ''}》，已为你开通积分兑换模块，去桌面「积分兑换」看看吧！`;
+  const [notifResult] = await connection.query(`
+    INSERT INTO notifications (teacher_id, title, content, notification_type, target_student_ids, can_open_exchange_module, published_at)
+    VALUES (?, ?, ?, 'student', ?, 1, NOW())
+  `, [test.created_by || 'system', title, content, JSON.stringify([studentId])]);
+  await connection.query(
+    'INSERT INTO notification_recipients (notification_id, student_id, point_change, point_change_reason) VALUES (?, ?, 0, \'\')',
+    [notifResult.insertId, studentId]
+  );
+  console.log(`🎁 学生 ${studentId} 通过${sourceLabel}《${test.title || ''}》，已开通兑换权限`);
+}
+
+// 测试/考试及格后允许访问应用中心（pass_grant_app_center 开关）
+// 与 pass_grant_browser 同模式：已开通则跳过；开通同时发一条系统通知告知学生
+// 同步字段：profiles.can_use_app（与通知管理"允许使用应用"开关一致）
+async function grantAppCenterOnPass(connection, test, studentId, sourceLabel) {
+  if (!test || !test.pass_grant_app_center) return;
+  const [rows] = await connection.query('SELECT can_use_app FROM profiles WHERE id = ?', [studentId]);
+  if (rows.length === 0) return;
+  if (rows[0].can_use_app === 1 || rows[0].can_use_app === true) return;
+
+  await connection.query('UPDATE profiles SET can_use_app = 1 WHERE id = ?', [studentId]);
+  invalidateProxyPerm(studentId);
+
+  const title = '📱 应用中心访问权限已开通';
+  const content = `恭喜通过${sourceLabel}《${test.title || ''}》，已为你开通应用中心访问权限，去桌面「应用中心」探索吧！`;
+  const [notifResult] = await connection.query(`
+    INSERT INTO notifications (teacher_id, title, content, notification_type, target_student_ids, enable_app_access, published_at)
+    VALUES (?, ?, ?, 'student', ?, 1, NOW())
+  `, [test.created_by || 'system', title, content, JSON.stringify([studentId])]);
+  await connection.query(
+    'INSERT INTO notification_recipients (notification_id, student_id, point_change, point_change_reason) VALUES (?, ?, 0, \'\')',
+    [notifResult.insertId, studentId]
+  );
+  console.log(`📱 学生 ${studentId} 通过${sourceLabel}《${test.title || ''}》，已开通应用中心访问权限`);
 }
 
 // 处理通知分发和积分
