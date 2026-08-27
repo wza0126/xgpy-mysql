@@ -70,19 +70,11 @@ function calcRankChange(winnerTier, winnerStars, loserTier, loserStars) {
     winnerPkDelta = +1;
     loserPkDelta = -1;
   } else if (diff === 1) {
-    // 差1级：低段赢 +1/-1；高段赢 +0/-0
-    if (winnerIsLower) {
-      winnerStarDelta = +1;
-      loserStarDelta = -1;
-      winnerPkDelta = +1;
-      loserPkDelta = -1;
-    } else {
-      // 高段位赢：高+0 低-0
-      winnerStarDelta = +0;
-      loserStarDelta = -0;
-      winnerPkDelta = +0;
-      loserPkDelta = -0;
-    }
+    // 差1级：胜者 +1 星 +1 PK，负者 -1 星 -1 PK（高段赢同样加星加分，避免难升级）
+    winnerStarDelta = +1;
+    loserStarDelta = -1;
+    winnerPkDelta = +1;
+    loserPkDelta = -1;
   } else {
     // 差2级及以上：低段赢 +2/-1；高段赢 +0/-0
     if (winnerIsLower) {
