@@ -23,6 +23,13 @@ export default defineConfig({
         changeOrigin: true,
         xfwd: true,
       },
+      // PK 对战 socket.io：必须 ws:true 转发 WebSocket 升级请求
+      '/pk-socket': {
+        target: 'http://localhost:3101',
+        changeOrigin: true,
+        ws: true,
+        xfwd: true,
+      },
     },
   },
   preview: {

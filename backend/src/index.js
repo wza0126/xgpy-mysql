@@ -856,9 +856,9 @@ app.get('/api/classes', async (req, res) => {
   }
 });
 
-// 班级管理快捷开关（4 项：应用中心/兑换/上网/工坊）
-// body: { app_center_enabled?, exchange_enabled?, internet_enabled?, workshop_enabled? }
-//   1) 更新 classes 表对应字段；2) 批量 UPDATE 该班所有学生的 profiles 对应字段；
+// 班级管理快捷开关（5 项：应用中心/兑换/上网/工坊/PK对战）
+// body: { app_center_enabled?, exchange_enabled?, internet_enabled?, workshop_enabled?, pk_battle_enabled? }
+//   1) 更新 classes 表对应字段；2) 批量 UPDATE 该班所有学生的 profiles 对应字段（PK对战为班级级开关，不同步profiles）；
 //   3) 切换 workshop_enabled 时同步 ai_workshop_config.enabled_classes（走 workshop 模块专用函数，若可用则回退内嵌逻辑）
 app.put('/api/classes/:id/toggles', authenticate, async (req, res) => {
   const connection = await pool.getConnection();
@@ -889,6 +889,7 @@ app.put('/api/classes/:id/toggles', authenticate, async (req, res) => {
       { key: 'exchange_enabled',   profileField: 'can_open_exchange_module', label: '兑换模块' },
       { key: 'internet_enabled',   profileField: 'can_use_browser',          label: '上网冲浪' },
       { key: 'workshop_enabled',   profileField: null,                        label: '工坊开关' },
+      { key: 'pk_battle_enabled',  profileField: null,                        label: 'PK对战' },
     ];
 
     const classSets = [];
@@ -12551,11 +12552,330 @@ const { registerCreativeWorkshop } = require('./creative-workshop');
 app.use('/api/creative-workshop', requireLicense(FEATURES.CREATIVE));
 registerCreativeWorkshop(app, pool, authenticate, requireTeacher, requireStudent, licenseManager, FEATURES);
 
+// ===== PK 对战 REST API =====
+// 注：crypto 已在文件顶部 require，此处直接复用
+
+// 教师端：对战配置 CRUD
+app.get('/api/pk/battle-configs', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      'SELECT * FROM pk_battle_configs WHERE teacher_id = ? ORDER BY created_at DESC',
+      [req.user.userId]
+    );
+    res.json({ data: rows, error: null });
+  } catch (err) {
+    console.error('查对战配置失败:', err);
+    res.status(500).json({ data: null, error: '查询失败' });
+  }
+});
+
+app.post('/api/pk/battle-configs', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { name, mode, duration_seconds, question_count, tag_filters,
+      cluster_filters, difficulty_min, difficulty_max, is_active, daily_limit,
+      qualification_correct_count } = req.body;
+    const id = 'pbc_' + crypto.randomBytes(8).toString('hex');
+    await pool.query(
+      `INSERT INTO pk_battle_configs
+       (id, teacher_id, name, mode, duration_seconds, question_count,
+        tag_filters, cluster_filters, difficulty_min, difficulty_max, is_active, daily_limit,
+        qualification_correct_count)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, req.user.userId, name, mode || 'timed',
+       duration_seconds || 180, question_count || 20,
+       tag_filters ? JSON.stringify(tag_filters) : null,
+       cluster_filters ? JSON.stringify(cluster_filters) : null,
+       difficulty_min || null, difficulty_max || null,
+       is_active === false ? 0 : 1, daily_limit || null,
+       qualification_correct_count || null]
+    );
+    res.json({ data: { id }, error: null });
+  } catch (err) {
+    console.error('创建对战配置失败:', err);
+    res.status(500).json({ data: null, error: '创建失败' });
+  }
+});
+
+app.put('/api/pk/battle-configs/:id', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { name, mode, duration_seconds, question_count, tag_filters,
+      cluster_filters, difficulty_min, difficulty_max, is_active, daily_limit,
+      qualification_correct_count } = req.body;
+    await pool.query(
+      `UPDATE pk_battle_configs SET
+        name = ?, mode = ?, duration_seconds = ?, question_count = ?,
+        tag_filters = ?, cluster_filters = ?, difficulty_min = ?, difficulty_max = ?,
+        is_active = ?, daily_limit = ?, qualification_correct_count = ?
+       WHERE id = ? AND teacher_id = ?`,
+      [name, mode || 'timed', duration_seconds || 180, question_count || 20,
+       tag_filters ? JSON.stringify(tag_filters) : null,
+       cluster_filters ? JSON.stringify(cluster_filters) : null,
+       difficulty_min || null, difficulty_max || null,
+       is_active === false ? 0 : 1, daily_limit || null,
+       qualification_correct_count || null,
+       req.params.id, req.user.userId]
+    );
+    res.json({ data: { id: req.params.id }, error: null });
+  } catch (err) {
+    console.error('更新对战配置失败:', err);
+    res.status(500).json({ data: null, error: '更新失败' });
+  }
+});
+
+app.delete('/api/pk/battle-configs/:id', authenticate, requireTeacher, async (req, res) => {
+  try {
+    await pool.query(
+      'DELETE FROM pk_battle_configs WHERE id = ? AND teacher_id = ?',
+      [req.params.id, req.user.userId]
+    );
+    res.json({ data: { id: req.params.id }, error: null });
+  } catch (err) {
+    console.error('删除对战配置失败:', err);
+    res.status(500).json({ data: null, error: '删除失败' });
+  }
+});
+
+// 学生端：查可用配置
+app.get('/api/pk/battle-configs/active', authenticate, requireStudent, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      'SELECT id, name, mode, duration_seconds, question_count, daily_limit, qualification_correct_count FROM pk_battle_configs WHERE is_active = 1 ORDER BY created_at DESC'
+    );
+    res.json({ data: rows, error: null });
+  } catch (err) {
+    res.status(500).json({ data: null, error: '查询失败' });
+  }
+});
+
+// 学生端：查段位/积分/战绩
+app.get('/api/pk/profile', authenticate, requireStudent, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT pk_rank_tier, pk_rank_stars, pk_points, pk_battles_today, pk_battles_date,
+       pk_total_wins, pk_total_losses, pk_total_draws,
+       c.pk_battle_enabled
+       FROM profiles p LEFT JOIN classes c ON p.class_id = c.id WHERE p.id = ?`,
+      [req.user.userId]
+    );
+    if (rows.length === 0) return res.status(404).json({ data: null, error: '未找到' });
+
+    const p = rows[0];
+    // 今日重置：数据库日期统一转 YYYY-MM-DD 字符串（mysql2 可能返回 Date 对象）再与服务器本地日期比较
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const bd = p.pk_battles_date;
+    const dbDate = bd instanceof Date
+      ? `${bd.getFullYear()}-${String(bd.getMonth() + 1).padStart(2, '0')}-${String(bd.getDate()).padStart(2, '0')}`
+      : String(bd || '').slice(0, 10);
+    let battlesToday = p.pk_battles_today;
+    if (dbDate !== today) {
+      battlesToday = 0;
+    }
+
+    // 累计做对题数（资格验证用，统计所有练习/测试作答）
+    const [cntRows] = await pool.query(
+      'SELECT COUNT(*) AS cnt FROM student_answers WHERE student_id = ? AND is_correct = 1',
+      [req.user.userId]
+    );
+
+    res.json({
+      data: {
+        tier: p.pk_rank_tier,
+        stars: p.pk_rank_stars,
+        pk_points: p.pk_points,
+        battles_today: battlesToday,
+        total_wins: p.pk_total_wins,
+        total_losses: p.pk_total_losses,
+        total_draws: p.pk_total_draws,
+        class_enabled: p.pk_battle_enabled === 1,
+        correct_count: cntRows[0].cnt || 0,
+      },
+      error: null,
+    });
+  } catch (err) {
+    console.error('查PK档案失败:', err);
+    res.status(500).json({ data: null, error: '查询失败' });
+  }
+});
+
+// 学生端：PK 积分排行榜
+app.get('/api/pk/leaderboard', authenticate, requireStudent, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT id, username, real_name, pk_rank_tier, pk_rank_stars, pk_points
+       FROM profiles WHERE role = 'student'
+       ORDER BY pk_points DESC, pk_total_wins DESC LIMIT 50`
+    );
+    res.json({ data: rows, error: null });
+  } catch (err) {
+    res.status(500).json({ data: null, error: '查询失败' });
+  }
+});
+
+// 学生端：对战历史
+app.get('/api/pk/history', authenticate, requireStudent, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const pageSize = parseInt(req.query.pageSize) || 10;
+    const offset = (page - 1) * pageSize;
+    const [rows] = await pool.query(
+      `SELECT r.id, r.room_code, r.status, r.created_at,
+       p.result, p.final_score, p.final_correct, p.final_wrong, p.final_duration_ms,
+       p.rank_points_change, p.system_points_earned
+       FROM pk_room_players p
+       JOIN pk_rooms r ON p.room_id = r.id
+       WHERE p.user_id = ? AND r.status = 'finished'
+       ORDER BY r.created_at DESC LIMIT ? OFFSET ?`,
+      [req.user.userId, pageSize, offset]
+    );
+    const [countRows] = await pool.query(
+      `SELECT COUNT(*) as total FROM pk_room_players p
+       JOIN pk_rooms r ON p.room_id = r.id
+       WHERE p.user_id = ? AND r.status = 'finished'`,
+      [req.user.userId]
+    );
+    res.json({
+      data: { list: rows, total: countRows[0].total, page, pageSize },
+      error: null,
+    });
+  } catch (err) {
+    console.error('查对战历史失败:', err);
+    res.status(500).json({ data: null, error: '查询失败' });
+  }
+});
+
+// 学生端：单场复盘
+app.get('/api/pk/history/:room_id', authenticate, requireStudent, async (req, res) => {
+  try {
+    const roomId = req.params.room_id;
+    // 校验是该房间玩家
+    const [myRows] = await pool.query(
+      'SELECT * FROM pk_room_players WHERE room_id = ? AND user_id = ?',
+      [roomId, req.user.userId]
+    );
+    if (myRows.length === 0) {
+      return res.status(403).json({ data: null, error: '无权查看' });
+    }
+
+    // 房间信息
+    const [roomRows] = await pool.query('SELECT * FROM pk_rooms WHERE id = ?', [roomId]);
+    if (roomRows.length === 0) return res.status(404).json({ data: null, error: '房间不存在' });
+
+    // 双方玩家
+    const [players] = await pool.query(
+      `SELECT p.*, pr.username, pr.real_name
+       FROM pk_room_players p JOIN profiles pr ON p.user_id = pr.id
+       WHERE p.room_id = ?`,
+      [roomId]
+    );
+
+    // 双方作答流水
+    const [answers] = await pool.query(
+      `SELECT a.user_id, a.question_id, a.answer, a.is_correct, a.cost_ms,
+       q.content AS question_text, q.type AS question_type, q.answers AS correct_answer
+       FROM pk_match_answers a
+       JOIN questions q ON a.question_id = q.id
+       WHERE a.room_id = ?
+       ORDER BY a.id`,
+      [roomId]
+    );
+
+    res.json({
+      data: {
+        room: roomRows[0],
+        players: players.map((p) => ({
+          user_id: p.user_id,
+          username: p.username,
+          real_name: p.real_name,
+          result: p.result,
+          final_score: p.final_score,
+          final_correct: p.final_correct,
+          final_wrong: p.final_wrong,
+          final_duration_ms: p.final_duration_ms,
+          rank_points_change: p.rank_points_change,
+          system_points_earned: p.system_points_earned,
+        })),
+        answers,
+      },
+      error: null,
+    });
+  } catch (err) {
+    console.error('查复盘失败:', err);
+    res.status(500).json({ data: null, error: '查询失败' });
+  }
+});
+
+// 学生端：错题一键加入错题本（结算时已自动导入，此接口保留兜底）
+app.post('/api/pk/history/:room_id/wrong-questions', authenticate, requireStudent, async (req, res) => {
+  try {
+    const roomId = req.params.room_id;
+    // 查该学生本局错题
+    const [wrongRows] = await pool.query(
+      'SELECT question_id FROM pk_match_answers WHERE room_id = ? AND user_id = ? AND is_correct = 0',
+      [roomId, req.user.userId]
+    );
+    if (wrongRows.length === 0) {
+      return res.json({ data: { added: 0, total: 0 }, error: null });
+    }
+
+    // upsert 到 wrong_questions（表结构字段为 student_id）
+    let added = 0;
+    for (const row of wrongRows) {
+      const [existing] = await pool.query(
+        'SELECT id FROM wrong_questions WHERE student_id = ? AND question_id = ?',
+        [req.user.userId, row.question_id]
+      );
+      if (existing.length > 0) {
+        await pool.query(
+          'UPDATE wrong_questions SET wrong_count = wrong_count + 1, last_wrong_at = NOW() WHERE id = ?',
+          [existing[0].id]
+        );
+      } else {
+        const wqId = `wq_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        await pool.query(
+          'INSERT INTO wrong_questions (id, student_id, question_id, wrong_count, last_wrong_at, created_at) VALUES (?, ?, ?, 1, NOW(), NOW())',
+          [wqId, req.user.userId, row.question_id]
+        );
+        added += 1;
+      }
+    }
+    res.json({ data: { added, total: wrongRows.length }, error: null });
+  } catch (err) {
+    console.error('错题导入失败:', err);
+    res.status(500).json({ data: null, error: '导入失败' });
+  }
+});
+
+// 教师端：班级学生 PK 战绩
+app.get('/api/pk/classes/:class_id/students/stats', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT id, username, real_name, pk_rank_tier, pk_rank_stars, pk_points,
+       pk_total_wins, pk_total_losses, pk_total_draws, pk_battles_today
+       FROM profiles WHERE class_id = ? AND role = 'student'
+       ORDER BY pk_points DESC`,
+      [req.params.class_id]
+    );
+    res.json({ data: rows, error: null });
+  } catch (err) {
+    res.status(500).json({ data: null, error: '查询失败' });
+  }
+});
+// ===== PK 对战 REST API END =====
+
   await runMigrations();
 
   const server = app.listen(port, host, () => {
     console.log(`XGPY Backend Server running on http://${host}:${port}`);
     console.log(`MariaDB: ${process.env.DB_HOST || '192.168.10.110'}:${process.env.DB_PORT || '3306'}`);
+
+    // 挂载 PK 对战 socket.io
+    try {
+      require('./pk-socket/handler').init(server, pool);
+      console.log('PK 对战 socket.io 已挂载 (path: /pk-socket/)');
+    } catch (err) {
+      console.error('PK 对战 socket.io 挂载失败:', err);
+    }
 
     // 启动定时任务，每分钟检查一次待发布通知
     if (!notificationScheduler) {

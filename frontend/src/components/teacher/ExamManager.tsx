@@ -5,6 +5,7 @@ import { Question } from '../../types';
 import { formatDateTime } from '../../utils/dateUtils';
 import * as XLSX from 'xlsx';
 import { sanitizeHtml, htmlToPlainText } from '../../utils/htmlUtils';
+import { PKBattleConfigTab } from './PKBattleConfigTab';
 
 type ExamTest = {
   id: string;
@@ -172,6 +173,7 @@ export const ExamManager: React.FC = () => {
   const [searchText, setSearchText] = useState('');
   const [filterType, setFilterType] = useState('');
   const [filterTags, setFilterTags] = useState<string[]>([]);
+  const [activeTab, setActiveTab] = useState<'exams' | 'pk_configs'>('exams');
 
   useEffect(() => {
     fetchData();
@@ -579,6 +581,32 @@ export const ExamManager: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {/* 顶层 tab 切换：考试管理 / 对战配置 */}
+      <div className="flex gap-1 border-b border-gray-200">
+        <button
+          onClick={() => setActiveTab('exams')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'exams'
+              ? 'border-purple-500 text-purple-600'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <i className="fa-solid fa-file-pen mr-2"></i>考试管理
+        </button>
+        <button
+          onClick={() => setActiveTab('pk_configs')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'pk_configs'
+              ? 'border-purple-500 text-purple-600'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <i className="fa-solid fa-trophy mr-2"></i>对战配置
+        </button>
+      </div>
+
+      {activeTab === 'exams' && (
+      <>
       <div className="flex justify-between items-center">
         <h3 className="text-lg font-bold text-gray-800">考试管理</h3>
         <button
@@ -784,6 +812,12 @@ export const ExamManager: React.FC = () => {
           })}
         </div>
         </>
+      )}
+      </>
+      )}
+
+      {activeTab === 'pk_configs' && (
+        <PKBattleConfigTab clusterTree={clusterTree} allTags={allTags} />
       )}
 
       <AnimatePresence>

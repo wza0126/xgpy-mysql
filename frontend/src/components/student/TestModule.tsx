@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, lazy, Suspense } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
 import { Test, Question, TestRecord } from '../../types';
@@ -8,6 +8,9 @@ import { toDatabaseDateTime } from '../../utils/dateUtils';
 import { sanitizeHtml, htmlToPlainText } from '../../utils/htmlUtils';
 import { EquipmentDropEffect } from './game/EquipmentDropEffect';
 import { useGameEventStore } from '../../store/gameEventStore';
+
+// PK 对战组件懒加载（避免影响主模块首屏）
+const PKBattle = lazy(() => import('./pk-battle/PKBattle').then(m => ({ default: m.PKBattle })));
 
 interface ExamRecord {
   id: string;
@@ -128,6 +131,7 @@ export const TestModule: React.FC = () => {
   const [examDetailData, setExamDetailData] = useState<{ questions: Question[]; answers: Record<string, string> } | null>(null);
   const [loading, setLoading] = useState(true);
   const [showExamList, setShowExamList] = useState(false);
+  const [showPKBattle, setShowPKBattle] = useState(false);
   const [currentExamTest, setCurrentExamTest] = useState<any>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const { profile, refreshProfile } = useAuth();
@@ -2004,20 +2008,30 @@ export const TestModule: React.FC = () => {
     <div className="p-6">
       <div className="flex gap-4 mb-6">
         <button
-          onClick={() => setShowExamList(false)}
-          className={`px-4 py-2 rounded-lg transition-colors ${!showExamList ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+          onClick={() => { setShowExamList(false); setShowPKBattle(false); }}
+          className={`px-4 py-2 rounded-lg transition-colors ${!showExamList && !showPKBattle ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
         >
           <i className="fa-solid fa-clipboard-list mr-2"></i>测试列表
         </button>
         <button
-          onClick={() => setShowExamList(true)}
+          onClick={() => { setShowExamList(true); setShowPKBattle(false); }}
           className={`px-4 py-2 rounded-lg transition-colors ${showExamList ? 'bg-purple-500 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
         >
           <i className="fa-solid fa-file-alt mr-2"></i>考试列表
         </button>
+        <button
+          onClick={() => { setShowExamList(false); setShowPKBattle(true); }}
+          className={`px-4 py-2 rounded-lg transition-colors ${showPKBattle ? 'bg-pink-500 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+        >
+          <i className="fa-solid fa-bolt mr-2"></i>对战 PK
+        </button>
       </div>
 
-      {!showExamList ? (
+      {showPKBattle ? (
+        <Suspense fallback={<div className="flex items-center justify-center h-full"><i className="fa-solid fa-circle-notch fa-spin text-3xl text-purple-500"></i></div>}>
+          <PKBattle />
+        </Suspense>
+      ) : !showExamList ? (
         <>
       <h2 className="text-xl font-bold text-gray-800 mb-6">测试列表</h2>
 
