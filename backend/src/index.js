@@ -11391,6 +11391,7 @@ app.get('/api/teacher/roll-call/students/:classId', authenticate, requireTeacher
     }
     const [students] = await pool.query(`
       SELECT p.id, p.username, p.real_name, p.current_points, p.max_points, p.total_correct, p.can_use_browser,
+        p.rollcall_note, p.rollcall_care, p.rollcall_recommend,
         (SELECT COUNT(*) FROM login_sessions ls
          WHERE ls.user_id = p.id
            AND ls.is_active = TRUE
@@ -11417,6 +11418,64 @@ app.get('/api/teacher/roll-call/students/:classId', authenticate, requireTeacher
     res.json({ data: studentsWithIp, error: null });
   } catch (error) {
     console.error('Error in GET /api/teacher/roll-call/students/:classId:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 2. 更新学生点名标记（备注/关爱/推荐，仅教师；只更新传入的字段）
+app.post('/api/teacher/roll-call/students/:studentId/mark', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const { note, care, recommend } = req.body;
+    const sets = [];
+    const params = [];
+    if (note !== undefined) { sets.push('rollcall_note = ?'); params.push(note); }
+    if (care !== undefined) { sets.push('rollcall_care = ?'); params.push(care ? 1 : 0); }
+    if (recommend !== undefined) { sets.push('rollcall_recommend = ?'); params.push(recommend ? 1 : 0); }
+    if (sets.length === 0) return res.json({ data: { ok: true }, error: null });
+    params.push(studentId);
+    await pool.query(`UPDATE profiles SET ${sets.join(', ')} WHERE id = ?`, params);
+    res.json({ data: { ok: true }, error: null });
+  } catch (error) {
+    console.error('更新点名标记失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 3. 获取班级备忘录（仅教师）
+app.get('/api/teacher/roll-call/classes/:classId/memo', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { classId } = req.params;
+    const [classRows] = await pool.query('SELECT id, teacher_id, rollcall_memo FROM classes WHERE id = ?', [classId]);
+    if (classRows.length === 0) {
+      return res.status(404).json({ data: null, error: '班级不存在' });
+    }
+    if (classRows[0].teacher_id !== req.user.userId) {
+      return res.status(403).json({ data: null, error: '无权限访问该班级' });
+    }
+    res.json({ data: { memo: classRows[0].rollcall_memo || '' }, error: null });
+  } catch (error) {
+    console.error('获取班级备忘录失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 4. 保存班级备忘录（仅教师）
+app.post('/api/teacher/roll-call/classes/:classId/memo', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { classId } = req.params;
+    const { memo } = req.body;
+    const [classRows] = await pool.query('SELECT id, teacher_id FROM classes WHERE id = ?', [classId]);
+    if (classRows.length === 0) {
+      return res.status(404).json({ data: null, error: '班级不存在' });
+    }
+    if (classRows[0].teacher_id !== req.user.userId) {
+      return res.status(403).json({ data: null, error: '无权限访问该班级' });
+    }
+    await pool.query('UPDATE classes SET rollcall_memo = ? WHERE id = ?', [memo || '', classId]);
+    res.json({ data: { ok: true }, error: null });
+  } catch (error) {
+    console.error('保存班级备忘录失败:', error);
     res.status(500).json({ data: null, error: error.message });
   }
 });

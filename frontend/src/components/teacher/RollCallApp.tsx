@@ -11,6 +11,8 @@ import { StudentDesktopModal } from './rollcall/StudentDesktopModal';
 import { API_CONFIG } from '../../api/config';
 import { RandomRollCallModal } from './rollcall/RandomRollCallModal';
 import { AttendanceModal } from './rollcall/AttendanceModal';
+import { ClassMemoModal } from './rollcall/ClassMemoModal';
+import { PodiumPanel } from './rollcall/PodiumPanel';
 import { LicenseGuard } from '../common/LicenseGuard';
 
 interface RollCallAppProps {
@@ -26,6 +28,10 @@ export const RollCallApp: React.FC<RollCallAppProps> = ({ onClose, mode = 'teach
   const [isSaving, setIsSaving] = useState(false);
   const [isRollCallModalOpen, setIsRollCallModalOpen] = useState(false);
   const [isAttendanceModalOpen, setIsAttendanceModalOpen] = useState(false);
+  const [isMemoModalOpen, setIsMemoModalOpen] = useState(false);
+  const [isPodiumSelected, setIsPodiumSelected] = useState(false);
+  const [classMemo, setClassMemo] = useState('');
+  const [memoLoading, setMemoLoading] = useState(false);
   const [rollCallCount, setRollCallCount] = useState(1);
 
   const rollCall = useRollCall(selectedClassId, mode);
@@ -72,6 +78,59 @@ export const RollCallApp: React.FC<RollCallAppProps> = ({ onClose, mode = 'teach
   }, [profile, mode]);
 
   const debounceTimerRef = useRef<number | null>(null);
+
+  // 加载当前班级备忘录文本
+  const loadMemoText = useCallback(async (): Promise<string> => {
+    if (!selectedClassId) return '';
+    const token = localStorage.getItem('xgpy_token');
+    const res = await fetch(
+      `${API_CONFIG.apiUrl}/api/teacher/roll-call/classes/${selectedClassId}/memo`,
+      { headers: token ? { Authorization: `Bearer ${token}` } : {} }
+    );
+    const json = await res.json();
+    return json.data?.memo || '';
+  }, [selectedClassId]);
+
+  // 保存当前班级备忘录
+  const saveMemo = useCallback(
+    async (memo: string): Promise<boolean> => {
+      if (!selectedClassId) return false;
+      const token = localStorage.getItem('xgpy_token');
+      const res = await fetch(
+        `${API_CONFIG.apiUrl}/api/teacher/roll-call/classes/${selectedClassId}/memo`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({ memo }),
+        }
+      );
+      const json = await res.json();
+      return !json.error;
+    },
+    [selectedClassId]
+  );
+
+  // 选中讲台：右侧切换为班级备忘录面板
+  const handleSelectPodium = useCallback(async () => {
+    setIsPodiumSelected(true);
+    rollCall.setSelectedSeatNumber(null);
+    setMemoLoading(true);
+    const text = await loadMemoText();
+    setClassMemo(text);
+    setMemoLoading(false);
+  }, [loadMemoText]);
+
+  // 选中座位：退出讲台模式
+  const handleSelectSeat = useCallback(
+    (seatNumber: number | null) => {
+      setIsPodiumSelected(false);
+      rollCall.setSelectedSeatNumber(seatNumber);
+    },
+    [rollCall]
+  );
 
   const triggerSave = useCallback(
     (seats: RollCallSeat[], isLocked: boolean) => {
@@ -276,6 +335,7 @@ export const RollCallApp: React.FC<RollCallAppProps> = ({ onClose, mode = 'teach
         selectedClassId={selectedClassId}
         onSelectClass={(id) => {
           setSelectedClassId(id);
+          setIsPodiumSelected(false);
           rollCall.setSelectedSeatNumber(null);
         }}
         isLocked={rollCall.isLocked}
@@ -294,6 +354,7 @@ export const RollCallApp: React.FC<RollCallAppProps> = ({ onClose, mode = 'teach
           setIsRollCallModalOpen(true);
         }}
         onAttendance={() => setIsAttendanceModalOpen(true)}
+        onClassMemo={() => setIsMemoModalOpen(true)}
         rollCallCount={rollCallCount}
         onRollCallCountChange={setRollCallCount}
         onlineCount={onlineCount}
@@ -334,8 +395,10 @@ export const RollCallApp: React.FC<RollCallAppProps> = ({ onClose, mode = 'teach
             seats={rollCall.seats}
             students={rollCall.students}
             selectedSeatNumber={rollCall.selectedSeatNumber}
+            isPodiumSelected={isPodiumSelected}
             isLayoutLocked={rollCall.isLocked || mode === 'student'}
-            onSelectSeat={rollCall.setSelectedSeatNumber}
+            onSelectSeat={handleSelectSeat}
+            onSelectPodium={mode === 'teacher' ? handleSelectPodium : undefined}
             onDoubleClickSeat={handleDoubleClickSeat}
             onMoveStudent={handleMoveStudent}
             onAssignStudent={handleAssignStudent}
@@ -344,7 +407,16 @@ export const RollCallApp: React.FC<RollCallAppProps> = ({ onClose, mode = 'teach
           />
         )}
 
-        {/* 右：详情面板 */}
+        {/* 右：详情面板 / 讲台备忘录面板 */}
+        {isPodiumSelected && mode === 'teacher' ? (
+          <PodiumPanel
+            className={classes.find((c) => c.id === selectedClassId)?.name || ''}
+            memo={classMemo}
+            loading={memoLoading}
+            onMemoChange={setClassMemo}
+            onSave={saveMemo}
+          />
+        ) : (
         <StudentDetailPanel
           student={selectedStudent}
           seatNumber={rollCall.selectedSeatNumber}
@@ -366,7 +438,11 @@ export const RollCallApp: React.FC<RollCallAppProps> = ({ onClose, mode = 'teach
           }}
           onBindIp={rollCall.bindIp}
           onToggleBrowser={rollCall.setBrowserPermission}
+          onToggleCare={rollCall.toggleCare}
+          onToggleRecommend={rollCall.toggleRecommend}
+          onSaveNote={rollCall.saveNote}
         />
+        )}
       </div>
 
       {/* 远程控制 Modal */}
@@ -421,6 +497,16 @@ export const RollCallApp: React.FC<RollCallAppProps> = ({ onClose, mode = 'teach
               }
             },
           })}
+        />
+      )}
+
+      {/* 班级备忘录 Modal */}
+      {isMemoModalOpen && mode === 'teacher' && selectedClassId && (
+        <ClassMemoModal
+          className={classes.find((c) => c.id === selectedClassId)?.name || ''}
+          onClose={() => setIsMemoModalOpen(false)}
+          onLoad={loadMemoText}
+          onSave={saveMemo}
         />
       )}
     </div>

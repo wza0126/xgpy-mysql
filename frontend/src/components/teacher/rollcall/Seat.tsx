@@ -30,6 +30,8 @@ export const Seat: React.FC<SeatProps> = ({
   const isEmpty = !student;
   const isDraggable = !isLayoutLocked && !isSeatLocked && !isEmpty;
   const isIpMismatch = !!student?.is_ip_mismatch;
+  const isCared = student?.rollcall_care === 1 || student?.rollcall_care === true;
+  const isRecommended = student?.rollcall_recommend === 1 || student?.rollcall_recommend === true;
 
   // 状态色彩
   let bgClass = '';
@@ -79,9 +81,23 @@ export const Seat: React.FC<SeatProps> = ({
       `}
       style={{ minHeight: '70px' }}
     >
-      {/* 座位号 */}
-      <div className="absolute top-1 left-1.5 text-[10px] font-mono text-slate-500">
-        {String(seat.seat_number).padStart(2, '0')}
+      {/* 座位号 + 关爱/推荐标记 */}
+      <div className="absolute top-1 left-1.5 flex items-center gap-1">
+        <span className="text-[10px] font-mono text-slate-500">
+          {String(seat.seat_number).padStart(2, '0')}
+        </span>
+        {isCared && (
+          <i
+            className="fa-solid fa-heart text-[10px] text-rose-400 drop-shadow-[0_0_3px_rgba(244,63,94,0.8)] animate-pulse"
+            title="关爱（重点关注学困生）"
+          ></i>
+        )}
+        {isRecommended && (
+          <i
+            className="fa-solid fa-star text-[10px] text-amber-300 drop-shadow-[0_0_3px_rgba(252,211,77,0.8)]"
+            title="推荐（优秀学生）"
+          ></i>
+        )}
       </div>
 
       {/* 锁定图标 */}

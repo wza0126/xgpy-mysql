@@ -26,6 +26,7 @@ interface ToolbarProps {
   onBindAllIp?: () => void;
   onToggleIpRestriction?: () => void;
   onSetBrowserPermission?: (canUse: boolean) => void;
+  onClassMemo?: () => void;
 }
 
 export const Toolbar: React.FC<ToolbarProps> = ({
@@ -52,6 +53,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onBindAllIp,
   onToggleIpRestriction,
   onSetBrowserPermission,
+  onClassMemo,
 }) => {
   const currentClass = classes.find((c) => c.id === selectedClassId);
   // 学生端（课代表/班长）：仅保留反向排座和考勤记录
@@ -185,6 +187,19 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           <i className="fa-solid fa-clipboard-check"></i>
           考勤记录
         </button>
+
+        {/* 班级备忘录 - 仅教师 */}
+        {!isStudent && onClassMemo && (
+          <button
+            onClick={onClassMemo}
+            disabled={!selectedClassId}
+            className="px-3 py-1.5 bg-slate-800 hover:bg-cyan-500/20 text-slate-300 hover:text-cyan-300 text-xs rounded flex items-center gap-1.5 border border-slate-700 hover:border-cyan-500/40 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            title="编辑本班备忘录"
+          >
+            <i className="fa-solid fa-book-open"></i>
+            班级备忘录
+          </button>
+        )}
 
         {/* IP 绑定与登录限制 - 仅教师 */}
         {!isStudent && onBindAllIp && onToggleIpRestriction && (

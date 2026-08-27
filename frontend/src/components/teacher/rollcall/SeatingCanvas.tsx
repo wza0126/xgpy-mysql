@@ -6,8 +6,10 @@ interface SeatingCanvasProps {
   seats: RollCallSeat[];
   students: RollCallStudent[];
   selectedSeatNumber: number | null;
+  isPodiumSelected?: boolean;
   isLayoutLocked: boolean;
   onSelectSeat: (seatNumber: number | null) => void;
+  onSelectPodium?: () => void;
   onDoubleClickSeat: (seatNumber: number) => void;
   onMoveStudent: (fromSeatNumber: number, toSeatNumber: number) => void;
   onAssignStudent: (studentId: string, toSeatNumber: number) => void;
@@ -19,8 +21,10 @@ export const SeatingCanvas: React.FC<SeatingCanvasProps> = ({
   seats,
   students,
   selectedSeatNumber,
+  isPodiumSelected = false,
   isLayoutLocked,
   onSelectSeat,
+  onSelectPodium,
   onDoubleClickSeat,
   onMoveStudent,
   onAssignStudent,
@@ -96,8 +100,22 @@ export const SeatingCanvas: React.FC<SeatingCanvasProps> = ({
   const podiumAtTop = avgFrontY < 3.5;
 
   const podium = (
-    <div className="flex justify-center py-1 select-none" title="讲台">
-      <div className="flex items-center gap-2 px-8 py-1.5 bg-amber-900/40 border border-amber-700/50 rounded-md">
+    <div
+      className={`flex justify-center py-1 select-none cursor-pointer ${
+        isPodiumSelected ? 'rounded-lg ring-4 ring-amber-400/70 shadow-2xl shadow-amber-500/30' : ''
+      }`}
+      title={isPodiumSelected ? '讲台（已选中）' : '点击选中讲台'}
+      onClick={() => {
+        if (onSelectPodium) onSelectPodium();
+      }}
+    >
+      <div
+        className={`flex items-center gap-2 px-8 py-1.5 rounded-md border transition-colors ${
+          isPodiumSelected
+            ? 'bg-amber-700/40 border-amber-400/70'
+            : 'bg-amber-900/40 border-amber-700/50 hover:border-amber-500/60'
+        }`}
+      >
         <i className="fa-solid fa-chalkboard-user text-amber-400 text-lg"></i>
         <span className="text-xs font-mono text-amber-300 tracking-widest">讲台</span>
       </div>

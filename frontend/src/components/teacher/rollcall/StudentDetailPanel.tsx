@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { RollCallStudent, RollCallMode } from '../../../hooks/useRollCall';
 
 interface StudentDetailPanelProps {
@@ -12,6 +12,9 @@ interface StudentDetailPanelProps {
   onToggleSeatLock: () => void;
   onBindIp?: (studentId: string, action: 'bind' | 'unbind') => void;
   onToggleBrowser?: (studentId: string, canUse: boolean) => void;
+  onToggleCare?: (studentId: string, current: boolean) => void;
+  onToggleRecommend?: (studentId: string, current: boolean) => void;
+  onSaveNote?: (studentId: string, note: string) => void;
 }
 
 export const StudentDetailPanel: React.FC<StudentDetailPanelProps> = ({
@@ -25,7 +28,25 @@ export const StudentDetailPanel: React.FC<StudentDetailPanelProps> = ({
   onToggleSeatLock,
   onBindIp,
   onToggleBrowser,
+  onToggleCare,
+  onToggleRecommend,
+  onSaveNote,
 }) => {
+  // 备注本地编辑状态（仅在切换学生时同步，轮询刷新不重置，避免打断编辑）
+  const [noteText, setNoteText] = useState('');
+  const [noteSaving, setNoteSaving] = useState(false);
+
+  useEffect(() => {
+    setNoteText(student?.rollcall_note || '');
+  }, [student?.id]);
+
+  const saveNote = async () => {
+    if (!student || !onSaveNote) return;
+    setNoteSaving(true);
+    await onSaveNote(student.id, noteText);
+    setNoteSaving(false);
+  };
+
   if (!student || seatNumber == null) {
     return (
       <div className="h-full bg-slate-900/50 border-l border-slate-700 p-6 flex flex-col items-center justify-center text-slate-500">
@@ -35,6 +56,9 @@ export const StudentDetailPanel: React.FC<StudentDetailPanelProps> = ({
       </div>
     );
   }
+
+  const isCared = student.rollcall_care === 1 || student.rollcall_care === true;
+  const isRecommended = student.rollcall_recommend === 1 || student.rollcall_recommend === true;
 
   return (
     <div className="h-full bg-slate-900/50 border-l border-slate-700 flex flex-col">
@@ -147,6 +171,40 @@ export const StudentDetailPanel: React.FC<StudentDetailPanelProps> = ({
                   <i className="fa-solid fa-link-slash"></i>
                   解绑
                 </button>
+                {onToggleCare && (
+                  <button
+                    onClick={() => onToggleCare(student.id, isCared)}
+                    className={`
+                      px-2 py-1.5 rounded text-xs flex items-center justify-center gap-1 transition-all
+                      ${
+                        isCared
+                          ? 'bg-gradient-to-r from-rose-600 to-red-600 text-white shadow-lg shadow-rose-500/40 border border-rose-400/60'
+                          : 'bg-slate-800 hover:bg-rose-500/20 text-slate-300 hover:text-rose-300 border border-slate-700 hover:border-rose-500/50'
+                      }
+                    `}
+                    title={isCared ? '取消关爱标记' : '标记关爱（重点关注学困生，座位显示爱心）'}
+                  >
+                    <i className={`fa-solid ${isCared ? 'fa-heart' : 'fa-heart'}`}></i>
+                    {isCared ? '已关爱' : '关爱'}
+                  </button>
+                )}
+                {onToggleRecommend && (
+                  <button
+                    onClick={() => onToggleRecommend(student.id, isRecommended)}
+                    className={`
+                      px-2 py-1.5 rounded text-xs flex items-center justify-center gap-1 transition-all
+                      ${
+                        isRecommended
+                          ? 'bg-gradient-to-r from-amber-500 to-yellow-500 text-white shadow-lg shadow-amber-500/40 border border-amber-300/60'
+                          : 'bg-slate-800 hover:bg-amber-500/20 text-slate-300 hover:text-amber-300 border border-slate-700 hover:border-amber-500/50'
+                      }
+                    `}
+                    title={isRecommended ? '取消推荐标记' : '标记推荐（优秀学生，座位显示五角星）'}
+                  >
+                    <i className={`fa-solid ${isRecommended ? 'fa-star' : 'fa-star'}`}></i>
+                    {isRecommended ? '已推荐' : '推荐'}
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -226,6 +284,35 @@ export const StudentDetailPanel: React.FC<StudentDetailPanelProps> = ({
           <i className="fa-solid fa-user-minus"></i>
           清空该座位
         </button>
+        )}
+
+        {/* 学生备注（长文本，教师可随时修改） */}
+        {mode === 'teacher' && onSaveNote && (
+          <div className="pt-3 border-t border-slate-800">
+            <label className="text-[10px] font-mono text-slate-500 mb-1 flex items-center gap-1">
+              <i className="fa-solid fa-note-sticky text-cyan-500"></i>学生备注
+            </label>
+            <textarea
+              value={noteText}
+              onChange={(e) => setNoteText(e.target.value)}
+              placeholder="填写该生的备注信息（学习情况、需重点关注事项等）..."
+              className="w-full h-24 bg-slate-800/60 border border-slate-700 rounded p-2 text-xs text-slate-200 placeholder-slate-500 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 outline-none resize-none"
+            />
+            <div className="flex justify-end mt-1.5">
+              <button
+                onClick={saveNote}
+                disabled={noteSaving}
+                className={`
+                  px-3 py-1.5 rounded text-xs flex items-center justify-center gap-1 transition-all
+                  bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white shadow-lg shadow-cyan-500/30
+                  ${noteSaving ? 'opacity-60 cursor-wait' : ''}
+                `}
+              >
+                <i className="fa-solid fa-floppy-disk"></i>
+                {noteSaving ? '保存中...' : '保存备注'}
+              </button>
+            </div>
+          </div>
         )}
       </div>
 

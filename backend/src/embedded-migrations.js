@@ -295,5 +295,13 @@ module.exports = [
   {
     "version": "071_add_pk_qualification.sql",
     "sql": "-- PK 对战：活动配置增加「资格验证」（参考普通测试的测试资格验证）\n-- 设置学生参加该对战所需的最低做对题目数量（统计 student_answers 累计做对数），NULL 表示不限制\nALTER TABLE pk_battle_configs\n  ADD COLUMN IF NOT EXISTS qualification_correct_count INT DEFAULT NULL\n    COMMENT '参加该对战所需的最低累计做对题目数量，NULL表示不限制';\n"
+  },
+  {
+    "version": "072_add_roll_call_marks.sql",
+    "sql": "-- 课堂点名：学生级备注/关爱/推荐标记（跟随学生，换座位不丢失）\n-- 关爱=重点关注学困生（座位显示爱心）；推荐=优秀学生（座位显示五角星）\nALTER TABLE profiles\n  ADD COLUMN IF NOT EXISTS rollcall_note TEXT NULL\n    COMMENT '课堂点名备注（教师可见，长文本）',\n  ADD COLUMN IF NOT EXISTS rollcall_care TINYINT(1) NOT NULL DEFAULT 0\n    COMMENT '课堂点名关爱标记（1=座位显示爱心）',\n  ADD COLUMN IF NOT EXISTS rollcall_recommend TINYINT(1) NOT NULL DEFAULT 0\n    COMMENT '课堂点名推荐标记（1=座位显示五角星）';\n"
+  },
+  {
+    "version": "073_add_roll_call_class_memo.sql",
+    "sql": "-- 课堂点名：班级级备忘录（教师端弹窗编辑，按班级存储）\nALTER TABLE classes\n  ADD COLUMN IF NOT EXISTS rollcall_memo TEXT NULL\n    COMMENT '课堂点名班级备忘录（教师可见，长文本）';\n"
   }
 ];

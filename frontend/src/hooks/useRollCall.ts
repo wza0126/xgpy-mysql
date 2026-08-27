@@ -13,6 +13,9 @@ export interface RollCallStudent {
   bound_ip?: string | null;
   is_ip_mismatch?: boolean;
   can_use_browser?: boolean | number;
+  rollcall_note?: string | null;
+  rollcall_care?: boolean | number;
+  rollcall_recommend?: boolean | number;
 }
 
 export interface RollCallSeat {
@@ -388,6 +391,54 @@ export function useRollCall(classId: string | null, mode: RollCallMode = 'teache
     }
   }, [classId, mode, apiPrefix, ipRestriction]);
 
+  // 更新学生点名标记（备注/关爱/推荐，仅教师）
+  const updateMark = useCallback(
+    async (studentId: string, payload: { note?: string; care?: boolean; recommend?: boolean }): Promise<boolean> => {
+      if (mode !== 'teacher' || !classId) return false;
+      try {
+        const res = await fetch(`${API_CONFIG.apiUrl}/api/teacher/roll-call/students/${studentId}/mark`, {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify(payload),
+        });
+        const json = await res.json();
+        if (json.error) {
+          console.error('updateMark error:', json.error);
+          alert(json.error);
+          return false;
+        }
+        await loadStudents(classId);
+        return true;
+      } catch (e) {
+        console.error('updateMark fetch error:', e);
+        alert('保存失败：' + (e as Error).message);
+        return false;
+      }
+    },
+    [classId, mode, loadStudents]
+  );
+
+  // 切换关爱标记（座位爱心）
+  const toggleCare = useCallback(
+    async (studentId: string, current: boolean): Promise<boolean> =>
+      updateMark(studentId, { care: !current }),
+    [updateMark]
+  );
+
+  // 切换推荐标记（座位五角星）
+  const toggleRecommend = useCallback(
+    async (studentId: string, current: boolean): Promise<boolean> =>
+      updateMark(studentId, { recommend: !current }),
+    [updateMark]
+  );
+
+  // 保存学生备注
+  const saveNote = useCallback(
+    async (studentId: string, note: string): Promise<boolean> =>
+      updateMark(studentId, { note }),
+    [updateMark]
+  );
+
   const requestProxyToken = useCallback(async (studentId: string): Promise<ProxyTokenInfo | null> => {
     try {
       const res = await fetch(`${API_CONFIG.apiUrl}${apiPrefix}/proxy-token/${studentId}`, {
@@ -536,6 +587,9 @@ export function useRollCall(classId: string | null, mode: RollCallMode = 'teache
     toggleIpRestriction,
     setBrowserPermission,
     setClassBrowserPermission,
+    toggleCare,
+    toggleRecommend,
+    saveNote,
     saveSeating,
     autoArrange,
     reverseArrange,
