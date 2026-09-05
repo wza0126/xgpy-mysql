@@ -7899,8 +7899,8 @@ app.get('/api/desktop-background', async (req, res) => {
       const url = typeof value === 'object' && value.value ? value.value : value;
       res.json({ data: { url: toRelativeUploadPath(url) }, error: null });
     } else {
-      // 返回默认背景
-      const defaultUrl = 'https://images.unsplash.com/photo-1506744038136-46273834b3fb?q=80&w=2070&auto=format&fit=crop';
+      // 返回默认背景（本地随前端打包的内置背景，不再依赖外部图床，保证内网可离线显示）
+      const defaultUrl = '/backgrounds/default-bg.svg';
       res.json({ data: { url: defaultUrl }, error: null });
     }
   } catch (error) {

@@ -709,13 +709,18 @@ export const Desktop: React.FC = () => {
     );
   }
 
+  // 内置渐变兜底背景（叠在背景图下层）：
+  // 1) 未配置背景时使用内置渐变；2) 外链背景在内网加载失败时渐变自动显现，避免灰蒙蒙
+  const DESKTOP_BG_FALLBACK = 'linear-gradient(160deg, #10162b 0%, #14243f 45%, #0f3460 100%)';
+
   return (
     <div
       className="min-h-screen relative overflow-hidden"
       style={{
-        backgroundColor: background ? 'transparent' : '#1a202c',
-        backgroundImage: background ? `url(${background})` : 'none',
-        backgroundSize: 'cover',
+        backgroundImage: background
+          ? `url(${background}), ${DESKTOP_BG_FALLBACK}`
+          : DESKTOP_BG_FALLBACK,
+        backgroundSize: background ? 'cover, cover' : 'cover',
         backgroundPosition: 'center',
       }}
     >

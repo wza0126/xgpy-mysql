@@ -2,6 +2,8 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import './styles/index.css';
+// FontAwesome 字体与样式本地打包（原为 index.html 中的 cdnjs CDN，内网断网时会丢失全部图标）
+import '@fortawesome/fontawesome-free/css/all.min.css';
 
 // 兼容旧版公开点名分享链接：/share/roll-call/<token> 自动跳转到正确的 hash 路由
 // （应用使用 HashRouter，旧链接没有 #/ 前缀会被当作未登录首页处理，表现为"公开页要求登录"）
