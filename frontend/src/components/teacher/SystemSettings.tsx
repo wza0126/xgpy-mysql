@@ -59,6 +59,15 @@ type ClassInfo = {
   name: string;
 };
 
+// 携带登录凭证的请求头（供直连 fetch 使用；json=true 时附加 Content-Type）
+function authHeaders(json = false): Record<string, string> {
+  const token = localStorage.getItem('xgpy_token');
+  const headers: Record<string, string> = {};
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  if (json) headers['Content-Type'] = 'application/json';
+  return headers;
+}
+
 export const SystemSettings: React.FC = () => {
   const siteConfig = useSiteConfig();
   const defaultConfigs: Record<string, any> = {
@@ -532,7 +541,7 @@ export const SystemSettings: React.FC = () => {
     try {
       const response = await fetch(`${API_BASE}/api/security-settings`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(true),
         body: JSON.stringify(securitySettings)
       });
       
@@ -555,7 +564,8 @@ export const SystemSettings: React.FC = () => {
     
     try {
       const response = await fetch(`${API_BASE}/api/admin/force-logout/${userId}`, {
-        method: 'POST'
+        method: 'POST',
+        headers: authHeaders(),
       });
       
       if (response.ok) {
@@ -668,7 +678,7 @@ export const SystemSettings: React.FC = () => {
     try {
       const response = await fetch(`${API_BASE}/api/teachers/${teacherId}/password`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(true),
         body: JSON.stringify({ password: form.new })
       });
       
@@ -705,7 +715,7 @@ export const SystemSettings: React.FC = () => {
     try {
       const response = await fetch(`${API_BASE}/api/teachers`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(true),
         body: JSON.stringify({
           username: newTeacher.username,
           password: newTeacher.password,
@@ -733,7 +743,7 @@ export const SystemSettings: React.FC = () => {
     try {
       const response = await fetch(`${API_BASE}/api/teachers/${teacherId}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(true),
         body: JSON.stringify({
           username: editingTeacherInfo.username,
           real_name: editingTeacherInfo.real_name

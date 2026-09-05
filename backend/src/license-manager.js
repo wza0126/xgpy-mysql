@@ -7,6 +7,8 @@ const LICENSE_SECRET = 'xgpy_2024_license_salt_!@#$';
 const TRIAL_END_DATE = new Date('2027-06-01T00:00:00');
 const EXPIRING_SOON_DAYS = 30;
 const NETWORK_TIME_CACHE_TTL = 60000;
+const NETWORK_TIME_FAILURE_CACHE_TTL = 5 * 60 * 1000; // 外网校时失败的负缓存时长（内网环境避免周期性阻塞）
+const MACHINE_CODE_CACHE_TTL = 5 * 60 * 1000; // 机器码缓存：硬件信息稳定，5 分钟内不重复查询（wmic 很慢）
 const MAX_TIME_DRIFT_MS = 5 * 60 * 1000;
 const DEFAULT_MONTHS = 13;
 
@@ -38,6 +40,8 @@ class LicenseManager {
     this.pool = pool;
     this._cachedNetworkTime = null;
     this._networkTimeCacheTime = 0;
+    this._machineCodeCache = null;
+    this._machineCodeCacheTime = 0;
   }
 
   _execPromise(cmd) {
@@ -67,6 +71,12 @@ class LicenseManager {
   }
 
   async getCurrentMachineCode() {
+    // 机码缓存：避免每个授权请求都派生子进程执行 4 条 wmic（CPU/BIOS/网卡/磁盘），显著影响接口耗时
+    const now = Date.now();
+    if (this._machineCodeCache && (now - this._machineCodeCacheTime) < MACHINE_CODE_CACHE_TTL) {
+      return { ...this._machineCodeCache };
+    }
+
     const [cpuId, biosSerial, macAddr, diskSerial] = await Promise.all([
       this._execPromise('wmic cpu get processorid /value'),
       this._execPromise('wmic bios get serialnumber /value'),
@@ -95,13 +105,14 @@ class LicenseManager {
     const machineCodeA = this._hashMachineCode(rawA);
     const machineCodeB = this._hashMachineCode(rawB);
 
-    // 对外暴露稳定算法（B）作为主机器码，避免未来的波动
-    // 但查询授权记录时会同时尝试 algoA 和 algoB，兼容已激活记录中绑定的 algoA
-    return {
+    const result = {
       machineCode: machineCodeB,
       raw: rawB,
       machineCodeLegacy: machineCodeA,
     };
+    this._machineCodeCache = result;
+    this._machineCodeCacheTime = Date.now();
+    return { ...result };
   }
 
   formatCode(code) {
@@ -175,7 +186,15 @@ class LicenseManager {
     const serverTime = new Date();
     const now = Date.now();
 
-    if (this._cachedNetworkTime && (now - this._networkTimeCacheTime) < NETWORK_TIME_CACHE_TTL) {
+    // 成功校时缓存 60s；若上次外网校时失败（内网/断网），5 分钟内直接用服务器时间，
+    // 避免每 60 秒就有请求被多个外网地址串行超时阻塞（每个 3s，最多 ~9s）
+    const networkTimeFresh = this._cachedNetworkTime
+      && (now - this._networkTimeCacheTime) < NETWORK_TIME_CACHE_TTL;
+    const networkFailureHold = !this._cachedNetworkTime
+      && this._networkTimeCacheTime > 0
+      && (now - this._networkTimeCacheTime) < NETWORK_TIME_FAILURE_CACHE_TTL;
+
+    if (networkTimeFresh) {
       const drift = Math.abs(this._cachedNetworkTime.getTime() - serverTime.getTime());
       if (drift > MAX_TIME_DRIFT_MS) {
         return { now: serverTime, source: 'server', tamperDetected: true };
@@ -183,6 +202,10 @@ class LicenseManager {
       const earlierTime = this._cachedNetworkTime.getTime() < serverTime.getTime()
         ? this._cachedNetworkTime : serverTime;
       return { now: new Date(earlierTime), source: 'authoritative', tamperDetected: false };
+    }
+
+    if (networkFailureHold) {
+      return { now: serverTime, source: 'server', tamperDetected: false };
     }
 
     const networkTime = await this._fetchNetworkTime();

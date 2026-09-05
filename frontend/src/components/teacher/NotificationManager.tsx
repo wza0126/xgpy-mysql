@@ -5,6 +5,15 @@ import { API_CONFIG } from '../../api/config';
 import { useAuth } from '../../hooks/useAuth';
 import { formatDateTime, formatDate } from '../../utils/dateUtils';
 
+// 携带登录凭证的请求头（供直连 fetch 使用；json=true 时附加 Content-Type）
+function authHeaders(json = false): Record<string, string> {
+  const token = localStorage.getItem('xgpy_token');
+  const headers: Record<string, string> = {};
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  if (json) headers['Content-Type'] = 'application/json';
+  return headers;
+}
+
 interface Class {
   id: string;
   name: string;
@@ -132,7 +141,9 @@ export const NotificationManager: React.FC = () => {
   const fetchNotifications = async () => {
     if (!profile) return;
     try {
-      const res = await fetch(`${API_CONFIG.apiUrl}/api/notifications/teacher/${profile.id}`);
+      const res = await fetch(`${API_CONFIG.apiUrl}/api/notifications/teacher/${profile.id}`, {
+        headers: authHeaders(),
+      });
       
       // 检查是否是HTML响应（404等错误）
       const contentType = res.headers.get('content-type');
@@ -237,7 +248,7 @@ export const NotificationManager: React.FC = () => {
       for (const id of selectedNotifications) {
         const res = await fetch(`${API_CONFIG.apiUrl}/api/notifications/${id}`, {
           method: 'DELETE',
-          headers: { 'Content-Type': 'application/json' },
+          headers: authHeaders(true),
           body: JSON.stringify({ teacher_id: profile?.id }),
         });
         
@@ -306,7 +317,7 @@ export const NotificationManager: React.FC = () => {
 
       const res = await fetch(`${API_CONFIG.apiUrl}/api/notifications`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(true),
         body: JSON.stringify(payload),
       });
 
@@ -359,7 +370,9 @@ export const NotificationManager: React.FC = () => {
 
   const handleViewStatistics = async (notificationId: number) => {
     try {
-      const res = await fetch(`${API_CONFIG.apiUrl}/api/notifications/${notificationId}/statistics?teacher_id=${profile?.id}`);
+      const res = await fetch(`${API_CONFIG.apiUrl}/api/notifications/${notificationId}/statistics?teacher_id=${profile?.id}`, {
+        headers: authHeaders(),
+      });
       
       // 检查是否是HTML响应（404等错误）
       const contentType = res.headers.get('content-type');
@@ -384,7 +397,7 @@ export const NotificationManager: React.FC = () => {
     try {
       const res = await fetch(`${API_CONFIG.apiUrl}/api/notifications/${notificationId}`, {
         method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(true),
         body: JSON.stringify({ teacher_id: profile?.id }),
       });
 

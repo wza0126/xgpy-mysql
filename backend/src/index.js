@@ -1811,7 +1811,7 @@ app.get('/api/auth/validate-session', async (req, res) => {
 });
 
 // 获取安全设置
-app.get('/api/security-settings', async (req, res) => {
+app.get('/api/security-settings', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const [settings] = await pool.query('SELECT * FROM security_settings WHERE id = 1');
     if (settings.length > 0) {
@@ -1826,7 +1826,7 @@ app.get('/api/security-settings', async (req, res) => {
 });
 
 // 更新安全设置
-app.put('/api/security-settings', async (req, res) => {
+app.put('/api/security-settings', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const {
       max_concurrent_sessions_teacher,
@@ -1886,7 +1886,7 @@ app.put('/api/security-settings', async (req, res) => {
 });
 
 // 获取所有用户会话统计（教师权限）
-app.get('/api/admin/sessions-stats', async (req, res) => {
+app.get('/api/admin/sessions-stats', authenticate, requireTeachingRole, async (req, res) => {
   try {
     // 定义活跃时间阈值：30分钟内有活动才算真正在线
     const ACTIVITY_THRESHOLD_MINUTES = 30;
@@ -1928,7 +1928,7 @@ app.get('/api/admin/sessions-stats', async (req, res) => {
 });
 
 // 强制踢出用户所有设备（教师权限）
-app.post('/api/admin/force-logout/:userId', async (req, res) => {
+app.post('/api/admin/force-logout/:userId', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const { userId } = req.params;
 
@@ -3910,7 +3910,7 @@ app.post('/api/auth/refresh-session', async (req, res) => {
   }
 });
 
-app.post('/api/import', authenticate, async (req, res) => {
+app.post('/api/import', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const data = req.body;
     const connection = await pool.getConnection();
@@ -4162,7 +4162,7 @@ app.post('/api/leaderboard', async (req, res) => {
 });
 
 // 更新教师密码的API
-app.put('/api/teachers/:id/password', async (req, res) => {
+app.put('/api/teachers/:id/password', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const { id } = req.params;
     const { password } = req.body;
@@ -4191,7 +4191,7 @@ app.put('/api/teachers/:id/password', async (req, res) => {
 });
 
 // 添加新教师账号的API
-app.post('/api/teachers', async (req, res) => {
+app.post('/api/teachers', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const { username, password, real_name } = req.body;
     
@@ -4226,7 +4226,7 @@ app.post('/api/teachers', async (req, res) => {
 });
 
 // 更新教师信息的API
-app.put('/api/teachers/:id', async (req, res) => {
+app.put('/api/teachers/:id', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const { id } = req.params;
     const { username, real_name } = req.body;
@@ -4262,10 +4262,15 @@ app.put('/api/teachers/:id', async (req, res) => {
 // ==================== 通知系统 API ====================
 
 // 获取学生的通知列表
-app.get('/api/notifications/student/:studentId', async (req, res) => {
+app.get('/api/notifications/student/:studentId', authenticate, async (req, res) => {
   try {
     const { studentId } = req.params;
     const { unread_only } = req.query;
+
+    // 学生仅能查看自己的通知；教师/超管（远程查看等场景）放行
+    if (req.user.role === 'student' && studentId !== req.user.userId) {
+      return res.status(403).json({ data: null, error: '仅能查看自己的通知' });
+    }
 
     let query = `
       SELECT 
@@ -4305,9 +4310,14 @@ app.get('/api/notifications/student/:studentId', async (req, res) => {
 });
 
 // 获取学生的未读通知数量
-app.get('/api/notifications/student/:studentId/unread-count', async (req, res) => {
+app.get('/api/notifications/student/:studentId/unread-count', authenticate, async (req, res) => {
   try {
     const { studentId } = req.params;
+
+    // 学生仅能查询自己的未读数
+    if (req.user.role === 'student' && studentId !== req.user.userId) {
+      return res.status(403).json({ data: null, error: '仅能查看自己的通知' });
+    }
 
     const [rows] = await pool.query(`
       SELECT COUNT(*) as count
@@ -4326,10 +4336,13 @@ app.get('/api/notifications/student/:studentId/unread-count', async (req, res) =
 });
 
 // 标记通知为已读
-app.put('/api/notifications/recipient/:notificationId/read', async (req, res) => {
+app.put('/api/notifications/recipient/:notificationId/read', authenticate, async (req, res) => {
   try {
     const { notificationId } = req.params;
-    const { studentId } = req.body;
+    const { studentId: bodyStudentId } = req.body;
+
+    // 学生只能标记自己为已读，忽略其传入的其他 studentId
+    const studentId = req.user.role === 'student' ? req.user.userId : bodyStudentId;
 
     if (!studentId) {
       return res.status(400).json({ data: null, error: 'studentId is required' });
@@ -4349,9 +4362,14 @@ app.put('/api/notifications/recipient/:notificationId/read', async (req, res) =>
 });
 
 // 标记所有通知为已读
-app.put('/api/notifications/student/:studentId/read-all', async (req, res) => {
+app.put('/api/notifications/student/:studentId/read-all', authenticate, async (req, res) => {
   try {
     const { studentId } = req.params;
+
+    // 学生仅能标记自己的通知为已读
+    if (req.user.role === 'student' && studentId !== req.user.userId) {
+      return res.status(403).json({ data: null, error: '仅能操作自己的通知' });
+    }
 
     await pool.query(`
       UPDATE notification_recipients 
@@ -4367,9 +4385,10 @@ app.put('/api/notifications/student/:studentId/read-all', async (req, res) => {
 });
 
 // 获取教师的通知列表（只能获取自己创建的）
-app.get('/api/notifications/teacher/:teacherId', async (req, res) => {
+app.get('/api/notifications/teacher/:teacherId', authenticate, requireTeachingRole, async (req, res) => {
   try {
-    const { teacherId } = req.params;
+    // 教师仅能查看自己创建的通知（忽略路径中的 teacherId）
+    const teacherId = req.user.userId;
     const { status } = req.query;
 
     let query = `
@@ -4406,16 +4425,11 @@ app.get('/api/notifications/teacher/:teacherId', async (req, res) => {
 });
 
 // 获取通知详情和统计
-app.get('/api/notifications/:id/statistics', async (req, res) => {
+app.get('/api/notifications/:id/statistics', authenticate, requireTeachingRole, async (req, res) => {
   try {
-    console.log('=== GET /api/notifications/:id/statistics ===');
-    console.log('Params:', req.params);
-    console.log('Query:', req.query);
-    
     const { id } = req.params;
-    const { teacher_id } = req.query;
-
-    console.log('Checking notification:', id, 'for teacher:', teacher_id);
+    // 忽略 query 中的 teacher_id，仅允许查询当前教师自己的通知
+    const teacher_id = req.user.userId;
     
     // 首先检查权限
     const [notification] = await pool.query(
@@ -4464,13 +4478,14 @@ app.get('/api/notifications/:id/statistics', async (req, res) => {
 });
 
 // 创建通知
-app.post('/api/notifications', async (req, res) => {
+app.post('/api/notifications', authenticate, requireTeachingRole, async (req, res) => {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
 
+    // teacher_id 一律以会话身份为准，防止伪造他人教师身份发布通知（发积分/开权限）
+    const teacher_id = req.user.userId;
     const {
-      teacher_id,
       title,
       content,
       notification_type,
@@ -4815,15 +4830,16 @@ async function processNotificationDelivery(connection, notificationId, options) 
 }
 
 // 更新通知
-app.put('/api/notifications/:id', async (req, res) => {
+app.put('/api/notifications/:id', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const { id } = req.params;
-    const { teacher_id, ...updateData } = req.body;
+    // teacher_id 一律以会话身份为准（忽略 body 传入的 teacher_id）
+    const updateData = req.body;
 
-    // 检查权限
+    // 检查权限：仅能修改自己创建的通知
     const [notification] = await pool.query(
       'SELECT * FROM notifications WHERE id = ? AND teacher_id = ?',
-      [id, teacher_id]
+      [id, req.user.userId]
     );
 
     if (notification.length === 0) {
@@ -4866,15 +4882,14 @@ app.put('/api/notifications/:id', async (req, res) => {
 });
 
 // 删除通知
-app.delete('/api/notifications/:id', async (req, res) => {
+app.delete('/api/notifications/:id', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const { id } = req.params;
-    const { teacher_id } = req.body;
 
-    // 检查权限
+    // 检查权限：仅能删除自己创建的通知（以会话身份为准）
     const [notification] = await pool.query(
       'SELECT * FROM notifications WHERE id = ? AND teacher_id = ?',
-      [id, teacher_id]
+      [id, req.user.userId]
     );
 
     if (notification.length === 0) {
@@ -5011,7 +5026,7 @@ async function checkAndPublishScheduledNotifications() {
 }
 
 // 定时发布检查（手动调用 API）
-app.get('/api/notifications/check-scheduled', async (req, res) => {
+app.get('/api/notifications/check-scheduled', authenticate, requireTeachingRole, async (req, res) => {
   const result = await checkAndPublishScheduledNotifications();
   if (result.error) {
     res.status(500).json({ data: null, error: result.error });
@@ -5230,7 +5245,34 @@ app.get('/api/python/tasks/:taskId', authenticate, async (req, res) => {
 });
 
 // 运行Python代码
-app.post('/api/python/run', authenticate, async (req, res) => {
+// Python 代码执行并发闸门：限制单用户/全局限流，防止学生并发提交把服务器打挂
+const PY_RUN_MAX_PER_USER = 2;
+const PY_RUN_MAX_TOTAL = 8;
+const pyRunActive = new Map(); // key -> 当前在途数
+let pyRunActiveTotal = 0;
+
+function pythonRunLimiter(req, res, next) {
+  try {
+    const userId = req.user && (req.user.userId || req.user.id);
+    const key = userId ? `u:${userId}` : `ip:${req.ip || 'anon'}`;
+    const current = pyRunActive.get(key) || 0;
+    if (current >= PY_RUN_MAX_PER_USER || pyRunActiveTotal >= PY_RUN_MAX_TOTAL) {
+      return res.status(429).json({ data: null, error: '代码执行队列已满，请稍后再试' });
+    }
+    pyRunActive.set(key, current + 1);
+    pyRunActiveTotal += 1;
+    res.on('finish', () => {
+      const c = pyRunActive.get(key) || 0;
+      if (c <= 1) pyRunActive.delete(key); else pyRunActive.set(key, c - 1);
+      if (pyRunActiveTotal > 0) pyRunActiveTotal -= 1;
+    });
+    next();
+  } catch (e) {
+    next();
+  }
+}
+
+app.post('/api/python/run', authenticate, pythonRunLimiter, async (req, res) => {
   try {
     const { code, input } = req.body;
     const user = req.user;
@@ -5352,7 +5394,7 @@ app.delete('/api/python/drafts/:draftId', authenticate, async (req, res) => {
 });
 
 // 提交作业
-app.post('/api/python/submit', authenticate, async (req, res) => {
+app.post('/api/python/submit', authenticate, pythonRunLimiter, async (req, res) => {
   try {
     const { task_id, code } = req.body;
     const user = req.user;
@@ -5539,7 +5581,7 @@ app.get('/api/python/submissions/:taskId', authenticate, async (req, res) => {
 // === 教师端 API ===
 
 // 创建/更新编程任务
-app.post('/api/python/teacher/tasks', authenticate, async (req, res) => {
+app.post('/api/python/teacher/tasks', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const user = req.user;
     const {
@@ -5593,7 +5635,7 @@ app.post('/api/python/teacher/tasks', authenticate, async (req, res) => {
 });
 
 // 教师获取任务列表
-app.get('/api/python/teacher/tasks', authenticate, async (req, res) => {
+app.get('/api/python/teacher/tasks', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const [rows] = await pool.query(
       'SELECT * FROM python_tasks ORDER BY created_at DESC'
@@ -5606,7 +5648,7 @@ app.get('/api/python/teacher/tasks', authenticate, async (req, res) => {
 });
 
 // 更新编程任务
-app.put('/api/python/teacher/tasks/:taskId', authenticate, async (req, res) => {
+app.put('/api/python/teacher/tasks/:taskId', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const { taskId } = req.params;
     const updateData = req.body;
@@ -5656,7 +5698,7 @@ app.put('/api/python/teacher/tasks/:taskId', authenticate, async (req, res) => {
 });
 
 // 删除编程任务（同步删除关联的提交和批改）
-app.delete('/api/python/teacher/tasks/:taskId', authenticate, async (req, res) => {
+app.delete('/api/python/teacher/tasks/:taskId', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const { taskId } = req.params;
     // 先删除批改记录
@@ -5676,7 +5718,7 @@ app.delete('/api/python/teacher/tasks/:taskId', authenticate, async (req, res) =
 });
 
 // 批量删除学生提交（恢复为未提交状态）
-app.post('/api/python/teacher/delete-submissions', authenticate, async (req, res) => {
+app.post('/api/python/teacher/delete-submissions', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const { submission_ids } = req.body;
     if (!submission_ids || !Array.isArray(submission_ids) || submission_ids.length === 0) {
@@ -5698,7 +5740,7 @@ app.post('/api/python/teacher/delete-submissions', authenticate, async (req, res
 });
 
 // 获取作业提交列表
-app.get('/api/python/teacher/submissions/:taskId', authenticate, async (req, res) => {
+app.get('/api/python/teacher/submissions/:taskId', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const { taskId } = req.params;
     const { class_id } = req.query;
@@ -5730,7 +5772,7 @@ app.get('/api/python/teacher/submissions/:taskId', authenticate, async (req, res
 });
 
 // 获取未提交作业的学生
-app.get('/api/python/teacher/unsubmitted/:taskId', authenticate, async (req, res) => {
+app.get('/api/python/teacher/unsubmitted/:taskId', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const { taskId } = req.params;
     const { class_id } = req.query;
@@ -5757,7 +5799,7 @@ app.get('/api/python/teacher/unsubmitted/:taskId', authenticate, async (req, res
 });
 
 // AI批改单个作业
-app.post('/api/python/teacher/grade/:submissionId', authenticate, async (req, res) => {
+app.post('/api/python/teacher/grade/:submissionId', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const licenseResult = await licenseManager.checkFeatureLicense(FEATURES.AI);
     if (!licenseResult.allowed) {
@@ -5808,7 +5850,7 @@ app.post('/api/python/teacher/grade/:submissionId', authenticate, async (req, re
 });
 
 // 批量AI批改全班作业
-app.post('/api/python/teacher/grade-task/:taskId', authenticate, async (req, res) => {
+app.post('/api/python/teacher/grade-task/:taskId', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const licenseResult = await licenseManager.checkFeatureLicense(FEATURES.AI);
     if (!licenseResult.allowed) {
@@ -5868,7 +5910,7 @@ app.post('/api/python/teacher/grade-task/:taskId', authenticate, async (req, res
 });
 
 // 教师手动调整分数
-app.put('/api/python/teacher/grade/:submissionId', authenticate, async (req, res) => {
+app.put('/api/python/teacher/grade/:submissionId', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const { submissionId } = req.params;
     const { adjusted_score, adjusted_comment, show_reference_code } = req.body;
@@ -5891,7 +5933,7 @@ app.put('/api/python/teacher/grade/:submissionId', authenticate, async (req, res
 });
 
 // 导出作业情况（支持班级筛选）
-app.get('/api/python/teacher/export', authenticate, async (req, res) => {
+app.get('/api/python/teacher/export', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const { class_id } = req.query;
 
@@ -7845,7 +7887,7 @@ app.get('/api/student/game-diagnostics', authenticate, async (req, res) => {
 // ==================== 桌面背景上传和管理 API ====================
 
 // 上传桌面背景图片
-app.post('/api/desktop-background/upload', authenticate, upload.single('background'), async (req, res) => {
+app.post('/api/desktop-background/upload', authenticate, requireTeachingRole, upload.single('background'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ data: null, error: '未上传文件' });
@@ -8553,7 +8595,7 @@ app.get('/api/uploads/backgrounds', async (req, res) => {
 });
 
 // 删除指定的背景图片
-app.delete('/api/uploads/backgrounds/:filename', authenticate, async (req, res) => {
+app.delete('/api/uploads/backgrounds/:filename', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const { filename } = req.params;
     
@@ -8599,7 +8641,7 @@ app.delete('/api/uploads/backgrounds/:filename', authenticate, async (req, res) 
 });
 
 // 萌宠图片上传
-app.post('/api/uploads/pet-image', authenticate, upload.single('image'), async (req, res) => {
+app.post('/api/uploads/pet-image', authenticate, requireTeachingRole, upload.single('image'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ data: null, error: '未上传文件' });
@@ -10173,6 +10215,20 @@ function requireTeacher(req, res, next) {
 function requireStudent(req, res, next) {
   if (req.user.role !== 'student') {
     return res.status(403).json({ data: null, error: '仅学生可访问该接口' });
+  }
+  next();
+}
+
+// 是否教师/超级管理员角色
+function isTeachingRole(role) {
+  return role === 'teacher' || role === 'super_admin';
+}
+
+// 教师/超级管理员角色检查中间件（教师端管理类功能通用）
+// 注：部分接口历史上用 requireTeacher(仅 teacher)，超管被误伤；此中间件对两者放行
+function requireTeachingRole(req, res, next) {
+  if (!req.user || !isTeachingRole(req.user.role)) {
+    return res.status(403).json({ data: null, error: '仅教师可访问该接口' });
   }
   next();
 }

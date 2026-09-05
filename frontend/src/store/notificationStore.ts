@@ -47,6 +47,15 @@ interface NotificationState {
   lastDigitalId: number | null;
 }
 
+// 携带登录凭证的请求头（供直连 fetch 使用；json=true 时附加 Content-Type）
+function authHeaders(json = false): Record<string, string> {
+  const token = localStorage.getItem('xgpy_token');
+  const headers: Record<string, string> = {};
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  if (json) headers['Content-Type'] = 'application/json';
+  return headers;
+}
+
 export const useNotificationStore = create<NotificationState>((set, get) => ({
   notifications: [],
   unreadCount: 0,
@@ -60,7 +69,9 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
     try {
       set({ isLoading: true });
       
-      const response = await fetch(`${API_CONFIG.apiUrl}/api/notifications/student/${studentId}`);
+      const response = await fetch(`${API_CONFIG.apiUrl}/api/notifications/student/${studentId}`, {
+        headers: authHeaders(),
+      });
       
       // 检查是否是HTML响应
       const contentType = response.headers.get('content-type');
@@ -83,7 +94,9 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
 
   fetchUnreadCount: async (studentId: number | string) => {
     try {
-      const response = await fetch(`${API_CONFIG.apiUrl}/api/notifications/student/${studentId}/unread-count`);
+      const response = await fetch(`${API_CONFIG.apiUrl}/api/notifications/student/${studentId}/unread-count`, {
+        headers: authHeaders(),
+      });
       
       // 检查是否是HTML响应
       const contentType = response.headers.get('content-type');
@@ -106,7 +119,7 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
     try {
       const response = await fetch(`${API_CONFIG.apiUrl}/api/notifications/recipient/${notificationId}/read`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(true),
         body: JSON.stringify({ studentId }),
       });
 
@@ -137,6 +150,7 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
     try {
       const response = await fetch(`${API_CONFIG.apiUrl}/api/notifications/student/${studentId}/read-all`, {
         method: 'PUT',
+        headers: authHeaders(),
       });
 
       // 检查是否是HTML响应
