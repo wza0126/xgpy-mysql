@@ -228,6 +228,7 @@ export const Desktop: React.FC = () => {
       checkAppAccessPermission();
       checkAiAccessPermission();
       checkExchangePermission();
+      checkPythonAccessPermission();
       fetchFocusModeConfig();
 
       const interval = setInterval(() => {
@@ -237,6 +238,7 @@ export const Desktop: React.FC = () => {
         checkAppAccessPermission();
         checkAiAccessPermission();
         checkExchangePermission();
+        checkPythonAccessPermission();
         fetchFocusModeConfig();
       }, 10000);
 
@@ -408,6 +410,33 @@ export const Desktop: React.FC = () => {
     }
   };
 
+  const checkPythonAccessPermission = async () => {
+    const { closeWindow, windows } = useDesktopStore.getState();
+    if (!effectiveProfile) return;
+
+    try {
+      const result = await backendClient
+        .from('profiles')
+        .select('python_enabled')
+        .eq('id', effectiveProfile.id)
+        .maybeSingle();
+
+      if (result.error || !result.data) return;
+
+      const pythonEnabledValue = result.data.python_enabled;
+      const pythonEnabled = pythonEnabledValue !== 0 && pythonEnabledValue !== false;
+
+      const pythonWindowOpen = windows.some(w => w.id === 'python' && w.isOpen);
+
+      if (!pythonEnabled && pythonWindowOpen) {
+        closeWindow('python');
+        alert('您的 Python 编程权限已被管理员禁用');
+      }
+    } catch (error) {
+      console.error('检查 Python 编程权限失败:', error);
+    }
+  };
+
   useEffect(() => {
     if (effectiveProfile?.role === 'student') {
       checkForNewNotifications(effectiveProfile.id);
@@ -555,6 +584,33 @@ export const Desktop: React.FC = () => {
 
         if (!canExchange) {
           alert('您当前无法使用积分兑换功能');
+          return;
+        }
+      } catch (error) {
+        alert('检查权限失败');
+        return;
+      }
+    }
+
+    if (icon.id === 'python') {
+      if (!effectiveProfile) {
+        alert('请先登录');
+        return;
+      }
+
+      try {
+        const result = await backendClient.from('profiles').select('python_enabled').eq('id', effectiveProfile.id).maybeSingle();
+
+        if (result.error || !result.data) {
+          alert('检查权限失败');
+          return;
+        }
+
+        const pythonEnabledValue = result.data.python_enabled;
+        const pythonEnabled = pythonEnabledValue !== 0 && pythonEnabledValue !== false;
+
+        if (!pythonEnabled) {
+          alert('Python 编程功能已被老师关闭');
           return;
         }
       } catch (error) {

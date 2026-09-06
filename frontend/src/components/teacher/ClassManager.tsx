@@ -78,12 +78,13 @@ export const ClassManager: React.FC = () => {
       }
     }
 
-    // 应用中心/兑换/上网/PK对战 4 个开关：走统一批量接口，同步改学生 profiles
-    const quickKeys: Array<'app_center_enabled' | 'exchange_enabled' | 'internet_enabled' | 'pk_battle_enabled'> = [
+    // 应用中心/兑换/上网/PK对战/Python编程 开关：走统一批量接口，同步改学生 profiles
+    const quickKeys: Array<'app_center_enabled' | 'exchange_enabled' | 'internet_enabled' | 'pk_battle_enabled' | 'python_enabled'> = [
       'app_center_enabled',
       'exchange_enabled',
       'internet_enabled',
       'pk_battle_enabled',
+      'python_enabled',
     ];
     const quickToggles: Record<string, boolean> = {};
     for (const k of quickKeys) {
@@ -194,8 +195,8 @@ export const ClassManager: React.FC = () => {
     return v === true || v === 1 || v === '1';
   };
 
-  // 班级快捷开关（应用中心/兑换/上网/PK对战）—— 走统一批量接口，同步改学生 profiles 对应字段
-  const toggleClassQuickSwitch = async (cls: Class, key: 'app_center_enabled' | 'exchange_enabled' | 'internet_enabled' | 'pk_battle_enabled') => {
+  // 班级快捷开关（应用中心/兑换/上网/PK对战/Python编程）—— 走统一批量接口，同步改学生 profiles 对应字段
+  const toggleClassQuickSwitch = async (cls: Class, key: 'app_center_enabled' | 'exchange_enabled' | 'internet_enabled' | 'pk_battle_enabled' | 'python_enabled') => {
     const cur = isClassBoolEnabled(cls, key);
     const newValue = !cur;
     try {
@@ -306,6 +307,7 @@ export const ClassManager: React.FC = () => {
               <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">兑换</th>
               <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">上网</th>
               <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">PK对战</th>
+              <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">编程</th>
               <th className="px-6 py-4 text-left text-sm font-medium text-gray-600">创建时间</th>
               <th className="px-6 py-4 text-right text-sm font-medium text-gray-600">操作</th>
             </tr>
@@ -550,6 +552,34 @@ export const ClassManager: React.FC = () => {
                     >
                       <i className={`fa-solid mr-2 ${isClassBoolEnabled(cls, 'pk_battle_enabled') ? 'fa-check' : 'fa-times'}`}></i>
                       {isClassBoolEnabled(cls, 'pk_battle_enabled') ? '已启用' : '已禁用'}
+                    </button>
+                  )}
+                </td>
+                {/* Python 编程 */}
+                <td className="px-6 py-4 text-center">
+                  {editingClass?.id === cls.id ? (
+                    <label className="flex items-center justify-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={isClassBoolEnabled(editingClass!, 'python_enabled')}
+                        onChange={(e) => setEditingClass({ ...editingClass!, python_enabled: e.target.checked })}
+                        className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      />
+                      <span className="text-sm text-gray-600">
+                        {isClassBoolEnabled(editingClass!, 'python_enabled') ? '启用' : '禁用'}
+                      </span>
+                    </label>
+                  ) : (
+                    <button
+                      onClick={() => toggleClassQuickSwitch(cls, 'python_enabled')}
+                      className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
+                        isClassBoolEnabled(cls, 'python_enabled')
+                          ? 'bg-green-100 text-green-700 hover:bg-green-200'
+                          : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                      }`}
+                    >
+                      <i className={`fa-solid mr-2 ${isClassBoolEnabled(cls, 'python_enabled') ? 'fa-check' : 'fa-times'}`}></i>
+                      {isClassBoolEnabled(cls, 'python_enabled') ? '已启用' : '已禁用'}
                     </button>
                   )}
                 </td>

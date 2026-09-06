@@ -295,5 +295,9 @@ module.exports = [
   {
     "version": "071_localize_external_assets.sql",
     "sql": "-- 本地化外部资源：内网/无外网机房离线部署时，桌面背景不再引用外部图床（原默认指向 images.unsplash.com）\n-- 创建时间: 2026-09-05\n\n-- 1. 系统当前桌面背景配置：若值为外部 http(s) 链接，改为随前端打包的本地内置背景\n--    （'/backgrounds/default-bg.svg' 由前端 public/ 目录提供，与页面同源加载）\nUPDATE system_config\nSET value = JSON_OBJECT('value', '/backgrounds/default-bg.svg'), updated_at = NOW()\nWHERE config_key = 'desktop_background'\n  AND value LIKE '%http%';\n\n-- 2. 桌面背景库：外链背景统一替换为本地内置背景\n--    （教师通过上传功能保存的本地背景为 /uploads/... 相对路径，不受影响）\nUPDATE desktop_backgrounds\nSET url = '/backgrounds/default-bg.svg'\nWHERE url LIKE 'http://%' OR url LIKE 'https://%';\n"
+  },
+  {
+    "version": "072_add_python_enabled.sql",
+    "sql": "-- 班级级 \"Python 编程\" 快捷开关（与应用中心/兑换/上网开关同模式）\n-- classes.python_enabled：班级是否允许该班学生使用桌面 Python 编程模块\n-- profiles.python_enabled：同步到学生个人，学生端双击/已打开窗口据此拦截与关闭\n-- 创建时间: 2026-09-06\n\nALTER TABLE classes\n  ADD COLUMN IF NOT EXISTS python_enabled TINYINT(1) NOT NULL DEFAULT 1\n    COMMENT '是否允许该班级学生使用Python编程（同步 profiles.python_enabled）';\n\nALTER TABLE profiles\n  ADD COLUMN IF NOT EXISTS python_enabled TINYINT(1) NOT NULL DEFAULT 1\n    COMMENT '是否允许使用Python编程（由班级快捷开关同步）';\n\n-- 存量学生行按所在班级补齐一次（默认均为 1；若个别班级历史已设为 0 则一并同步）\nUPDATE profiles p\n  JOIN classes c ON p.class_id = c.id\nSET p.python_enabled = c.python_enabled\nWHERE p.role = 'student' AND p.python_enabled <> c.python_enabled;\n"
   }
 ];

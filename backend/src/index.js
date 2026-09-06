@@ -890,6 +890,7 @@ app.put('/api/classes/:id/toggles', authenticate, async (req, res) => {
       { key: 'internet_enabled',   profileField: 'can_use_browser',          label: '上网冲浪' },
       { key: 'workshop_enabled',   profileField: null,                        label: '工坊开关' },
       { key: 'pk_battle_enabled',  profileField: null,                        label: 'PK对战' },
+      { key: 'python_enabled',     profileField: 'python_enabled',            label: 'Python编程' },
     ];
 
     const classSets = [];
