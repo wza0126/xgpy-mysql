@@ -259,7 +259,8 @@ export const ProxyManager: React.FC = () => {
         ...f,
         domainsText: merged.join('\n'),
         name: f.name || info.title || f.name,
-        icon: f.icon || info.favicon || f.icon,
+        // 不再回填远程 favicon，图标统一使用本地资源，避免外链
+        icon: f.icon,
       }));
     } catch (error) {
       alert('抓取失败：' + (error as Error).message);
@@ -449,7 +450,7 @@ export const ProxyManager: React.FC = () => {
                   <tr key={site.id} className="hover:bg-gray-50">
                     <td className="px-4 py-2.5 text-xl w-12">
                       {site.icon && /^https?:\/\//i.test(site.icon) ? (
-                        <img src={site.icon} alt="" className="w-6 h-6 object-contain" />
+                        <img src="/icons/site-default.svg" alt="" className="w-6 h-6 object-contain" />
                       ) : (
                         <span>{site.icon || '🌐'}</span>
                       )}

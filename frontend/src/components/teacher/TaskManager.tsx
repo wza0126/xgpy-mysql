@@ -81,6 +81,7 @@ interface StudentProgress {
   student_id: string;
   username: string;
   real_name?: string;
+  class_name?: string;
   status: 'not_started' | 'in_progress' | 'completed';
   score?: number;
   submitted_at?: string;
@@ -1955,6 +1956,7 @@ const StudentDataModal: React.FC<{
 }> = ({ taskId, taskTitle, onClose }) => {
   const [students, setStudents] = useState<StudentProgress[]>([]);
   const [loading, setLoading] = useState(true);
+  const [classFilter, setClassFilter] = useState('');
   const [activeTab, setActiveTab] = useState<'students' | 'analysis'>('students');
   const [sortField, setSortField] = useState<'name' | 'score' | 'status'>('name');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
@@ -2010,9 +2012,13 @@ const StudentDataModal: React.FC<{
     URL.revokeObjectURL(url);
   };
 
-  const completed = students.filter((s) => s.status === 'completed');
-  const inProgress = students.filter((s) => s.status === 'in_progress');
-  const notStarted = students.filter((s) => s.status === 'not_started');
+  // 班级筛选：选项来自返回数据中出现的班级
+  const classOptions = Array.from(new Set((students || []).map((s) => s.class_name).filter(Boolean))) as string[];
+  const visibleStudents = classFilter ? students.filter((s) => s.class_name === classFilter) : students;
+
+  const completed = visibleStudents.filter((s) => s.status === 'completed');
+  const inProgress = visibleStudents.filter((s) => s.status === 'in_progress');
+  const notStarted = visibleStudents.filter((s) => s.status === 'not_started');
   const avgScore = completed.length > 0
     ? Math.round(completed.reduce((sum, s) => sum + (s.score || 0), 0) / completed.length)
     : 0;
@@ -2040,7 +2046,7 @@ const StudentDataModal: React.FC<{
     }
   };
 
-  const sortedStudents = [...students].sort((a, b) => {
+  const sortedStudents = [...visibleStudents].sort((a, b) => {
     let cmp = 0;
     if (sortField === 'name') {
       cmp = (a.real_name || a.username).localeCompare(b.real_name || b.username, 'zh-CN');
@@ -2117,7 +2123,9 @@ const StudentDataModal: React.FC<{
               <i className="fa-solid fa-chart-bar mr-2 text-purple-500"></i>
               {taskTitle} - 学生数据
             </h3>
-            <p className="text-sm text-gray-500 mt-0.5">共 {students.length} 名学生</p>
+            <p className="text-sm text-gray-500 mt-0.5">
+              共 {students.length} 名学生{classFilter && `（当前显示 ${visibleStudents.length} 名）`}
+            </p>
           </div>
           <div className="flex gap-2">
             <button
@@ -2150,6 +2158,21 @@ const StudentDataModal: React.FC<{
           >
             <i className="fa-solid fa-chart-pie mr-1.5"></i>题目正确率
           </button>
+        </div>
+
+        {/* 班级筛选 */}
+        <div className="px-6 pt-3 border-b border-gray-100 flex items-center justify-end gap-2">
+          <span className="text-sm text-gray-500">按班级筛选：</span>
+          <select
+            value={classFilter}
+            onChange={(e) => setClassFilter(e.target.value)}
+            className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm bg-white text-gray-700"
+          >
+            <option value="">全部班级</option>
+            {classOptions.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
         </div>
 
         {/* 统计卡片 */}

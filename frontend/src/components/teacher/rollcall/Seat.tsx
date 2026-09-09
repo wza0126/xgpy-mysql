@@ -61,7 +61,8 @@ export const Seat: React.FC<SeatProps> = ({
   }
 
   const name = student?.real_name || student?.username || '';
-  const shortName = name.length > 2 ? name.slice(0, 2) : name;
+  // 座位姓名最多显示 3 个字（超出仍截断避免撑破座位格）
+  const shortName = name.length > 3 ? name.slice(0, 3) : name;
   const isOffline = student && !isOnline;
 
   return (

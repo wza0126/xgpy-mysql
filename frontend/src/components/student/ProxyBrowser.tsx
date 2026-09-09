@@ -13,10 +13,11 @@ interface ProxySite {
   sort_order: number;
 }
 
-// 站点图标：emoji 直接显示，URL 用 img，兜底用地球图标
+// 站点图标：emoji/字符直接显示；外链 URL 一律用本地默认图标，杜绝加载外部资源
+const SITE_DEFAULT_ICON = '/icons/site-default.svg';
 const SiteIcon: React.FC<{ icon: string | null; className?: string }> = ({ icon, className = '' }) => {
   if (icon && /^https?:\/\//i.test(icon)) {
-    return <img src={icon} alt="" className={`object-contain ${className}`} />;
+    return <img src={SITE_DEFAULT_ICON} alt="" className={`object-contain ${className}`} />;
   }
   if (icon) {
     return <span className={className}>{icon}</span>;
