@@ -10286,7 +10286,7 @@ app.get('/api/teacher/questions', authenticate, requireTeacher, async (req, res)
 app.post('/api/teacher/tasks', authenticate, requireTeacher, async (req, res) => {
   try {
     const teacherId = req.user.userId;
-    const { class_ids, title, learning_objectives, start_time, deadline, force_video_watch, min_study_duration, access_type, passing_score, pass_reward_points } = req.body;
+    const { class_ids, title, learning_objectives, start_time, deadline, force_video_watch, min_study_duration, access_type, passing_score, pass_reward_points, show_answer } = req.body;
     const taskId = 'task_' + Date.now() + '_' + Math.random().toString(36).substr(2, 8);
     const accessKey = crypto.randomUUID().replace(/-/g, '').substr(0, 32);
     const accessTypeVal = access_type === 'public' ? 1 : 0;
@@ -10295,10 +10295,12 @@ app.post('/api/teacher/tasks', authenticate, requireTeacher, async (req, res) =>
     const minStudyDur = Math.max(0, parseInt(min_study_duration) || 0);
     const passingScore = Math.max(0, parseInt(passing_score) || 0);
     const passReward = Math.max(0, parseInt(pass_reward_points) || 0);
+    // 未传时默认开启（保持历史行为），只有显式传 false/0 才关闭
+    const showAnswerVal = (show_answer === false || show_answer === 0 || show_answer === '0' || show_answer === 'false') ? 0 : 1;
     const [result] = await pool.query(
-      `INSERT INTO task_class (id, class_id, class_ids, teacher_id, title, learning_objectives, start_time, deadline, status, access_key, force_video_watch, min_study_duration, passing_score, pass_reward_points, access_type, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
-      [taskId, firstClassId, JSON.stringify(classIdArr), teacherId, title, learning_objectives || null, start_time || null, deadline || null, accessKey, force_video_watch ? 1 : 0, minStudyDur, passingScore, passReward, accessTypeVal]
+      `INSERT INTO task_class (id, class_id, class_ids, teacher_id, title, learning_objectives, start_time, deadline, status, access_key, force_video_watch, min_study_duration, passing_score, pass_reward_points, show_answer, access_type, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      [taskId, firstClassId, JSON.stringify(classIdArr), teacherId, title, learning_objectives || null, start_time || null, deadline || null, accessKey, force_video_watch ? 1 : 0, minStudyDur, passingScore, passReward, showAnswerVal, accessTypeVal]
     );
     res.json({ data: { id: taskId, access_key: accessKey }, error: null });
   } catch (error) {
@@ -10387,10 +10389,10 @@ app.get('/api/teacher/tasks/:taskId', authenticate, requireTeacher, async (req, 
     const formattedQuestions = questions.map(q => {
       const isTemp = !q.question_id;
       const content = isTemp ? q.temp_content : q.q_content;
-      const type = isTemp ? q.temp_type : q.q_type;
-      const options = isTemp ? taskSafeJsonParse(q.temp_options, null) : taskSafeJsonParse(q.q_options, null);
-      const answers = isTemp ? (q.temp_answer ? [q.temp_answer] : []) : taskSafeJsonParse(q.q_answers, []);
-      const explanation = isTemp ? null : q.q_explanation;
+      const type = (isTemp ? q.temp_type : q.q_type) || 'fill_blank';
+      const options = taskGetOptionsArray(isTemp ? q.temp_options : q.q_options);
+      const answers = taskNormalizeCorrectAnswers(isTemp ? q.temp_answer : q.q_answers, type, options);
+      const explanation = isTemp ? (q.temp_explanation || null) : q.q_explanation;
       return { ...q, content, type, options, answers, explanation };
     });
     res.json({ data: { task, resources: formattedResources, questions: formattedQuestions }, error: null });
@@ -10405,7 +10407,7 @@ app.put('/api/teacher/tasks/:taskId', authenticate, requireTeacher, async (req, 
   try {
     const { taskId } = req.params;
     const teacherId = req.user.userId;
-    const { title, learning_objectives, start_time, deadline, force_video_watch, min_study_duration, access_type, status, class_ids, passing_score, pass_reward_points } = req.body;
+    const { title, learning_objectives, start_time, deadline, force_video_watch, min_study_duration, access_type, status, class_ids, passing_score, pass_reward_points, show_answer } = req.body;
     const fields = [];
     const params = [];
     fields.push('title = ?');
@@ -10429,6 +10431,10 @@ app.put('/api/teacher/tasks/:taskId', authenticate, requireTeacher, async (req, 
     if (pass_reward_points !== undefined) {
       fields.push('pass_reward_points = ?');
       params.push(Math.max(0, parseInt(pass_reward_points) || 0));
+    }
+    if (show_answer !== undefined) {
+      fields.push('show_answer = ?');
+      params.push((show_answer === false || show_answer === 0 || show_answer === '0' || show_answer === 'false') ? 0 : 1);
     }
     fields.push('access_type = ?');
     params.push(access_type === 'public' ? 1 : (access_type === 'private' ? 0 : (access_type != null ? access_type : 0)));
@@ -10588,7 +10594,7 @@ app.post('/api/teacher/tasks/:taskId/questions', authenticate, requireTeacher, a
     const teacherId = req.user.userId;
     const [[task]] = await pool.query('SELECT id FROM task_class WHERE id = ? AND teacher_id = ?', [taskId, teacherId]);
     if (!task) return res.status(404).json({ data: null, error: '任务不存在' });
-    const { question_id, score, temp_content, temp_type, temp_options, temp_answer } = req.body;
+    const { question_id, score, temp_content, temp_type, temp_options, temp_answer, temp_explanation } = req.body;
     const questionId = 'tq_' + Date.now() + '_' + Math.random().toString(36).substr(2, 8);
     let result;
     if (question_id) {
@@ -10598,9 +10604,9 @@ app.post('/api/teacher/tasks/:taskId/questions', authenticate, requireTeacher, a
       );
     } else {
       [result] = await pool.query(
-        `INSERT INTO task_question (id, task_id, question_id, score, temp_content, temp_type, temp_options, temp_answer, created_at)
-         VALUES (?, ?, NULL, ?, ?, ?, ?, ?, NOW())`,
-        [questionId, taskId, score || 0, temp_content, temp_type, temp_options ? JSON.stringify(temp_options) : null, temp_answer]
+        `INSERT INTO task_question (id, task_id, question_id, score, temp_content, temp_type, temp_options, temp_answer, temp_explanation, created_at)
+         VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, NOW())`,
+        [questionId, taskId, score || 0, temp_content, temp_type, temp_options ? JSON.stringify(temp_options) : null, temp_answer, temp_explanation || null]
       );
     }
     res.json({ data: { id: questionId }, error: null });
@@ -10663,6 +10669,25 @@ app.put('/api/teacher/tasks/:taskId/pin', authenticate, requireTeacher, async (r
   }
 });
 
+// 11.6 启用/停止任务（停止后学生端课堂任务列表不再显示该任务）
+app.put('/api/teacher/tasks/:taskId/active', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const teacherId = req.user.userId;
+    const raw = req.body ? req.body.is_active : undefined;
+    const isActive = (raw === false || raw === 0 || raw === '0' || raw === 'false') ? 0 : 1;
+    const [result] = await pool.query(
+      'UPDATE task_class SET is_active = ?, updated_at = NOW() WHERE id = ? AND teacher_id = ?',
+      [isActive, taskId, teacherId]
+    );
+    if (result.affectedRows === 0) return res.status(404).json({ data: null, error: '任务不存在' });
+    res.json({ data: { success: true, is_active: isActive }, error: null });
+  } catch (error) {
+    console.error('设置任务启用状态失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
 // 12. 复制任务
 app.post('/api/teacher/tasks/:taskId/duplicate', authenticate, requireTeacher, async (req, res) => {
   try {
@@ -10672,10 +10697,11 @@ app.post('/api/teacher/tasks/:taskId/duplicate', authenticate, requireTeacher, a
     if (!task) return res.status(404).json({ data: null, error: '任务不存在' });
     const newTaskId = 'task_' + Date.now() + '_' + Math.random().toString(36).substr(2, 8);
     const newAccessKey = crypto.randomUUID().replace(/-/g, '').substr(0, 32);
+    const srcShowAnswer = (task.show_answer === 0 || task.show_answer === false || task.show_answer === '0') ? 0 : 1;
     await pool.query(
-      `INSERT INTO task_class (id, class_id, class_ids, teacher_id, title, learning_objectives, start_time, deadline, status, access_key, force_video_watch, min_study_duration, access_type, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, NOW(), NOW())`,
-      [newTaskId, task.class_id, task.class_ids, teacherId, (task.title || '') + '_副本', task.learning_objectives, null, null, newAccessKey, task.force_video_watch, task.min_study_duration || 0, task.access_type]
+      `INSERT INTO task_class (id, class_id, class_ids, teacher_id, title, learning_objectives, start_time, deadline, status, is_active, access_key, force_video_watch, min_study_duration, passing_score, pass_reward_points, show_answer, access_type, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      [newTaskId, task.class_id, task.class_ids, teacherId, (task.title || '') + '_副本', task.learning_objectives, null, null, newAccessKey, task.force_video_watch, task.min_study_duration || 0, task.passing_score || 0, task.pass_reward_points || 0, srcShowAnswer, task.access_type]
     );
     const [resources] = await pool.query('SELECT * FROM task_resource WHERE task_id = ?', [taskId]);
     for (const r of resources) {
@@ -10690,9 +10716,9 @@ app.post('/api/teacher/tasks/:taskId/duplicate', authenticate, requireTeacher, a
     for (const q of questions) {
       const newQuestionId = 'tq_' + Date.now() + '_' + Math.random().toString(36).substr(2, 8);
       await pool.query(
-        `INSERT INTO task_question (id, task_id, question_id, score, sort_order, temp_content, temp_type, temp_options, temp_answer, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-        [newQuestionId, newTaskId, q.question_id, q.score, q.sort_order, q.temp_content, q.temp_type, q.temp_options, q.temp_answer]
+        `INSERT INTO task_question (id, task_id, question_id, score, sort_order, temp_content, temp_type, temp_options, temp_answer, temp_explanation, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+        [newQuestionId, newTaskId, q.question_id, q.score, q.sort_order, q.temp_content, q.temp_type, q.temp_options, q.temp_answer, q.temp_explanation || null]
       );
     }
     res.json({ data: { id: newTaskId, access_key: newAccessKey }, error: null });
@@ -10774,6 +10800,27 @@ app.get('/api/teacher/tasks/:taskId/students', authenticate, requireTeacher, asy
   }
 });
 
+// 13a. 重置某学生的随堂练习（清空答卷与得分，学生可重新练习）
+app.post('/api/teacher/tasks/:taskId/students/:studentId/reset', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { taskId, studentId } = req.params;
+    const teacherId = req.user.userId;
+    const [[task]] = await pool.query('SELECT id FROM task_class WHERE id = ? AND teacher_id = ?', [taskId, teacherId]);
+    if (!task) return res.status(404).json({ data: null, error: '任务不存在' });
+    // 只清空随堂练习相关数据（答卷、得分、提交时间、完成状态），保留视频/资源学习进度
+    const [result] = await pool.query(
+      `UPDATE task_study_log
+       SET answers = NULL, total_score = 0, submit_time = NULL, status = 0, updated_at = NOW()
+       WHERE task_id = ? AND student_id = ?`,
+      [taskId, studentId]
+    );
+    res.json({ data: { success: true, affected: result.affectedRows }, error: null });
+  } catch (error) {
+    console.error('重置学生练习失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
 // 13b. 获取任务分析数据（题目列表+学生答题详情+正确率统计）
 app.get('/api/teacher/tasks/:taskId/analysis', authenticate, requireTeacher, async (req, res) => {
   try {
@@ -10784,7 +10831,7 @@ app.get('/api/teacher/tasks/:taskId/analysis', authenticate, requireTeacher, asy
 
     // 获取题目列表
     const [taskQuestions] = await pool.query(
-      `SELECT tq.id AS tq_id, tq.question_id, tq.score, tq.sort_order, tq.temp_content, tq.temp_type, tq.temp_options, tq.temp_answer,
+      `SELECT tq.id AS tq_id, tq.question_id, tq.score, tq.sort_order, tq.temp_content, tq.temp_type, tq.temp_options, tq.temp_answer, tq.temp_explanation,
               q.type AS q_type, q.content AS q_content, q.options AS q_options, q.answers AS q_answers, q.explanation AS q_explanation
        FROM task_question tq
        LEFT JOIN questions q ON tq.question_id = q.id COLLATE utf8mb4_unicode_ci
@@ -10794,16 +10841,16 @@ app.get('/api/teacher/tasks/:taskId/analysis', authenticate, requireTeacher, asy
     const questions = taskQuestions.map((q, idx) => {
       const isTemp = !q.question_id;
       const content = isTemp ? q.temp_content : q.q_content;
-      const type = isTemp ? q.temp_type : q.q_type;
-      const options = isTemp ? taskSafeJsonParse(q.temp_options, null) : taskSafeJsonParse(q.q_options, null);
-      const answers = isTemp ? (q.temp_answer ? taskGetAnswersArray(q.temp_answer) : []) : taskGetAnswersArray(q.q_answers);
-      const explanation = isTemp ? null : q.q_explanation;
+      const type = (isTemp ? q.temp_type : q.q_type) || 'fill_blank';
+      const options = taskGetOptionsArray(isTemp ? q.temp_options : q.q_options);
+      const answers = taskNormalizeCorrectAnswers(isTemp ? q.temp_answer : q.q_answers, type, options);
+      const explanation = isTemp ? (q.temp_explanation || null) : q.q_explanation;
       return {
         tq_id: q.tq_id,
         question_id: q.question_id,
         index: idx,
         content,
-        type: type || 'fill_blank',
+        type,
         options,
         correct_answers: answers,
         score: q.score,
@@ -10975,6 +11022,100 @@ app.get('/api/teacher/tasks/:taskId/export', authenticate, requireTeacher, async
   }
 });
 
+// 14b. AI 快速出题（复用系统 AI 设置中的 API，生成选择题/填空题，返回前端预览后再入库）
+app.post('/api/teacher/tasks/ai-generate-questions', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { knowledge, type, count, difficulty, extra } = req.body || {};
+    const qType = type === 'fill_blank' ? 'fill_blank' : 'choice';
+    const n = Math.min(20, Math.max(1, parseInt(count) || 5));
+    const knowledgeText = (knowledge || '').toString().trim();
+    if (!knowledgeText) {
+      return res.status(400).json({ data: null, error: '请填写知识点或出题要求' });
+    }
+    const config = await getAiQaConfig(pool);
+    if (!config.ai_api_base_url || !config.ai_api_key) {
+      return res.status(400).json({ data: null, error: 'AI API 未配置，请先在 系统配置 → AI设置 中完成配置' });
+    }
+    const difficultyText = { easy: '简单（基础概念识记）', medium: '中等（理解与应用）', hard: '较难（综合分析与迁移）' }[difficulty] || '中等（理解与应用）';
+
+    const systemPrompt = '你是江苏省高中信息技术课程的资深命题老师，熟悉《数据与计算》《信息系统与社会》两本教材与江苏省学业水平测试考点。请严格按照要求命题，只输出 JSON，不要输出任何多余文字。';
+
+    const userPrompt = `请围绕下面的知识点命题：
+【知识点/范围】${knowledgeText}
+【题型】${qType === 'choice' ? '单项选择题' : '填空题'}
+【数量】${n} 道
+【难度】${difficultyText}
+${extra && String(extra).trim() ? `【额外要求】${String(extra).trim()}\n` : ''}
+返回严格的 JSON 数组，不要包含 Markdown 代码块标记，格式如下：
+[
+  {
+    "content": "题干（可使用简单的 HTML 标签换行或加粗，不要使用脚本）",
+    "options": ${qType === 'choice' ? '["选项内容（不要带 A. B. 前缀）", "选项内容", "选项内容", "选项内容"]' : '[]'},
+    "answers": ${qType === 'choice' ? '["A"]' : '["答案文本"]'},
+    "explanation": "解析（说明为什么选它，以及常见错误）"
+  }
+]
+要求：
+1. 题干表述简洁、无歧义，符合高中生认知水平；
+2. ${qType === 'choice' ? '每题必须 4 个选项，且正确答案只有一个，answers 只填选项字母（A/B/C/D）' : '填空题的 answers 填写正确答案文本，若有多个空用逗号分隔'};
+3. 每题都要给出解析；
+4. 不要编造教材以外的冷门知识。`;
+
+    const content = await callAiApi(config, [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ]);
+
+    let rawList = [];
+    try {
+      const jsonMatch = content.match(/\[[\s\S]*\]/);
+      rawList = JSON.parse(jsonMatch ? jsonMatch[0] : content);
+    } catch {
+      return res.status(500).json({ data: null, error: 'AI 返回内容解析失败，请重试' });
+    }
+    if (!Array.isArray(rawList)) {
+      return res.status(500).json({ data: null, error: 'AI 返回格式不正确，请重试' });
+    }
+
+    const stripOptionPrefix = (s) => String(s == null ? '' : s).replace(/^\s*[A-Da-d]\s*[\.、,，．:：\)）]\s*/, '').trim();
+
+    const questions = rawList.map(item => {
+      const src = item || {};
+      const options = qType === 'choice'
+        ? (Array.isArray(src.options) ? src.options.map(stripOptionPrefix).filter(o => o) : [])
+        : [];
+      let answers = Array.isArray(src.answers) ? src.answers : (src.answers != null ? [src.answers] : []);
+      if (qType === 'choice') {
+        answers = answers.map(a => {
+          const s = String(a == null ? '' : a).trim();
+          const pure = s.match(/^[A-Da-d]$/);
+          if (pure) return pure[0].toUpperCase();
+          const prefixed = s.match(/^([A-Da-d])[\.、,，．:：\)）]/);
+          if (prefixed) return prefixed[1].toUpperCase();
+          const idx = options.findIndex(o => o === s || o.replace(/\s/g, '') === s.replace(/\s/g, ''));
+          if (idx >= 0) return String.fromCharCode(65 + idx);
+          return s.toUpperCase();
+        }).filter(a => /^[A-D]$/.test(a));
+        answers = Array.from(new Set(answers)).sort();
+      } else {
+        answers = answers.map(a => String(a == null ? '' : a).trim()).filter(Boolean);
+      }
+      return {
+        content: String(src.content == null ? '' : src.content).trim(),
+        options,
+        answers,
+        explanation: String(src.explanation == null ? '' : src.explanation).trim(),
+        type: qType,
+      };
+    }).filter(q => q.content && q.answers.length > 0 && (qType !== 'choice' || q.options.length > 0));
+
+    res.json({ data: { questions, count: questions.length, requested: n }, error: null });
+  } catch (error) {
+    console.error('AI 快速出题失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
 // ===== 学生端接口 =====
 
 // 15. 获取本班任务列表
@@ -10986,7 +11127,8 @@ app.get('/api/student/tasks', authenticate, async (req, res) => {
       `SELECT t.*, p.real_name AS teacher_name
        FROM task_class t
        LEFT JOIN profiles p ON t.teacher_id = p.id COLLATE utf8mb4_unicode_ci
-       WHERE t.status = 1 AND ( (t.class_ids IS NOT NULL AND JSON_CONTAINS(t.class_ids, JSON_QUOTE(?))) OR t.class_id = ? )
+       WHERE t.status = 1 AND (t.is_active IS NULL OR t.is_active = 1)
+         AND ( (t.class_ids IS NOT NULL AND JSON_CONTAINS(t.class_ids, JSON_QUOTE(?))) OR t.class_id = ? )
        ORDER BY t.is_pinned DESC, t.created_at DESC`,
       [classId, classId]
     );
@@ -11022,6 +11164,9 @@ app.get('/api/student/tasks/:taskId', authenticate, async (req, res) => {
     const classId = req.user.classId;
     const [[task]] = await pool.query('SELECT * FROM task_class WHERE id = ?', [taskId]);
     if (!task) return res.status(404).json({ data: null, error: '任务不存在' });
+    if (task.is_active === 0 || task.is_active === false || task.is_active === '0') {
+      return res.status(403).json({ data: null, error: '该任务已停止，暂不可访问' });
+    }
     const taskClassIds = task.class_ids ? JSON.parse(task.class_ids) : (task.class_id ? [String(task.class_id)] : []);
     if (!taskClassIds.includes(String(classId))) {
       return res.status(403).json({ data: null, error: '无权访问该任务' });
@@ -11039,21 +11184,24 @@ app.get('/api/student/tasks/:taskId', authenticate, async (req, res) => {
       return { ...r, file_url, content: r.html_content || null };
     });
     const [questions] = await pool.query(
-      `SELECT tq.id, tq.task_id, tq.question_id, tq.score, tq.sort_order, tq.temp_content, tq.temp_type, tq.temp_options, tq.temp_answer,
+      `SELECT tq.id, tq.task_id, tq.question_id, tq.score, tq.sort_order, tq.temp_content, tq.temp_type, tq.temp_options, tq.temp_answer, tq.temp_explanation,
               q.type AS q_type, q.content AS q_content, q.options AS q_options, q.answers AS q_answers, q.explanation AS q_explanation
        FROM task_question tq
        LEFT JOIN questions q ON tq.question_id = q.id COLLATE utf8mb4_unicode_ci
        WHERE tq.task_id = ?
        ORDER BY tq.sort_order, tq.created_at`, [taskId]);
+    // 是否允许学生查看解析与正确答案（默认允许，兼容历史数据）
+    const showAnswerForStudent = !(task.show_answer === 0 || task.show_answer === false || task.show_answer === '0');
     // 映射题目字段：题库题用 q_ 前缀字段，临时题用 temp_ 前缀字段，统一输出为 content/type/options/answers/explanation
     const formattedQuestions = questions.map(q => {
       const isTemp = !q.question_id;
       const content = isTemp ? q.temp_content : q.q_content;
-      const type = isTemp ? q.temp_type : q.q_type;
-      const options = isTemp ? taskSafeJsonParse(q.temp_options, null) : taskSafeJsonParse(q.q_options, null);
-      const answers = isTemp ? (q.temp_answer ? [q.temp_answer] : []) : taskSafeJsonParse(q.q_answers, []);
-      const explanation = isTemp ? null : q.q_explanation;
-      return { ...q, content, type, options, answers, explanation };
+      const type = (isTemp ? q.temp_type : q.q_type) || 'fill_blank';
+      const options = taskGetOptionsArray(isTemp ? q.temp_options : q.q_options);
+      const explanation = isTemp ? (q.temp_explanation || null) : q.q_explanation;
+      // show_answer 关闭时不向学生端下发正确答案与解析
+      const answers = showAnswerForStudent ? taskNormalizeCorrectAnswers(isTemp ? q.temp_answer : q.q_answers, type, options) : [];
+      return { ...q, content, type, options, answers, explanation: showAnswerForStudent ? explanation : null };
     });
     const [[log]] = await pool.query('SELECT * FROM task_study_log WHERE student_id = ? AND task_id = ?', [studentId, taskId]);
     res.json({ data: { task, resources: formattedResources, questions: formattedQuestions, study_log: log || null }, error: null });
@@ -11201,6 +11349,28 @@ function taskGetOptionsArray(optField) {
   return [];
 }
 
+// 统一把正确答案规整为数组：选择题输出选项字母（A/B/C...），填空题输出答案文本
+// 兼容存储形态：JSON 数组 / {answers:[...]} / "A" / "A,C" / 选项原文
+function taskNormalizeCorrectAnswers(ansField, questionType, options) {
+  let arr = taskGetAnswersArray(ansField);
+  arr = arr
+    .flatMap(a => (typeof a === 'string' && a.includes(',') ? a.split(',').map(s => s.trim()).filter(Boolean) : [a]))
+    .filter(a => a !== null && a !== undefined && String(a).trim() !== '');
+
+  if (questionType === 'choice' || questionType === 'multiple_choice') {
+    const opts = taskGetOptionsArray(options);
+    const mapped = arr.map(a => {
+      const norm = taskNormalizeAnswer(a);
+      if (/^[a-z]$/.test(norm)) return norm.toUpperCase();
+      const idx = opts.findIndex(o => taskNormalizeAnswer(o) === norm);
+      return idx >= 0 ? String.fromCharCode(65 + idx) : String(a).trim();
+    });
+    return Array.from(new Set(mapped)).sort();
+  }
+
+  return arr.map(a => String(a).trim());
+}
+
 function taskCheckAnswerCorrect(userAnswer, questionType, correctAnswers, options) {
   const normUser = taskNormalizeAnswer(userAnswer);
   const answers = taskGetAnswersArray(correctAnswers);
@@ -11345,20 +11515,21 @@ app.get('/api/task-public/:accessKey', async (req, res) => {
       return { ...r, file_url, content: r.html_content || null };
     });
     const [questions] = await pool.query(
-      `SELECT tq.id, tq.task_id, tq.question_id, tq.score, tq.sort_order, tq.temp_content, tq.temp_type, tq.temp_options, tq.temp_answer,
+      `SELECT tq.id, tq.task_id, tq.question_id, tq.score, tq.sort_order, tq.temp_content, tq.temp_type, tq.temp_options, tq.temp_answer, tq.temp_explanation,
               q.type AS q_type, q.content AS q_content, q.options AS q_options, q.answers AS q_answers, q.explanation AS q_explanation
        FROM task_question tq
        LEFT JOIN questions q ON tq.question_id = q.id COLLATE utf8mb4_unicode_ci
        WHERE tq.task_id = ?
        ORDER BY tq.sort_order, tq.created_at`, [task.id]);
+    const showAnswerForGuest = !(task.show_answer === 0 || task.show_answer === false || task.show_answer === '0');
     const formattedQuestions = questions.map(q => {
       const isTemp = !q.question_id;
       const content = isTemp ? q.temp_content : q.q_content;
-      const type = isTemp ? q.temp_type : q.q_type;
-      const options = isTemp ? taskSafeJsonParse(q.temp_options, null) : taskSafeJsonParse(q.q_options, null);
-      const answers = isTemp ? (q.temp_answer ? [q.temp_answer] : []) : taskSafeJsonParse(q.q_answers, []);
-      const explanation = isTemp ? null : q.q_explanation;
-      return { ...q, content, type, options, answers, explanation };
+      const type = (isTemp ? q.temp_type : q.q_type) || 'fill_blank';
+      const options = taskGetOptionsArray(isTemp ? q.temp_options : q.q_options);
+      const explanation = isTemp ? (q.temp_explanation || null) : q.q_explanation;
+      const answers = showAnswerForGuest ? taskNormalizeCorrectAnswers(isTemp ? q.temp_answer : q.q_answers, type, options) : [];
+      return { ...q, content, type, options, answers, explanation: showAnswerForGuest ? explanation : null };
     });
     res.json({ data: { task, resources: formattedResources, questions: formattedQuestions }, error: null });
   } catch (error) {

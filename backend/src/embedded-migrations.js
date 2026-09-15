@@ -299,5 +299,13 @@ module.exports = [
   {
     "version": "072_add_python_enabled.sql",
     "sql": "-- 班级级 \"Python 编程\" 快捷开关（与应用中心/兑换/上网开关同模式）\n-- classes.python_enabled：班级是否允许该班学生使用桌面 Python 编程模块\n-- profiles.python_enabled：同步到学生个人，学生端双击/已打开窗口据此拦截与关闭\n-- 创建时间: 2026-09-06\n\nALTER TABLE classes\n  ADD COLUMN IF NOT EXISTS python_enabled TINYINT(1) NOT NULL DEFAULT 1\n    COMMENT '是否允许该班级学生使用Python编程（同步 profiles.python_enabled）';\n\nALTER TABLE profiles\n  ADD COLUMN IF NOT EXISTS python_enabled TINYINT(1) NOT NULL DEFAULT 1\n    COMMENT '是否允许使用Python编程（由班级快捷开关同步）';\n\n-- 存量学生行按所在班级补齐一次（默认均为 1；若个别班级历史已设为 0 则一并同步）\nUPDATE profiles p\n  JOIN classes c ON p.class_id = c.id\nSET p.python_enabled = c.python_enabled\nWHERE p.role = 'student' AND p.python_enabled <> c.python_enabled;\n"
+  },
+  {
+    "version": "073_add_task_enable_and_answer_visibility.sql",
+    "sql": "-- 备课工作台：课堂任务启用/停止开关 + 随堂练习答案解析可见性开关\n-- is_active：任务是否启用。停止后学生端「课堂任务」列表不再显示该任务，教师端仍可管理\n-- show_answer：学生提交随堂练习后是否可查看「解析」与「正确答案」\n-- 创建时间: 2026-09-15\n\nALTER TABLE task_class\n  ADD COLUMN IF NOT EXISTS is_active TINYINT(1) NOT NULL DEFAULT 1\n    COMMENT '是否启用：0停止（学生端不显示）/1启用'\n    AFTER status,\n  ADD COLUMN IF NOT EXISTS show_answer TINYINT(1) NOT NULL DEFAULT 1\n    COMMENT '完成随堂练习后是否可查看解析与正确答案：0隐藏/1显示'\n    AFTER pass_reward_points;\n"
+  },
+  {
+    "version": "074_add_task_question_temp_explanation.sql",
+    "sql": "-- 随堂习题：临时题（快速录入 / AI 出题）支持解析\n-- 此前临时题没有解析字段，题库题解析取自 questions.explanation\n-- 创建时间: 2026-09-15\n\nALTER TABLE task_question\n  ADD COLUMN IF NOT EXISTS temp_explanation TEXT\n    COMMENT '临时题解析（快速录入/AI出题）'\n    AFTER temp_answer;\n"
   }
 ];

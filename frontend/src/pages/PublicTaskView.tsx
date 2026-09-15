@@ -27,7 +27,7 @@ interface Question {
 }
 
 interface TaskData {
-  task: { id: string; title: string; learning_objectives: string; deadline: string; force_video_watch: number };
+  task: { id: string; title: string; learning_objectives: string; deadline: string; force_video_watch: number; show_answer?: number | boolean | null };
   resources: Resource[];
   questions: Question[];
 }
@@ -177,6 +177,8 @@ const PublicTaskView: React.FC = () => {
   if (!taskData) return null;
   const { task, resources, questions } = taskData;
   const currentResource = resources[activeResourceIdx];
+  // 完成后是否允许查看解析与正确答案（默认允许）
+  const showAnswer = task.show_answer === undefined || task.show_answer === null ? true : Number(task.show_answer) !== 0;
 
   const allAnswered = questions.length > 0 && questions.every((q) => {
     const a = answers[q.id];
@@ -373,8 +375,9 @@ const PublicTaskView: React.FC = () => {
                           const isCorrect = correctAnswers.some((a: string) => a.trim().toUpperCase() === letter);
                           let cls = 'border-gray-200 hover:border-indigo-300 bg-white';
                           if (submitted) {
-                            if (isCorrect) cls = 'border-green-500 bg-green-50';
-                            else if (isSelected && !isCorrect) cls = 'border-red-500 bg-red-50';
+                            if (showAnswer && isCorrect) cls = 'border-green-500 bg-green-50';
+                            else if (showAnswer && isSelected && !isCorrect) cls = 'border-red-500 bg-red-50';
+                            else if (isSelected) cls = 'border-indigo-500 bg-indigo-50';
                           } else if (isSelected) {
                             cls = 'border-indigo-500 bg-indigo-50';
                           }
@@ -398,7 +401,7 @@ const PublicTaskView: React.FC = () => {
                             >
                               <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 ${
                                 isSelected ? 'bg-indigo-500 text-white' : 'bg-gray-100 text-gray-500'
-                              } ${submitted && isCorrect ? 'bg-green-500 text-white' : ''} ${submitted && isSelected && !isCorrect ? 'bg-red-500 text-white' : ''}`}>
+                              } ${submitted && showAnswer && isCorrect ? 'bg-green-500 text-white' : ''} ${submitted && showAnswer && isSelected && !isCorrect ? 'bg-red-500 text-white' : ''}`}>
                                 {letter}
                               </span>
                               <span className="flex-1 text-sm text-gray-700 question-rich-content">
@@ -423,7 +426,7 @@ const PublicTaskView: React.FC = () => {
                         }`}
                       />
                     )}
-                    {submitted && q.explanation && (
+                    {submitted && showAnswer && q.explanation && (
                       <div className="mt-4 pt-4 border-t border-gray-100">
                         <div className="text-sm text-gray-600 bg-amber-50/50 p-3 rounded-lg question-rich-content">
                           <div dangerouslySetInnerHTML={{ __html: sanitizeHtml(q.explanation) }} />

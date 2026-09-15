@@ -65,6 +65,8 @@ interface TaskDetail {
   min_study_duration?: number;
   access_type: AccessType;
   access_key?: string;
+  /** 完成后是否允许查看解析与正确答案：0 隐藏 / 1 显示（默认显示） */
+  show_answer?: number | boolean | null;
   resources: Resource[];
   questions: Question[];
   study_log: StudyLog;
@@ -656,6 +658,8 @@ interface QuestionSectionProps {
   locked: boolean;
   onSubmit: () => void;
   submitting: boolean;
+  /** 是否允许展示解析与正确答案（由任务设置 show_answer 控制） */
+  showAnswer?: boolean;
 }
 
 const QuestionSection: React.FC<QuestionSectionProps> = ({
@@ -667,6 +671,7 @@ const QuestionSection: React.FC<QuestionSectionProps> = ({
   locked,
   onSubmit,
   submitting,
+  showAnswer = true,
 }) => {
   const getQuestionResult = (qid: string) => submitResult?.answers.find((a) => a.question_id === qid);
 
@@ -761,8 +766,9 @@ const QuestionSection: React.FC<QuestionSectionProps> = ({
 
                       let cls = 'border-gray-200 hover:border-indigo-300 bg-white';
                       if (submitted) {
-                        if (isCorrect) cls = 'border-green-500 bg-green-50';
-                        else if (isSelected && !isCorrect) cls = 'border-red-500 bg-red-50';
+                        if (showAnswer && isCorrect) cls = 'border-green-500 bg-green-50';
+                        else if (showAnswer && isSelected && !isCorrect) cls = 'border-red-500 bg-red-50';
+                        else if (isSelected) cls = 'border-indigo-500 bg-indigo-50';
                         else cls = 'border-gray-200 bg-white';
                       } else if (isSelected) {
                         cls = 'border-indigo-500 bg-indigo-50';
@@ -778,16 +784,16 @@ const QuestionSection: React.FC<QuestionSectionProps> = ({
                         >
                           <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 ${
                             isSelected ? 'bg-indigo-500 text-white' : 'bg-gray-100 text-gray-500'
-                          } ${submitted && isCorrect ? 'bg-green-500 text-white' : ''} ${submitted && isSelected && !isCorrect ? 'bg-red-500 text-white' : ''}`}>
+                          } ${submitted && showAnswer && isCorrect ? 'bg-green-500 text-white' : ''} ${submitted && showAnswer && isSelected && !isCorrect ? 'bg-red-500 text-white' : ''}`}>
                             {letter}
                           </span>
                           <span className="flex-1 text-sm text-gray-700 question-rich-content">
                             <span dangerouslySetInnerHTML={{ __html: sanitizeHtml(opt) }} />
                           </span>
-                          {submitted && isCorrect && (
+                          {submitted && showAnswer && isCorrect && (
                             <i className="fa-solid fa-check text-green-500 flex-shrink-0"></i>
                           )}
-                          {submitted && isSelected && !isCorrect && (
+                          {submitted && showAnswer && isSelected && !isCorrect && (
                             <i className="fa-solid fa-xmark text-red-500 flex-shrink-0"></i>
                           )}
                         </button>
@@ -815,7 +821,7 @@ const QuestionSection: React.FC<QuestionSectionProps> = ({
                 )}
 
                 {/* 解析 */}
-                {submitted && q.explanation && (
+                {submitted && showAnswer && q.explanation && (
                   <div className="mt-4 pt-4 border-t border-gray-100">
                     <div className="flex items-center gap-2 mb-2">
                       <i className="fa-solid fa-lightbulb text-amber-400 text-sm"></i>
@@ -824,7 +830,7 @@ const QuestionSection: React.FC<QuestionSectionProps> = ({
                     <div className="text-sm text-gray-600 leading-relaxed bg-amber-50/50 p-3 rounded-lg question-rich-content">
                       <div dangerouslySetInnerHTML={{ __html: sanitizeHtml(q.explanation) }} />
                     </div>
-                    {submitted && !result?.is_correct && correctAnswers.length > 0 && q.type !== 'fill_blank' && (
+                    {submitted && showAnswer && !result?.is_correct && correctAnswers.length > 0 && q.type !== 'fill_blank' && (
                       <div className="mt-2 text-xs text-green-600">
                         <i className="fa-solid fa-circle-check mr-1"></i>
                         正确答案：{correctAnswers.join(' / ')}
@@ -1390,6 +1396,7 @@ const TaskDetailView: React.FC<TaskDetailViewProps> = ({ taskId, onBack }) => {
           locked={questionLocked}
           onSubmit={handleSubmit}
           submitting={submitting}
+          showAnswer={detail.show_answer === undefined || detail.show_answer === null ? true : Number(detail.show_answer) !== 0}
         />
       </div>
 

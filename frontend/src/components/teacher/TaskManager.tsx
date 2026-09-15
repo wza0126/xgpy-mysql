@@ -21,6 +21,10 @@ interface Task {
   access_type: 'private' | 'public';
   status: TaskStatus;
   is_pinned?: number | boolean;
+  /** 是否启用：0 停止（学生端不显示）/ 1 启用 */
+  is_active?: number | boolean;
+  /** 完成随堂练习后是否允许学生查看解析与正确答案：0 隐藏 / 1 显示 */
+  show_answer?: number | boolean;
   created_at?: string;
   updated_at?: string;
   class_name?: string;
@@ -241,6 +245,27 @@ const stripHtml = (html: string): string => {
   return (tmp.textContent || tmp.innerText || '').trim();
 };
 
+// 判断后端返回的 0/1 开关字段是否处于「关闭」态（兼容 number / boolean / string 三种形态）
+const isFlagOff = (val: unknown): boolean => val === 0 || val === false || val === '0' || val === 'false';
+
+// 兼容多种存储形态，把题目选项/答案统一成字符串数组
+const toStrArray = (val: unknown): string[] => {
+  if (val === null || val === undefined || val === '') return [];
+  if (Array.isArray(val)) return val.map((x) => String(x));
+  if (typeof val === 'string') {
+    try {
+      const parsed = JSON.parse(val);
+      if (Array.isArray(parsed)) return parsed.map((x) => String(x));
+      if (parsed && Array.isArray(parsed.options)) return parsed.options.map((x: unknown) => String(x));
+      if (parsed && Array.isArray(parsed.answers)) return parsed.answers.map((x: unknown) => String(x));
+      return [String(parsed)];
+    } catch {
+      return val.split(',').map((s) => s.trim()).filter(Boolean);
+    }
+  }
+  return [String(val)];
+};
+
 // ============ 主组件 ============
 export const TaskManager: React.FC = () => {
   const { profile } = useAuth();
@@ -369,6 +394,25 @@ export const TaskManager: React.FC = () => {
     setShowStudentModal(true);
   };
 
+  const handleToggleActive = async (task: Task) => {
+    const currentlyActive = !isFlagOff(task.is_active);
+    const next = currentlyActive ? 0 : 1;
+    if (!currentlyActive) {
+      // 启用不需要二次确认
+    } else if (!window.confirm('确定要停止该任务吗？停止后学生端「课堂任务」将不再显示该任务。')) {
+      return;
+    }
+    const { error } = await apiRequest(`/api/teacher/tasks/${task.id}/active`, {
+      method: 'PUT',
+      body: JSON.stringify({ is_active: next }),
+    });
+    if (error) {
+      alert((next === 1 ? '启用失败: ' : '停止失败: ') + error);
+      return;
+    }
+    fetchTasks();
+  };
+
   const handlePanelClose = () => {
     setShowEditPanel(false);
     setEditingTaskId(null);
@@ -451,6 +495,7 @@ export const TaskManager: React.FC = () => {
               onDelete={handleDelete}
               onViewStudents={handleViewStudents}
               onTogglePin={handleTogglePin}
+              onToggleActive={handleToggleActive}
             />
           ))}
         </div>
@@ -494,11 +539,14 @@ const TaskCard: React.FC<{
   onDelete: (taskId: string) => void;
   onViewStudents: (task: Task) => void;
   onTogglePin: (task: Task) => void;
-}> = ({ task, onEdit, onPublish, onDuplicate, onDelete, onViewStudents, onTogglePin }) => {
+  onToggleActive: (task: Task) => void;
+}> = ({ task, onEdit, onPublish, onDuplicate, onDelete, onViewStudents, onTogglePin, onToggleActive }) => {
   const completionRate = task.completion_rate ?? 0;
   const totalStudents = task.total_students ?? 0;
   const completedStudents = task.completed_students ?? 0;
   const isPinned = !!Number(task.is_pinned);
+  const isActive = !isFlagOff(task.is_active);
+  const showAnswer = !isFlagOff(task.show_answer);
 
   return (
     <div className={`bg-white rounded-xl shadow-sm border p-5 hover:shadow-md transition-shadow flex flex-col ${isPinned ? 'border-amber-300 ring-1 ring-amber-200' : 'border-gray-200'}`}>
@@ -517,6 +565,11 @@ const TaskCard: React.FC<{
         <div className="flex items-center gap-1.5 flex-shrink-0">
           {isPinned && (
             <span className="px-2 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-600">置顶</span>
+          )}
+          {!isActive && (
+            <span className="px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-600">
+              <i className="fa-solid fa-circle-pause mr-1"></i>已停止
+            </span>
           )}
           <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusStyle(task.status)}`}>
             {getStatusLabel(task.status)}
@@ -565,6 +618,11 @@ const TaskCard: React.FC<{
             <i className="fa-solid fa-globe"></i>公开
           </span>
         )}
+        {!showAnswer && (
+          <span className="flex items-center gap-1 text-gray-500">
+            <i className="fa-solid fa-eye-slash"></i>隐藏答案解析
+          </span>
+        )}
       </div>
 
       {/* 完成率进度条 */}
@@ -611,6 +669,17 @@ const TaskCard: React.FC<{
           title={isPinned ? '取消置顶' : '置顶（学生端优先显示）'}
         >
           <i className="fa-solid fa-thumbtack"></i>
+        </button>
+        <button
+          onClick={() => onToggleActive(task)}
+          className={`px-2 py-1.5 text-sm rounded-lg transition-colors ${
+            isActive
+              ? 'text-red-600 bg-red-50 hover:bg-red-100'
+              : 'text-green-600 bg-green-50 hover:bg-green-100'
+          }`}
+          title={isActive ? '停止任务（学生端不再显示该任务）' : '启用任务（学生端恢复显示）'}
+        >
+          <i className={`fa-solid ${isActive ? 'fa-circle-pause' : 'fa-circle-play'}`}></i>
         </button>
         <button
           onClick={() => onDuplicate(task.id)}
@@ -664,6 +733,7 @@ const TaskEditPanel: React.FC<{
     passing_score: 0,
     pass_reward_points: 0,
     access_type: 'private' as 'private' | 'public',
+    show_answer: true,
   });
   const [taskStatus, setTaskStatus] = useState<TaskStatus>('draft');
   const [publicLink, setPublicLink] = useState('');
@@ -701,6 +771,21 @@ const TaskEditPanel: React.FC<{
     temp_answer: '',
     score: 5,
   });
+  // 已添加题目：展开查看选项/答案/解析
+  const [expandedQuestionId, setExpandedQuestionId] = useState<string | null>(null);
+  // AI 快速出题
+  const [aiForm, setAiForm] = useState({
+    knowledge: '',
+    type: 'choice' as 'choice' | 'fill_blank',
+    count: 5,
+    score: 5,
+    difficulty: 'medium',
+    extra: '',
+  });
+  const [aiGenerating, setAiGenerating] = useState(false);
+  const [aiGeneratingMsg, setAiGeneratingMsg] = useState('');
+  const [aiPreview, setAiPreview] = useState<{ content: string; options: string[]; answers: string[]; explanation: string; type: 'choice' | 'fill_blank' }[]>([]);
+  const [showManualForm, setShowManualForm] = useState(false);
 
   const loadTaskDetail = useCallback(async (id: string) => {
     setLoading(true);
@@ -734,6 +819,7 @@ const TaskEditPanel: React.FC<{
         passing_score: task.passing_score ? Number(task.passing_score) : 0,
         pass_reward_points: task.pass_reward_points ? Number(task.pass_reward_points) : 0,
         access_type: accessTypeStr as 'private' | 'public',
+        show_answer: !isFlagOff(task.show_answer),
       });
       setTaskStatus(taskStatusStr);
       setResources((data.resources || []).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)));
@@ -773,6 +859,7 @@ const TaskEditPanel: React.FC<{
       passing_score: formData.passing_score,
       pass_reward_points: formData.pass_reward_points,
       access_type: formData.access_type,
+      show_answer: formData.show_answer,
     };
 
     if (currentTaskId) {
@@ -1033,7 +1120,7 @@ const TaskEditPanel: React.FC<{
       temp_content: quickForm.temp_content,
       temp_type: quickForm.temp_type,
       temp_options: quickForm.temp_type === 'choice' ? quickForm.temp_options.filter((o) => o.trim()) : [],
-      temp_answer: quickForm.temp_answer.split(',').map((s) => s.trim()).filter(Boolean),
+      temp_answer: JSON.stringify(quickForm.temp_answer.split(',').map((s) => s.trim()).filter(Boolean)),
       score: quickForm.score,
     };
     const { data, error } = await apiRequest<TaskQuestion>(`/api/teacher/tasks/${targetId}/questions`, {
@@ -1055,6 +1142,76 @@ const TaskEditPanel: React.FC<{
       temp_answer: '',
       score: 5,
     });
+    setQuestionTab('list');
+  };
+
+  // ============ AI 快速出题 ============
+  const handleAiGenerate = async () => {
+    if (!aiForm.knowledge.trim()) {
+      alert('请填写知识点或出题要求');
+      return;
+    }
+    setAiGenerating(true);
+    setAiGeneratingMsg('AI 正在出题，请稍候（可能需要十几秒）...');
+    const { data, error } = await apiRequest<{ questions: typeof aiPreview; count: number }>(
+      '/api/teacher/tasks/ai-generate-questions',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          knowledge: aiForm.knowledge.trim(),
+          type: aiForm.type,
+          count: aiForm.count,
+          difficulty: aiForm.difficulty,
+          extra: aiForm.extra.trim(),
+        }),
+      }
+    );
+    setAiGenerating(false);
+    setAiGeneratingMsg('');
+    if (error) {
+      alert('AI 出题失败: ' + error);
+      return;
+    }
+    const list = data?.questions || [];
+    if (list.length === 0) {
+      alert('AI 未返回可用题目，请调整要求后重试');
+      return;
+    }
+    setAiPreview(list);
+  };
+
+  const handleRemoveAiPreview = (index: number) => {
+    setAiPreview((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleAddAiQuestions = async () => {
+    if (aiPreview.length === 0) return;
+    let targetId = currentTaskId;
+    if (!targetId) {
+      targetId = await handleSaveBasic();
+      if (!targetId) return;
+    }
+    setSaving(true);
+    let successCount = 0;
+    for (const q of aiPreview) {
+      const { error } = await apiRequest(`/api/teacher/tasks/${targetId}/questions`, {
+        method: 'POST',
+        body: JSON.stringify({
+          temp_content: q.content,
+          temp_type: q.type,
+          temp_options: q.type === 'choice' ? q.options : [],
+          temp_answer: JSON.stringify(q.answers),
+          temp_explanation: q.explanation || '',
+          score: aiForm.score,
+        }),
+      });
+      if (!error) successCount++;
+    }
+    setSaving(false);
+    alert(`已添加 ${successCount} 道题目`);
+    setAiPreview([]);
+    const { data: detail } = await apiRequest<Task & { questions?: TaskQuestion[] }>(`/api/teacher/tasks/${targetId}`);
+    if (detail?.questions) setQuestions(detail.questions);
     setQuestionTab('list');
   };
 
@@ -1325,6 +1482,22 @@ const TaskEditPanel: React.FC<{
                         </p>
                       )}
                     </div>
+
+                    <label className="flex items-center justify-between p-3 bg-white border border-gray-200 rounded-lg cursor-pointer hover:bg-gray-50 transition-colors">
+                      <div className="flex items-center gap-3">
+                        <i className="fa-solid fa-lightbulb text-amber-400"></i>
+                        <div>
+                          <span className="text-sm font-medium text-gray-700">完成练习后可查看答案解析</span>
+                          <p className="text-xs text-gray-400">关闭后，学生提交随堂练习将看不到「解析」和「正确答案」</p>
+                        </div>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={formData.show_answer}
+                        onChange={(e) => setFormData({ ...formData, show_answer: e.target.checked })}
+                        className="w-5 h-5 rounded"
+                      />
+                    </label>
 
                     <label className="flex items-center justify-between p-3 bg-white border border-gray-200 rounded-lg cursor-pointer hover:bg-gray-50 transition-colors">
                       <div className="flex items-center gap-3">
@@ -1615,7 +1788,7 @@ const TaskEditPanel: React.FC<{
                     {([
                       { key: 'list', label: '已添加', icon: 'fa-list' },
                       { key: 'bank', label: '从题库选题', icon: 'fa-book-bookmark' },
-                      { key: 'quick', label: '快速出题', icon: 'fa-bolt' },
+                      { key: 'quick', label: 'AI快速出题', icon: 'fa-wand-magic-sparkles' },
                     ] as const).map((tab) => (
                       <button
                         key={tab.key}
@@ -1645,35 +1818,92 @@ const TaskEditPanel: React.FC<{
                       {questions.length === 0 ? (
                         <div className="text-center py-8 text-gray-400 border border-dashed border-gray-200 rounded-lg">
                           <i className="fa-solid fa-circle-question text-3xl mb-2"></i>
-                          <p className="text-sm">暂无题目，请从题库选题或快速出题</p>
+                          <p className="text-sm">暂无题目，请从题库选题或使用 AI 快速出题</p>
                         </div>
                       ) : (
                         <div className="space-y-2">
-                          {questions.map((q, idx) => (
-                            <div key={q.id} className="flex items-start gap-3 p-3 bg-white border border-gray-200 rounded-lg group">
-                              <span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-medium">
-                                {idx + 1}
-                              </span>
-                              <div className="flex-1 min-w-0">
-                                <p className="text-sm text-gray-700 line-clamp-2">
-                                  {q.content ? stripHtml(q.content) : (q.temp_content ? stripHtml(q.temp_content) : (q.question_id ? `题库题目 #${q.question_id.slice(0, 8)}` : '题目'))}
-                                </p>
-                                <div className="flex items-center gap-2 mt-1">
-                                  <span className="text-xs text-gray-400">
-                                    [{(q.type || q.temp_type) === 'fill_blank' ? '填空题' : (q.type || q.temp_type) === 'code' ? '编程题' : '选择题'}]
+                          {questions.map((q, idx) => {
+                            const qText = q.content
+                              ? stripHtml(q.content)
+                              : (q.temp_content ? stripHtml(q.temp_content) : (q.question_id ? `题库题目 #${q.question_id.slice(0, 8)}` : '题目'));
+                            const qType = q.type || q.temp_type;
+                            const qOptions = toStrArray(q.options as unknown);
+                            const qAnswers = toStrArray(q.answers as unknown);
+                            const expanded = expandedQuestionId === q.id;
+                            return (
+                              <div key={q.id} className="bg-white border border-gray-200 rounded-lg group overflow-hidden">
+                                <div className="flex items-start gap-3 p-3">
+                                  <span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-medium">
+                                    {idx + 1}
                                   </span>
-                                  <span className="text-xs font-medium text-purple-600">{q.score}分</span>
+                                  <div
+                                    className="flex-1 min-w-0 cursor-pointer"
+                                    onClick={() => setExpandedQuestionId(expanded ? null : q.id)}
+                                    title="点击查看选项、答案与解析"
+                                  >
+                                    <p className={`text-sm text-gray-700 ${expanded ? '' : 'line-clamp-2'}`}>{qText}</p>
+                                    <div className="flex items-center gap-2 mt-1 flex-wrap">
+                                      <span className="text-xs text-gray-400">
+                                        [{qType === 'fill_blank' ? '填空题' : qType === 'code' ? '编程题' : '选择题'}]
+                                      </span>
+                                      <span className="text-xs font-medium text-purple-600">{q.score}分</span>
+                                      <span className="text-xs text-blue-500">
+                                        <i className={`fa-solid fa-chevron-${expanded ? 'up' : 'down'} mr-1`}></i>
+                                        {expanded ? '收起' : '查看选项/答案/解析'}
+                                      </span>
+                                    </div>
+                                  </div>
+                                  <button
+                                    onClick={() => handleDeleteQuestion(q.id)}
+                                    className="text-red-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition-opacity p-1"
+                                    title="删除"
+                                  >
+                                    <i className="fa-solid fa-trash"></i>
+                                  </button>
                                 </div>
+                                {expanded && (
+                                  <div className="px-3 pb-3">
+                                    {qOptions.length > 0 && (
+                                      <div className="space-y-1.5">
+                                        {qOptions.map((opt, oIdx) => {
+                                          const letter = String.fromCharCode(65 + oIdx);
+                                          const isAns = qAnswers.some((a) => a.trim().toUpperCase() === letter);
+                                          return (
+                                            <div
+                                              key={oIdx}
+                                              className={`text-sm px-3 py-1.5 rounded-lg flex items-start gap-2 ${
+                                                isAns ? 'bg-green-50 text-green-700' : 'bg-gray-50 text-gray-600'
+                                              }`}
+                                            >
+                                              <span className="font-medium">{letter}.</span>
+                                              <span className="flex-1">{stripHtml(opt)}</span>
+                                              {isAns && <i className="fa-solid fa-check text-green-500"></i>}
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    )}
+                                    <div className="mt-3 text-sm">
+                                      <span className="text-gray-500">正确答案：</span>
+                                      <span className="text-green-600 font-medium">
+                                        {qAnswers.length > 0 ? qAnswers.join(' / ') : '（无）'}
+                                      </span>
+                                    </div>
+                                    {q.explanation ? (
+                                      <div className="mt-2 text-sm">
+                                        <span className="text-gray-500">解析：</span>
+                                        <div className="mt-1 text-gray-600 leading-relaxed bg-amber-50/50 p-3 rounded-lg question-rich-content">
+                                          <div dangerouslySetInnerHTML={{ __html: q.explanation }} />
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <div className="mt-2 text-xs text-gray-400">（暂无解析）</div>
+                                    )}
+                                  </div>
+                                )}
                               </div>
-                              <button
-                                onClick={() => handleDeleteQuestion(q.id)}
-                                className="text-red-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition-opacity p-1"
-                                title="删除"
-                              >
-                                <i className="fa-solid fa-trash"></i>
-                              </button>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       )}
                     </div>
@@ -1827,88 +2057,274 @@ const TaskEditPanel: React.FC<{
                     </div>
                   )}
 
-                  {/* 快速出题 */}
+                  {/* AI 快速出题 */}
                   {questionTab === 'quick' && (
-                    <div className="space-y-3">
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1.5">题目类型</label>
-                        <select
-                          value={quickForm.temp_type}
-                          onChange={(e) => setQuickForm({ ...quickForm, temp_type: e.target.value as 'choice' | 'fill_blank' })}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
-                        >
-                          <option value="choice">选择题</option>
-                          <option value="fill_blank">填空题</option>
-                        </select>
+                    <div className="space-y-4">
+                      <div className="p-3 bg-purple-50 border border-purple-100 rounded-lg text-xs text-purple-700">
+                        <i className="fa-solid fa-wand-magic-sparkles mr-1"></i>
+                        使用「系统配置 → AI设置」中配置的 AI 模型自动命题，生成后请先核对再添加到任务。
                       </div>
-
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1.5">题目内容</label>
-                        <textarea
-                          value={quickForm.temp_content}
-                          onChange={(e) => setQuickForm({ ...quickForm, temp_content: e.target.value })}
-                          rows={3}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm resize-y"
-                          placeholder="输入题目内容..."
-                        />
-                      </div>
-
-                      {quickForm.temp_type === 'choice' && (
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1.5">选项</label>
-                          <div className="space-y-2">
-                            {quickForm.temp_options.map((opt, i) => (
-                              <div key={i} className="flex items-center gap-2">
-                                <span className="w-6 text-sm font-medium text-gray-500">{String.fromCharCode(65 + i)}.</span>
-                                <input
-                                  type="text"
-                                  value={opt}
-                                  onChange={(e) => {
-                                    const newOpts = [...quickForm.temp_options];
-                                    newOpts[i] = e.target.value;
-                                    setQuickForm({ ...quickForm, temp_options: newOpts });
-                                  }}
-                                  className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg text-sm"
-                                  placeholder={`选项 ${String.fromCharCode(65 + i)}`}
-                                />
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
 
                       <div className="grid grid-cols-2 gap-3">
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                            正确答案 {quickForm.temp_type === 'choice' ? '(多个用逗号分隔)' : '(多个空用逗号分隔)'}
-                          </label>
-                          <input
-                            type="text"
-                            value={quickForm.temp_answer}
-                            onChange={(e) => setQuickForm({ ...quickForm, temp_answer: e.target.value })}
+                          <label className="block text-sm font-medium text-gray-700 mb-1.5">题目类型</label>
+                          <select
+                            value={aiForm.type}
+                            onChange={(e) => setAiForm({ ...aiForm, type: e.target.value as 'choice' | 'fill_blank' })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
-                            placeholder={quickForm.temp_type === 'choice' ? '如: A 或 A,C' : '如: print,for'}
-                          />
+                          >
+                            <option value="choice">选择题</option>
+                            <option value="fill_blank">填空题</option>
+                          </select>
                         </div>
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1.5">分值</label>
+                          <label className="block text-sm font-medium text-gray-700 mb-1.5">题目数量</label>
                           <input
                             type="number"
-                            value={quickForm.score}
-                            onChange={(e) => setQuickForm({ ...quickForm, score: parseInt(e.target.value) || 5 })}
                             min={1}
+                            max={20}
+                            value={aiForm.count}
+                            onChange={(e) => setAiForm({ ...aiForm, count: Math.min(20, Math.max(1, parseInt(e.target.value) || 1)) })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
                           />
                         </div>
                       </div>
 
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1.5">难度</label>
+                          <select
+                            value={aiForm.difficulty}
+                            onChange={(e) => setAiForm({ ...aiForm, difficulty: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                          >
+                            <option value="easy">简单</option>
+                            <option value="medium">中等</option>
+                            <option value="hard">较难</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1.5">每题分值</label>
+                          <input
+                            type="number"
+                            min={1}
+                            value={aiForm.score}
+                            onChange={(e) => setAiForm({ ...aiForm, score: parseInt(e.target.value) || 5 })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                          知识点 / 出题范围 <span className="text-red-500">*</span>
+                        </label>
+                        <textarea
+                          value={aiForm.knowledge}
+                          onChange={(e) => setAiForm({ ...aiForm, knowledge: e.target.value })}
+                          rows={2}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm resize-y"
+                          placeholder="例如：Python 中 for 循环与 range() 函数的基本用法"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1.5">额外要求（选填）</label>
+                        <input
+                          type="text"
+                          value={aiForm.extra}
+                          onChange={(e) => setAiForm({ ...aiForm, extra: e.target.value })}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                          placeholder="例如：结合生活场景命题，不要出现负数"
+                        />
+                      </div>
+
                       <button
-                        onClick={handleAddQuickQuestion}
-                        disabled={saving}
+                        onClick={handleAiGenerate}
+                        disabled={aiGenerating}
                         className="w-full py-2.5 bg-purple-500 text-white rounded-lg hover:bg-purple-600 transition-colors disabled:opacity-50"
                       >
-                        {saving ? '添加中...' : '添加题目'}
+                        {aiGenerating ? (
+                          <>
+                            <i className="fa-solid fa-circle-notch fa-spin mr-1"></i>
+                            {aiGeneratingMsg || 'AI 出题中...'}
+                          </>
+                        ) : (
+                          <>
+                            <i className="fa-solid fa-wand-magic-sparkles mr-1"></i>
+                            AI 生成题目
+                          </>
+                        )}
                       </button>
+
+                      {aiPreview.length > 0 && (
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <p className="text-sm font-medium text-gray-700">生成结果（{aiPreview.length} 题）</p>
+                            <button
+                              onClick={() => setAiPreview([])}
+                              className="text-xs text-gray-500 hover:text-gray-700"
+                            >
+                              <i className="fa-solid fa-trash-can mr-1"></i>清空
+                            </button>
+                          </div>
+                          <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
+                            {aiPreview.map((q, idx) => (
+                              <div key={idx} className="p-3 bg-white border border-gray-200 rounded-lg">
+                                <div className="flex items-start gap-2">
+                                  <span className="flex-shrink-0 w-5 h-5 bg-purple-100 text-purple-600 rounded-full flex items-center justify-center text-xs font-medium">
+                                    {idx + 1}
+                                  </span>
+                                  <div className="flex-1 min-w-0">
+                                    <div
+                                      className="text-sm text-gray-700 question-rich-content"
+                                      dangerouslySetInnerHTML={{ __html: q.content }}
+                                    />
+                                    {q.options.length > 0 && (
+                                      <div className="mt-2 space-y-1">
+                                        {q.options.map((opt, oIdx) => {
+                                          const letter = String.fromCharCode(65 + oIdx);
+                                          const isAns = q.answers.some((a) => a.trim().toUpperCase() === letter);
+                                          return (
+                                            <div
+                                              key={oIdx}
+                                              className={`text-xs px-2 py-1 rounded flex items-start gap-1.5 ${
+                                                isAns ? 'bg-green-50 text-green-700' : 'bg-gray-50 text-gray-600'
+                                              }`}
+                                            >
+                                              <span className="font-medium">{letter}.</span>
+                                              <span className="flex-1">{stripHtml(opt)}</span>
+                                              {isAns && <i className="fa-solid fa-check text-green-500"></i>}
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    )}
+                                    <div className="mt-2 text-xs">
+                                      <span className="text-gray-500">答案：</span>
+                                      <span className="text-green-600 font-medium">{q.answers.join(' / ')}</span>
+                                    </div>
+                                    {q.explanation && (
+                                      <div className="mt-1 text-xs text-gray-500">
+                                        <span>解析：</span>
+                                        <span className="question-rich-content" dangerouslySetInnerHTML={{ __html: q.explanation }} />
+                                      </div>
+                                    )}
+                                  </div>
+                                  <button
+                                    onClick={() => handleRemoveAiPreview(idx)}
+                                    className="text-red-400 hover:text-red-600 p-1"
+                                    title="移除该题"
+                                  >
+                                    <i className="fa-solid fa-xmark"></i>
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                          <button
+                            onClick={handleAddAiQuestions}
+                            disabled={saving}
+                            className="w-full py-2.5 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors disabled:opacity-50"
+                          >
+                            {saving ? '添加中...' : `全部添加到任务（每题 ${aiForm.score} 分）`}
+                          </button>
+                        </div>
+                      )}
+
+                      {/* 手动录入单题（保留原快速出题能力） */}
+                      <div className="pt-3 border-t border-gray-100">
+                        <button
+                          onClick={() => setShowManualForm(!showManualForm)}
+                          className="text-xs text-gray-500 hover:text-gray-700"
+                        >
+                          <i className={`fa-solid fa-chevron-${showManualForm ? 'down' : 'right'} mr-1`}></i>
+                          手动录入单道题目
+                        </button>
+                        {showManualForm && (
+                          <div className="mt-3 space-y-3">
+                            <div>
+                              <label className="block text-sm font-medium text-gray-700 mb-1.5">题目类型</label>
+                              <select
+                                value={quickForm.temp_type}
+                                onChange={(e) => setQuickForm({ ...quickForm, temp_type: e.target.value as 'choice' | 'fill_blank' })}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                              >
+                                <option value="choice">选择题</option>
+                                <option value="fill_blank">填空题</option>
+                              </select>
+                            </div>
+
+                            <div>
+                              <label className="block text-sm font-medium text-gray-700 mb-1.5">题目内容</label>
+                              <textarea
+                                value={quickForm.temp_content}
+                                onChange={(e) => setQuickForm({ ...quickForm, temp_content: e.target.value })}
+                                rows={3}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm resize-y"
+                                placeholder="输入题目内容..."
+                              />
+                            </div>
+
+                            {quickForm.temp_type === 'choice' && (
+                              <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1.5">选项</label>
+                                <div className="space-y-2">
+                                  {quickForm.temp_options.map((opt, i) => (
+                                    <div key={i} className="flex items-center gap-2">
+                                      <span className="w-6 text-sm font-medium text-gray-500">{String.fromCharCode(65 + i)}.</span>
+                                      <input
+                                        type="text"
+                                        value={opt}
+                                        onChange={(e) => {
+                                          const newOpts = [...quickForm.temp_options];
+                                          newOpts[i] = e.target.value;
+                                          setQuickForm({ ...quickForm, temp_options: newOpts });
+                                        }}
+                                        className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg text-sm"
+                                        placeholder={`选项 ${String.fromCharCode(65 + i)}`}
+                                      />
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            <div className="grid grid-cols-2 gap-3">
+                              <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                                  正确答案 {quickForm.temp_type === 'choice' ? '(多个用逗号分隔)' : '(多个空用逗号分隔)'}
+                                </label>
+                                <input
+                                  type="text"
+                                  value={quickForm.temp_answer}
+                                  onChange={(e) => setQuickForm({ ...quickForm, temp_answer: e.target.value })}
+                                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                                  placeholder={quickForm.temp_type === 'choice' ? '如: A 或 A,C' : '如: print,for'}
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1.5">分值</label>
+                                <input
+                                  type="number"
+                                  value={quickForm.score}
+                                  onChange={(e) => setQuickForm({ ...quickForm, score: parseInt(e.target.value) || 5 })}
+                                  min={1}
+                                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                                />
+                              </div>
+                            </div>
+
+                            <button
+                              onClick={handleAddQuickQuestion}
+                              disabled={saving}
+                              className="w-full py-2.5 bg-gray-700 text-white rounded-lg hover:bg-gray-800 transition-colors disabled:opacity-50"
+                            >
+                              {saving ? '添加中...' : '添加题目'}
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -1964,6 +2380,7 @@ const StudentDataModal: React.FC<{
   const [selectedQuestion, setSelectedQuestion] = useState<AnalysisQuestion | null>(null);
   const [analysisData, setAnalysisData] = useState<{ questions: AnalysisQuestion[]; students: AnalysisStudent[]; question_stats: QuestionStat[] } | null>(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [resettingId, setResettingId] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -1994,6 +2411,29 @@ const StudentDataModal: React.FC<{
       loadAnalysis();
     }
   }, [activeTab, analysisData, analysisLoading, loadAnalysis]);
+
+  // 重置某学生的随堂练习（清空答卷与得分，学生可重新练习）
+  const handleResetStudent = async (student: StudentProgress) => {
+    const name = student.real_name || student.username;
+    if (!window.confirm(`确定要重置「${name}」的随堂练习吗？\n重置后该学生的答卷与得分将被清空，可重新练习（视频/资源学习进度保留）。`)) {
+      return;
+    }
+    setResettingId(student.student_id);
+    const { error } = await apiRequest(
+      `/api/teacher/tasks/${taskId}/students/${encodeURIComponent(student.student_id)}/reset`,
+      { method: 'POST' }
+    );
+    setResettingId(null);
+    if (error) {
+      alert('重置失败: ' + error);
+      return;
+    }
+    await loadData();
+    setAnalysisData(null);
+    if (activeTab === 'analysis') {
+      await loadAnalysis();
+    }
+  };
 
   const handleExportCSV = async () => {
     const response = await fetch(`${API_CONFIG.apiUrl}/api/teacher/tasks/${taskId}/export`, {
@@ -2225,6 +2665,7 @@ const StudentDataModal: React.FC<{
                         </th>
                         <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">提交时间</th>
                         <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">观看时长</th>
+                        <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">操作</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-200">
@@ -2250,6 +2691,21 @@ const StudentDataModal: React.FC<{
                             {s.submitted_at ? formatDateTime(s.submitted_at) : '-'}
                           </td>
                           <td className="px-4 py-3 text-center text-sm text-gray-500">{formatDuration(s.watch_duration)}</td>
+                          <td className="px-4 py-3 text-center">
+                            <button
+                              onClick={() => handleResetStudent(s)}
+                              disabled={resettingId === s.student_id}
+                              className="px-2 py-1 text-xs text-orange-600 bg-orange-50 rounded-lg hover:bg-orange-100 transition-colors disabled:opacity-50"
+                              title="清空该学生的随堂练习答卷与得分，学生可重新练习"
+                            >
+                              {resettingId === s.student_id ? (
+                                <i className="fa-solid fa-circle-notch fa-spin mr-1"></i>
+                              ) : (
+                                <i className="fa-solid fa-rotate-left mr-1"></i>
+                              )}
+                              重置练习
+                            </button>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
