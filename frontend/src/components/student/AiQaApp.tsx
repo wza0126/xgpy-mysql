@@ -3,6 +3,13 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useAuth } from '../../hooks/useAuth';
 import { backendClient } from '../../api/backendClient';
+import { useDesktopStore } from '../../store/desktopStore';
+
+/** 测试 / 课堂任务窗口打开期间的答疑拦截提示语 */
+export const EXAM_QA_BLOCKED_MESSAGE = '测试期间禁止答疑';
+
+/** 会触发「禁止答疑」的模块窗口 id：测试、课堂任务 */
+const EXAM_BLOCKING_WINDOW_IDS = ['test', 'taskCenter'];
 
 interface Message {
   role: 'user' | 'assistant';
@@ -33,6 +40,12 @@ interface AiQaAppProps {
 
 export function AiQaApp({ onClose, initialData }: AiQaAppProps) {
   const { user, profile, refreshProfile } = useAuth();
+  // 订阅桌面窗口状态：只要「测试」或「课堂任务」窗口处于打开状态（含最小化），即禁止答疑
+  const isExamWindowOpen = useDesktopStore((state) =>
+    state.windows.some(
+      (w) => EXAM_BLOCKING_WINDOW_IDS.includes(w.id) && w.isOpen
+    )
+  );
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState(initialData?.question || '');
   const [isLoading, setIsLoading] = useState(false);
@@ -144,7 +157,22 @@ export function AiQaApp({ onClose, initialData }: AiQaAppProps) {
     
     if (!input.trim() || isLoading) return;
 
-    const userMessage: Message = { role: 'user', content: input.trim() };
+    const question = input.trim();
+
+    // 「测试」/「课堂任务」窗口打开期间禁止答疑：
+    // 本地直接回复拦截提示，不请求接口、不消耗积分、不写入历史记录
+    if (isExamWindowOpen) {
+      setMessages([
+        ...messages,
+        { role: 'user', content: question },
+        { role: 'assistant', content: EXAM_QA_BLOCKED_MESSAGE }
+      ]);
+      setInput('');
+      setError(null);
+      return;
+    }
+
+    const userMessage: Message = { role: 'user', content: question };
     const currentMessages = [...messages, userMessage];
     setMessages(currentMessages);
     setInput('');
@@ -153,7 +181,7 @@ export function AiQaApp({ onClose, initialData }: AiQaAppProps) {
 
     try {
       const response = await backendClient.post('/api/ai-qa/ask', {
-        question: input.trim(),
+        question,
         history: messages.slice(-10)
       });
 
@@ -347,7 +375,7 @@ export function AiQaApp({ onClose, initialData }: AiQaAppProps) {
                 </div>
                 <button
                   type="submit"
-                  disabled={isLoading || !input.trim() || (config && profile && profile.current_points < config.pointsPerQuestion)}
+                  disabled={isLoading || !input.trim() || !!(config && profile && profile.current_points < config.pointsPerQuestion)}
                   className="px-6 py-4 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed text-white rounded-xl transition-colors"
                 >
                   {isLoading ? (
