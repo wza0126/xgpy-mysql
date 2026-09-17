@@ -89,6 +89,8 @@ interface StudentProgress {
   status: 'not_started' | 'in_progress' | 'completed';
   score?: number;
   submitted_at?: string;
+  /** 随堂练习首次作答时间，非空表示已开始练习 */
+  practice_started_at?: string | null;
   watch_duration?: number;
 }
 
@@ -780,7 +782,8 @@ const TaskEditPanel: React.FC<{
     count: 5,
     score: 5,
     difficulty: 'medium',
-    extra: '',
+    // 默认带上本教材/学测的口径，避免超纲；老师可自行修改
+    extra: '根据江苏省高中信息技术 教科版 教材 不要超纲',
   });
   const [aiGenerating, setAiGenerating] = useState(false);
   const [aiGeneratingMsg, setAiGeneratingMsg] = useState('');
@@ -2464,7 +2467,7 @@ const StudentDataModal: React.FC<{
     : 0;
 
   const getStatusLabel = (status: string) => {
-    const map: Record<string, string> = { completed: '已完成', in_progress: '进行中', not_started: '未开始' };
+    const map: Record<string, string> = { completed: '已完成', in_progress: '练习中', not_started: '未开始' };
     return map[status] || status;
   };
   const getStatusStyle = (status: string) => {
@@ -2623,7 +2626,7 @@ const StudentDataModal: React.FC<{
           </div>
           <div className="bg-blue-50 rounded-lg p-3 text-center">
             <div className="text-2xl font-bold text-blue-600">{inProgress.length}</div>
-            <div className="text-xs text-gray-500 mt-1">进行中</div>
+            <div className="text-xs text-gray-500 mt-1">练习中</div>
           </div>
           <div className="bg-gray-50 rounded-lg p-3 text-center">
             <div className="text-2xl font-bold text-gray-500">{notStarted.length}</div>

@@ -307,5 +307,13 @@ module.exports = [
   {
     "version": "074_add_task_question_temp_explanation.sql",
     "sql": "-- 随堂习题：临时题（快速录入 / AI 出题）支持解析\n-- 此前临时题没有解析字段，题库题解析取自 questions.explanation\n-- 创建时间: 2026-09-15\n\nALTER TABLE task_question\n  ADD COLUMN IF NOT EXISTS temp_explanation TEXT\n    COMMENT '临时题解析（快速录入/AI出题）'\n    AFTER temp_answer;\n"
+  },
+  {
+    "version": "075_add_task_points_source_enum.sql",
+    "sql": "-- 为 point_transactions.source_type 增加 'task'（课堂任务合格奖励）\n-- 备课工作台「随堂习题合格奖励」发放积分时会写入 source_type='task'，\n-- 严格模式下若缺少该枚举值会导致发奖语句报错，进而使整个提交事务失败。\nALTER TABLE point_transactions\nMODIFY COLUMN source_type ENUM('notification', 'manual', 'system', 'practice', 'pet_feed', 'test', 'python_submit', 'exam', 'task') NOT NULL DEFAULT 'notification' COMMENT '来源类型';\n"
+  },
+  {
+    "version": "076_add_task_study_log_practice_started.sql",
+    "sql": "-- 076: 记录学生随堂练习的首次作答时间\n--\n-- 背景：task_study_log.status 的 1（进行中）原本由「学习进度上报」置位，\n-- 等价于「打开过任务详情页」，无法表达「开始做题」。\n-- 新增独立字段，专门标记学生是否动过随堂练习的第一题。\n--\n-- 教师端「学生列表」状态判定改为：已完成(2) > practice_started_at 非空 → 练习中 > 未开始\n-- 该字段只在首次作答时写入，后续进度上报不覆盖（IFNULL 保护）。\n-- 老师「重置练习」时置回 NULL。\n\nALTER TABLE task_study_log\n  ADD COLUMN IF NOT EXISTS practice_started_at DATETIME NULL\n  COMMENT '随堂练习首次作答时间，NULL 表示尚未开始练习' AFTER status;\n"
   }
 ];

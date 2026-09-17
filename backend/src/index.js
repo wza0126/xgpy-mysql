@@ -10745,6 +10745,7 @@ app.get('/api/teacher/tasks/:taskId/students', authenticate, requireTeacher, asy
                 COALESCE(tsl.status, 0) AS status_num,
                 COALESCE(tsl.total_score, 0) AS total_score,
                 tsl.submit_time,
+                tsl.practice_started_at,
                 COALESCE(tsl.watch_duration, 0) AS watch_duration,
                 tsl.answers,
                 c.name AS class_name
@@ -10755,16 +10756,16 @@ app.get('/api/teacher/tasks/:taskId/students', authenticate, requireTeacher, asy
          ORDER BY p.class_id, p.id`,
         [taskId, ...classIds]
       );
-      const statusMap = { 0: 'not_started', 1: 'in_progress', 2: 'completed' };
       rows.forEach(r => {
         result.push({
           student_id: r.student_id,
           real_name: r.real_name,
           username: r.username,
           class_name: r.class_name,
-          status: statusMap[r.status_num] || 'not_started',
+          status: taskResolveStudentStatus(r.status_num, r.practice_started_at),
           score: r.total_score,
           submitted_at: r.submit_time,
+          practice_started_at: r.practice_started_at,
           watch_duration: r.watch_duration,
           answers: r.answers,
         });
@@ -10807,10 +10808,11 @@ app.post('/api/teacher/tasks/:taskId/students/:studentId/reset', authenticate, r
     const teacherId = req.user.userId;
     const [[task]] = await pool.query('SELECT id FROM task_class WHERE id = ? AND teacher_id = ?', [taskId, teacherId]);
     if (!task) return res.status(404).json({ data: null, error: '任务不存在' });
-    // 只清空随堂练习相关数据（答卷、得分、提交时间、完成状态），保留视频/资源学习进度
+    // 只清空随堂练习相关数据（答卷、得分、提交时间、完成状态、首次作答时间），保留视频/资源学习进度
     const [result] = await pool.query(
       `UPDATE task_study_log
-       SET answers = NULL, total_score = 0, submit_time = NULL, status = 0, updated_at = NOW()
+       SET answers = NULL, total_score = 0, submit_time = NULL, status = 0,
+           practice_started_at = NULL, updated_at = NOW()
        WHERE task_id = ? AND student_id = ?`,
       [taskId, studentId]
     );
@@ -10869,6 +10871,7 @@ app.get('/api/teacher/tasks/:taskId/analysis', authenticate, requireTeacher, asy
                 COALESCE(tsl.status, 0) AS status_num,
                 COALESCE(tsl.total_score, 0) AS total_score,
                 tsl.submit_time,
+                tsl.practice_started_at,
                 tsl.answers
          FROM profiles p
          LEFT JOIN task_study_log tsl ON tsl.student_id = p.id COLLATE utf8mb4_unicode_ci AND tsl.task_id = ?
@@ -10876,15 +10879,15 @@ app.get('/api/teacher/tasks/:taskId/analysis', authenticate, requireTeacher, asy
          ORDER BY p.class_id, p.id`,
         [taskId, ...classIds]
       );
-      const statusMap = { 0: 'not_started', 1: 'in_progress', 2: 'completed' };
       rows.forEach(r => {
         students.push({
           student_id: r.student_id,
           real_name: r.real_name,
           username: r.username,
-          status: statusMap[r.status_num] || 'not_started',
+          status: taskResolveStudentStatus(r.status_num, r.practice_started_at),
           score: r.total_score,
           submitted_at: r.submit_time,
+          practice_started_at: r.practice_started_at,
           answers: r.answers,
         });
       });
@@ -10996,6 +10999,7 @@ app.get('/api/teacher/tasks/:taskId/export', authenticate, requireTeacher, async
     const [rows] = await pool.query(
       `SELECT p.id AS student_id, p.real_name, p.username, p.class_id,
               COALESCE(tsl.status, 0) AS status,
+              tsl.practice_started_at,
               COALESCE(tsl.total_score, 0) AS total_score,
               tsl.submit_time,
               COALESCE(tsl.watch_duration, 0) AS watch_duration,
@@ -11007,11 +11011,13 @@ app.get('/api/teacher/tasks/:taskId/export', authenticate, requireTeacher, async
        ORDER BY p.class_id, p.id`,
       [taskId, ...classIds]
     );
-    const statusText = (s) => ['未开始', '进行中', '已完成', '已逾期'][s] || String(s);
+    const statusTextMap = { not_started: '未开始', in_progress: '练习中', completed: '已完成' };
+    const statusText = (s) => statusTextMap[s] || String(s);
     let csv = '\uFEFF';
     csv += '班级,学生姓名,用户名,完成状态,得分,提交时间,观看时长(秒)\n';
     for (const r of rows) {
-      csv += `"${(r.class_name || '').replace(/"/g, '""')}","${(r.real_name || '').replace(/"/g, '""')}","${(r.username || '').replace(/"/g, '""')}","${statusText(r.status)}",${r.total_score},${r.submit_time ? new Date(r.submit_time).toLocaleString('zh-CN') : ''},${r.watch_duration}\n`;
+      const st = taskResolveStudentStatus(r.status, r.practice_started_at);
+      csv += `"${(r.class_name || '').replace(/"/g, '""')}","${(r.real_name || '').replace(/"/g, '""')}","${(r.username || '').replace(/"/g, '""')}","${statusText(st)}",${r.total_score},${r.submit_time ? new Date(r.submit_time).toLocaleString('zh-CN') : ''},${r.watch_duration}\n`;
     }
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename=task_${taskId}_scores_${new Date().toISOString().slice(0, 10)}.csv`);
@@ -11216,7 +11222,8 @@ app.post('/api/student/tasks/:taskId/progress', authenticate, async (req, res) =
   try {
     const { taskId } = req.params;
     const studentId = req.user.userId;
-    const { video_progress, resources_viewed, watch_duration } = req.body;
+    const { video_progress, resources_viewed, watch_duration, practice_started } = req.body;
+    // practice_started: 学生首次作答随堂练习时上报，用于教师端「练习中」状态判定
 
     const [[existing]] = await pool.query(
       'SELECT * FROM task_study_log WHERE student_id = ? AND task_id = ?',
@@ -11299,10 +11306,18 @@ app.post('/api/student/tasks/:taskId/progress', authenticate, async (req, res) =
       params.push(finalWatchDuration);
     }
 
+    // 首次作答时间：只在学生真正动过练习题时写入一次，后续上报不覆盖
+    if (practice_started) {
+      fields.push('practice_started_at');
+      values.push('NOW()');
+      placeholders.push('NOW()');
+    }
+
     const updateFields = ['status = VALUES(status)', 'updated_at = NOW()'];
     if (finalVideoProgress != null) updateFields.push('video_progress = VALUES(video_progress)');
     if (finalResourcesViewed != null) updateFields.push('resources_viewed = VALUES(resources_viewed)');
     if (finalWatchDuration != null) updateFields.push('watch_duration = VALUES(watch_duration)');
+    if (practice_started) updateFields.push('practice_started_at = IFNULL(practice_started_at, NOW())');
 
     await pool.query(
       `INSERT INTO task_study_log (${fields.join(', ')})
@@ -11320,6 +11335,21 @@ app.post('/api/student/tasks/:taskId/progress', authenticate, async (req, res) =
 
 function taskNormalizeAnswer(ans) {
   return (ans || '').toLowerCase().trim();
+}
+
+/**
+ * 统一解析学生在某个课堂任务中的状态（教师端学生列表 / 分析 / 导出共用）
+ * 优先级：已完成(提交过答卷) > 练习中(动过第一题) > 未开始
+ * 注意：不再依赖 task_study_log.status 的 1，因为该值由「学习进度上报」置位，
+ *       只代表"浏览过资源"，无法区分学生是否真正开始做练习。
+ * @param {number|string|null} statusNum COALESCE(tsl.status, 0)
+ * @param {Date|string|null} practiceStartedAt task_study_log.practice_started_at
+ * @returns {'completed'|'in_progress'|'not_started'}
+ */
+function taskResolveStudentStatus(statusNum, practiceStartedAt) {
+  if (Number(statusNum) === 2) return 'completed';
+  if (practiceStartedAt) return 'in_progress';
+  return 'not_started';
 }
 
 function taskGetAnswersArray(ansField) {
@@ -11462,12 +11492,64 @@ app.post('/api/student/tasks/:taskId/submit', authenticate, async (req, res) => 
     const answersJson = JSON.stringify(answers || []);
     const logId = 'log_' + Date.now() + '_' + Math.random().toString(36).substr(2, 8);
     await pool.query(
-      `INSERT INTO task_study_log (id, student_id, task_id, answers, total_score, submit_time, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, NOW(), 2, NOW(), NOW())
-       ON DUPLICATE KEY UPDATE answers = VALUES(answers), total_score = VALUES(total_score), submit_time = VALUES(submit_time), status = VALUES(status), updated_at = NOW()`,
+      `INSERT INTO task_study_log (id, student_id, task_id, answers, total_score, submit_time, status, practice_started_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, NOW(), 2, NOW(), NOW(), NOW())
+       ON DUPLICATE KEY UPDATE answers = VALUES(answers), total_score = VALUES(total_score), submit_time = VALUES(submit_time), status = VALUES(status), practice_started_at = IFNULL(practice_started_at, NOW()), updated_at = NOW()`,
       [logId, studentId, taskId, answersJson, totalScore]
     );
-    res.json({ data: { total_score: totalScore, answers: answerResults.map(r => ({ question_id: r.question_id, is_correct: r.correct, score: r.score })), results: answerResults }, error: null });
+
+    // ===== 随堂习题合格奖励 =====
+    // 规则：同时设置了「合格分数线 > 0」和「奖励积分 > 0」时生效；
+    // 本次得分 >= 合格分数线即视为合格。每个学生在同一个任务上只发放一次，
+    // 重复提交（或老师重置后重做）不会重复刷分。
+    const [[taskInfo]] = await pool.query(
+      'SELECT title, passing_score, pass_reward_points FROM task_class WHERE id = ?',
+      [taskId]
+    );
+    const passingScore = Math.max(0, parseInt(taskInfo?.passing_score) || 0);
+    const rewardPoints = Math.max(0, parseInt(taskInfo?.pass_reward_points) || 0);
+    let passed = false;
+    let awardedPoints = 0;
+    let alreadyRewarded = false;
+
+    if (passingScore > 0 && rewardPoints > 0) {
+      passed = totalScore >= passingScore;
+      if (passed) {
+        const [existingRewards] = await pool.query(
+          `SELECT id FROM point_transactions
+           WHERE student_id = ? AND source_type = 'task' AND source_id = ? AND amount > 0 LIMIT 1`,
+          [studentId, taskId]
+        );
+        if (existingRewards.length > 0) {
+          alreadyRewarded = true;
+        } else {
+          await pool.query(
+            'UPDATE profiles SET current_points = current_points + ?, total_points_earned = total_points_earned + ? WHERE id = ?',
+            [rewardPoints, rewardPoints, studentId]
+          );
+          await pool.query(
+            `INSERT INTO point_transactions (student_id, amount, reason, source_type, source_id, teacher_id)
+             VALUES (?, ?, ?, 'task', ?, NULL)`,
+            [studentId, rewardPoints, `随堂习题合格奖励: ${taskInfo?.title || ''}`.slice(0, 250), taskId]
+          );
+          awardedPoints = rewardPoints;
+        }
+      }
+    }
+
+    res.json({
+      data: {
+        total_score: totalScore,
+        answers: answerResults.map(r => ({ question_id: r.question_id, is_correct: r.correct, score: r.score })),
+        results: answerResults,
+        passing_score: passingScore,
+        passed,
+        reward_points: rewardPoints,
+        awarded_points: awardedPoints,
+        already_rewarded: alreadyRewarded
+      },
+      error: null
+    });
   } catch (error) {
     console.error('提交答题失败:', error);
     res.status(500).json({ data: null, error: error.message });
@@ -11578,13 +11660,14 @@ app.post('/api/task-public/:accessKey/submit', async (req, res) => {
     const answersJson = JSON.stringify(answers || []);
     const logId = 'log_' + Date.now() + '_' + Math.random().toString(36).substr(2, 8);
     await pool.query(
-      `INSERT INTO task_study_log (id, student_id, task_id, answers, total_score, submit_time, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, NOW(), 2, NOW(), NOW())
+      `INSERT INTO task_study_log (id, student_id, task_id, answers, total_score, submit_time, status, practice_started_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, NOW(), 2, NOW(), NOW(), NOW())
        ON DUPLICATE KEY UPDATE
          answers = VALUES(answers),
          total_score = VALUES(total_score),
          submit_time = NOW(),
          status = 2,
+         practice_started_at = IFNULL(practice_started_at, NOW()),
          updated_at = NOW()`,
       [logId, safeStudentId, taskId, answersJson, totalScore]
     );

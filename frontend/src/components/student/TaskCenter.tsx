@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { API_CONFIG } from '../../api/config';
 import { sanitizeHtml } from '../../utils/htmlUtils';
 import { useDesktopStore } from '../../store/desktopStore';
+import { useAuth } from '../../hooks/useAuth';
 
 // ============ 类型定义 ============
 
@@ -75,6 +76,16 @@ interface TaskDetail {
 interface SubmitResult {
   total_score: number;
   answers: { question_id: string; is_correct: boolean }[];
+  /** 合格分数线（0 表示未设置合格奖励） */
+  passing_score?: number;
+  /** 本次是否达到合格分数线 */
+  passed?: boolean;
+  /** 任务设置的合格奖励积分 */
+  reward_points?: number;
+  /** 本次实际发放到账的积分（0 表示未发放或已发放过） */
+  awarded_points?: number;
+  /** 之前已领取过该任务的合格奖励 */
+  already_rewarded?: boolean;
 }
 
 // ============ 工具函数 ============
@@ -911,6 +922,8 @@ const TaskDetailView: React.FC<TaskDetailViewProps> = ({ taskId, onBack }) => {
   const [needPassword, setNeedPassword] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');
   const [passwordError, setPasswordError] = useState('');
+  // 用于合格奖励到账后刷新顶栏积分显示
+  const { refreshProfile } = useAuth();
 
   const isWindowMinimized = useDesktopStore(
     (state) => state.windows.find((w) => w.id === 'taskCenter')?.isMinimized ?? false
@@ -919,10 +932,15 @@ const TaskDetailView: React.FC<TaskDetailViewProps> = ({ taskId, onBack }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const progressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const watchTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // 保证「练习开始」整场只上报一次
+  const practiceReportedRef = useRef(false);
   const hasVideo = detail?.resources?.some((r) => r.type === 'video' || r.type === 'link') ?? false;
   const totalResources = detail?.resources?.length ?? 0;
   const viewedCount = resourcesViewed.length;
-  const allResourcesViewed = totalResources > 0 && viewedCount >= totalResources;
+  // 只有一个资源时，学生没有可切换的对象（切换才触发"已查看"标记），
+  // 因此只要资源已被加载展示，就直接视为已查看，避免永远无法开始练习。
+  const singleResourceAutoViewed = totalResources === 1;
+  const allResourcesViewed = totalResources > 0 && (viewedCount >= totalResources || singleResourceAutoViewed);
   const videoWatchedEnough = videoProgress >= 90;
   const minStudyDurationSec = (detail?.min_study_duration || 0) * 60;
   const studyDurationEnough = minStudyDurationSec <= 0 || watchDuration >= minStudyDurationSec;
@@ -1024,11 +1042,26 @@ const TaskDetailView: React.FC<TaskDetailViewProps> = ({ taskId, onBack }) => {
     loadDetail();
   }, [loadDetail]);
 
-  // 视频进度自动上报（每 5 秒）
+  // 切换任务时重置「练习开始」上报标记
   useEffect(() => {
-    if (!detail || !hasVideo) return;
+    practiceReportedRef.current = false;
+  }, [taskId]);
+
+  // 只有一个资源时自动标记为已查看（无需切换资源即可标记），并上报一次
+  useEffect(() => {
+    if (!detail) return;
+    if (totalResources !== 1) return;
+    const rid = detail.resources[0]?.id;
+    if (rid) markResourceViewed(String(rid));
+  }, [detail, totalResources]);
+
+  // 学习进度自动上报（每 5 秒）
+  // 说明：原来只在有视频时上报，导致"纯图文资源"任务的已查看/学习时长无法保存，
+  // 现改为只要任务存在可学习内容就上报。
+  useEffect(() => {
+    if (!detail || (totalResources === 0 && !hasVideo)) return;
     progressTimerRef.current = setInterval(async () => {
-      if (videoProgress > 0) {
+      if (videoProgress > 0 || resourcesViewed.length > 0 || watchDuration > 0) {
         await apiPost(`/api/student/tasks/${taskId}/progress`, {
           video_progress: videoProgress,
           resources_viewed: resourcesViewed,
@@ -1039,7 +1072,7 @@ const TaskDetailView: React.FC<TaskDetailViewProps> = ({ taskId, onBack }) => {
     return () => {
       if (progressTimerRef.current) clearInterval(progressTimerRef.current);
     };
-  }, [detail, hasVideo, videoProgress, resourcesViewed, watchDuration, taskId]);
+  }, [detail, hasVideo, totalResources, videoProgress, resourcesViewed, watchDuration, taskId]);
 
   // 观看时长累计（页面隐藏或窗口最小化时暂停）
   useEffect(() => {
@@ -1129,6 +1162,12 @@ const TaskDetailView: React.FC<TaskDetailViewProps> = ({ taskId, onBack }) => {
     if (data) {
       setSubmitResult(data);
       setSubmitted(true);
+      // 合格奖励到账后刷新个人信息（顶栏积分显示同步）
+      if (data.awarded_points && data.awarded_points > 0) {
+        try {
+          await refreshProfile();
+        } catch {}
+      }
       // 提交完成后保存最终进度
       await apiPost(`/api/student/tasks/${taskId}/progress`, {
         video_progress: videoProgress,
@@ -1136,6 +1175,17 @@ const TaskDetailView: React.FC<TaskDetailViewProps> = ({ taskId, onBack }) => {
         watch_duration: watchDuration,
       });
     }
+  };
+
+  // 学生首次作答随堂练习时上报一次「练习开始」，
+  // 教师端「学生数据 → 学生列表」据此把状态判定为「练习中」。
+  // 只在整场第一次真正填写答案时触发（清空答案不算），后续不再重复上报。
+  const handleAnswerChange = (qid: string, ans: string) => {
+    setAnswers((prev) => ({ ...prev, [qid]: ans }));
+    if (practiceReportedRef.current) return;
+    if (!(ans || '').trim()) return;
+    practiceReportedRef.current = true;
+    apiPost(`/api/student/tasks/${taskId}/progress`, { practice_started: true });
   };
 
   // 密码校验
@@ -1390,7 +1440,7 @@ const TaskDetailView: React.FC<TaskDetailViewProps> = ({ taskId, onBack }) => {
         <QuestionSection
           questions={detail.questions}
           answers={answers}
-          onAnswerChange={(qid, ans) => setAnswers((prev) => ({ ...prev, [qid]: ans }))}
+          onAnswerChange={handleAnswerChange}
           submitted={submitted}
           submitResult={submitResult}
           locked={questionLocked}
@@ -1414,6 +1464,25 @@ const TaskDetailView: React.FC<TaskDetailViewProps> = ({ taskId, onBack }) => {
           <p className="text-sm text-gray-600">
             本次得分：<span className="text-xl font-bold text-green-600">{submitResult?.total_score || 0}</span> 分
           </p>
+          {/* 合格奖励反馈 */}
+          {submitResult && (submitResult.awarded_points ?? 0) > 0 && (
+            <div className="mt-3 inline-flex items-center gap-2 px-4 py-2 bg-amber-100 border border-amber-300 rounded-xl text-amber-700 text-sm font-medium">
+              <i className="fa-solid fa-gift"></i>
+              恭喜达标，获得 {submitResult.awarded_points} 积分奖励！
+            </div>
+          )}
+          {submitResult && (submitResult.awarded_points ?? 0) === 0 && submitResult.passed === true && submitResult.already_rewarded && (
+            <p className="mt-3 text-xs text-gray-500">
+              <i className="fa-solid fa-circle-info mr-1"></i>
+              合格奖励已领取过，本次不再重复发放积分
+            </p>
+          )}
+          {submitResult && (submitResult.passed === false) && (submitResult.passing_score ?? 0) > 0 && (submitResult.reward_points ?? 0) > 0 && (
+            <p className="mt-3 text-xs text-amber-600">
+              <i className="fa-solid fa-circle-exclamation mr-1"></i>
+              未达到 {submitResult.passing_score} 分合格线，未获得 {submitResult.reward_points} 积分奖励
+            </p>
+          )}
           <button
             onClick={onBack}
             className="mt-4 px-6 py-2.5 bg-white text-gray-700 rounded-xl hover:bg-gray-50 transition-colors text-sm border border-gray-200"
