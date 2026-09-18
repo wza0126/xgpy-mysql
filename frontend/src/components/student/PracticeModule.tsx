@@ -446,7 +446,11 @@ export const PracticeModule: React.FC = () => {
           alert(result.error || '提交失败，请重试');
           return;
         }
-        
+
+        // 判分以服务端为准：服务端会拿题库里的正确答案复核（前端判分只在接口失败降级时使用）
+        const serverVerdict = (result.data as any)?.is_correct;
+        if (typeof serverVerdict === 'boolean') correct = serverVerdict;
+
         // API成功后再显示结果
         setIsCorrect(correct);
         setShowResult(true);

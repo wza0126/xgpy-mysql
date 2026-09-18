@@ -322,6 +322,21 @@ export const WrongQuestions: React.FC = () => {
         throw new Error(result.error);
       }
 
+      // 判分以服务端为准：服务端会拿题库里的正确答案复核（前端判分只在接口失败降级时使用）
+      const serverVerdict = (result.data as any)?.is_correct;
+      if (typeof serverVerdict === 'boolean' && serverVerdict !== correct) {
+        correct = serverVerdict;
+        // 判分结果有变化时重算"下一题"，保持与最终判分一致
+        if (correct) {
+          const newList = wrongQuestions.filter(wq => wq.id !== selectedQuestion.id);
+          nextQuestionRef.current = currentQuestionIndex < newList.length ? newList[currentQuestionIndex] : null;
+        } else {
+          nextQuestionRef.current = currentQuestionIndex + 1 < wrongQuestions.length
+            ? wrongQuestions[currentQuestionIndex + 1]
+            : null;
+        }
+      }
+
       // API成功后才显示结果，避免等待API时的卡顿
       setIsCorrect(correct);
       setShowResult(true);

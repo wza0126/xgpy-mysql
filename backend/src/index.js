@@ -2301,9 +2301,11 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
     await connection.beginTransaction();
     
     const { 
-      student_id, question_id, answer, is_correct, 
+      student_id, question_id, answer, 
       points_change, source, lesson_id, test_id, test_record_id 
     } = req.body;
+    // 前端传入的 is_correct / points_change 不再采信，仅保留前者的原值用于不一致告警
+    const clientIsCorrect = req.body.is_correct;
     
     if (!student_id || !question_id) {
       await connection.rollback();
@@ -2323,6 +2325,43 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
         error: '只能提交自己的答题记录'
       });
     }
+
+    // ===== 服务端判分（核心防作弊）=====
+    // 1) 对错一律由服务端拿题库正确答案判定，前端传什么 is_correct 都不采信；
+    // 2) 分值也由服务端取系统配置，避免伪造 points_change 灌高 max_points / total_points_earned。
+    const [questionRows] = await connection.query(
+      'SELECT id, type, answers, options FROM questions WHERE id = ? LIMIT 1',
+      [question_id]
+    );
+    if (questionRows.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({
+        data: null,
+        error: '题目不存在'
+      });
+    }
+    const judgement = judgeQuestionAnswer(questionRows[0], answer);
+    const is_correct = judgement.isCorrect;
+    if (typeof clientIsCorrect === 'boolean' && clientIsCorrect !== is_correct) {
+      console.warn('[SUBMIT-ANSWER] 前端判分与服务端不一致（已按服务端为准）:', {
+        student_id, question_id, client: clientIsCorrect, server: is_correct
+      });
+    }
+
+    const [pointsCfgRows] = await connection.query(
+      "SELECT config_key, value FROM system_config WHERE config_key IN ('points_correct_answer', 'points_wrong_answer')"
+    );
+    const pointsCfg = {};
+    pointsCfgRows.forEach(row => {
+      let v = row.value;
+      if (typeof v === 'string') {
+        try { v = JSON.parse(v); } catch {}
+      }
+      pointsCfg[row.config_key] = v?.value ?? v;
+    });
+    const serverPointsChange = is_correct
+      ? (Math.abs(parseFloat(pointsCfg['points_correct_answer'])) || 10)
+      : -(Math.abs(parseFloat(pointsCfg['points_wrong_answer'])) || 5);
 
     // 检查学生信息（带排他锁）
     const [students] = await connection.query(
@@ -2409,9 +2448,9 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
       }
     }
 
-    // 2. 更新积分（如果有变化，且未被掌握门禁拦截）
-    if (rewardAllowed && points_change !== undefined && points_change !== 0) {
-      const newPoints = students[0].current_points + points_change;
+    // 2. 更新积分（分值由服务端决定，且未被掌握门禁拦截）
+    if (rewardAllowed && serverPointsChange !== 0) {
+      const newPoints = students[0].current_points + serverPointsChange;
       if (newPoints < 0) {
         await connection.rollback();
         return res.status(400).json({ 
@@ -2420,7 +2459,7 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
         });
       }
       
-      const totalPointsEarnedIncrement = points_change > 0 ? points_change : 0;
+      const totalPointsEarnedIncrement = serverPointsChange > 0 ? serverPointsChange : 0;
       await connection.query(`
         UPDATE profiles 
         SET current_points = ?, max_points = GREATEST(max_points, ?), total_points_earned = total_points_earned + ?
@@ -2434,7 +2473,7 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
         ) VALUES (?, ?, ?, ?, NOW())
       `, [
         student_id, 
-        points_change, 
+        serverPointsChange, 
         is_correct ? '答题正确' : '答题错误', 
         source || 'practice'
       ]);
@@ -2449,7 +2488,7 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
     `, [
       answerId, student_id, question_id, answer, 
-      is_correct ? 1 : 0, rewardAllowed ? (points_change || 0) : 0, source || 'practice', 
+      is_correct ? 1 : 0, rewardAllowed ? serverPointsChange : 0, source || 'practice', 
       test_id || null, test_record_id || null
     ]);
 
@@ -2457,8 +2496,8 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
     let power_multiplier = 1.0;
     let crit_rate = 5;
     let is_crit = false;
-    let crit_final_score = points_change || 0;
-    let final_score = points_change || 0;
+    let crit_final_score = serverPointsChange;
+    let final_score = serverPointsChange;
     let newStreak = 0;
     let newCritStreak = 0;
     let newWrong = 0;
@@ -2580,8 +2619,8 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
           newCritStreak = 0;
         }
 
-        // 若最终得分与原 points_change 不同，补差额
-        const diff = Math.round(crit_final_score) - (points_change || 0);
+        // 若最终得分与原基础分不同，补差额
+        const diff = Math.round(crit_final_score) - serverPointsChange;
         if (diff !== 0) {
           const [cur] = await connection.query(
             'SELECT current_points FROM profiles WHERE id = ? FOR UPDATE', [student_id]
@@ -2691,6 +2730,9 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
       data: { 
         success: true, 
         answer_id: answerId,
+        // 服务端判分结果：前端应以它为准刷新「对/错」展示与连对状态
+        is_correct,
+        server_judged: judgement.judged,
         student: formatRow(updatedStudent[0]),
         power_multiplier: Math.round(power_multiplier * 100) / 100,
         crit_rate: Math.round(crit_rate * 10) / 10,
@@ -2937,116 +2979,100 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
       questions 
     } = req.body;
     console.log('[submit-test] student_id:', student_id, 'test_id:', test_id);
-    
+
     if (!student_id || !test_id || !answers || !questions) {
       await connection.rollback();
-      return res.status(400).json({ 
-        data: null, 
-        error: '缺少必填字段' 
+      return res.status(400).json({
+        data: null,
+        error: '缺少必填字段'
       });
     }
 
-    // 先计算得分
+    // 归属校验：学生只能提交自己的测试记录（教师/管理员代提交不受限）
+    const requesterRoleSubmitTest = req.user?.role;
+    const isTeacherSubmitTest = requesterRoleSubmitTest && requesterRoleSubmitTest !== 'student';
+    if (!isTeacherSubmitTest && student_id !== req.user?.userId) {
+      await connection.rollback();
+      return res.status(403).json({ data: null, error: '只能提交自己的测试记录' });
+    }
+
+    // 先取测试信息：抽题规则（question_count / tag_filters）与每日次数限制都要用
+    const [testRowsEarly] = await connection.query(
+      'SELECT * FROM tests WHERE id = ?',
+      [test_id]
+    );
+    if (testRowsEarly.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ data: null, error: '测试不存在' });
+    }
+    const testEarly = testRowsEarly[0];
+
+    // 分母防作弊：普通测试的题目是前端从「exam_enabled=1（+ 教师设置的标签过滤）」的题库里
+    // 随机抽 question_count 道，所以不能直接把前端传来的数组长度当成题数 ——
+    // 否则学生只交 1 道自己有把握的题，score = 1/1 = 100 分，直接拿走全额积分与装备掉落。
+    // 这里按前端同一套抽题规则算出「本该抽到多少道」，与实际提交题数取较大值作为分母。
+    let poolCount = 0;
+    let testTagFilters = [];
+    {
+      let parsedTags = testEarly.tag_filters;
+      if (typeof parsedTags === 'string') {
+        try { parsedTags = JSON.parse(parsedTags); } catch { parsedTags = null; }
+      }
+      if (Array.isArray(parsedTags)) testTagFilters = parsedTags.filter(t => typeof t === 'string' && t);
+    }
+    if (testTagFilters.length > 0) {
+      const [poolRows] = await connection.query('SELECT tags FROM questions WHERE exam_enabled = 1');
+      poolCount = poolRows.filter(r => {
+        let t = r.tags;
+        if (typeof t === 'string') {
+          try { t = JSON.parse(t); } catch { t = null; }
+        }
+        return Array.isArray(t) && t.some(x => testTagFilters.includes(x));
+      }).length;
+    } else {
+      const [poolCountRows] = await connection.query('SELECT COUNT(*) n FROM questions WHERE exam_enabled = 1');
+      poolCount = Number(poolCountRows[0]?.n || 0);
+    }
+    const submittedCount = new Set(
+      (Array.isArray(questions) ? questions : []).map(q => q && q.id).filter(Boolean)
+    ).size;
+    const expectedTotal = Math.min(poolCount, Number(testEarly.question_count) || 20);
+    const total = Math.max(submittedCount, expectedTotal);
+    if (submittedCount < expectedTotal) {
+      console.warn(`[submit-test] 提交题数 ${submittedCount} 少于按抽题规则应有的 ${expectedTotal}，分母按 ${expectedTotal} 计算`, { student_id, test_id });
+    }
+
     let correct = 0;
-    const total = questions.length;
 
-    const normalizeAnswer = (ans) => {
-      return (ans || '').toLowerCase().trim();
-    };
-
-    const getAnswersArray = (ansField) => {
-      if (!ansField) return [];
-      let parsed;
-      try {
-        parsed = typeof ansField === 'string' ? JSON.parse(ansField) : ansField;
-      } catch {
-        parsed = ansField;
-      }
-      if (Array.isArray(parsed?.answers)) return parsed.answers;
-      if (Array.isArray(parsed)) return parsed;
-      if (typeof parsed === 'string') return [parsed];
-      return [];
-    };
-
-    const getCompositeSubQuestions = (ansField) => {
-      const parsed = getAnswersArray(ansField);
-      return Array.isArray(parsed) ? parsed : [];
-    };
-
-    const normalizeBlankAnswers = (answers) => {
-      if (!Array.isArray(answers)) return [[]];
-      if (answers.length === 0) return [[]];
-      if (answers.some(item => Array.isArray(item))) {
-        return answers.map(item => Array.isArray(item) ? item : item ? [item] : []);
-      }
-      return answers.map(item => item ? [item] : []);
-    };
-
-    const checkFillBlankAnswer = (userAnswers, correctAnswers) => {
-      const normalized = normalizeBlankAnswers(correctAnswers);
-      if (userAnswers.length !== normalized.length) return false;
-      return userAnswers.every((userAns, idx) => {
-        const correctList = normalized[idx] || [];
-        return correctList.some(ca => ca.toLowerCase().trim() === (userAns || '').toLowerCase().trim());
-      });
-    };
-
-    const checkChoiceAnswer = (userAnswer, correctAnswers, multiple) => {
-      if (multiple) {
-        const userList = (userAnswer || '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean).sort();
-        const correctList = (correctAnswers || []).map(s => s.trim().toUpperCase()).filter(Boolean).sort();
-        return userList.length === correctList.length && userList.every((v, i) => v === correctList[i]);
-      }
-      return (correctAnswers || []).some(ca => ca.toLowerCase().trim() === (userAnswer || '').toLowerCase().trim());
-    };
+    // 服务端判分数据源：题目类型与正确答案一律取自题库 questions 表。
+    // 前端传来的 questions[].answers 只是它自己的一份副本，不能作为判分依据
+    //（否则学生改一下请求体就能伪造满分，直接拿走全额奖励积分与装备掉落）。
+    const serverQuestionMap = new Map();
+    const submitQuestionIds = [...new Set((Array.isArray(questions) ? questions : []).map(q => q && q.id).filter(Boolean))];
+    if (submitQuestionIds.length > 0) {
+      const [serverQs] = await connection.query(
+        'SELECT id, type, answers, options FROM questions WHERE id IN (?)',
+        [submitQuestionIds]
+      );
+      serverQs.forEach(row => serverQuestionMap.set(row.id, row));
+    }
 
     for (const q of questions) {
       const userAnswer = answers[q.id];
       if (!userAnswer) continue;
-      if (q.type === 'composite') {
-        try {
-          const parsed = JSON.parse(userAnswer);
-          const subQs = getCompositeSubQuestions(q.answers);
-          const allCorrect = subQs.every((sq, idx) => {
-            if (sq.type === 'choice') {
-              const ans = parsed.choice_answers?.[idx] || '';
-              return checkChoiceAnswer(ans, sq.answers || [], sq.multiple || false);
-            } else if (sq.type === 'fill_blank') {
-              const ans = parsed.blank_answers?.[idx] || [];
-              return checkFillBlankAnswer(ans, sq.answers || []);
-            }
-            return false;
-          });
-          if (allCorrect) correct++;
-        } catch {
-          // 解析失败不计分
-        }
-      } else {
-        const correctAnswers = getAnswersArray(q.answers);
-        const isCorrect = correctAnswers.some(
-          (ans) => normalizeAnswer(ans) === normalizeAnswer(userAnswer)
-        );
-        if (isCorrect) correct++;
+      const serverQ = serverQuestionMap.get(q.id);
+      if (!serverQ) {
+        // 题库中查不到该题（异常数据）：按未答对处理，绝不采信前端给的"答案"
+        console.warn('[submit-test/exam] 题目不在题库中，按未答对处理:', q.id);
+        continue;
       }
+      if (judgeQuestionAnswer(serverQ, userAnswer).isCorrect) correct++;
     }
 
     const score = Math.round((correct / total) * 100);
 
-    // 获取测试信息
-    const [tests] = await connection.query(
-      'SELECT * FROM tests WHERE id = ?',
-      [test_id]
-    );
-    
-    if (tests.length === 0) {
-      await connection.rollback();
-      return res.status(404).json({ 
-        data: null, 
-        error: '测试不存在' 
-      });
-    }
-    
-    const test = tests[0];
+    // 测试信息已在判分前加载（testEarly）
+    const test = testEarly;
     
     // 检查考试是否已结束
     if (!test.is_active && test.type === 'exam') {
@@ -3146,29 +3172,9 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
     // 处理学生答案和错题
     for (const q of questions) {
       const userAnswer = (answers[q.id] || '').trim();
-      let isCorrect = false;
-      if (q.type === 'composite') {
-        try {
-          const parsed = JSON.parse(userAnswer);
-          const subQs = getCompositeSubQuestions(q.answers);
-          isCorrect = subQs.every((sq, idx) => {
-            if (sq.type === 'choice') {
-              const ans = parsed.choice_answers?.[idx] || '';
-              return checkChoiceAnswer(ans, sq.answers || [], sq.multiple || false);
-            } else if (sq.type === 'fill_blank') {
-              const ans = parsed.blank_answers?.[idx] || [];
-              return checkFillBlankAnswer(ans, sq.answers || []);
-            }
-            return false;
-          });
-        } catch {
-          isCorrect = false;
-        }
-      } else {
-        isCorrect = getAnswersArray(q.answers).some(
-          (ans) => normalizeAnswer(ans) === normalizeAnswer(userAnswer)
-        );
-      }
+      // 判分口径与上面的计分循环保持一致：一律以题库正确答案为准
+      const serverQ = serverQuestionMap.get(q.id);
+      const isCorrect = serverQ ? judgeQuestionAnswer(serverQ, userAnswer).isCorrect : false;
 
       if (userAnswer) {
         // 插入学生答案
@@ -3377,105 +3383,87 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
       });
     }
 
+    // 归属校验：学生只能提交自己的考试记录（教师/管理员代提交不受限）
+    const requesterRoleSubmitExam = req.user?.role;
+    const isTeacherSubmitExam = requesterRoleSubmitExam && requesterRoleSubmitExam !== 'student';
+    if (!isTeacherSubmitExam && student_id !== req.user?.userId) {
+      await connection.rollback();
+      return res.status(403).json({ data: null, error: '只能提交自己的考试记录' });
+    }
+
+    // 先取考试信息：抽题规则（question_ids / question_count）与判分都要用
+    const [testRowsEarly] = await connection.query(
+      'SELECT * FROM tests WHERE id = ?',
+      [test_id]
+    );
+    if (testRowsEarly.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ data: null, error: '考试不存在' });
+    }
+    const testEarly = testRowsEarly[0];
+
+    // 分母防作弊：考试题目是前端从 tests.question_ids 里随机抽 question_count 道，
+    // 不能采信前端传来的数组长度（否则只交 1 道题就能拿 100 分、拿走全额奖励）。
+    let configuredIds = [];
+    {
+      let parsedIds = testEarly.question_ids;
+      if (typeof parsedIds === 'string') {
+        try { parsedIds = JSON.parse(parsedIds); } catch { parsedIds = null; }
+      }
+      if (Array.isArray(parsedIds)) {
+        configuredIds = [...new Set(parsedIds.filter(x => typeof x === 'string' && x))];
+      }
+    }
+    let examPoolCount = 0;
+    if (configuredIds.length > 0) {
+      const [examPoolRows] = await connection.query(
+        'SELECT COUNT(*) n FROM questions WHERE id IN (?)',
+        [configuredIds]
+      );
+      examPoolCount = Number(examPoolRows[0]?.n || 0);
+    }
+    const submittedCount = new Set(
+      (Array.isArray(questions) ? questions : []).map(q => q && q.id).filter(Boolean)
+    ).size;
+    const expectedTotal = configuredIds.length > 0
+      ? Math.min(examPoolCount, Number(testEarly.question_count) || examPoolCount)
+      : submittedCount;
+    const total = Math.max(submittedCount, expectedTotal);
+    if (submittedCount < expectedTotal) {
+      console.warn(`[submit-exam] 提交题数 ${submittedCount} 少于按抽题规则应有的 ${expectedTotal}，分母按 ${expectedTotal} 计算`, { student_id, test_id });
+    }
+
     let correct = 0;
-    const total = questions.length;
 
-    const normalizeAnswer = (ans) => {
-      return (ans || '').toLowerCase().trim();
-    };
-
-    const getAnswersArray = (ansField) => {
-      if (!ansField) return [];
-      let parsed;
-      try {
-        parsed = typeof ansField === 'string' ? JSON.parse(ansField) : ansField;
-      } catch {
-        parsed = ansField;
-      }
-      if (Array.isArray(parsed?.answers)) return parsed.answers;
-      if (Array.isArray(parsed)) return parsed;
-      if (typeof parsed === 'string') return [parsed];
-      return [];
-    };
-
-    const getCompositeSubQuestions = (ansField) => {
-      const parsed = getAnswersArray(ansField);
-      return Array.isArray(parsed) ? parsed : [];
-    };
-
-    const normalizeBlankAnswers = (answers) => {
-      if (!Array.isArray(answers)) return [[]];
-      if (answers.length === 0) return [[]];
-      if (answers.some(item => Array.isArray(item))) {
-        return answers.map(item => Array.isArray(item) ? item : item ? [item] : []);
-      }
-      return answers.map(item => item ? [item] : []);
-    };
-
-    const checkFillBlankAnswer = (userAnswers, correctAnswers) => {
-      const normalized = normalizeBlankAnswers(correctAnswers);
-      if (userAnswers.length !== normalized.length) return false;
-      return userAnswers.every((userAns, idx) => {
-        const correctList = normalized[idx] || [];
-        return correctList.some(ca => ca.toLowerCase().trim() === (userAns || '').toLowerCase().trim());
-      });
-    };
-
-    const checkChoiceAnswer = (userAnswer, correctAnswers, multiple) => {
-      if (multiple) {
-        const userList = (userAnswer || '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean).sort();
-        const correctList = (correctAnswers || []).map(s => s.trim().toUpperCase()).filter(Boolean).sort();
-        return userList.length === correctList.length && userList.every((v, i) => v === correctList[i]);
-      }
-      return (correctAnswers || []).some(ca => ca.toLowerCase().trim() === (userAnswer || '').toLowerCase().trim());
-    };
+    // 服务端判分数据源：题目类型与正确答案一律取自题库 questions 表。
+    // 前端传来的 questions[].answers 只是它自己的一份副本，不能作为判分依据
+    //（否则学生改一下请求体就能伪造满分，直接拿走全额奖励积分与装备掉落）。
+    const serverQuestionMap = new Map();
+    const submitQuestionIds = [...new Set((Array.isArray(questions) ? questions : []).map(q => q && q.id).filter(Boolean))];
+    if (submitQuestionIds.length > 0) {
+      const [serverQs] = await connection.query(
+        'SELECT id, type, answers, options FROM questions WHERE id IN (?)',
+        [submitQuestionIds]
+      );
+      serverQs.forEach(row => serverQuestionMap.set(row.id, row));
+    }
 
     for (const q of questions) {
       const userAnswer = answers[q.id];
       if (!userAnswer) continue;
-      if (q.type === 'composite') {
-        try {
-          const parsed = JSON.parse(userAnswer);
-          const subQs = getCompositeSubQuestions(q.answers);
-          const allCorrect = subQs.every((sq, idx) => {
-            if (sq.type === 'choice') {
-              const ans = parsed.choice_answers?.[idx] || '';
-              return checkChoiceAnswer(ans, sq.answers || [], sq.multiple || false);
-            } else if (sq.type === 'fill_blank') {
-              const ans = parsed.blank_answers?.[idx] || [];
-              return checkFillBlankAnswer(ans, sq.answers || []);
-            }
-            return false;
-          });
-          if (allCorrect) correct++;
-        } catch {
-          // 解析失败不计分
-        }
-      } else {
-        const correctAnswers = getAnswersArray(q.answers);
-        const isCorrect = correctAnswers.some(
-          (ans) => normalizeAnswer(ans) === normalizeAnswer(userAnswer)
-        );
-        if (isCorrect) correct++;
+      const serverQ = serverQuestionMap.get(q.id);
+      if (!serverQ) {
+        // 题库中查不到该题（异常数据）：按未答对处理，绝不采信前端给的"答案"
+        console.warn('[submit-test/exam] 题目不在题库中，按未答对处理:', q.id);
+        continue;
       }
+      if (judgeQuestionAnswer(serverQ, userAnswer).isCorrect) correct++;
     }
 
     const score = Math.round((correct / total) * 100);
 
-    const [tests] = await connection.query(
-      'SELECT * FROM tests WHERE id = ?',
-      [test_id]
-    );
-    
-    if (tests.length === 0) {
-      await connection.rollback();
-      return res.status(404).json({ 
-        data: null, 
-        error: '考试不存在' 
-      });
-    }
-    
-    const test = tests[0];
+    // 考试信息已在判分前加载（testEarly）
+    const test = testEarly;
     
     if (!test.is_active) {
       await connection.rollback();
@@ -3517,23 +3505,32 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
       }
     }
 
+    // 取（或建）考试记录：同一场考试每位学生只有一条记录。
+    // 重考只补发「成绩提高」对应的积分差额，避免反复重考刷分
+    //（以前每提交一次就把 pointsEarned 再加一遍，学生可以靠重考无限拿分）。
     const [examRecordData] = await connection.query(
-      'SELECT id FROM exam_records WHERE test_id = ? AND student_id = ?',
+      'SELECT id, points_earned FROM exam_records WHERE test_id = ? AND student_id = ?',
       [test_id, student_id]
     );
     
     let examRecordId = examRecordData.length > 0 ? examRecordData[0].id : null;
+    const alreadyAwarded = examRecordData.length > 0 ? Number(examRecordData[0].points_earned || 0) : 0;
+    const pointsToAward = Math.max(0, pointsEarned - alreadyAwarded);
+    const accumulatedPoints = alreadyAwarded + pointsToAward;
+    if (pointsToAward === 0 && pointsEarned > 0) {
+      console.log(`[submit-exam] 本次应得 ${pointsEarned} ≤ 历史已发 ${alreadyAwarded}，按要求不重复发放积分`);
+    }
     
     if (examRecordId) {
       await connection.query(
         'UPDATE exam_records SET score = ?, correct_count = ?, total_count = ?, points_earned = ?, internet_codes_earned = ?, is_passed = ?, completed_at = NOW() WHERE id = ?',
-        [score, correct, total, pointsEarned, internetCodes.length, isPassed ? 1 : 0, examRecordId]
+        [score, correct, total, accumulatedPoints, internetCodes.length, isPassed ? 1 : 0, examRecordId]
       );
     } else {
       examRecordId = `er_${Date.now()}_${Math.random().toString(36).substr(2,9)}`;
       await connection.query(
         'INSERT INTO exam_records (id, test_id, student_id, score, correct_count, total_count, points_earned, internet_codes_earned, is_passed, started_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())',
-        [examRecordId, test_id, student_id, score, correct, total, pointsEarned, internetCodes.length, isPassed ? 1 : 0]
+        [examRecordId, test_id, student_id, score, correct, total, accumulatedPoints, internetCodes.length, isPassed ? 1 : 0]
       );
     }
 
@@ -3544,7 +3541,8 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
       await grantAppCenterOnPass(connection, test, student_id, '考试');
     }
 
-    if (pointsEarned > 0) {
+    // 只发「本次新增」的积分（重考同分不再重复发）
+    if (pointsToAward > 0) {
       const [students] = await connection.query(
         'SELECT * FROM profiles WHERE id = ? FOR UPDATE',
         [student_id]
@@ -3553,41 +3551,21 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
       if (students.length > 0) {
         await connection.query(
           'UPDATE profiles SET current_points = current_points + ?, total_points_earned = total_points_earned + ? WHERE id = ?',
-          [pointsEarned, pointsEarned, student_id]
+          [pointsToAward, pointsToAward, student_id]
         );
         
         await connection.query(
           'INSERT INTO point_transactions (student_id, amount, reason, source_type, created_at) VALUES (?, ?, ?, \'exam\', NOW())',
-          [student_id, pointsEarned, `考试通过: ${test.title || test.name}`]
+          [student_id, pointsToAward, `考试通过: ${test.title || test.name}`]
         );
       }
     }
     
     for (const q of questions) {
       const userAnswer = (answers[q.id] || '').trim();
-      let isCorrect = false;
-      if (q.type === 'composite') {
-        try {
-          const parsed = JSON.parse(userAnswer);
-          const subQs = getCompositeSubQuestions(q.answers);
-          isCorrect = subQs.every((sq, idx) => {
-            if (sq.type === 'choice') {
-              const ans = parsed.choice_answers?.[idx] || '';
-              return checkChoiceAnswer(ans, sq.answers || [], sq.multiple || false);
-            } else if (sq.type === 'fill_blank') {
-              const ans = parsed.blank_answers?.[idx] || [];
-              return checkFillBlankAnswer(ans, sq.answers || []);
-            }
-            return false;
-          });
-        } catch {
-          isCorrect = false;
-        }
-      } else {
-        isCorrect = getAnswersArray(q.answers).some(
-          (ans) => normalizeAnswer(ans) === normalizeAnswer(userAnswer)
-        );
-      }
+      // 判分口径与上面的计分循环保持一致：一律以题库正确答案为准
+      const serverQ = serverQuestionMap.get(q.id);
+      const isCorrect = serverQ ? judgeQuestionAnswer(serverQ, userAnswer).isCorrect : false;
 
       if (userAnswer) {
         const saId = `sa_${Date.now()}_${Math.random().toString(36).substr(2,9)}`;
@@ -3650,7 +3628,8 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
         correct,
         total,
         is_passed: isPassed,
-        points_earned: pointsEarned,
+        points_earned: pointsToAward,
+        points_earned_total: accumulatedPoints,
         internet_codes: internetCodes,
         exam_record_id: examRecordId,
         dropped_equipments: droppedEquipments,
@@ -11924,6 +11903,78 @@ function taskCheckAnswerCorrect(userAnswer, questionType, correctAnswers, option
   }
   
   return answers.some(a => taskNormalizeAnswer(a) === normUser);
+}
+
+// ==================== 服务端统一判分（练习 / 测试 / 考试共用） ====================
+// 背景：以前 submit-answer 直接采信前端传入的 is_correct，submit-test / submit-exam 直接采信
+//       前端传入的 questions[].answers，学生只要伪造「正确答案」就能拿到积分与装备掉落。
+//       现在一律以题库 questions 表里的正确答案为准，前端传入的判分结果只作参考、不参与计分。
+function judgeNormalizeBlankAnswers(value) {
+  if (!Array.isArray(value)) return [[]];
+  if (value.length === 0) return [[]];
+  if (value.some(item => Array.isArray(item))) {
+    return value.map(item => (Array.isArray(item) ? item : (item ? [item] : [])));
+  }
+  return value.map(item => (item ? [item] : []));
+}
+
+function judgeFillBlankAnswer(userAnswers, correctAnswers) {
+  const userList = Array.isArray(userAnswers)
+    ? userAnswers
+    : (userAnswers === undefined || userAnswers === null || userAnswers === '' ? [] : [userAnswers]);
+  const normalized = judgeNormalizeBlankAnswers(correctAnswers);
+  if (userList.length !== normalized.length) return false;
+  return userList.every((userAns, idx) =>
+    (normalized[idx] || []).some(ca => taskNormalizeAnswer(ca) === taskNormalizeAnswer(userAns))
+  );
+}
+
+// 复合题判分：correctField 为题库里的小题数组（或 JSON 字符串），userAnswerRaw 为学生作答 JSON
+// 约定与前端一致：choice_answers 按小题在数组中的位置（0 基）对应，blank_answers 同理
+function judgeCompositeAnswer(correctField, userAnswerRaw) {
+  if (userAnswerRaw === undefined || userAnswerRaw === null || userAnswerRaw === '') return false;
+  let parsedUser;
+  try {
+    parsedUser = typeof userAnswerRaw === 'string' ? JSON.parse(userAnswerRaw) : userAnswerRaw;
+  } catch {
+    return false;
+  }
+  if (!parsedUser || typeof parsedUser !== 'object') return false;
+
+  const subQuestions = taskGetAnswersArray(correctField);
+  if (!Array.isArray(subQuestions) || subQuestions.length === 0) return false;
+
+  return subQuestions.every((sq, idx) => {
+    if (!sq || typeof sq !== 'object') return false;
+    if (sq.type === 'fill_blank') {
+      return judgeFillBlankAnswer(parsedUser.blank_answers?.[idx], sq.answers);
+    }
+    if (sq.type === 'choice' || sq.type === 'multiple_choice') {
+      const multiple = sq.multiple === true || sq.type === 'multiple_choice';
+      return taskCheckAnswerCorrect(
+        parsedUser.choice_answers?.[idx],
+        multiple ? 'multiple_choice' : 'choice',
+        sq.answers,
+        sq.options
+      );
+    }
+    return false;
+  });
+}
+
+/**
+ * 服务端判分入口：答案一律取自题库行，前端传入的 is_correct / questions[].answers 一概不采信
+ * @param {{type?:string, question_type?:string, answers?:any, options?:any}} question 题库 questions 行
+ * @param {any} userAnswerRaw 学生作答（复合题为 JSON 字符串）
+ * @returns {{isCorrect:boolean, judged:boolean}} judged=false 表示题目数据缺失、无法判分
+ */
+function judgeQuestionAnswer(question, userAnswerRaw) {
+  if (!question) return { isCorrect: false, judged: false };
+  const type = question.type || question.question_type;
+  if (type === 'composite') {
+    return { isCorrect: judgeCompositeAnswer(question.answers, userAnswerRaw), judged: true };
+  }
+  return { isCorrect: taskCheckAnswerCorrect(userAnswerRaw, type, question.answers, question.options), judged: true };
 }
 
 // 18. 提交答题
