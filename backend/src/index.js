@@ -1907,6 +1907,128 @@ app.get('/api/security-settings', authenticate, requireTeachingRole, async (req,
   }
 });
 
+// ==================== 数据导入导出（.xgpybak） ====================
+const dataIO = require('./data-io');
+const backupsDir = path.join(appBaseDir, 'backups');
+const importTmpDir = path.join(appBaseDir, 'tmp-data-io');
+if (!fs.existsSync(importTmpDir)) fs.mkdirSync(importTmpDir, { recursive: true });
+
+const importUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, importTmpDir),
+    filename: (req, file, cb) => cb(null, `import-${Date.now()}-${Math.round(Math.random() * 1e9)}.xgpybak`),
+  }),
+  limits: { fileSize: 2 * 1024 * 1024 * 1024 }, // 2GB，管理员可在 system_config 调整预期
+});
+
+// 元信息：域列表、行数、文件统计（供导出页与体积预估）
+app.get('/api/admin/data-io/meta', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const meta = await dataIO.getExportMeta(pool, uploadsDir);
+    res.json({ data: meta, error: null });
+  } catch (error) {
+    console.error('Error in GET /api/admin/data-io/meta:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 导出备份包（流式 zip 下载）。query: domains=a,b / file_mode=full|manifest / exclude=tasks,xxx
+app.get('/api/admin/data-io/export', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const domainIds = String(req.query.domains || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (domainIds.length === 0) {
+      return res.status(400).json({ data: null, error: '未选择任何数据域' });
+    }
+    const opts = {
+      domainIds,
+      fileMode: req.query.file_mode === 'manifest' ? 'manifest' : 'full',
+      excludeDirs: String(req.query.exclude || '').split(',').map(s => s.trim()).filter(Boolean),
+    };
+    console.log('[data-io] 导出 domains=', domainIds.join(','), 'file_mode=', opts.fileMode, 'exclude=', opts.excludeDirs.join(','));
+    await dataIO.exportToResponse(pool, uploadsDir, appBaseDir, opts, res);
+  } catch (error) {
+    console.error('Error in GET /api/admin/data-io/export:', error);
+    if (!res.headersSent) res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 快照列表
+app.get('/api/admin/data-io/snapshots', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    res.json({ data: dataIO.listSnapshots(backupsDir), error: null });
+  } catch (error) {
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 导入预览：上传包 → 只解析 manifest 与当前库对比（不写任何数据）
+app.post('/api/admin/data-io/import/preview', authenticate, requireTeachingRole, importUpload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ data: null, error: '未上传备份包' });
+  try {
+    const preview = await dataIO.previewImport(pool, uploadsDir, req.file.path);
+    res.json({ data: { ...preview, temp_file: path.basename(req.file.path), size: req.file.size }, error: null });
+  } catch (error) {
+    fs.unlink(req.file.path, () => {});
+    console.error('Error in POST /api/admin/data-io/import/preview:', error);
+    res.status(400).json({ data: null, error: `备份包解析失败: ${error.message}` });
+  }
+});
+
+// 执行导入：两种方式二选一 —— ① 重新上传包（multipart file 字段）；② 复用预览时上传的临时文件（JSON body.reuse_file）
+app.post('/api/admin/data-io/import/execute', authenticate, requireTeachingRole, importUpload.single('file'), async (req, res) => {
+  // 清理超过 2 小时的遗留临时文件
+  try {
+    const staleMs = 2 * 60 * 60 * 1000;
+    for (const f of fs.readdirSync(importTmpDir)) {
+      const fp = path.join(importTmpDir, f);
+      const st = fs.statSync(fp);
+      if (Date.now() - st.mtimeMs > staleMs) fs.unlink(fp, () => {});
+    }
+  } catch { /* 忽略 */ }
+
+  let zipPath = null;
+  const cleanup = () => { if (zipPath) fs.unlink(zipPath, () => {}); };
+  if (req.file) {
+    zipPath = req.file.path;
+  } else {
+    const reuseName = path.basename(String(req.body.reuse_file || ''));
+    if (!reuseName || !reuseName.startsWith('import-')) {
+      return res.status(400).json({ data: null, error: '未上传备份包，且 reuse_file 参数无效' });
+    }
+    zipPath = path.join(importTmpDir, reuseName);
+    if (!fs.existsSync(zipPath)) {
+      return res.status(400).json({ data: null, error: '临时备份文件已失效，请重新上传预览' });
+    }
+  }
+  if (req.body.confirm !== 'yes') {
+    cleanup();
+    return res.status(400).json({ data: null, error: '缺少二次确认（confirm=yes）' });
+  }
+  let modes;
+  try {
+    modes = typeof req.body.modes === 'string' ? JSON.parse(req.body.modes) : (req.body.modes || {});
+  } catch {
+    cleanup();
+    return res.status(400).json({ data: null, error: 'modes 参数格式错误' });
+  }
+  const anyActive = Object.values(modes).some(m => m === 'overwrite' || m === 'append');
+  if (!anyActive) {
+    cleanup();
+    return res.status(400).json({ data: null, error: '未选择任何要导入的数据域' });
+  }
+  try {
+    console.log('[data-io] 导入 modes=', JSON.stringify(modes));
+    const report = await dataIO.runImport(pool, uploadsDir, backupsDir, zipPath, { modes });
+    res.json({ data: report, error: null });
+  } catch (error) {
+    console.error('Error in POST /api/admin/data-io/import/execute:', error);
+    res.status(500).json({ data: null, error: `导入失败: ${error.message}` });
+  } finally {
+    cleanup();
+  }
+});
+// ==================== 数据导入导出结束 ====================
+
 // 更新安全设置
 app.put('/api/security-settings', authenticate, requireTeachingRole, async (req, res) => {
   try {

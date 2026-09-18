@@ -18,6 +18,10 @@ backend/uploads/
 # 代理上网静态资源磁盘缓存（可随时手工删除）
 backend/cache/
 
+# 数据导入导出运行时目录（备份快照与导入临时文件，含业务数据）
+backend/backups/
+backend/tmp-data-io/
+
 # 数据库备份（含账号散列与 API 密钥，仅忽略根目录下的导出文件；
 # backend/database/migrations/ 下的迁移脚本是代码，必须入库）
 /*.sql

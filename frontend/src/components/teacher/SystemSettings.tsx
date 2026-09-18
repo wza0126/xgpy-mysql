@@ -4,6 +4,7 @@ import { backendClient } from '../../api/backendClient';
 import { API_CONFIG } from '../../api/config';
 import { useAuth } from '../../hooks/useAuth';
 import { applySiteConfig, useSiteConfig } from '../../hooks/useSiteConfig';
+import { DataManager } from './DataManager';
 
 const API_BASE = API_CONFIG.apiUrl;
 
@@ -906,6 +907,7 @@ export const SystemSettings: React.FC = () => {
     { id: 'desktop', label: '桌面背景', icon: 'fa-image' },
     { id: 'security', label: '安全配置', icon: 'fa-shield-halved' },
     { id: 'teachers', label: '教师账号', icon: 'fa-users-gear' },
+    { id: 'data', label: '数据管理', icon: 'fa-box-archive' },
     { id: 'license', label: '系统授权', icon: 'fa-key' },
     { id: 'update', label: '系统升级', icon: 'fa-download' },
   ];
@@ -1976,6 +1978,13 @@ export const SystemSettings: React.FC = () => {
                 </div>
               </motion.div>
             )}
+          </motion.div>
+        )}
+
+        {activeTab === 'data' && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+            <h3 className="text-lg font-bold text-gray-800 mb-6">数据管理 <span className="text-sm text-gray-500 font-normal">(数据导入导出 / .xgpybak 备份包)</span></h3>
+            <DataManager />
           </motion.div>
         )}
 
