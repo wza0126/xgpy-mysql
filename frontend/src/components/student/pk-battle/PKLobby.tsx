@@ -350,8 +350,15 @@ export const PKLobby: React.FC<{
                     {i + 1}
                   </span>
                   <span className="text-xl">{info.icon}</span>
-                  <div className="flex-1">
-                    <p className="font-medium">{entry.real_name}</p>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium truncate">
+                      {entry.real_name || '—'}
+                      {entry.username && (
+                        <span className="ml-2 text-xs text-gray-400 font-normal">
+                          {entry.username}
+                        </span>
+                      )}
+                    </p>
                     <p className="text-xs text-gray-500">
                       {info.name} {renderStars(entry.pk_rank_tier, entry.pk_rank_stars)}
                     </p>

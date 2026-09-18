@@ -80,7 +80,9 @@ async function fetchApi(endpoint, options = {}) {
   
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Network error' }));
-    throw new Error(error.error || 'Request failed');
+    const err = new Error(error.error || 'Request failed') as Error & { status?: number };
+    err.status = response.status;
+    throw err;
   }
   
   return response.json();

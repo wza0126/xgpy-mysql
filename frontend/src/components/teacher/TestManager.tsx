@@ -41,6 +41,7 @@ export const TestManager: React.FC = () => {
     pass_grant_app_center: false,
     allow_equipment_drop: false,
     qualification_correct_count: 0,
+    daily_test_limit: 0,
   });
   const [allTags, setAllTags] = useState<string[]>([]);
   const [showTagModal, setShowTagModal] = useState(false);
@@ -144,6 +145,7 @@ export const TestManager: React.FC = () => {
       pass_grant_app_center: false,
       allow_equipment_drop: false,
       qualification_correct_count: 0,
+      daily_test_limit: 0,
     });
   };
 
@@ -204,6 +206,7 @@ export const TestManager: React.FC = () => {
       pass_grant_app_center: testData.pass_grant_app_center === true || testData.pass_grant_app_center === 1,
       allow_equipment_drop: testData.allow_equipment_drop === true || testData.allow_equipment_drop === 1,
       qualification_correct_count: testData.qualification_correct_count || 0,
+      daily_test_limit: parseInt(testData.daily_test_limit, 10) || 0,
     });
     setShowModal(true);
   };
@@ -496,6 +499,23 @@ export const TestManager: React.FC = () => {
                       min={0}
                     />
                   </div>
+                </div>
+
+                <div className="p-4 bg-orange-50 rounded-xl">
+                  <label className="block text-sm font-medium text-orange-800 mb-1">每日测试次数限制</label>
+                  <p className="text-xs text-gray-500 mb-2">学生每天最多可以参加该测试几次（及格后正常发放奖励）</p>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-gray-600 whitespace-nowrap">每天最多</span>
+                    <input
+                      type="number"
+                      value={formData.daily_test_limit}
+                      onChange={(e) => setFormData({ ...formData, daily_test_limit: parseInt(e.target.value) || 0 })}
+                      className="w-24 p-2 border border-gray-300 rounded-lg text-center"
+                      min={0}
+                    />
+                    <span className="text-sm text-gray-600 whitespace-nowrap">次</span>
+                  </div>
+                  <p className="text-xs text-gray-400 mt-1">填 0 或留空表示不限制次数</p>
                 </div>
 
                 <div className="p-4 bg-blue-50 rounded-xl">

@@ -911,7 +911,36 @@ export const TestModule: React.FC = () => {
     return Array.isArray(ids) ? ids : [];
   };
 
+  // ===== 每日测试次数限制辅助 =====
+  // 统计口径与服务端一致：test_records 中该生当天对该测试的提交条数
+  const isSameLocalDay = (ts: any): boolean => {
+    if (!ts) return false;
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return false;
+    const now = new Date();
+    return d.getFullYear() === now.getFullYear()
+      && d.getMonth() === now.getMonth()
+      && d.getDate() === now.getDate();
+  };
+
+  const getTodayAttempts = (testId: string): number => {
+    return testHistory.filter((r: any) => r.test_id === testId && isSameLocalDay(r.completed_at)).length;
+  };
+
+  const getDailyLimit = (test: any): number => parseInt(test?.daily_test_limit, 10) || 0;
+
   const startTest = async (test: Test) => {
+    // 每日测试次数限制（教师端可设置，0 = 不限制）
+    const limit = getDailyLimit(test);
+    if (limit > 0) {
+      const used = getTodayAttempts(test.id);
+      if (used >= limit) {
+        alert(`今日该测试次数已用完（每天最多 ${limit} 次），请明天再来`);
+        fetchTestHistory();
+        return;
+      }
+    }
+
     const { data: freshTestData } = await backendClient.from('tests').select('*').eq('id', test.id).maybeSingle();
     const testData = (freshTestData || test) as any;
 
@@ -1034,7 +1063,17 @@ export const TestModule: React.FC = () => {
       
       fetchTestHistory();
     } catch (apiError: any) {
-      // 如果API调用失败，降级使用原方法
+      // 服务端业务规则拒绝（HTTP 4xx，如「今日测试次数已用完」「测试不存在」「考试已结束」）
+      // 必须直接提示并结束，绝不能走下面的前端降级逻辑 ——
+      // 否则前端会自己判分、自己发积分、自己插入测试记录，把服务端的次数限制整条绕过。
+      if (apiError?.status && apiError.status >= 400 && apiError.status < 500) {
+        console.warn('[handleSubmitTest] 服务端拒绝提交:', apiError.message);
+        alert(apiError.message || '提交失败，请稍后重试');
+        fetchTestHistory();
+        return;
+      }
+
+      // 仅网络异常/服务端 5xx 才降级使用原方法
       console.error('[handleSubmitTest] 业务API调用失败，降级使用原始方法:', apiError);
       
       let correct = 0;
@@ -1197,14 +1236,15 @@ export const TestModule: React.FC = () => {
       setActiveTest(null);
       
       // 降级路径也尝试通过后端API触发装备掉落
-      if (isPassed) {
+      // 注意：服务端会校验这条 test_record 是否真实存在且及格，并对同一条记录只发放一次掉落，
+      //       因此这里必须带上 test_record_id。
+      if (isPassed && testRecordData?.[0]?.id) {
         try {
           console.log('[handleSubmitTest] 降级路径：调用装备掉落API');
           const dropResult = await backendClient.post('/api/business/test-equipment-drop', {
             student_id: profile.id,
             test_id: activeTest.test.id,
-            score,
-            is_passed: isPassed
+            test_record_id: testRecordData[0].id
           });
           console.log('[handleSubmitTest] 降级路径：掉落结果:', dropResult);
           if (dropResult?.data?.dropped_equipments?.length > 0) {
@@ -2042,7 +2082,14 @@ export const TestModule: React.FC = () => {
         </div>
       ) : (
         <div className="grid grid-cols-2 gap-4 mb-8">
-          {tests.map((test) => (
+          {tests.map((test) => {
+            const dailyLimit = getDailyLimit(test);
+            const todayUsed = getTodayAttempts(test.id);
+            const dailyExhausted = dailyLimit > 0 && todayUsed >= dailyLimit;
+            const qualificationLack = (test as any).qualification_correct_count > 0
+              && studentCorrectCount < (test as any).qualification_correct_count;
+            const blocked = dailyExhausted || qualificationLack;
+            return (
             <motion.div
               key={test.id}
               initial={{ opacity: 0, y: 10 }}
@@ -2058,6 +2105,12 @@ export const TestModule: React.FC = () => {
               <div className="space-y-2 text-sm text-gray-600 mb-4">
                 <p><i className="fa-solid fa-clock mr-2"></i>限时 {test.time_limit} 分钟</p>
                 <p><i className="fa-solid fa-gift mr-2"></i>奖励 {test.points_reward} 积分</p>
+                {dailyLimit > 0 && (
+                  <p className={dailyExhausted ? 'text-red-600' : 'text-gray-600'}>
+                    <i className={`fa-solid fa-calendar-day mr-2 ${dailyExhausted ? 'text-red-500' : ''}`}></i>
+                    今日剩余 {Math.max(0, dailyLimit - todayUsed)} 次（每天最多 {dailyLimit} 次）
+                  </p>
+                )}
               </div>
               {(test as any).qualification_correct_count > 0 && (
                 <div className="mb-3">
@@ -2074,19 +2127,22 @@ export const TestModule: React.FC = () => {
               )}
               <button
                 onClick={() => startTest(test)}
-                disabled={(test as any).qualification_correct_count > 0 && studentCorrectCount < (test as any).qualification_correct_count}
+                disabled={blocked}
                 className={`w-full py-2 rounded-lg transition-colors ${
-                  (test as any).qualification_correct_count > 0 && studentCorrectCount < (test as any).qualification_correct_count
+                  blocked
                     ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
                     : 'bg-blue-500 text-white hover:bg-blue-600'
                 }`}
               >
-                {(test as any).qualification_correct_count > 0 && studentCorrectCount < (test as any).qualification_correct_count
+                {qualificationLack
                   ? '资格不足'
-                  : '开始测试'}
+                  : dailyExhausted
+                    ? '今日次数已用完'
+                    : '开始测试'}
               </button>
             </motion.div>
-          ))}
+            );
+          })}
         </div>
       )}
 

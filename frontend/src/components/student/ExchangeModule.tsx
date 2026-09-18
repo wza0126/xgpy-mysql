@@ -11,6 +11,8 @@ export const ExchangeModule: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [showConfirm, setShowConfirm] = useState<{ item: Prize; type: 'prize' } | null>(null);
   const [isExchanging, setIsExchanging] = useState(false); // 防重复提交标志
+  // 学生已拥有的皮肤ID：同一皮肤只能兑换一次，已拥有的直接禁用兑换按钮
+  const [ownedSkinIds, setOwnedSkinIds] = useState<string[]>([]);
   const { profile, refreshProfile } = useAuth();
 
   useEffect(() => {
@@ -53,7 +55,25 @@ export const ExchangeModule: React.FC = () => {
     }
     if (historyData) setExchangeHistory(historyData as ExchangeRecord[]);
 
+    // 拉取已拥有皮肤，用于「已拥有」标记与按钮禁用
+    try {
+      const skinResult: any = await backendClient.get('/api/student/my-skins');
+      const owned = skinResult?.data?.ownedSkins;
+      if (Array.isArray(owned)) {
+        setOwnedSkinIds(owned.map((s: any) => s.skin_id).filter(Boolean));
+      }
+    } catch (error) {
+      console.warn('获取已拥有皮肤失败，将不做「已拥有」标记:', error);
+    }
+
     setLoading(false);
+  };
+
+  /** 皮肤类奖品且学生已拥有 → 不可再兑换（重复兑换只是多买一个同款，效果完全一样） */
+  const isSkinOwned = (prize: Prize): boolean => {
+    if (prize.type !== 'skin') return false;
+    const skinId = (prize as any).skin_id;
+    return !!skinId && ownedSkinIds.includes(skinId);
   };
 
   const canExchangeToday = async (prize: Prize): Promise<boolean> => {
@@ -88,6 +108,13 @@ export const ExchangeModule: React.FC = () => {
       }
 
       const prize = item as Prize;
+
+      // 皮肤：同一皮肤只能兑换一次（多个相同皮肤与一个的效果完全一样，重复兑换只是浪费积分）
+      if (isSkinOwned(prize)) {
+        alert('您已拥有该皮肤，同一皮肤只能兑换一次');
+        setShowConfirm(null);
+        return;
+      }
 
       // 使用新的业务API进行兑换（认证码由后端在事务内自动分配，避免并发竞争）
       try {
@@ -148,17 +175,23 @@ export const ExchangeModule: React.FC = () => {
       <div className="grid grid-cols-3 gap-4">
         {prizes.map((prize) => {
           const skinConfig = prize.type === 'skin' ? getSkinById((prize as any).skin_id) : null;
+          const skinOwned = isSkinOwned(prize);
           return (
           <motion.div
             key={prize.id}
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
-            className={`bg-white rounded-xl shadow-sm border p-4 hover:shadow-md transition-shadow ${
+            className={`relative bg-white rounded-xl shadow-sm border p-4 hover:shadow-md transition-shadow ${
               prize.type === 'equipment' ? 'border-orange-300' :
               prize.type === 'skin' ? 'border-pink-300' :
               'border-gray-200'
             }`}
           >
+            {skinOwned && (
+              <span className="absolute top-2 right-2 bg-gray-500/90 text-white text-[10px] px-2 py-0.5 rounded-full">
+                已拥有
+              </span>
+            )}
             {prize.type === 'skin' && skinConfig ? (
               // 皮肤奖品：显示迷你窗口预览
               <div className="mb-3">
@@ -206,22 +239,31 @@ export const ExchangeModule: React.FC = () => {
                 {prize.points_cost}
               </span>
               <button
-                onClick={() => setShowConfirm({ item: prize, type: 'prize' })}
-                disabled={(profile?.current_points || 0) < (prize.points_cost || 0)}
+                onClick={() => !skinOwned && setShowConfirm({ item: prize, type: 'prize' })}
+                disabled={skinOwned || (profile?.current_points || 0) < (prize.points_cost || 0)}
                 className={`px-4 py-1 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm ${
+                  skinOwned ? 'bg-gray-400' :
                   prize.type === 'equipment' ? 'bg-orange-500 hover:bg-orange-600' :
                   prize.type === 'skin' ? 'bg-pink-500 hover:bg-pink-600' :
                   'bg-blue-500 hover:bg-blue-600'
                 }`}
               >
-                兑换
+                {skinOwned ? '已拥有' : '兑换'}
               </button>
             </div>
-            {(prize.daily_limit || 0) > 0 && (
+            {skinOwned ? (
+              <p className="text-xs text-pink-500 text-center mt-2">
+                <i className="fa-solid fa-circle-check mr-1"></i>同一皮肤只能兑换一次
+              </p>
+            ) : prize.type === 'skin' ? (
+              <p className="text-xs text-gray-400 text-center mt-2">
+                同一皮肤限兑一次
+              </p>
+            ) : (prize.daily_limit || 0) > 0 ? (
               <p className="text-xs text-gray-400 text-center mt-2">
                 每日限兑 {prize.daily_limit} 个
               </p>
-            )}
+            ) : null}
           </motion.div>
           );
         })}
@@ -314,6 +356,14 @@ export const ExchangeModule: React.FC = () => {
                   <p className="text-sm text-orange-600 text-center">
                     <i className="fa-solid fa-shield-halved mr-1"></i>
                     兑换后装备将直接生效，暴击率永久提升
+                  </p>
+                </div>
+              )}
+              {showConfirm.item.type === 'skin' && (
+                <div className="bg-pink-50 border border-pink-200 rounded-lg p-3 mb-4">
+                  <p className="text-sm text-pink-600 text-center">
+                    <i className="fa-solid fa-circle-info mr-1"></i>
+                    同一皮肤只能兑换一次，不会重复扣分
                   </p>
                 </div>
               )}

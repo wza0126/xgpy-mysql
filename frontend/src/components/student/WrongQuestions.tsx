@@ -101,6 +101,15 @@ export const WrongQuestions: React.FC = () => {
   const [showResult, setShowResult] = useState(false);
   const [isCorrect, setIsCorrect] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // 同步提交锁：不依赖 React 重渲染。用 state 做锁时，页面一旦卡顿/掉帧导致不再重渲染，
+  // 按钮闭包里的 isSubmitting 始终是 false，就会出现"界面卡住还能一直点提交"（同题被连点数百次）。
+  const submittingRef = useRef(false);
+  // 当前这一屏错题是否已提交：未切题前只允许提交一次
+  const answeredQuestionIdRef = useRef<string | null>(null);
+  // 连点冷却兜底（毫秒）
+  const lastSubmitAtRef = useRef(0);
+  const SUBMIT_COOLDOWN_MS = 1500;
+  const [submitNotice, setSubmitNotice] = useState('');
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'unresolved'>('unresolved');
   const [pointsConfig, setPointsConfig] = useState({ correct: 10, wrong: -5 });
@@ -218,12 +227,25 @@ export const WrongQuestions: React.FC = () => {
     setCompositeBlankAnswers({});
     setSubQuestionResults([]);
     setShowResult(false);
+    setSubmitNotice('');
+    answeredQuestionIdRef.current = null;
   };
 
   const handleSubmit = async () => {
-    if (!selectedQuestion || !profile || isSubmitting) return;
+    if (!selectedQuestion || !profile) return;
 
+    // 同步拦截（不依赖 state 是否已刷新）
+    if (submittingRef.current) return;
+    if (answeredQuestionIdRef.current === selectedQuestion.question_id) {
+      setSubmitNotice('本题已提交，请点击「下一题」继续。同一道题重复提交不再计分。');
+      return;
+    }
+    if (Date.now() - lastSubmitAtRef.current < SUBMIT_COOLDOWN_MS) return;
+
+    submittingRef.current = true;
+    lastSubmitAtRef.current = Date.now();
     setIsSubmitting(true);
+    setSubmitNotice('');
 
     let correct = false;
     let answerText = '';
@@ -303,6 +325,17 @@ export const WrongQuestions: React.FC = () => {
       // API成功后才显示结果，避免等待API时的卡顿
       setIsCorrect(correct);
       setShowResult(true);
+      // 锁定本题，未切题前不再允许提交
+      answeredQuestionIdRef.current = selectedQuestion.question_id;
+      // 掌握门禁回执：已达掌握阈值 → 不再计分
+      const gateData = result.data as any;
+      if (gateData?.rewarded === false) {
+        setSubmitNotice(
+          gateData.reward_blocked_reason === 'wrong_limit'
+            ? '本题错误次数较多，本次不再扣分'
+            : '本题已掌握，本次不再计分、不掉装备'
+        );
+      }
       if (subResults.length > 0) {
         setSubQuestionResults(subResults);
       }
@@ -385,6 +418,8 @@ export const WrongQuestions: React.FC = () => {
       // 降级时也先显示结果
       setIsCorrect(correct);
       setShowResult(true);
+      // 降级路径同样锁定本题，避免接口超时/静默失败被连点重复计分
+      answeredQuestionIdRef.current = selectedQuestion.question_id;
       if (subResults.length > 0) {
         setSubQuestionResults(subResults);
       }
@@ -452,6 +487,7 @@ export const WrongQuestions: React.FC = () => {
           .eq('id', selectedQuestion.id);
       }
     } finally {
+      submittingRef.current = false;
       setIsSubmitting(false);
     }
   };
@@ -463,6 +499,8 @@ export const WrongQuestions: React.FC = () => {
     setCompositeBlankAnswers({});
     setSubQuestionResults([]);
     setShowResult(false);
+    setSubmitNotice('');
+    answeredQuestionIdRef.current = null;
   };
 
   const handleNextQuestion = () => {
@@ -478,6 +516,8 @@ export const WrongQuestions: React.FC = () => {
       setCompositeBlankAnswers({});
       setSubQuestionResults([]);
       setShowResult(false);
+      setSubmitNotice('');
+      answeredQuestionIdRef.current = null;
     } else if (wrongQuestions.length > 0) {
       let nextIndex = isCorrect ? currentQuestionIndex : currentQuestionIndex + 1;
       if (nextIndex < wrongQuestions.length) {
@@ -488,6 +528,8 @@ export const WrongQuestions: React.FC = () => {
         setCompositeBlankAnswers({});
         setSubQuestionResults([]);
         setShowResult(false);
+        setSubmitNotice('');
+        answeredQuestionIdRef.current = null;
       } else {
         handleBack();
       }
@@ -769,6 +811,13 @@ export const WrongQuestions: React.FC = () => {
                     )}
                   </div>
                 </motion.div>
+              )}
+
+              {submitNotice && (
+                <div className="mt-6 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-800 flex items-start gap-2">
+                  <i className="fa-solid fa-circle-info mt-0.5"></i>
+                  <span>{submitNotice}</span>
+                </div>
               )}
 
               <div className="mt-6 flex justify-end gap-3">

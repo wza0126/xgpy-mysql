@@ -1227,6 +1227,48 @@ app.put('/api/tables/:tableName/:id', authenticate, async (req, res) => {
     
     // 删除 id 字段，不要更新 id
     delete data.id;
+
+    // ---- profiles 表写保护 ----
+    // /api/tables 是通用表写接口，默认任何已登录用户都能改任意表任意字段。
+    // 历史上学生端用它直接写 current_points（前端读-改-写绝对赋值），
+    // 既能写出负分，也能改到别人头上。这里做最小收口：
+    //   1) 学生只能改自己那一行，且不能碰积分类 / 身份权限类字段；
+    //   2) 教师可以改，但积分类字段一律钳制到 >= 0（后台编辑手滑填负数也不会落库）。
+    if (tableName === 'profiles') {
+      const POINT_FIELDS = ['current_points', 'max_points', 'total_points_earned'];
+      const IDENTITY_FIELDS = [
+        'role', 'password_hash', 'username', 'class_id',
+        'can_open_exchange_module', 'can_use_app', 'can_use_browser', 'can_exchange_internet_code',
+      ];
+      const PROTECTED_FIELDS = [...POINT_FIELDS, ...IDENTITY_FIELDS];
+
+      const requesterRole = req.user?.role;
+      const isTeacher = requesterRole && requesterRole !== 'student';
+
+      if (!isTeacher) {
+        if (id !== req.user?.userId) {
+          return res.status(403).json({ data: null, error: '只能修改自己的资料' });
+        }
+        const touched = PROTECTED_FIELDS.filter((field) => data[field] !== undefined);
+        if (touched.length > 0) {
+          console.warn(`[tables] 学生 ${id} 尝试通过通用表接口写入受保护字段：${touched.join(', ')}，已忽略`);
+          PROTECTED_FIELDS.forEach((field) => delete data[field]);
+          if (Object.keys(data).length === 0) {
+            return res.status(403).json({
+              data: null,
+              error: '积分与权限字段不可通过此接口修改，请使用对应功能接口',
+            });
+          }
+        }
+      } else {
+        for (const field of POINT_FIELDS) {
+          if (data[field] !== undefined && data[field] !== null) {
+            const num = Number(data[field]);
+            data[field] = Number.isFinite(num) ? Math.max(0, Math.trunc(num)) : 0;
+          }
+        }
+      }
+    }
     
     // 检查是否有数据要更新
     const keys = Object.keys(data);
@@ -1961,6 +2003,17 @@ app.post('/api/business/exchange-prize', authenticate, async (req, res) => {
       });
     }
 
+    // 归属校验：学生只能给自己兑换，避免用别人的 student_id 扣掉他人的积分
+    const requesterRole = req.user?.role;
+    const isTeacher = requesterRole && requesterRole !== 'student';
+    if (!isTeacher && student_id !== req.user?.userId) {
+      await connection.rollback();
+      return res.status(403).json({
+        data: null,
+        error: '只能为自己兑换奖品'
+      });
+    }
+
     // 1. 获取奖品信息（带排他锁）
     const [prizes] = await connection.query(
       'SELECT * FROM prizes WHERE id = ? FOR UPDATE', 
@@ -2079,12 +2132,47 @@ app.post('/api/business/exchange-prize', authenticate, async (req, res) => {
       }
     }
     
+    // 3.7 皮肤类奖品：同一皮肤每人只允许兑换一次
+    // 重复兑换只是多买一个完全相同的皮肤（外观与暴击加成一致），纯属浪费学生积分，故限制。
+    if (prize.type === 'skin') {
+      if (!prize.skin_id) {
+        await connection.rollback();
+        return res.status(400).json({
+          data: null,
+          error: '该皮肤奖品未关联皮肤，请联系老师检查配置'
+        });
+      }
+
+      const [ownedSkins] = await connection.query(
+        'SELECT id FROM student_skins WHERE student_id = ? AND skin_id = ? LIMIT 1',
+        [student_id, prize.skin_id]
+      );
+      if (ownedSkins.length > 0) {
+        await connection.rollback();
+        return res.status(400).json({
+          data: null,
+          error: '您已拥有该皮肤，同一皮肤只能兑换一次'
+        });
+      }
+    }
+
     // 4. 扣除积分
-    await connection.query(`
-      UPDATE profiles 
-      SET current_points = current_points - ?, max_points = GREATEST(max_points, current_points) 
-      WHERE id = ?
-    `, [prizePoints, student_id]);
+    // 条件写进 WHERE 做原子扣减（并发下第二个请求 affectedRows=0 直接失败），
+    // GREATEST(0, ...) 作为第二道下限兜底，确保积分不会被扣成负数。
+    const [deductResult] = await connection.query(`
+      UPDATE profiles
+      SET current_points = GREATEST(0, current_points - ?),
+          max_points = GREATEST(max_points, current_points)
+      WHERE id = ? AND current_points >= ?
+    `, [prizePoints, student_id, prizePoints]);
+
+    if (!deductResult.affectedRows) {
+      await connection.rollback();
+      return res.status(400).json({
+        data: null,
+        error: '积分不足'
+      });
+    }
     
     // 5. 记录积分流水
     await connection.query(`
@@ -2148,12 +2236,25 @@ app.post('/api/business/exchange-prize', authenticate, async (req, res) => {
     // 7.6 如果是皮肤类奖品，给学生添加皮肤
     if (prize.type === 'skin' && prize.skin_id) {
       const ssId = `ss_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      // INSERT IGNORE 避免重复兑换导致唯一键冲突
-      await connection.query(
-        `INSERT IGNORE INTO student_skins (id, student_id, skin_id)
-         VALUES (?, ?, ?)`,
-        [ssId, student_id, prize.skin_id]
-      );
+      // 这里刻意不用 INSERT IGNORE：student_skins 对 (student_id, skin_id) 有唯一键，
+      // 若并发下两个请求同时通过前置检查，唯一键冲突必须让整个事务（含已扣积分）回滚，
+      // 否则学生会白扣积分却只拿到一个皮肤。
+      try {
+        await connection.query(
+          `INSERT INTO student_skins (id, student_id, skin_id)
+           VALUES (?, ?, ?)`,
+          [ssId, student_id, prize.skin_id]
+        );
+      } catch (skinError) {
+        if (skinError && skinError.code === 'ER_DUP_ENTRY') {
+          await connection.rollback();
+          return res.status(400).json({
+            data: null,
+            error: '您已拥有该皮肤，同一皮肤只能兑换一次'
+          });
+        }
+        throw skinError;
+      }
 
       // 在兑换记录中记录皮肤ID
       await connection.query(
@@ -2212,6 +2313,17 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
       });
     }
 
+    // 归属校验：学生只能提交自己的答题记录，避免用他人的 student_id 加/扣别人的积分
+    const requesterRole = req.user?.role;
+    const isTeacher = requesterRole && requesterRole !== 'student';
+    if (!isTeacher && student_id !== req.user?.userId) {
+      await connection.rollback();
+      return res.status(403).json({
+        data: null,
+        error: '只能提交自己的答题记录'
+      });
+    }
+
     // 检查学生信息（带排他锁）
     const [students] = await connection.query(
       'SELECT id, current_points FROM profiles WHERE id = ? FOR UPDATE', 
@@ -2226,28 +2338,79 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
       });
     }
     
-    // 1. 检查是否已经提交过该题（防止重复提交，practice 来源允许重复，不检查）
+    // 1. 检查是否已经提交过该题
+    //    练习（practice）来源允许同题反复练习，不做查重；
+    //    其他来源只拦截「同一次作答（test_record_id）」内的重复提交，
+    //    绝不按「历史上是否做过该题」拦截 —— 否则学生在练习里做过的题，
+    //    到了测试/考试里会被直接拒绝，测试就无法完整作答了。
     const src = source || 'practice';
-    if (src !== 'practice') {
+    if (src !== 'practice' && test_record_id) {
       const [existingAnswer] = await connection.query(`
         SELECT id, is_correct FROM student_answers 
-        WHERE student_id = ? AND question_id = ?
-        ${lesson_id ? 'AND lesson_id = ?' : ''}
+        WHERE student_id = ? AND question_id = ? AND test_record_id = ?
         LIMIT 1
-      `, lesson_id ? [student_id, question_id, lesson_id] : [student_id, question_id]);
-      
+      `, [student_id, question_id, test_record_id]);
+
       if (existingAnswer.length > 0) {
-        // 非 practice 来源拒绝重复提交
+        // 同一次作答内重复提交，拒绝
         await connection.rollback();
-        return res.status(400).json({ 
-          data: null, 
-          error: '该题已经提交过了' 
+        return res.status(400).json({
+          data: null,
+          error: '该题已经提交过了'
         });
       }
     }
     
-    // 2. 更新积分（如果有变化）
-    if (points_change !== undefined && points_change !== 0) {
+    // 1.5 掌握阈值门禁（仅针对练习来源，防"同题无限重复提交"刷分刷装备）
+    //     背景：曾有学生把同一道题在 26 分钟内重复提交 317 次，刷出 3155 分、并反复重掷装备掉落。
+    //     规则：练习类来源同一题答对达到"掌握题目阈值"（后台设置 master_question_threshold，默认3）后，
+    //           不再发放积分、不再重掷装备、不再累加连对/暴击等游戏计数器；答错达到同样次数后也不再重复扣分。
+    //     该门禁在服务端生效，前端即使卡死、被篡改或被脚本调用也绕不过。
+    //     注意：测试 / 考试（submit-test、submit-exam）走独立接口，不受此门禁约束，
+    //           每次测试都能完整作答，及格即按测试配置正常发放奖励；测试答题也不计入练习的掌握次数。
+    let masterThreshold = 3;
+    let histCorrect = 0;
+    let histWrong = 0;
+    let rewardAllowed = true;
+    let blockReason = null;
+
+    if (src === 'practice') {
+      const [thresholdRows] = await connection.query(
+        "SELECT value FROM system_config WHERE config_key = 'master_question_threshold' LIMIT 1"
+      );
+      if (thresholdRows.length > 0) {
+        let tv = thresholdRows[0].value;
+        if (typeof tv === 'string') {
+          try { tv = JSON.parse(tv); } catch {}
+        }
+        const parsed = parseInt(typeof tv === 'object' && tv !== null ? tv.value : tv, 10);
+        if (Number.isFinite(parsed) && parsed > 0) masterThreshold = parsed;
+      }
+
+      const [histRows] = await connection.query(
+        `SELECT
+           IFNULL(SUM(CASE WHEN is_correct = 1 THEN 1 ELSE 0 END), 0) AS correct_cnt,
+           IFNULL(SUM(CASE WHEN is_correct = 0 THEN 1 ELSE 0 END), 0) AS wrong_cnt
+         FROM student_answers
+         WHERE student_id = ? AND question_id = ? AND source = ?`,
+        [student_id, question_id, src]
+      );
+      histCorrect = Number(histRows[0]?.correct_cnt || 0);
+      histWrong = Number(histRows[0]?.wrong_cnt || 0);
+
+      if (histCorrect >= masterThreshold) {
+        // 该题已达掌握标准（后台"做对 N 次就排除"）：之后的任何提交都不再计分、不再扣分、不掉装备
+        rewardAllowed = false;
+        blockReason = 'already_mastered';
+      } else if (!is_correct && histWrong >= masterThreshold) {
+        // 同题答错达到阈值后不再重复扣分，避免把学生扣成负分
+        rewardAllowed = false;
+        blockReason = 'wrong_limit';
+      }
+    }
+
+    // 2. 更新积分（如果有变化，且未被掌握门禁拦截）
+    if (rewardAllowed && points_change !== undefined && points_change !== 0) {
       const newPoints = students[0].current_points + points_change;
       if (newPoints < 0) {
         await connection.rollback();
@@ -2286,7 +2449,7 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
     `, [
       answerId, student_id, question_id, answer, 
-      is_correct ? 1 : 0, points_change || 0, source || 'practice', 
+      is_correct ? 1 : 0, rewardAllowed ? (points_change || 0) : 0, source || 'practice', 
       test_id || null, test_record_id || null
     ]);
 
@@ -2313,7 +2476,7 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
         [student_id]
       );
 
-      if (profileRows.length > 0) {
+      if (profileRows.length > 0 && rewardAllowed) {
          const gp = profileRows[0];
          const oldStreak = gp.curr_streak || 0;
          const oldCritStreak = gp.curr_crit_streak || 0;
@@ -2507,6 +2670,15 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
       );
     }
 
+    // 被掌握门禁拦截时，本次提交不产生任何奖励或惩罚效果（只保留答题记录用于统计）
+    if (!rewardAllowed) {
+      final_score = 0;
+      crit_final_score = 0;
+      is_crit = false;
+      newHonor = null;
+      droppedEquipments = [];
+    }
+
     await connection.commit();
 
     // 获取更新后的学生信息
@@ -2529,11 +2701,19 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
         current_crit_streak: newCritStreak,
         current_wrong: newWrong,
         new_honor: newHonor,
-        dropped_equipments: droppedEquipments
+        dropped_equipments: droppedEquipments,
+        // 掌握门禁回执：前端据此即时把已掌握的题移出练习队列，并给学生明确提示
+        rewarded: rewardAllowed,
+        reward_blocked_reason: blockReason,
+        master_threshold: masterThreshold,
+        question_correct_count: histCorrect + (rewardAllowed && is_correct ? 1 : 0),
+        mastered: src === 'practice'
+          ? (histCorrect + (rewardAllowed && is_correct ? 1 : 0)) >= masterThreshold
+          : false
       }, 
       error: null 
     });
-    console.log('[GAME RESPONSE] final_score:', Math.round(final_score), 'power:', Math.round(power_multiplier * 100) / 100, 'crit:', is_crit, 'streak:', newStreak, 'new_honor:', newHonor?.type);
+    console.log('[GAME RESPONSE] final_score:', Math.round(final_score), 'power:', Math.round(power_multiplier * 100) / 100, 'crit:', is_crit, 'streak:', newStreak, 'new_honor:', newHonor?.type, 'rewarded:', rewardAllowed, blockReason || '');
   } catch (error) {
     await connection.rollback();
     console.error('Error in submit-answer:', error);
@@ -2559,6 +2739,17 @@ app.post('/api/business/feed-pet', authenticate, async (req, res) => {
       return res.status(400).json({ 
         data: null, 
         error: '缺少必填字段' 
+      });
+    }
+
+    // 归属校验：学生只能喂自己的宠物，避免用他人的 student_id 扣别人的积分
+    const requesterRole = req.user?.role;
+    const isTeacher = requesterRole && requesterRole !== 'student';
+    if (!isTeacher && student_id !== req.user?.userId) {
+      await connection.rollback();
+      return res.status(403).json({
+        data: null,
+        error: '只能为自己的宠物喂食'
       });
     }
 
@@ -2632,11 +2823,20 @@ app.post('/api/business/feed-pet', authenticate, async (req, res) => {
     }
     
     // 扣除积分
-    await connection.query(`
-      UPDATE profiles 
-      SET current_points = current_points - ? 
-      WHERE id = ?
-    `, [cost, student_id]);
+    // 条件写进 WHERE + GREATEST(0,...) 双保险，杜绝并发下扣成负数
+    const [feedDeduct] = await connection.query(`
+      UPDATE profiles
+      SET current_points = GREATEST(0, current_points - ?)
+      WHERE id = ? AND current_points >= ?
+    `, [cost, student_id, cost]);
+
+    if (!feedDeduct.affectedRows) {
+      await connection.rollback();
+      return res.status(400).json({
+        data: null,
+        error: '积分不足'
+      });
+    }
     
     // 记录积分流水
     await connection.query(`
@@ -2856,7 +3056,25 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
         error: '考试已结束，无法提交'
       });
     }
-    
+
+    // 每日测试次数限制（教师端「考试管理 → 普通测试」中设置，0 表示不限制）
+    // 统计口径：该生当天已成功提交过该测试的次数（test_records 按 completed_at 落在当日的记录数）
+    const dailyTestLimit = parseInt(test.daily_test_limit, 10) || 0;
+    if (dailyTestLimit > 0) {
+      const [todayAttempts] = await connection.query(
+        'SELECT COUNT(*) AS cnt FROM test_records WHERE student_id = ? AND test_id = ? AND DATE(completed_at) = CURDATE()',
+        [student_id, test_id]
+      );
+      const usedToday = Number(todayAttempts[0]?.cnt || 0);
+      if (usedToday >= dailyTestLimit) {
+        await connection.rollback();
+        return res.status(400).json({
+          data: null,
+          error: `今日该测试次数已用完（每天最多 ${dailyTestLimit} 次），请明天再来`
+        });
+      }
+    }
+
     const passingScore = test.passing_score || 60;
     const isPassed = score >= passingScore;
     const pointsEarned = isPassed ? Math.round((score / 100) * (test.points_reward || 50)) : 0;
@@ -3005,6 +3223,12 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
           droppedEquipments.push({ id: eq.id, name: eq.name, icon: eq.icon, crit_bonus: parseFloat(eq.crit_bonus) });
         }
       }
+      // 标记本次作答的掉落已发放：/api/business/test-equipment-drop 不会为同一条记录再掷一次，
+      // 避免「前端降级路径」与「服务端主路径」重复发装备，也避免学生拿同一条记录反复刷装备。
+      await connection.query(
+        'UPDATE test_records SET equipment_granted = 1 WHERE id = ?',
+        [testRecordId]
+      );
     }
     console.log('[submit-test] 掉落装备:', droppedEquipments);
 
@@ -3047,35 +3271,60 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
 app.post('/api/business/test-equipment-drop', authenticate, async (req, res) => {
   const connection = await pool.getConnection();
   try {
-    const { student_id, test_id, score, is_passed } = req.body;
-    console.log('[test-equipment-drop] student_id:', student_id, 'test_id:', test_id, 'is_passed:', is_passed);
-    
+    const { student_id, test_id, test_record_id } = req.body;
+    console.log('[test-equipment-drop] student_id:', student_id, 'test_id:', test_id, 'test_record_id:', test_record_id);
+
     if (!student_id || !test_id) {
       return res.status(400).json({ data: null, error: '缺少必填字段' });
+    }
+
+    // 归属校验：学生只能为自己发放掉落
+    const requesterRole = req.user?.role;
+    const isTeacher = requesterRole && requesterRole !== 'student';
+    if (!isTeacher && student_id !== req.user?.userId) {
+      return res.status(403).json({ data: null, error: '无权操作他人数据' });
+    }
+
+    if (!test_record_id) {
+      return res.status(400).json({ data: null, error: '缺少 test_record_id，无法确认作答记录' });
     }
 
     const [tests] = await connection.query('SELECT * FROM tests WHERE id = ?', [test_id]);
     if (tests.length === 0) {
       return res.status(404).json({ data: null, error: '测试不存在' });
     }
-    
+
     const test = tests[0];
-    const isPassed = is_passed !== undefined ? is_passed : (score >= (test.passing_score || 60));
-    
+    const passingScore = test.passing_score || 60;
+
+    // 必须绑定一条真实且及格的作答记录：及格与否由服务端的分数判定，不再采信请求体里的 is_passed
+    const [records] = await connection.query(
+      'SELECT * FROM test_records WHERE id = ? AND student_id = ? AND test_id = ? LIMIT 1',
+      [test_record_id, student_id, test_id]
+    );
+    if (records.length === 0) {
+      return res.status(400).json({ data: null, error: '未找到对应的测试作答记录，无法发放掉落' });
+    }
+    const record = records[0];
+    if (Number(record.score || 0) < passingScore) {
+      return res.status(400).json({ data: null, error: '本次测试未及格，不发放装备掉落' });
+    }
+
+    // 幂等：同一条作答记录只发放一次掉落（防止用同一条记录反复刷装备）
     let droppedEquipments = [];
-    console.log('[test-equipment-drop] isPassed:', isPassed, 'allow_equipment_drop:', test.allow_equipment_drop);
-    
-    if (isPassed && test.allow_equipment_drop) {
+    console.log('[test-equipment-drop] allow_equipment_drop:', test.allow_equipment_drop, 'equipment_granted:', record.equipment_granted);
+
+    if (test.allow_equipment_drop && !Number(record.equipment_granted || 0)) {
       const [activeEquipments] = await connection.query(
         'SELECT id, name, icon, drop_rate, crit_bonus FROM equipments WHERE is_active = true'
       );
       console.log('[test-equipment-drop] 活跃装备数量:', activeEquipments.length);
-      
+
       for (const eq of activeEquipments) {
         const dropChance = Math.random() * 100;
         const dropThreshold = parseFloat(eq.drop_rate) * 10;
         console.log('[test-equipment-drop] 装备:', eq.name, '随机数:', dropChance.toFixed(2), '阈值:', dropThreshold);
-        
+
         if (dropChance < dropThreshold) {
           await connection.query(
             `INSERT INTO student_equipments (id, student_id, equipment_id, quantity) 
@@ -3086,10 +3335,15 @@ app.post('/api/business/test-equipment-drop', authenticate, async (req, res) => 
           droppedEquipments.push({ id: eq.id, name: eq.name, icon: eq.icon, crit_bonus: parseFloat(eq.crit_bonus) });
         }
       }
+
+      await connection.query(
+        'UPDATE test_records SET equipment_granted = 1 WHERE id = ?',
+        [test_record_id]
+      );
     }
-    
+
     console.log('[test-equipment-drop] 掉落装备:', droppedEquipments);
-    
+
     res.json({ 
       data: { dropped_equipments: droppedEquipments }, 
       error: null 
@@ -6226,10 +6480,24 @@ app.post('/api/ai-qa/ask', authenticate, async (req, res) => {
     }
     
     // 扣除积分（无论是否命中答疑库都扣除）
-    await pool.query(
-      'UPDATE profiles SET current_points = current_points - ?, max_points = GREATEST(max_points, current_points - ?), updated_at = NOW() WHERE id = ?',
-      [pointsPerQuestion, pointsPerQuestion, userId]
+    // 关键：把余额判断写进 WHERE 做原子扣减。若只靠上面的预检，
+    // 同一学生并发发起多个提问时，多个请求会同时通过预检、同时扣减，把积分扣成负数。
+    const [deductResult] = await pool.query(
+      `UPDATE profiles
+          SET current_points = GREATEST(0, current_points - ?),
+              max_points = GREATEST(max_points, current_points - ?),
+              updated_at = NOW()
+        WHERE id = ? AND current_points >= ?`,
+      [pointsPerQuestion, pointsPerQuestion, userId, pointsPerQuestion]
     );
+
+    if (!deductResult.affectedRows) {
+      const [cur] = await pool.query('SELECT current_points FROM profiles WHERE id = ?', [userId]);
+      return res.status(400).json({
+        data: null,
+        error: `积分不足！需要 ${pointsPerQuestion} 积分，当前仅有 ${cur[0]?.current_points ?? 0} 积分`
+      });
+    }
     
     await pool.query(
       'INSERT INTO point_transactions (student_id, amount, reason, source_type, created_at) VALUES (?, ?, ?, ?, NOW())',
@@ -8143,10 +8411,19 @@ app.post('/api/student/custom-background', authenticate, async (req, res) => {
 
     // 扣积分或使用免费次数
     if (needToDeductPoints) {
-      await connection.query(
-        'UPDATE profiles SET current_points = current_points - ?, custom_background = ? WHERE id = ?',
-        [pointsCost, selectedBg.url, studentId]
+      // 条件写进 WHERE + GREATEST(0,...) 双保险，确保扣到 0 为止不会出现负分
+      const [bgDeduct] = await connection.query(
+        `UPDATE profiles
+            SET current_points = GREATEST(0, current_points - ?),
+                custom_background = ?
+          WHERE id = ? AND current_points >= ?`,
+        [pointsCost, selectedBg.url, studentId, pointsCost]
       );
+
+      if (!bgDeduct.affectedRows) {
+        await connection.rollback();
+        return res.status(400).json({ data: null, error: `积分不足！需要 ${pointsCost} 积分` });
+      }
 
       // 记录积分变动
       const transactionId = Math.floor(Math.random() * 1000000000);
@@ -8324,6 +8601,194 @@ app.post('/api/student/active-skin', authenticate, async (req, res) => {
   } catch (error) {
     console.error('Error setting active skin:', error);
     res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// ==================== 积分原子变动 API ====================
+// 背景：前端原先用「读 current_points → 本地加减 → 绝对赋值写回」的方式改积分
+// （见 hooks/usePoints.ts、AppCenter.tsx），这种写法无锁、无事务、无下限，
+// 并发或接口降级重试时会互相覆盖，甚至写出负分。
+// 这里统一改成「服务端按增量原子结算」，扣分不足直接拒绝，且永远不会低于 0。
+
+const POINTS_ADJUST_MAX_DELTA = 100000;
+
+/**
+ * 原子调整本人积分
+ * body: { delta: number, reason?: string }
+ * - delta > 0：加分（同时累加 total_points_earned）
+ * - delta < 0：扣分，积分不足直接拒绝（不会扣成负数）
+ */
+app.post('/api/student/points/adjust', authenticate, async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    const studentId = req.user?.userId;
+    if (!studentId) {
+      return res.status(401).json({ data: null, error: '未登录' });
+    }
+
+    const delta = Number(req.body?.delta);
+    if (!Number.isInteger(delta) || delta === 0) {
+      return res.status(400).json({ data: null, error: '积分变动值必须是非 0 整数' });
+    }
+    if (Math.abs(delta) > POINTS_ADJUST_MAX_DELTA) {
+      return res.status(400).json({ data: null, error: `积分变动值超出允许范围（±${POINTS_ADJUST_MAX_DELTA}）` });
+    }
+
+    const reason = String(req.body?.reason || (delta > 0 ? '积分增加' : '积分扣除')).slice(0, 200);
+
+    await connection.beginTransaction();
+
+    let result;
+    if (delta < 0) {
+      // 扣分：把余额判断写进 WHERE，并发下第二个请求会因 affectedRows=0 被拒
+      const need = -delta;
+      [result] = await connection.query(
+        `UPDATE profiles
+            SET current_points = GREATEST(0, current_points - ?),
+                max_points = GREATEST(max_points, current_points - ?),
+                updated_at = NOW()
+          WHERE id = ? AND current_points >= ?`,
+        [need, need, studentId, need]
+      );
+      if (!result.affectedRows) {
+        await connection.rollback();
+        const [cur] = await connection.query('SELECT current_points FROM profiles WHERE id = ?', [studentId]);
+        return res.status(400).json({
+          data: null,
+          error: `积分不足！需要 ${need} 积分，当前仅有 ${cur[0]?.current_points ?? 0} 积分`
+        });
+      }
+    } else {
+      [result] = await connection.query(
+        `UPDATE profiles
+            SET current_points = current_points + ?,
+                max_points = GREATEST(max_points, current_points + ?),
+                total_points_earned = total_points_earned + ?,
+                updated_at = NOW()
+          WHERE id = ?`,
+        [delta, delta, delta, studentId]
+      );
+      if (!result.affectedRows) {
+        await connection.rollback();
+        return res.status(404).json({ data: null, error: '学生不存在' });
+      }
+    }
+
+    await connection.query(
+      `INSERT INTO point_transactions (student_id, amount, reason, source_type, created_at)
+       VALUES (?, ?, ?, 'system', NOW())`,
+      [studentId, delta, reason]
+    );
+
+    await connection.commit();
+
+    const [rows] = await pool.query(
+      'SELECT current_points, max_points, total_points_earned FROM profiles WHERE id = ?',
+      [studentId]
+    );
+
+    res.json({
+      data: {
+        success: true,
+        delta,
+        current_points: rows[0]?.current_points ?? 0,
+        max_points: rows[0]?.max_points ?? 0,
+        total_points_earned: rows[0]?.total_points_earned ?? 0,
+      },
+      error: null
+    });
+  } catch (error) {
+    try { await connection.rollback(); } catch { /* ignore */ }
+    console.error('Error in /api/student/points/adjust:', error);
+    res.status(500).json({ data: null, error: error.message });
+  } finally {
+    connection.release();
+  }
+});
+
+/**
+ * 应用扣费（服务端定价）
+ * body: { app_id: string }
+ * 价格一律以数据库 apps 表为准，不信任前端传来的金额；
+ * price_type 为 points（一次性购买）或 per_use（按次使用）时扣费，其余免费。
+ * 扣费不足返回 400，绝不会扣成负数。
+ */
+app.post('/api/student/apps/charge', authenticate, async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    const studentId = req.user?.userId;
+    if (!studentId) {
+      return res.status(401).json({ data: null, error: '未登录' });
+    }
+
+    const appId = req.body?.app_id;
+    if (!appId) {
+      return res.status(400).json({ data: null, error: '缺少 app_id' });
+    }
+
+    const [appRows] = await connection.query(
+      'SELECT id, name, price_type, points_price, is_active FROM apps WHERE id = ?',
+      [appId]
+    );
+    if (appRows.length === 0) {
+      return res.status(404).json({ data: null, error: '应用不存在' });
+    }
+
+    const app = appRows[0];
+    if (!app.is_active) {
+      return res.status(400).json({ data: null, error: '应用已下架' });
+    }
+
+    const chargeable = app.price_type === 'points' || app.price_type === 'per_use';
+    const amount = chargeable ? Math.max(0, Math.floor(Number(app.points_price) || 0)) : 0;
+
+    if (amount <= 0) {
+      const [rows] = await connection.query('SELECT current_points FROM profiles WHERE id = ?', [studentId]);
+      return res.json({
+        data: { success: true, charged: 0, current_points: rows[0]?.current_points ?? 0 },
+        error: null
+      });
+    }
+
+    await connection.beginTransaction();
+
+    const [result] = await connection.query(
+      `UPDATE profiles
+          SET current_points = GREATEST(0, current_points - ?),
+              updated_at = NOW()
+        WHERE id = ? AND current_points >= ?`,
+      [amount, studentId, amount]
+    );
+
+    if (!result.affectedRows) {
+      await connection.rollback();
+      const [cur] = await connection.query('SELECT current_points FROM profiles WHERE id = ?', [studentId]);
+      return res.status(400).json({
+        data: null,
+        error: `积分不足！需要 ${amount} 积分，当前仅有 ${cur[0]?.current_points ?? 0} 积分`
+      });
+    }
+
+    await connection.query(
+      `INSERT INTO point_transactions (student_id, amount, reason, source_type, created_at)
+       VALUES (?, ?, ?, 'system', NOW())`,
+      [studentId, -amount, `${app.price_type === 'per_use' ? '使用应用' : '购买应用'}：${app.name}`]
+    );
+
+    await connection.commit();
+
+    const [rows] = await pool.query('SELECT current_points FROM profiles WHERE id = ?', [studentId]);
+
+    res.json({
+      data: { success: true, charged: amount, current_points: rows[0]?.current_points ?? 0 },
+      error: null
+    });
+  } catch (error) {
+    try { await connection.rollback(); } catch { /* ignore */ }
+    console.error('Error in /api/student/apps/charge:', error);
+    res.status(500).json({ data: null, error: error.message });
+  } finally {
+    connection.release();
   }
 });
 
@@ -11680,6 +12145,60 @@ app.post('/api/task-public/:accessKey/submit', async (req, res) => {
 
 // ==================== 课堂任务模块 API 结束 ====================
 
+// ==================== 积分下限保障（数据库级兜底） ====================
+/**
+ * 保证 profiles.current_points 永远不为负数。
+ *
+ * 为什么放在数据库层：积分扣减散落在十余处（答题、兑换、喂食、AI答疑、自定义背景、
+ * 创意工坊、PK报名、通知扣分、通用表写接口…），任何一处漏掉下限校验都会写出负分，
+ * 而负分一旦落库，前端各处展示与判定都会失真。这里用触发器做最后一道闸门：
+ * 不论业务代码怎么算，写库时一律把 current_points 钳制到 >= 0。
+ *
+ * 幂等：每次启动先 DROP 再 CREATE，可安全重复执行。
+ * 兼容：MariaDB 10.2+ / MySQL 8.0+ 支持；若数据库用户无 TRIGGER 权限，
+ *       只打警告不阻断启动（业务层已有下限校验）。
+ */
+async function ensurePointsFloorTriggers() {
+  const triggers = [
+    {
+      name: 'trg_profiles_points_floor_bi',
+      timing: 'BEFORE INSERT',
+    },
+    {
+      name: 'trg_profiles_points_floor_bu',
+      timing: 'BEFORE UPDATE',
+    },
+  ];
+
+  for (const trigger of triggers) {
+    try {
+      await pool.query(`DROP TRIGGER IF EXISTS ${trigger.name}`);
+      await pool.query(
+        `CREATE TRIGGER ${trigger.name} ${trigger.timing} ON profiles
+         FOR EACH ROW
+         BEGIN
+           IF NEW.current_points < 0 THEN
+             SET NEW.current_points = 0;
+           END IF;
+           IF NEW.max_points < 0 THEN
+             SET NEW.max_points = 0;
+           END IF;
+           IF NEW.total_points_earned < 0 THEN
+             SET NEW.total_points_earned = 0;
+           END IF;
+         END`
+      );
+    } catch (error) {
+      console.warn(
+        `警告：创建积分下限触发器 ${trigger.name} 失败（${error.message}）。` +
+        '业务层仍有下限校验，但建议检查数据库用户的 TRIGGER 权限。'
+      );
+      return;
+    }
+  }
+  console.log('积分下限触发器已就绪：profiles.current_points 不会被写为负数');
+}
+
 async function startServer(options = {}) {
   const configuredPort = options.port ?? parseInt(process.env.PORT, 10);
   const configuredHost = options.host ?? process.env.HOST;
@@ -13234,6 +13753,8 @@ app.get('/api/pk/classes/:class_id/students/stats', authenticate, requireTeacher
 // ===== PK 对战 REST API END =====
 
   await runMigrations();
+
+  await ensurePointsFloorTriggers();
 
   const server = app.listen(port, host, () => {
     console.log(`XGPY Backend Server running on http://${host}:${port}`);

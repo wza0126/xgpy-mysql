@@ -48,7 +48,7 @@ interface AppVisibility {
 }
 
 export const AppCenter: React.FC = () => {
-  const { user, profile } = useAuth();
+  const { user, profile, refreshProfile } = useAuth();
   const { openWindow, closeWindow, activateWindow } = useDesktopStore();
   const [activeTab, setActiveTab] = useState<'myApps' | 'marketplace'>('myApps');
   const [apps, setApps] = useState<App[]>([]);
@@ -253,17 +253,17 @@ export const AppCenter: React.FC = () => {
     
     try {
       if (app.price_type === 'points') {
-        const { data: studentData } = await backendClient.from('profiles').select('*').eq('id', user?.id).single();
-        if (!studentData) {
-          alert('获取用户信息失败！');
+        // 扣费一律交给服务端：按 apps 表定价原子扣减，积分不足直接拒绝，
+        // 且有下限保护。旧写法是前端读 current_points 再绝对值写回，
+        // 无锁无事务、无下限，会写出负分。
+        const chargeResult: any = await backendClient.post('/api/student/apps/charge', {
+          app_id: app.id,
+        });
+        if (chargeResult?.error) {
+          alert(chargeResult.error);
           return;
         }
-        if (studentData?.current_points < app.points_price) {
-          alert('积分不足！');
-          return;
-        }
-        const { error: updateError } = await backendClient.from('profiles').update({ current_points: studentData.current_points - app.points_price }).eq('id', user?.id);
-        if (updateError) throw updateError;
+        await refreshProfile();
       }
       
       const success = await acquireApp(app);
@@ -307,14 +307,18 @@ export const AppCenter: React.FC = () => {
         return;
       }
 
-      // 扣除积分
-      const { error: updateError } = await backendClient
-        .from('profiles')
-        .update({ current_points: studentData.current_points - app.points_price })
-        .eq('id', user.id);
-      
-      if (updateError) {
-        alert('积分扣除失败，请重试！');
+      // 扣费交给服务端原子处理（不足则拒绝，且不会扣成负数）
+      try {
+        const chargeResult: any = await backendClient.post('/api/student/apps/charge', {
+          app_id: app.id,
+        });
+        if (chargeResult?.error) {
+          alert(chargeResult.error);
+          return;
+        }
+        await refreshProfile();
+      } catch (chargeError: any) {
+        alert(chargeError?.message || '积分扣除失败，请重试！');
         return;
       }
     }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
 import { Question, PracticeStats } from '../../types';
@@ -134,7 +134,17 @@ export const PracticeModule: React.FC = () => {
   const [masteredQuestionIds, setMasteredQuestionIds] = useState<Set<string>>(new Set());
   const [masterThreshold, setMasterThreshold] = useState(3);
   const [pointsConfig, setPointsConfig] = useState({ correct: 10, wrong: -5 });
-  const [isSubmitting, setIsSubmitting] = useState(false); // 防重复提交标志
+  const [isSubmitting, setIsSubmitting] = useState(false); // 防重复提交标志（仅用于按钮文案/禁用，不做真正的拦截）
+  // 同步提交锁：不依赖 React 重渲染。此前用 state 做锁，一旦页面卡顿/掉帧导致 React 不再重渲染，
+  // 按钮闭包里的 isSubmitting 永远是 false，"卡住了还能一直点提交"——单题被连点提交 317 次就是这么来的。
+  const submittingRef = useRef(false);
+  // 当前这一屏题目是否已经提交过：同一道题在未切题前只允许提交一次，切题时清空
+  const answeredQuestionIdRef = useRef<string | null>(null);
+  // 同题连点冷却兜底（毫秒）
+  const lastSubmitAtRef = useRef(0);
+  const SUBMIT_COOLDOWN_MS = 1500;
+  // 提交反馈提示（已掌握/重复提交等）
+  const [submitNotice, setSubmitNotice] = useState('');
   const { profile, refreshProfile } = useAuth();
   const { updatePoints, getPointsConfig } = usePoints();
   const [gameResult, setGameResult] = useState<SubmitResult | null>(null);
@@ -334,6 +344,8 @@ export const PracticeModule: React.FC = () => {
     setSelectedAnswer('');
     setShowResult(false);
     setShowConfig(false);
+    setSubmitNotice('');
+    answeredQuestionIdRef.current = null;
   };
 
   const shuffleArray = <T,>(array: T[]): T[] => {
@@ -348,9 +360,23 @@ export const PracticeModule: React.FC = () => {
   const currentQuestion = filteredQuestions[currentIndex];
 
   const handleSubmit = async () => {
-    if (!currentQuestion || !profile || isSubmitting) return;
+    if (!currentQuestion || !profile) return;
 
+    // 同步拦截（不依赖 state 是否已刷新）：
+    // 1) 已有提交在途 → 直接忽略
+    if (submittingRef.current) return;
+    // 2) 本题已经提交过、且还没有切到下一题 → 忽略并提示（防止"看起来没反应"而反复点）
+    if (answeredQuestionIdRef.current === currentQuestion.id) {
+      setSubmitNotice('本题已提交，请点击「下一题」继续。同一道题重复提交不再计分。');
+      return;
+    }
+    // 3) 极短时间内的连点（含鼠标连击/按键卡键）→ 忽略
+    if (Date.now() - lastSubmitAtRef.current < SUBMIT_COOLDOWN_MS) return;
+
+    submittingRef.current = true;
+    lastSubmitAtRef.current = Date.now();
     setIsSubmitting(true);
+    setSubmitNotice('');
     
     try {
       let correct = false;
@@ -424,6 +450,28 @@ export const PracticeModule: React.FC = () => {
         // API成功后再显示结果
         setIsCorrect(correct);
         setShowResult(true);
+        // 标记"当前这一屏题已提交"，未切题前不再允许提交
+        answeredQuestionIdRef.current = currentQuestion.id;
+
+        // 掌握门禁回执：该题答对次数已达阈值 → 立即移出练习队列并提示
+        const gateData = result.data as any;
+        if (gateData?.mastered) {
+          setMasteredQuestionIds((prev) => {
+            if (prev.has(currentQuestion.id)) return prev;
+            const next = new Set(prev);
+            next.add(currentQuestion.id);
+            return next;
+          });
+          setSubmitNotice(
+            `本题已答对 ${gateData.question_correct_count ?? ''} 次，达到掌握标准（${gateData.master_threshold} 次），已移出练习队列`
+          );
+        } else if (gateData?.rewarded === false) {
+          setSubmitNotice(
+            gateData.reward_blocked_reason === 'wrong_limit'
+              ? '本题错误次数较多，本次不再扣分'
+              : '本题已掌握，本次不再计分、不掉装备'
+          );
+        }
         
         // 更新本地用户信息
         if (result.data?.student) {
@@ -471,6 +519,8 @@ export const PracticeModule: React.FC = () => {
         console.warn('业务API调用失败，降级使用原始方法:', apiError);
         setIsCorrect(correct);
         setShowResult(true);
+        // 降级路径同样锁定本题，避免接口超时/静默失败被连点重复计分
+        answeredQuestionIdRef.current = currentQuestion.id;
         await updatePoints(profile.id, pointsChange);
         await backendClient.from('student_answers').insert({
           student_id: profile.id,
@@ -544,6 +594,7 @@ export const PracticeModule: React.FC = () => {
       fetchStats();
       fetchMasteredQuestions();
     } finally {
+      submittingRef.current = false;
       setIsSubmitting(false);
     }
   };
@@ -554,6 +605,9 @@ export const PracticeModule: React.FC = () => {
     setCompositeBlankAnswers({});
     setSubQuestionResults([]);
     setShowResult(false);
+    setSubmitNotice('');
+    // 切题后解锁：新的一屏题目允许提交一次
+    answeredQuestionIdRef.current = null;
 
     const remainingQuestions = filteredQuestions.filter((q) => !masteredQuestionIds.has(q.id));
     if (remainingQuestions.length === 0) {
@@ -1154,6 +1208,13 @@ export const PracticeModule: React.FC = () => {
                   )}
                 </div>
               </motion.div>
+            )}
+
+            {submitNotice && (
+              <div className="mt-6 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-800 flex items-start gap-2">
+                <i className="fa-solid fa-circle-info mt-0.5"></i>
+                <span>{submitNotice}</span>
+              </div>
             )}
 
             <div className="mt-6 flex justify-end gap-3">

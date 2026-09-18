@@ -315,5 +315,17 @@ module.exports = [
   {
     "version": "076_add_task_study_log_practice_started.sql",
     "sql": "-- 076: 记录学生随堂练习的首次作答时间\n--\n-- 背景：task_study_log.status 的 1（进行中）原本由「学习进度上报」置位，\n-- 等价于「打开过任务详情页」，无法表达「开始做题」。\n-- 新增独立字段，专门标记学生是否动过随堂练习的第一题。\n--\n-- 教师端「学生列表」状态判定改为：已完成(2) > practice_started_at 非空 → 练习中 > 未开始\n-- 该字段只在首次作答时写入，后续进度上报不覆盖（IFNULL 保护）。\n-- 老师「重置练习」时置回 NULL。\n\nALTER TABLE task_study_log\n  ADD COLUMN IF NOT EXISTS practice_started_at DATETIME NULL\n  COMMENT '随堂练习首次作答时间，NULL 表示尚未开始练习' AFTER status;\n"
+  },
+  {
+    "version": "077_fix_negative_points.sql",
+    "sql": "-- 077: 修复历史负积分数据\n--\n-- 背景：学生积分出现负值（例如 -4900 分）。排查发现在若干扣分链路上缺少下限保护，\n-- 且存在「客户端读-改-写绝对赋值」的写法，并发/降级时会写出负数。\n-- 本次除了在业务代码与数据库层补齐下限（见 index.js 的积分下限触发器），\n-- 还需要把已经写坏的历史数据纠正为 0，避免学生端一直显示负分。\n--\n-- 说明：只做「负数归零」，不动正常分值，可重复执行。\n\nUPDATE profiles SET current_points = 0 WHERE current_points < 0;\n\nUPDATE profiles SET max_points = 0 WHERE max_points < 0;\n\nUPDATE profiles SET total_points_earned = 0 WHERE total_points_earned < 0;\n"
+  },
+  {
+    "version": "078_add_test_daily_limit.sql",
+    "sql": "-- 普通测试支持「每日测试次数限制」\n-- 教师端「考试管理 → 普通测试」中可设置学生每天最多参加该测试的次数。\n-- 0 表示不限制（保持原有行为）；服务端在 submit-test 中按 (student_id, test_id, 当日) 计数后拦截。\nALTER TABLE `tests`\nADD COLUMN IF NOT EXISTS `daily_test_limit` INT NOT NULL DEFAULT 0 COMMENT '每日可参加该测试的次数上限，0=不限制';\n"
+  },
+  {
+    "version": "079_add_test_record_equipment_granted.sql",
+    "sql": "-- 测试及格掉落装备「每次作答只发一次」的幂等标记\n-- 背景：/api/business/test-equipment-drop 原为独立接口，student_id / is_passed 全由请求体传入，\n--       学生可脱离测试反复调用刷装备，绕过「每日测试次数限制」与及格判定。\n--       现改为：必须绑定一条真实且及格的 test_record，且该记录只能发放一次掉落。\nALTER TABLE `test_records`\nADD COLUMN IF NOT EXISTS `equipment_granted` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '本次作答的及格装备掉落是否已发放（防重复发放）';\n"
   }
 ];
