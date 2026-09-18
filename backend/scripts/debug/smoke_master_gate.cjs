@@ -1,12 +1,14 @@
 /**
  * 门禁 / 判分 / 归属校验 冒烟测试
  *
- * 覆盖四件事：
+ * 覆盖五件事：
  *   1. 掌握门禁：同一题反复提交不再刷分刷装备（背景：有学生 26 分钟提交同一题 317 次）
  *   2. 服务端判分：对错与分值一律以题库 + 系统配置为准，前端传的 is_correct / points_change /
  *      questions[].answers 一概不作数（背景：伪造这两个字段就能白拿积分和装备）
  *   3. 归属校验：学生不能拿别人的 student_id 提交（练习 / 测试 / 考试 / 掉落接口）
  *   4. 考试重考：同一场考试只补发「成绩提高」的积分差额，重考同分不再加分
+ *   5. 答案脱敏（场景O）：学生拉题不再下发 answers / explanation，答案只在「提交之后」
+ *      由回执带回；reveal-answers 只放行本人做过的题；练习来源收窄、伪造 source 无效
  *
  * 用法：先启动后端(node src/index.js, 端口 3101)，再执行
  *   node scripts/debug/smoke_master_gate.cjs
@@ -179,11 +181,17 @@ const correctAnswerFor = (row) => {
   assert('新题首次答对 rewarded=true', rd.json?.data?.rewarded !== false);
   assert('阈值>1 时首次答对不标记 mastered', THRESHOLD <= 1 || rd.json?.data?.mastered === false);
 
-  // ================= 场景 E：非 practice 来源不受影响 =================
-  console.log('\n--- 场景E：test 来源不受本次改动影响（用干净题目） ---');
-  const re = await submitQ(Q4, Q4.correct, true, 10, 'test', { test_id: 'x', test_record_id: 'smoke_er_' + Date.now() });
-  assert('test 来源提交有明确回执（未 500）', re.status === 200 && !!re.json?.data, `status=${re.status} err=${re.json?.error}`);
-  assert('test 来源不被掌握门禁拦截', re.json?.data?.rewarded !== false);
+  // ================= 场景 E：similar_practice（举一反三）不计分、不走掌握门禁 =================
+  console.log('\n--- 场景E：similar_practice 只做即时反馈，不计分（用干净题目） ---');
+  const e0 = await snap();
+  const re = await submitQ(Q4, Q4.correct, true, 10, 'similar_practice');
+  const e1 = await snap();
+  assert('similar_practice 提交有明确回执（未 500）', re.status === 200 && !!re.json?.data, `status=${re.status} err=${re.json?.error}`);
+  assert('similar_practice 不因掌握门禁被拒（原因为 no_reward）',
+    re.json?.data?.rewarded === false && re.json?.data?.reward_blocked_reason === 'no_reward',
+    `rewarded=${re.json?.data?.rewarded} reason=${re.json?.data?.reward_blocked_reason}`);
+  assert('similar_practice 不计分（与历史行为一致）', e1.current_points === e0.current_points,
+    `${e0.current_points} → ${e1.current_points}`);
 
   // ================= 场景 F：越权仍被拦（学生改他人 student_id） =================
   console.log('\n--- 场景F：归属校验（学生不能替别人提交） ---');
@@ -325,18 +333,17 @@ const correctAnswerFor = (row) => {
   const [recMain] = await conn.query('SELECT equipment_granted FROM test_records WHERE id = ?', [recI]);
   assert('主路径发完掉落即标记 equipment_granted=1', Number(recMain[0].equipment_granted) === 1, `实际 ${recMain[0]?.equipment_granted}`);
 
-  // ---- 场景 J：submit-answer 对非练习来源的查重口径 ----
-  console.log('\n--- 场景J：非练习来源只拦截「同一次作答」内的重复提交 ---');
-  const TR_A = 'smoke_tr_a_' + Date.now();
-  const TR_B = 'smoke_tr_b_' + Date.now();
-  const j1 = await submitQ(Q4, Q4.correct, true, 10, 'test', { test_id: 'x', test_record_id: TR_A });
-  assert('同一次作答的第 1 次提交成功（200）', j1.status === 200, `status=${j1.status} err=${j1.json?.error}`);
-
-  const j2 = await submitQ(Q4, Q4.correct, true, 10, 'test', { test_id: 'x', test_record_id: TR_A });
-  assert('同一次作答内重复提交被拒 400', j2.status === 400, `status=${j2.status}`);
-
-  const j3 = await submitQ(Q4, Q4.correct, true, 10, 'test', { test_id: 'x', test_record_id: TR_B });
-  assert('换一次作答（新的 test_record_id）不被历史拦截（200）', j3.status === 200, `status=${j3.status} err=${j3.json?.error}`);
+  // ---- 场景 J：练习接口的来源白名单 ----
+  // 测试/考试走各自专用接口（submit-test / submit-exam），不能从练习接口借道 ——
+  // 否则伪造一个 source 就能绕过「未开放练习的题不能拿来试答案」的限制。
+  console.log('\n--- 场景J：submit-answer 只接受练习类来源 ---');
+  const j1 = await api('/api/business/submit-answer', {
+    method: 'POST', token: rawToken,
+    body: { student_id: TS, question_id: Q4.id, answer: Q4.correct, source: 'test', test_record_id: 'smoke_tr_' + Date.now() },
+  });
+  assert('J source=test 走练习接口被拒 403', j1.status === 403, `status=${j1.status} err=${j1.json?.error}`);
+  const j2 = await submitQ(Q4, Q4.correct, true, 10, 'similar_practice');
+  assert('J source=similar_practice 允许通过（200）', j2.status === 200, `status=${j2.status} err=${j2.json?.error}`);
 
   // ================= 场景 K：伪造判分与分值（核心防作弊） =================
   console.log('\n--- 场景K：前端传的 is_correct / points_change 不作数 ---');
@@ -466,7 +473,152 @@ const correctAnswerFor = (row) => {
   assert('N 重考总分不超过单次奖励上限', n2.current_points - n0.current_points === firstEarned,
     `累计 +${n2.current_points - n0.current_points}，单次奖励 ${firstEarned}`);
 
+  // ================= 场景 O：答案脱敏（题目不下发答案，答过才给） =================
+  console.log('\n--- 场景O：学生拉题不含答案，提交后才给答案 ---');
+
+  // O1 学生拉题列表 → 不含 answers / explanation
+  const oList = await api('/api/tables/questions?limit=5', { token: rawToken });
+  const oRows = oList.json?.data || [];
+  assert('O 学生拉题列表非空', oList.status === 200 && oRows.length > 0, `status=${oList.status} rows=${oRows.length}`);
+  assert('O 拉题列表不含 answers', oRows.every(r => r.answers === undefined),
+    `泄漏 ${oRows.filter(r => r.answers !== undefined).length} 行`);
+  assert('O 拉题列表不含 explanation', oRows.every(r => r.explanation === undefined),
+    `泄漏 ${oRows.filter(r => r.explanation !== undefined).length} 行`);
+
+  // O2 学生按 id 拉单题 → 同样脱敏，但题干仍在（不影响作答）
+  const oOne = await api('/api/tables/questions/' + encodeURIComponent(Q1.id), { token: rawToken });
+  assert('O 拉单题不含 answers', !!oOne.json?.data && oOne.json.data.answers === undefined);
+  assert('O 拉单题仍返回题干', !!(oOne.json?.data && oOne.json.data.content));
+
+  // O3 教师拉题 → 保留答案（题库管理不受影响）
+  const [tchRows] = await conn.query("SELECT id FROM profiles WHERE role = 'teacher' LIMIT 1");
+  if (tchRows.length > 0) {
+    const tchTokenRaw = `${Date.now()}.${crypto.randomBytes(32).toString('hex')}`;
+    const tchHash = crypto.createHash('sha256').update(tchTokenRaw).digest('hex');
+    await conn.query(
+      `INSERT INTO login_sessions (id, user_id, token, device_info, ip_address, created_at, last_active_at, expires_at, is_active)
+       VALUES (?, ?, ?, 'smoke', '127.0.0.1', NOW(), NOW(), DATE_ADD(NOW(), INTERVAL 1 DAY), TRUE)`,
+      ['smoke_t_' + Date.now(), tchRows[0].id, tchHash]
+    );
+    const tList = await api('/api/tables/questions?limit=3', { token: tchTokenRaw });
+    const tRows = tList.json?.data || [];
+    assert('O 教师拉题仍带 answers（题库管理不受影响）',
+      tRows.length > 0 && tRows.every(r => r.answers !== undefined), `status=${tList.status} rows=${tRows.length}`);
+  } else {
+    console.log('  （跳过教师侧断言：库中无 teacher 账号）');
+  }
+
+  // O4 提交答题回执带回答案与解析
+  const [q4meta] = await conn.query('SELECT answers FROM questions WHERE id = ?', [Q4.id]);
+  const oSubmit = await api('/api/business/submit-answer', {
+    method: 'POST', token: rawToken,
+    body: { student_id: TS, question_id: Q4.id, answer: Q4.correct, source: 'practice' },
+  });
+  const oData = oSubmit.json?.data || {};
+  assert('O 提交回执含正确答案', oData.correct_answers !== undefined, `keys=${Object.keys(oData).join(',')}`);
+  assert('O 回执答案与题库原文一致', String(oData.correct_answers) === String(q4meta[0].answers));
+  assert('O 回执含解析字段', 'question_explanation' in oData);
+  assert('O 普通题回执不误带 sub_correct', oData.sub_correct === null);
+
+  // O5 复合题回执带逐小题对错
+  const [compRows] = await conn.query(
+    "SELECT id, answers FROM questions WHERE type = 'composite' AND practice_enabled = 1 AND answers IS NOT NULL LIMIT 1"
+  );
+  if (compRows.length > 0) {
+    const subs = JSON.parse(compRows[0].answers);
+    const choiceAnswers = {};
+    const blankAnswers = {};
+    subs.forEach((sq, idx) => {
+      if (sq && sq.type === 'fill_blank') {
+        const first = Array.isArray(sq.answers && sq.answers[0]) ? sq.answers[0][0]
+          : (Array.isArray(sq.answers) ? sq.answers[0] : sq.answers);
+        blankAnswers[idx] = [String(first === undefined || first === null ? '' : first)];
+      } else if (sq) {
+        const arr = Array.isArray(sq.answers) ? sq.answers : [sq.answers];
+        choiceAnswers[idx] = arr.filter(Boolean).map(String).join(',');
+      }
+    });
+    const oComp = await api('/api/business/submit-answer', {
+      method: 'POST', token: rawToken,
+      body: {
+        student_id: TS, question_id: compRows[0].id, source: 'practice',
+        answer: JSON.stringify({ choice_answers: choiceAnswers, blank_answers: blankAnswers }),
+      },
+    });
+    const cData = oComp.json?.data || {};
+    assert('O 复合题回执含逐小题对错数组',
+      Array.isArray(cData.sub_correct) && cData.sub_correct.length === subs.length,
+      `sub_correct=${JSON.stringify(cData.sub_correct)}`);
+    assert('O 按题库答案作答的复合题判对', cData.is_correct === true, `is_correct=${cData.is_correct}`);
+  } else {
+    console.log('  （跳过复合题断言：无开放练习的复合题）');
+  }
+
+  // O6 「答过才给答案」：做过的题换得到，没做过的换不到
+  const Q8 = usable[7];
+  if (Q8) {
+    const oReveal = await api('/api/practice/reveal-answers', {
+      method: 'POST', token: rawToken, body: { question_ids: [Q4.id, Q8.id] },
+    });
+    const revealedList = oReveal.json?.data?.questions || [];
+    const revealedIds = revealedList.map(r => r.id);
+    assert('O 做过的题可换到答案', revealedIds.includes(Q4.id), `返回 ${JSON.stringify(revealedIds)}`);
+    assert('O 未做过的题换不到答案', !revealedIds.includes(Q8.id), `返回 ${JSON.stringify(revealedIds)}`);
+    assert('O 换答案接口不夹带题干/选项',
+      revealedList.every(r => r.content === undefined && r.options === undefined));
+  } else {
+    console.log('  （跳过 reveal-answers 断言：可判分题目不足 8 道）');
+  }
+
+  // O7 未开放练习的题：没做过一律拒绝（防拿考试专属题当练习试答案），做过的仍放行
+  const [npRows] = await conn.query(
+    "SELECT id, type, answers FROM questions WHERE practice_enabled = 0 AND type <> 'composite' AND answers IS NOT NULL LIMIT 20"
+  );
+  const npTarget = npRows
+    .map(r => ({ id: r.id, type: r.type, correct: correctAnswerFor(r) }))
+    .find(r => r.correct);
+  if (npTarget) {
+    const [[beforeRow]] = await conn.query(
+      'SELECT COUNT(*) n FROM student_answers WHERE student_id = ? AND question_id = ?', [TS, npTarget.id]
+    );
+    if (Number(beforeRow.n) === 0) {
+      const rDeny = await api('/api/business/submit-answer', {
+        method: 'POST', token: rawToken,
+        body: { student_id: TS, question_id: npTarget.id, answer: npTarget.correct, source: 'practice' },
+      });
+      assert('O 未开放练习且未做过的题：练习提交被拒 403', rDeny.status === 403, `status=${rDeny.status}`);
+
+      // 造一条历史作答后同一道题应放行（避免误伤错题本重做）
+      await conn.query(
+        "INSERT INTO student_answers (id, student_id, question_id, answer, is_correct, points_change, source, created_at) VALUES (?, ?, ?, '__old__', 0, 0, 'practice', NOW())",
+        ['sa_smoke_' + Date.now(), TS, npTarget.id]
+      );
+      const rAllow = await api('/api/business/submit-answer', {
+        method: 'POST', token: rawToken,
+        body: { student_id: TS, question_id: npTarget.id, answer: npTarget.correct, source: 'practice' },
+      });
+      assert('O 做过但已关练习开关的题仍可提交（不误伤错题重做）', rAllow.status === 200, `status=${rAllow.status}`);
+    } else {
+      console.log('  （跳过未开放练习断言：候选题该生已做过）');
+    }
+  } else {
+    console.log('  （跳过未开放练习断言：库中无可用候选题）');
+  }
+
+  // O8 伪造 source 绕不过练习开关校验
+  const oFakeSrc = await api('/api/business/submit-answer', {
+    method: 'POST', token: rawToken,
+    body: { student_id: TS, question_id: Q4.id, answer: Q4.correct, source: 'test' },
+  });
+  assert('O 伪造 source=test 走练习接口被拒 403', oFakeSrc.status === 403, `status=${oFakeSrc.status}`);
+  const oFakeSrc2 = await api('/api/business/submit-answer', {
+    method: 'POST', token: rawToken,
+    body: { student_id: TS, question_id: Q4.id, answer: Q4.correct, source: 'whatever' },
+  });
+  assert('O 伪造未知 source 同样被拒 403', oFakeSrc2.status === 403, `status=${oFakeSrc2.status}`);
+
   // ---- 清理 ----
+  await conn.query("DELETE FROM login_sessions WHERE device_info = 'smoke'");
   await conn.query('DELETE FROM exam_records WHERE student_id=?', [TS]);
   await conn.query('DELETE FROM test_records WHERE student_id=?', [TS]);
   await conn.query('DELETE FROM tests WHERE created_by=?', [TS]);

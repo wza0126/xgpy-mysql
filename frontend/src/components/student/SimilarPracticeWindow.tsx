@@ -66,6 +66,9 @@ export const SimilarPracticeWindow: React.FC<SimilarPracticeWindowProps> = ({ in
   const [source, setSource] = useState<string>(''); // cluster / fallback / none
   const [clusterId, setClusterId] = useState<string | null>(null);
   const [sessionStats, setSessionStats] = useState({ correct: 0, total: 0 });
+  // 题目已对学生脱敏（不含答案），提交后由服务端回执带回答案与解析
+  const [revealedAnswers, setRevealedAnswers] = useState<Record<string, { answers: any; explanation?: string | null }>>({});
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (!initialData?.questionId) {
@@ -122,52 +125,69 @@ export const SimilarPracticeWindow: React.FC<SimilarPracticeWindowProps> = ({ in
     }
   };
 
-  const currentQuestion = questions[currentIndex];
+  const baseQuestion = questions[currentIndex];
+  const revealed = baseQuestion ? revealedAnswers[baseQuestion.id] : undefined;
+  // 答过之后把回执里的答案/解析合并进题目对象，渲染逻辑照旧
+  const currentQuestion = baseQuestion && revealed ? { ...baseQuestion, ...revealed } : baseQuestion;
 
   const handleSubmit = async () => {
-    if (!currentQuestion || !profile) return;
-    const correctAnswers = getAnswers(currentQuestion.answers);
-    let correct = false;
-    if (currentQuestion.type === 'choice') {
-      correct = checkChoiceAnswer(selectedAnswer, correctAnswers);
-    } else if (currentQuestion.type === 'fill_blank') {
-      correct = correctAnswers.some(ca => normalizeAnswer(ca) === normalizeAnswer(selectedAnswer));
-    }
-    setIsCorrect(correct);
-    setShowResult(true);
-    setSessionStats(prev => ({
-      correct: prev.correct + (correct ? 1 : 0),
-      total: prev.total + 1,
-    }));
-
-    // 记录答题（不计入正式练习统计，仅作答错时入错题集）
+    if (!currentQuestion || !profile || submitting) return;
+    if (!selectedAnswer) return;
+    setSubmitting(true);
     try {
-      await backendClient.from('student_answers').insert({
-        id: `ans_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+      // 题目已脱敏、本地拿不到正确答案：判分与答案一律由服务端给出。
+      // similar_practice 在服务端固定不计分、不掉装备，与历史行为一致。
+      const result = await backendClient.businessSubmitAnswer({
         student_id: profile.id,
         question_id: currentQuestion.id,
         answer: selectedAnswer,
-        is_correct: correct,
         source: 'similar_practice',
-        created_at: toDatabaseDateTime(new Date()),
       });
 
-      // 做错自动加入错题集（方便后续在错题集里继续强化）
+      if (result.error) {
+        alert(result.error || '提交失败，请重试');
+        return;
+      }
+
+      const data = result.data as any;
+      const correct = data?.is_correct === true;
+
+      setRevealedAnswers(prev => ({
+        ...prev,
+        [currentQuestion.id]: {
+          answers: data?.correct_answers ?? null,
+          explanation: data?.question_explanation ?? null,
+        },
+      }));
+      setIsCorrect(correct);
+      setShowResult(true);
+      setSessionStats(prev => ({
+        correct: prev.correct + (correct ? 1 : 0),
+        total: prev.total + 1,
+      }));
+
+      // 答题记录已由服务端写入；这里只补「做错自动进错题集」
       if (!correct) {
-        const wrongId = `wq_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-        await backendClient.from('wrong_questions').insert({
-          id: wrongId,
-          student_id: profile.id,
-          question_id: currentQuestion.id,
-          wrong_answer: selectedAnswer,
-          source: 'similar_practice',
-          created_at: toDatabaseDateTime(new Date()),
-          resolved: false,
-        });
+        try {
+          const wrongId = `wq_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+          await backendClient.from('wrong_questions').insert({
+            id: wrongId,
+            student_id: profile.id,
+            question_id: currentQuestion.id,
+            wrong_answer: selectedAnswer,
+            source: 'similar_practice',
+            created_at: toDatabaseDateTime(new Date()),
+            resolved: false,
+          });
+        } catch (e) {
+          console.error('写入错题集失败', e);
+        }
       }
     } catch (e) {
-      // 记录失败不影响继续练习
-      console.error('记录同类题答题失败', e);
+      console.error('提交同类题答案失败', e);
+      alert('提交失败，请检查网络后重试');
+    } finally {
+      setSubmitting(false);
     }
   };
 

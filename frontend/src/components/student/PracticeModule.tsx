@@ -119,6 +119,9 @@ export const PracticeModule: React.FC = () => {
   const [compositeAnswers, setCompositeAnswers] = useState<Record<number, string>>({});
   const [compositeBlankAnswers, setCompositeBlankAnswers] = useState<Record<number, string[]>>({});
   const [subQuestionResults, setSubQuestionResults] = useState<{ index: number; isCorrect: boolean; score: number }[]>([]);
+  // 题目数据已对学生脱敏（不含 answers / explanation），答案与解析在「提交之后」
+  // 由服务端回执带回，按题目 id 暂存，本题渲染时合并回去。
+  const [revealedQuestions, setRevealedQuestions] = useState<Record<string, { answers: any; explanation?: string | null }>>({});
   const [showResult, setShowResult] = useState(false);
   const [isCorrect, setIsCorrect] = useState(false);
   const [stats, setStats] = useState<PracticeStats>({ total: 0, correct: 0, wrong: 0, accuracy: 0, mastered: 0 });
@@ -357,7 +360,10 @@ export const PracticeModule: React.FC = () => {
     return newArray;
   };
 
-  const currentQuestion = filteredQuestions[currentIndex];
+  const baseQuestion = filteredQuestions[currentIndex];
+  const revealed = baseQuestion ? revealedQuestions[baseQuestion.id] : undefined;
+  // 答过之后把回执里的答案/解析合并进题目对象，原有渲染逻辑（正确答案高亮、解析、填空参考答案）无需改动
+  const currentQuestion = baseQuestion && revealed ? { ...baseQuestion, ...revealed } : baseQuestion;
 
   const handleSubmit = async () => {
     if (!currentQuestion || !profile) return;
@@ -381,35 +387,15 @@ export const PracticeModule: React.FC = () => {
     try {
       let correct = false;
       let answerText = '';
-      let pointsChange = 0;
-      let subResults: { index: number; isCorrect: boolean; score: number }[] = [];
+      // points_change 只是历史字段，服务端已不采信（分值由系统配置决定），这里恒传 0
+      const pointsChange = 0;
 
       if (currentQuestion.type === 'composite') {
-        const subQs = getCompositeSubQuestions(currentQuestion.answers);
-        subResults = subQs.map((sq: any, idx: number) => {
-          let sqCorrect = false;
-          if (sq.type === 'choice') {
-            const userAns = compositeAnswers[idx] || '';
-            sqCorrect = checkChoiceAnswer(userAns, sq.answers || [], sq.multiple || false);
-          } else if (sq.type === 'fill_blank') {
-            const userAns = compositeBlankAnswers[idx] || [];
-            sqCorrect = checkFillBlankAnswer(userAns, sq.answers || []);
-          }
-          return {
-            index: idx,
-            isCorrect: sqCorrect,
-            score: sqCorrect ? (sq.score || 0) : 0
-          };
-        });
-        
-        setSubQuestionResults(subResults);
-        correct = subResults.every(r => r.isCorrect);
+        // 题目已对学生脱敏、不含答案：对错与逐小题结果全部等提交后由服务端回执给出
         answerText = JSON.stringify({
           choice_answers: compositeAnswers,
-          blank_answers: compositeBlankAnswers,
-          sub_results: subResults
+          blank_answers: compositeBlankAnswers
         });
-        pointsChange = correct ? pointsConfig.correct : pointsConfig.wrong;
       } else {
         if (!selectedAnswer) {
           setIsSubmitting(false);
@@ -420,13 +406,7 @@ export const PracticeModule: React.FC = () => {
           alert('请输入答案');
           return;
         }
-
-        const correctAnswers = getAnswers(currentQuestion.answers);
-        correct = correctAnswers.some(
-          (ans: string) => normalizeAnswer(ans) === normalizeAnswer(answerTrimmed)
-        );
         answerText = answerTrimmed;
-        pointsChange = correct ? pointsConfig.correct : pointsConfig.wrong;
       }
 
       console.log('[GAME FRONTEND] submitting:', { student_id: profile.id, is_correct: correct, points_change: pointsChange });
@@ -447,9 +427,34 @@ export const PracticeModule: React.FC = () => {
           return;
         }
 
-        // 判分以服务端为准：服务端会拿题库里的正确答案复核（前端判分只在接口失败降级时使用）
+        // 判分以服务端为准：服务端拿题库里的正确答案判定
         const serverVerdict = (result.data as any)?.is_correct;
         if (typeof serverVerdict === 'boolean') correct = serverVerdict;
+
+        // 答案与解析随回执下发（题目本身已脱敏），按题暂存后合并回题目对象
+        const revealData = result.data as any;
+        if (revealData) {
+          setRevealedQuestions((prev) => ({
+            ...prev,
+            [currentQuestion.id]: {
+              answers: revealData.correct_answers ?? null,
+              explanation: revealData.question_explanation ?? null,
+            },
+          }));
+          if (Array.isArray(revealData.sub_correct)) {
+            // 复合题逐小题对错同样以服务端为准
+            const subQs = getCompositeSubQuestions(revealData.correct_answers) as any[];
+            setSubQuestionResults(
+              revealData.sub_correct.map((ok: boolean, idx: number) => ({
+                index: idx,
+                isCorrect: !!ok,
+                score: ok ? (subQs[idx]?.score || 0) : 0,
+              }))
+            );
+          } else {
+            setSubQuestionResults([]);
+          }
+        }
 
         // API成功后再显示结果
         setIsCorrect(correct);
@@ -519,41 +524,12 @@ export const PracticeModule: React.FC = () => {
           }
         }
       } catch (apiError: any) {
-        // 如果API调用失败，降级使用原方法
-        console.warn('业务API调用失败，降级使用原始方法:', apiError);
-        setIsCorrect(correct);
-        setShowResult(true);
-        // 降级路径同样锁定本题，避免接口超时/静默失败被连点重复计分
-        answeredQuestionIdRef.current = currentQuestion.id;
-        await updatePoints(profile.id, pointsChange);
-        await backendClient.from('student_answers').insert({
-          student_id: profile.id,
-          question_id: currentQuestion.id,
-          answer: answerText,
-          is_correct: correct,
-          points_change: pointsChange,
-          source: 'practice',
-        });
-        // 降级时也尝试刷新游戏数据
-        const statsData = await gameSystem.fetchGameStats();
-        if (statsData) {
-          setGameResult({
-            power_multiplier: statsData.power_multiplier || 1,
-            crit_rate: statsData.crit_rate || 0,
-            is_crit: false,
-            final_score: pointsChange,
-            current_streak: 0,
-            current_crit_streak: 0,
-            current_wrong: 0,
-            new_honor: null,
-          } as SubmitResult);
-          setCurrentStreak(0);
-          setCurrentCritStreak(0);
-          setCurrentWrong(0);
-        }
-
-        const emitEvent = useGameEventStore.getState().emitEvent;
-        emitEvent(correct ? 'correct' : 'wrong');
+        // 判分与答案都在服务端，接口失败时不能再用本地判分兜底：题目已不含答案，
+        // 本地判分只会写出一条「前端说对、服务端不知情」的脏记录。明确提示重试，
+        // finally 会解锁本题，学生直接再点提交即可。
+        console.error('提交答案接口调用失败:', apiError);
+        alert('提交失败，请检查网络后重试');
+        return;
       }
 
       if (correct) {

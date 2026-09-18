@@ -730,6 +730,17 @@ export interface BackendClient {
   getSession(): Promise<any>;
   importData(jsonData: any): Promise<any>;
   rpc(functionName: string, params?: any): Promise<BackendResult<any>>;
+  // 业务 API：运行时由 MariaDBClient 实现，这里补齐声明以消除调用处的类型噪声
+  businessSubmitAnswer(data: any): Promise<any>;
+  businessSubmitTest(data: any): Promise<any>;
+  businessSubmitExam(data: any): Promise<any>;
+  businessExchangePrize(data: any): Promise<any>;
+  businessFeedPet(data: any): Promise<any>;
+  saveExamProgress(data: any): Promise<any>;
+  getExamProgress(examRecordId: string): Promise<any>;
+  deleteExamProgress(examRecordId: string): Promise<any>;
+  isExamClosed(testId: string): Promise<any>;
+  closeExam(testId: string): Promise<any>;
 }
 
 export const backendClient: BackendClient = new MariaDBClient() as any;

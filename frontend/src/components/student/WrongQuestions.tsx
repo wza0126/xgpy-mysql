@@ -210,6 +210,32 @@ export const WrongQuestions: React.FC = () => {
         });
       }
 
+      // 题目表已对学生脱敏（不再下发 answers / explanation）。
+      // 错题本里的题都是本人做错过的，走「答过才给答案」的接口把答案与解析换回来。
+      try {
+        const ids = wrongWithDetails.map(wq => wq.question_id).filter(Boolean);
+        if (ids.length > 0) {
+          const reveal = await backendClient.post('/api/practice/reveal-answers', { question_ids: ids });
+          const revealMap = new Map<string, any>(
+            ((reveal as any)?.data?.questions || []).map((r: any) => [r.id, r])
+          );
+          wrongWithDetails = wrongWithDetails.map(wq => {
+            const r = revealMap.get(wq.question_id);
+            if (!r) return wq;
+            return {
+              ...wq,
+              question: {
+                ...wq.question,
+                answers: r.correct_answers,
+                explanation: r.explanation,
+              },
+            };
+          });
+        }
+      } catch (e) {
+        console.warn('获取错题答案失败（答案需提交后才能看到）:', e);
+      }
+
       setWrongQuestions(wrongWithDetails);
     } else {
       setWrongQuestions([]);
@@ -249,34 +275,15 @@ export const WrongQuestions: React.FC = () => {
 
     let correct = false;
     let answerText = '';
-    let pointsChange = 0;
-    let subResults: { index: number; isCorrect: boolean; score: number }[] = [];
+    // points_change 只是历史字段，服务端已不采信（分值由系统配置决定），这里恒传 0
+    const pointsChange = 0;
 
     if (selectedQuestion.question.type === 'composite') {
-      const subQs = getCompositeSubQuestions(selectedQuestion.question.answers);
-      subResults = subQs.map((sq: any, idx: number) => {
-        let sqCorrect = false;
-        if (sq.type === 'choice') {
-          const userAns = compositeAnswers[idx] || '';
-          sqCorrect = checkChoiceAnswer(userAns, sq.answers || [], sq.multiple || false);
-        } else if (sq.type === 'fill_blank') {
-          const userAns = compositeBlankAnswers[idx] || [];
-          sqCorrect = checkFillBlankAnswer(userAns, sq.answers || []);
-        }
-        return {
-          index: idx,
-          isCorrect: sqCorrect,
-          score: sqCorrect ? (sq.score || 0) : 0
-        };
-      });
-      
-      correct = subResults.every(r => r.isCorrect);
+      // 对错与逐小题结果一律等提交后由服务端回执给出
       answerText = JSON.stringify({
         choice_answers: compositeAnswers,
-        blank_answers: compositeBlankAnswers,
-        sub_results: subResults
+        blank_answers: compositeBlankAnswers
       });
-      pointsChange = correct ? pointsConfig.correct : pointsConfig.wrong;
     } else {
       if (!selectedAnswer) {
         setIsSubmitting(false);
@@ -288,13 +295,7 @@ export const WrongQuestions: React.FC = () => {
         setIsSubmitting(false);
         return;
       }
-
-      const correctAnswers = getAnswers(selectedQuestion.question.answers);
-      correct = correctAnswers.some(
-        (ans: string) => normalizeAnswer(ans) === normalizeAnswer(answerTrimmed)
-      );
       answerText = answerTrimmed;
-      pointsChange = correct ? pointsConfig.correct : pointsConfig.wrong;
     }
 
     // 预计算下一题（同步，不依赖异步 state）
@@ -351,9 +352,19 @@ export const WrongQuestions: React.FC = () => {
             : '本题已掌握，本次不再计分、不掉装备'
         );
       }
-      if (subResults.length > 0) {
-        setSubQuestionResults(subResults);
-      }
+      // 复合题逐小题对错由服务端回执给出（题目已不含答案，不再本地判分）
+      setSubQuestionResults(
+        Array.isArray(gateData?.sub_correct)
+          ? (() => {
+              const subQs = getCompositeSubQuestions(gateData.correct_answers) as any[];
+              return gateData.sub_correct.map((ok: boolean, idx: number) => ({
+                index: idx,
+                isCorrect: !!ok,
+                score: ok ? (subQs[idx]?.score || 0) : 0,
+              }));
+            })()
+          : []
+      );
 
       // 更新本地用户信息
       if (result.data?.student) {
@@ -428,79 +439,12 @@ export const WrongQuestions: React.FC = () => {
         }
       }
     } catch (apiError: any) {
-      console.warn('业务API调用失败，降级使用原始方法:', apiError);
-      
-      // 降级时也先显示结果
-      setIsCorrect(correct);
-      setShowResult(true);
-      // 降级路径同样锁定本题，避免接口超时/静默失败被连点重复计分
-      answeredQuestionIdRef.current = selectedQuestion.question_id;
-      if (subResults.length > 0) {
-        setSubQuestionResults(subResults);
-      }
-
-      if (correct) {
-        await updatePoints(profile.id, pointsChange);
-        await backendClient.from('student_answers').insert({
-          student_id: profile.id,
-          question_id: selectedQuestion.question_id,
-          answer: answerText,
-          is_correct: true,
-          points_change: pointsChange,
-          source: 'practice',
-        });
-      } else {
-        await updatePoints(profile.id, pointsChange);
-        await backendClient.from('student_answers').insert({
-          student_id: profile.id,
-          question_id: selectedQuestion.question_id,
-          answer: answerText,
-          is_correct: false,
-          points_change: pointsChange,
-          source: 'practice',
-        });
-      }
-      refreshProfile();
-      const statsData = await gameSystem.fetchGameStats();
-      if (statsData) {
-        setGameResult({
-          power_multiplier: statsData.power_multiplier || 1,
-          crit_rate: statsData.crit_rate || 0,
-          is_crit: false,
-          final_score: pointsChange,
-          current_streak: 0,
-          current_crit_streak: 0,
-          current_wrong: 0,
-          new_honor: null,
-        } as SubmitResult);
-      }
-
-      const emitEvent = useGameEventStore.getState().emitEvent;
-      emitEvent(correct ? 'correct' : 'wrong');
-
-      // 降级时也更新错题列表
-      if (correct) {
-        const newList = wrongQuestions.filter(wq => wq.id !== selectedQuestion.id);
-        setWrongQuestions(newList);
-        backendClient
-          .from('wrong_questions')
-          .update({ is_resolved: true })
-          .eq('id', selectedQuestion.id);
-      } else {
-        const newWrongCount = (selectedQuestion.wrong_count || 0) + 1;
-        setWrongQuestions(prev => prev.map(wq =>
-          wq.id === selectedQuestion.id
-            ? { ...wq, wrong_count: newWrongCount, last_wrong_at: toDatabaseDateTime(new Date()) }
-            : wq
-        ));
-        backendClient
-          .from('wrong_questions')
-          .update({
-            wrong_count: newWrongCount,
-            last_wrong_at: toDatabaseDateTime(new Date()),
-          })
-          .eq('id', selectedQuestion.id);
-      }
+      // 判分与答案都在服务端，接口失败时不再做本地降级判分：题目已不含答案，
+      // 本地判分只会写出一条「前端说对、服务端不知情」的脏记录。提示重试即可，
+      // finally 会解锁本题，学生直接再点提交。
+      console.error('提交答案接口调用失败:', apiError);
+      alert('提交失败，请检查网络后重试');
+      return;
     } finally {
       submittingRef.current = false;
       setIsSubmitting(false);

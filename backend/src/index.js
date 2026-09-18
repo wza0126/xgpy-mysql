@@ -807,6 +807,42 @@ function formatRows(rows) {
   return rows.map(formatRow);
 }
 
+// ===== 题目答案脱敏 =====
+// 学生端拉题时不应拿到正确答案与解析：否则用浏览器开发者工具看一眼请求响应就是作弊。
+// 教师端（teacher / super_admin）不受影响，题库管理与组卷仍需完整字段。
+// 学生取答案的正规途径只有三条，都在「已经作答过」之后：
+//   1) 练习 / 错题 / 举一反三 —— 提交后由 /api/business/submit-answer 回执带回；
+//   2) 测试 / 考试 —— 提交后由 submit-test / submit-exam 回执带回；
+//   3) 错题本回看 —— /api/practice/reveal-answers（只返回本人做过的题）。
+const QUESTION_ANSWER_FIELDS = ['answers', 'explanation'];
+
+function stripQuestionForStudent(row) {
+  if (!row || typeof row !== 'object') return row;
+  const cloned = { ...row };
+  QUESTION_ANSWER_FIELDS.forEach(f => { delete cloned[f]; });
+  return cloned;
+}
+
+// 表级脱敏入口：仅 questions 表、且请求者不是教学角色时生效
+function stripQuestionRowsForRequester(tableName, rows, req) {
+  if (tableName !== 'questions') return rows;
+  if (!Array.isArray(rows)) return rows;
+  if (isTeachingRole(req && req.user && req.user.role)) return rows;
+  return rows.map(stripQuestionForStudent);
+}
+
+// 交卷后回传本次题目的答案与解析（题目本身已对学生脱敏），供结果页回顾
+function buildRevealList(questions, serverQuestionMap) {
+  if (!Array.isArray(questions) || !serverQuestionMap) return [];
+  return questions
+    .map(q => {
+      const sq = serverQuestionMap.get(q && q.id);
+      if (!sq) return null;
+      return { id: sq.id, answers: sq.answers, explanation: sq.explanation || null };
+    })
+    .filter(Boolean);
+}
+
 app.get('/', (req, res, next) => {
   if (process.env.XGPY_SERVE_FRONTEND === 'true') return next();
 
@@ -1080,7 +1116,8 @@ app.get('/api/tables/:tableName', authenticate, async (req, res) => {
     }
     
     const [rows] = await pool.query(query, params);
-    res.json({ data: formatRows(rows), error: null });
+    // questions 表对学生脱敏：不下发 answers / explanation
+    res.json({ data: formatRows(stripQuestionRowsForRequester(tableName, rows, req)), error: null });
   } catch (error) {
     console.error('Error in GET /api/tables:', error);
     res.status(500).json({ data: [], error: error.message });
@@ -1091,11 +1128,13 @@ app.get('/api/tables/:tableName/:id', authenticate, async (req, res) => {
   try {
     const { tableName, id } = req.params;
     const [rows] = await pool.query('SELECT * FROM ?? WHERE id = ?', [tableName, id]);
+    // questions 表对学生脱敏：不下发 answers / explanation
+    const safeRows = stripQuestionRowsForRequester(tableName, rows, req);
     
-    if (rows.length === 0) {
+    if (safeRows.length === 0) {
       res.json({ data: null, error: 'Not found' });
     } else {
-      res.json({ data: formatRow(rows[0]), error: null });
+      res.json({ data: formatRow(safeRows[0]), error: null });
     }
   } catch (error) {
     console.error('Error in GET /api/tables/:id:', error);
@@ -2330,7 +2369,7 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
     // 1) 对错一律由服务端拿题库正确答案判定，前端传什么 is_correct 都不采信；
     // 2) 分值也由服务端取系统配置，避免伪造 points_change 灌高 max_points / total_points_earned。
     const [questionRows] = await connection.query(
-      'SELECT id, type, answers, options FROM questions WHERE id = ? LIMIT 1',
+      'SELECT id, type, answers, options, explanation, practice_enabled FROM questions WHERE id = ? LIMIT 1',
       [question_id]
     );
     if (questionRows.length === 0) {
@@ -2339,6 +2378,33 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
         data: null,
         error: '题目不存在'
       });
+    }
+    // 练习来源必须是「开放练习」或「本人做过的」题：否则学生可以把「只开放考试」的题
+    // 拿到练习接口上试答案（提交一次就能从回执里看出对错，等于把考试题当练习刷）。
+    // 放行「做过的题」是为了不误伤错题重做 —— 后来被老师关掉练习开关的老题，
+    // 学生本来就在错题本里，且已经答错过，再挡他没有防作弊意义。
+    // 练习接口只接练习类来源：测试/考试各有专用接口（submit-test / submit-exam）。
+    // 若允许 source 传 test/exam 从这里进来，学生就能伪造一个 source 绕过下面的练习开关校验。
+    const submitSrc = source || 'practice';
+    if (submitSrc !== 'practice' && submitSrc !== 'similar_practice') {
+      await connection.rollback();
+      return res.status(403).json({
+        data: null,
+        error: '不支持的答题来源'
+      });
+    }
+    if (submitSrc === 'practice' && Number(questionRows[0].practice_enabled) !== 1) {
+      const [[attemptRow]] = await connection.query(
+        'SELECT COUNT(*) AS n FROM student_answers WHERE student_id = ? AND question_id = ?',
+        [student_id, question_id]
+      );
+      if (!attemptRow || Number(attemptRow.n) === 0) {
+        await connection.rollback();
+        return res.status(403).json({
+          data: null,
+          error: '该题未开放练习'
+        });
+      }
     }
     const judgement = judgeQuestionAnswer(questionRows[0], answer);
     const is_correct = judgement.isCorrect;
@@ -2446,6 +2512,13 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
         rewardAllowed = false;
         blockReason = 'wrong_limit';
       }
+    }
+
+    // 举一反三（similar_practice）：只做即时练习反馈，不计分、不掉装备、不写积分流水。
+    // 走这个接口是为了让「题目不下发答案」之后学生仍能立刻看到对错与讲解。
+    if (src === 'similar_practice') {
+      rewardAllowed = false;
+      blockReason = 'no_reward';
     }
 
     // 2. 更新积分（分值由服务端决定，且未被掌握门禁拦截）
@@ -2733,6 +2806,13 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
         // 服务端判分结果：前端应以它为准刷新「对/错」展示与连对状态
         is_correct,
         server_judged: judgement.judged,
+        // 答案与解析只在「提交之后」随回执下发（题目本身已对学生脱敏），
+        // 供前端答后展示正确答案与讲解；复合题额外给逐小题对错。
+        correct_answers: questionRows[0].answers,
+        question_explanation: questionRows[0].explanation || null,
+        sub_correct: questionRows[0].type === 'composite'
+          ? judgeCompositeSubResults(questionRows[0].answers, answer)
+          : null,
         student: formatRow(updatedStudent[0]),
         power_multiplier: Math.round(power_multiplier * 100) / 100,
         crit_rate: Math.round(crit_rate * 10) / 10,
@@ -3051,7 +3131,7 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
     const submitQuestionIds = [...new Set((Array.isArray(questions) ? questions : []).map(q => q && q.id).filter(Boolean))];
     if (submitQuestionIds.length > 0) {
       const [serverQs] = await connection.query(
-        'SELECT id, type, answers, options FROM questions WHERE id IN (?)',
+        'SELECT id, type, answers, options, explanation FROM questions WHERE id IN (?)',
         [submitQuestionIds]
       );
       serverQs.forEach(row => serverQuestionMap.set(row.id, row));
@@ -3257,6 +3337,8 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
         internet_code: internetCode,
         test_record_id: testRecordId,
         dropped_equipments: droppedEquipments,
+        // 交卷后下发本次题目的答案与解析，供结果页回顾（题目本身已对学生脱敏）
+        reveal_questions: buildRevealList(questions, serverQuestionMap),
         student: formatRow(updatedStudent[0])
       }, 
       error: null 
@@ -3442,7 +3524,7 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
     const submitQuestionIds = [...new Set((Array.isArray(questions) ? questions : []).map(q => q && q.id).filter(Boolean))];
     if (submitQuestionIds.length > 0) {
       const [serverQs] = await connection.query(
-        'SELECT id, type, answers, options FROM questions WHERE id IN (?)',
+        'SELECT id, type, answers, options, explanation FROM questions WHERE id IN (?)',
         [submitQuestionIds]
       );
       serverQs.forEach(row => serverQuestionMap.set(row.id, row));
@@ -3633,6 +3715,8 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
         internet_codes: internetCodes,
         exam_record_id: examRecordId,
         dropped_equipments: droppedEquipments,
+        // 交卷后下发本次题目的答案与解析，供结果页回顾（题目本身已对学生脱敏）
+        reveal_questions: buildRevealList(questions, serverQuestionMap),
         student: formatRow(updatedStudent[0])
       }, 
       error: null 
@@ -7018,7 +7102,8 @@ app.get('/api/practice/similar/:questionId', authenticate, async (req, res) => {
 
     res.json({
       data: {
-        questions: formatRows(candidates),
+        // 举一反三的题学生还没做过 → 同样脱敏，答案等提交后由 submit-answer 回执带回
+        questions: formatRows(stripQuestionRowsForRequester('questions', candidates, req)),
         // source 现在准确反映实际命中来源：
         //   cluster  → 同 AI 簇命中（最精准）
         //   keyword  → 簇内无其他题或未聚类，靠题干关键词命中
@@ -7031,6 +7116,47 @@ app.get('/api/practice/similar/:questionId', authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error('获取同类题失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 错题本回看答案：批量取「本人做过的」题目的正确答案与解析。
+// 题目表已对学生脱敏，答案只能走这条路 —— 且必须是本人真的作答过的题，
+// 等价于「答过才给答案」，既保住错题复习，又不能拿来套没做过的题。
+app.post('/api/practice/reveal-answers', authenticate, async (req, res) => {
+  try {
+    const studentId = req.user.userId;
+    const rawIds = Array.isArray(req.body?.question_ids) ? req.body.question_ids : [];
+    const ids = [...new Set(rawIds.filter(id => typeof id === 'string' && id))].slice(0, 200);
+    if (ids.length === 0) {
+      return res.json({ data: { questions: [] }, error: null });
+    }
+
+    const [answered] = await pool.query(
+      'SELECT DISTINCT question_id FROM student_answers WHERE student_id = ? AND question_id IN (?)',
+      [studentId, ids]
+    );
+    const allowed = answered.map(r => r.question_id).filter(Boolean);
+    if (allowed.length === 0) {
+      return res.json({ data: { questions: [] }, error: null });
+    }
+
+    const [rows] = await pool.query(
+      'SELECT id, answers, explanation FROM questions WHERE id IN (?)',
+      [allowed]
+    );
+    res.json({
+      data: {
+        questions: rows.map(r => ({
+          id: r.id,
+          correct_answers: r.answers,
+          explanation: r.explanation || null,
+        })),
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('获取题目答案失败:', error);
     res.status(500).json({ data: null, error: error.message });
   }
 });
@@ -11975,6 +12101,35 @@ function judgeQuestionAnswer(question, userAnswerRaw) {
     return { isCorrect: judgeCompositeAnswer(question.answers, userAnswerRaw), judged: true };
   }
   return { isCorrect: taskCheckAnswerCorrect(userAnswerRaw, type, question.answers, question.options), judged: true };
+}
+
+// 复合题逐小题对错：答案不再下发到浏览器后，小题的对错标记也由服务端给出
+function judgeCompositeSubResults(correctField, userAnswerRaw) {
+  const subQuestions = taskGetAnswersArray(correctField);
+  if (!Array.isArray(subQuestions)) return [];
+  let parsedUser = {};
+  try {
+    parsedUser = typeof userAnswerRaw === 'string' ? JSON.parse(userAnswerRaw) : (userAnswerRaw || {});
+  } catch {
+    parsedUser = {};
+  }
+  if (!parsedUser || typeof parsedUser !== 'object') parsedUser = {};
+  return subQuestions.map((sq, idx) => {
+    if (!sq || typeof sq !== 'object') return false;
+    if (sq.type === 'fill_blank') {
+      return judgeFillBlankAnswer(parsedUser.blank_answers?.[idx], sq.answers);
+    }
+    if (sq.type === 'choice' || sq.type === 'multiple_choice') {
+      const multiple = sq.multiple === true || sq.type === 'multiple_choice';
+      return taskCheckAnswerCorrect(
+        parsedUser.choice_answers?.[idx],
+        multiple ? 'multiple_choice' : 'choice',
+        sq.answers,
+        sq.options
+      );
+    }
+    return false;
+  });
 }
 
 // 18. 提交答题

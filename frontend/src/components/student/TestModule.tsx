@@ -68,6 +68,18 @@ const getOptions = (options: any) => {
   return parsed?.options || parsed;
 };
 
+// 交卷后把服务端回执里的答案与解析合并回题目对象。
+// 题目本身已对学生脱敏（不含 answers / explanation），只有交卷回执才带答案。
+const mergeRevealIntoQuestions = (questions: Question[], revealList: any[]): Question[] => {
+  if (!Array.isArray(revealList) || revealList.length === 0) return questions;
+  const revealMap = new Map<string, any>(revealList.map((r: any) => [r.id, r]));
+  return questions.map(q => {
+    const r = revealMap.get(q.id);
+    if (!r) return q;
+    return { ...q, answers: r.answers, explanation: r.explanation };
+  });
+};
+
 const getAnswers = (answers: any) => {
   const parsed = parseJsonField(answers);
   let result = parsed?.answers || parsed;
@@ -716,7 +728,7 @@ export const TestModule: React.FC = () => {
         points: points_earned, 
         internetCodes: internet_codes.length,
         codes: internet_codes,
-        questions: activeExam.questions, 
+        questions: mergeRevealIntoQuestions(activeExam.questions, (result.data as any)?.reveal_questions || []),
         answers: activeExam.answers,
         isPassed: is_passed
       });
@@ -853,10 +865,18 @@ export const TestModule: React.FC = () => {
           console.error('获取答案记录失败:', e);
         }
         
-        // 构建最终数据
-        const questions: Question[] = [];
-        questionsData.forEach(q => {
-          questions.push(q as Question);
+        // 构建最终数据；题目已脱敏，答案与解析走「答过才给答案」的接口换回来
+        let revealedList: any[] = [];
+        try {
+          const reveal = await backendClient.post('/api/practice/reveal-answers', {
+            question_ids: questionsData.map((q: any) => q.id),
+          });
+          revealedList = (reveal as any)?.data?.questions || [];
+        } catch (e) {
+          console.warn('获取历史试卷答案失败:', e);
+        }
+        const questions: Question[] = mergeRevealIntoQuestions(questionsData as Question[], revealedList);
+        questionsData.forEach((q: any) => {
           if (!answers[q.id]) {
             answers[q.id] = '';
           }
@@ -1047,7 +1067,7 @@ export const TestModule: React.FC = () => {
       const droppedEquipments = dropped_equipments || [];
       console.log('[handleSubmitTest] 掉落装备:', droppedEquipments, '数量:', droppedEquipments.length);
       
-      setTestResult({ score, correct, points: points_earned, internetCode: internet_code, questions: activeTest.questions, answers: activeTest.answers, droppedEquipments });
+      setTestResult({ score, correct, points: points_earned, internetCode: internet_code, questions: mergeRevealIntoQuestions(activeTest.questions, (result.data as any)?.reveal_questions || []), answers: activeTest.answers, droppedEquipments });
       setShowResult(true);
       setActiveTest(null);
       
@@ -1073,191 +1093,12 @@ export const TestModule: React.FC = () => {
         return;
       }
 
-      // 仅网络异常/服务端 5xx 才降级使用原方法
-      console.error('[handleSubmitTest] 业务API调用失败，降级使用原始方法:', apiError);
-      
-      let correct = 0;
-      const answers = activeTest.answers;
-
-      const normalizeAnswer = (ans: string) => {
-        return ans.toLowerCase().trim();
-      };
-
-      activeTest.questions.forEach((q) => {
-        const userAnswer = answers[q.id];
-        if (!userAnswer) return;
-        if (q.type === 'composite') {
-          try {
-            const parsed = JSON.parse(userAnswer);
-            const subQs = getCompositeSubQuestions(q.answers);
-            const allCorrect = subQs.every((sq: any, idx: number) => {
-              if (sq.type === 'choice') {
-                const ans = parsed.choice_answers?.[idx] || '';
-                return checkChoiceAnswer(ans, sq.answers || [], sq.multiple || false);
-              } else if (sq.type === 'fill_blank') {
-                const ans = parsed.blank_answers?.[idx] || [];
-                return checkFillBlankAnswer(ans, sq.answers || []);
-              }
-              return false;
-            });
-            if (allCorrect) correct++;
-          } catch {
-            // 解析失败不计分
-          }
-        } else {
-          const correctAnswers = getAnswers(q.answers);
-          if (correctAnswers.some((ans) => normalizeAnswer(ans) === normalizeAnswer(userAnswer))) {
-            correct++;
-          }
-        }
-      });
-
-      const total = activeTest.questions.length;
-      const score = Math.round((correct / total) * 100);
-      const passingScore = (activeTest.test as any).passing_score || 60;
-      const isPassed = score >= passingScore;
-      const pointsEarned = isPassed ? Math.round((score / 100) * (activeTest.test.points_reward || 50)) : 0;
-
-      // 先插入 test_record 并获取生成的 id
-      const { data: testRecordData } = await backendClient.from('test_records').insert({
-        test_id: activeTest.test.id,
-        student_id: profile.id,
-        score,
-        correct_count: correct,
-        total_count: total,
-        points_earned: pointsEarned,
-      });
-
-      let fallbackInternetCode = '';
-      if (isPassed) {
-        const testData = activeTest.test as any;
-        if (testData.allow_internet_code && testData.internet_code_reward > 0) {
-          const { data: allRecords } = await backendClient
-            .from('test_records')
-            .select('internet_code, completed_at')
-            .eq('student_id', profile.id);
-          const today = new Date();
-          const todayStr = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
-          const alreadyGotCodeToday = allRecords && allRecords.some((r: any) => {
-            if (!r.internet_code) return false;
-            const d = new Date(r.completed_at);
-            const dStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-            return dStr === todayStr;
-          });
-          if (!alreadyGotCodeToday) {
-            const { data: availableCodes } = await backendClient
-              .from('internet_codes')
-              .select('code')
-              .eq('is_used', false)
-              .limit(1);
-            if (availableCodes && availableCodes.length > 0) {
-              fallbackInternetCode = availableCodes[0].code;
-              await backendClient
-                .from('internet_codes')
-                .update({ is_used: true, used_by: profile.id, used_by_username: profile.username || '', used_at: new Date().toISOString(), source: 'test', source_id: activeTest.test.id })
-                .eq('code', fallbackInternetCode);
-            }
-          }
-        }
-        await updatePoints(profile.id, pointsEarned);
-      }
-
-      if (testRecordData && testRecordData[0] && fallbackInternetCode) {
-        await backendClient.from('test_records').update({ internet_code: fallbackInternetCode }).eq('id', testRecordData[0].id);
-      }
-
-      for (const q of activeTest.questions) {
-        const userAnswer = (answers[q.id] || '').trim();
-        const normalizeAns = (ans: any) => (ans?.toString() || '').toLowerCase().trim();
-        let isCorrect = false;
-        if (q.type === 'composite') {
-          try {
-            const parsed = JSON.parse(userAnswer);
-            const subQs = getCompositeSubQuestions(q.answers);
-            isCorrect = subQs.every((sq: any, idx: number) => {
-              if (sq.type === 'choice') {
-                const ans = parsed.choice_answers?.[idx] || '';
-                return checkChoiceAnswer(ans, sq.answers || [], sq.multiple || false);
-              } else if (sq.type === 'fill_blank') {
-                const ans = parsed.blank_answers?.[idx] || [];
-                return checkFillBlankAnswer(ans, sq.answers || []);
-              }
-              return false;
-            });
-          } catch {
-            isCorrect = false;
-          }
-        } else {
-          isCorrect = getAnswers(q.answers).some(
-            (ans) => normalizeAns(ans) === normalizeAns(userAnswer)
-          );
-        }
-
-        if (userAnswer) {
-          await backendClient.from('student_answers').insert({
-            student_id: profile.id,
-            question_id: q.id,
-            answer: userAnswer,
-            is_correct: isCorrect,
-            points_change: 0,
-            source: 'test',
-            test_id: activeTest.test.id,
-            test_record_id: testRecordData?.[0]?.id,
-          });
-        }
-
-        if (!isCorrect) {
-          const { data: existing } = await backendClient
-            .from('wrong_questions')
-            .select('*')
-            .eq('student_id', profile.id)
-            .eq('question_id', q.id)
-            .maybeSingle();
-
-          if (existing) {
-            await backendClient
-              .from('wrong_questions')
-              .eq('id', existing.id)
-              .update({
-                wrong_count: (existing.wrong_count || 0) + 1,
-                last_wrong_at: toDatabaseDateTime(new Date()),
-              });
-          } else {
-            await backendClient.from('wrong_questions').insert({
-              student_id: profile.id,
-              question_id: q.id,
-            });
-          }
-        }
-      }
-
-      setTestResult({ score, correct, points: pointsEarned, internetCode: fallbackInternetCode, questions: activeTest.questions, answers: activeTest.answers });
-      setShowResult(true);
-      setActiveTest(null);
-      
-      // 降级路径也尝试通过后端API触发装备掉落
-      // 注意：服务端会校验这条 test_record 是否真实存在且及格，并对同一条记录只发放一次掉落，
-      //       因此这里必须带上 test_record_id。
-      if (isPassed && testRecordData?.[0]?.id) {
-        try {
-          console.log('[handleSubmitTest] 降级路径：调用装备掉落API');
-          const dropResult = await backendClient.post('/api/business/test-equipment-drop', {
-            student_id: profile.id,
-            test_id: activeTest.test.id,
-            test_record_id: testRecordData[0].id
-          });
-          console.log('[handleSubmitTest] 降级路径：掉落结果:', dropResult);
-          if (dropResult?.data?.dropped_equipments?.length > 0) {
-            console.log('[handleSubmitTest] 降级路径：触发装备掉落特效');
-            emitEvent('equipment_drop', { equipments: dropResult.data.dropped_equipments });
-          }
-        } catch (e) {
-          console.warn('装备掉落API调用失败:', e);
-        }
-      }
-      
-      refreshProfile();
+      // 仅网络异常 / 服务端 5xx 才会走到这里。题目已不再下发答案，前端无法本地判分，
+      // 更不能自建测试记录与发积分（会绕过服务端判分口径与每日次数限制），因此不再降级。
+      console.error('[handleSubmitTest] 业务API调用失败:', apiError);
+      alert('提交失败，请检查网络后重试');
       fetchTestHistory();
+      return;
     } finally {
       setIsSubmitting(false);
     }
@@ -1267,7 +1108,7 @@ export const TestModule: React.FC = () => {
     // 先尝试通过 test_record_id 查找
     let query = backendClient
       .from('student_answers')
-      .select('*, question:questions(*)')
+      .select('*')
       .eq('student_id', profile?.id)
       .eq('source', 'test');
 
@@ -1279,22 +1120,43 @@ export const TestModule: React.FC = () => {
 
     const { data: answersData } = await query.order('created_at', { ascending: true });
 
-    if (answersData && answersData.length > 0) {
-      const questions: Question[] = [];
-      const answers: Record<string, string> = {};
-      answersData.forEach((item: any) => {
-        if (item.question) {
-          questions.push(item.question);
-          answers[item.question.id] = item.answer || '';
-        }
-      });
-      setTestDetailData({ questions, answers });
-      setSelectedTestRecord(record);
-      setShowTestDetail(true);
-    } else {
-      // 如果没有找到答案，显示提示
+    if (!answersData || answersData.length === 0) {
       alert('暂无详细答题记录');
+      return;
     }
+
+    const answers: Record<string, string> = {};
+    const questionIds: string[] = [];
+    answersData.forEach((item: any) => {
+      if (item.question_id) {
+        questionIds.push(item.question_id);
+        answers[item.question_id] = item.answer || '';
+      }
+    });
+    if (questionIds.length === 0) {
+      alert('暂无详细答题记录');
+      return;
+    }
+
+    // 题干/选项走题库表（已脱敏，够渲染用），答案与解析走「答过才给答案」的接口
+    const { data: qsData } = await backendClient.from('questions').select('*').in('id', questionIds);
+    let revealedList: any[] = [];
+    try {
+      const reveal = await backendClient.post('/api/practice/reveal-answers', { question_ids: questionIds });
+      revealedList = (reveal as any)?.data?.questions || [];
+    } catch (e) {
+      console.warn('获取历史测试答案失败:', e);
+    }
+
+    const questions = mergeRevealIntoQuestions((qsData || []) as Question[], revealedList);
+    if (questions.length === 0) {
+      alert('暂无详细答题记录');
+      return;
+    }
+
+    setTestDetailData({ questions, answers });
+    setSelectedTestRecord(record);
+    setShowTestDetail(true);
   };
 
   const formatTime = (seconds: number) => {
