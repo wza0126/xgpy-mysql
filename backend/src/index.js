@@ -2018,12 +2018,14 @@ app.post('/api/admin/data-io/import/execute', authenticate, requireTeachingRole,
     return res.status(400).json({ data: null, error: '未选择任何要导入的数据域' });
   }
   try {
-    console.log('[data-io] 导入 modes=', JSON.stringify(modes));
-    const report = await dataIO.runImport(pool, uploadsDir, backupsDir, zipPath, { modes });
+    const allowEmptyOverwrite = req.body.allow_empty_overwrite === true || req.body.allow_empty_overwrite === 'true' || req.body.allow_empty_overwrite === 'yes';
+    console.log('[data-io] 导入 modes=', JSON.stringify(modes), 'allowEmptyOverwrite=', allowEmptyOverwrite);
+    const report = await dataIO.runImport(pool, uploadsDir, backupsDir, zipPath, { modes, allowEmptyOverwrite });
     res.json({ data: report, error: null });
   } catch (error) {
     console.error('Error in POST /api/admin/data-io/import/execute:', error);
-    res.status(500).json({ data: null, error: `导入失败: ${error.message}` });
+    const status = error && error.code === 'EMPTY_OVERWRITE_BLOCKED' ? 400 : 500;
+    res.status(status).json({ data: null, error: `导入失败: ${error.message}` });
   } finally {
     cleanup();
   }

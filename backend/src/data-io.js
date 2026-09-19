@@ -326,7 +326,7 @@ async function previewImport(pool, uploadsDir, zipPath) {
         const [[r]] = await pool.query(`SELECT COUNT(*) AS n FROM \`${t.table}\``);
         current = r.n;
       } catch { current = null; } // 表在本库不存在（schema 更旧）
-      tables.push({ table: t.table, package_rows: t.rows, current_rows: current });
+      tables.push({ table: t.table, package_rows: t.rows, current_rows: current, empty_overwrite: (t.rows || 0) === 0 && current > 0 });
     }
     domains.push({ id: d.id, name: d.name, tables, total_package: tables.reduce((s, t) => s + (t.package_rows || 0), 0) });
   }
@@ -358,14 +358,38 @@ function includeFilesInManifest(manifest) {
 
 // 执行导入。plan: { modes: {domainId: 'overwrite'|'append'|'skip'}, files_mode 同上 }
 async function runImport(pool, uploadsDir, backupsDir, zipPath, plan) {
-  const snapshot = await createSnapshot(pool, uploadsDir, backupsDir);
-
   const tmpDir = path.join(path.dirname(zipPath), `extract-${Date.now()}`);
   fs.mkdirSync(tmpDir, { recursive: true });
   try {
     const raw = await readZipEntry(zipPath, MANIFEST_NAME);
     const manifest = JSON.parse(raw.toString('utf8'));
-    const report = { snapshot: { name: path.basename(snapshot.file), size: snapshot.bytes }, tables: [], files: null, warnings: [] };
+    const report = { snapshot: null, tables: [], files: null, warnings: [] };
+
+    // 防呆（放在快照之前，避免白做一份 60MB 快照）：
+    // 覆盖模式 + 包内该表 0 行 + 目标库该表有数据 → 默认阻止。
+    // 否则会出现"导入显示成功"，但账号/业务数据被静默清空（典型后果：导入后系统无法登录）。
+    if (plan.allowEmptyOverwrite !== true) {
+      const blockList = [];
+      for (const d of manifest.domains || []) {
+        if (plan.modes[d.id] !== 'overwrite' || d.id === 'files') continue;
+        for (const t of (d.tables || [])) {
+          if ((t.rows || 0) !== 0) continue;
+          try {
+            const [[r]] = await pool.query(`SELECT COUNT(*) AS n FROM \`${t.table}\``);
+            if (r.n > 0) blockList.push(`${t.table}（包内 0 行，覆盖将清空当前库 ${r.n} 行）`);
+          } catch { /* 表在本库不存在，无需防呆 */ }
+        }
+      }
+      if (blockList.length > 0) {
+        const err = new Error('已阻止导入：' + blockList.join('、') + '。'
+          + '覆盖模式会把目标库这些表清空成 0 行。若确认要清空，请勾选"允许清空包内为 0 行的表"后重试。');
+        err.code = 'EMPTY_OVERWRITE_BLOCKED';
+        throw err;
+      }
+    }
+
+    const snapshot = await createSnapshot(pool, uploadsDir, backupsDir);
+    report.snapshot = { name: path.basename(snapshot.file), size: snapshot.bytes };
 
     // 只解压被选中域需要的 data/*.json；有文件域时全包解压
     const needed = new Set();
@@ -433,6 +457,17 @@ async function runImport(pool, uploadsDir, backupsDir, zipPath, plan) {
       await conn.commit();
       txOpen = false;
       await conn.query('SET FOREIGN_KEY_CHECKS = 1').catch(() => {});
+      // 导入后自检：库里必须还有可登录的教师/管理员账号。
+      // 否则系统会"登录不了"，而且导入功能本身需要登录才能用——等于把自救的路也堵死了。
+      try {
+        const [[n]] = await conn.query(
+          "SELECT COUNT(*) AS n FROM profiles WHERE role IN ('teacher','super_admin') AND LENGTH(IFNULL(password_hash,'')) = 64"
+        );
+        if (Number(n.n) === 0) {
+          report.account_warning = '当前库已没有任何可登录的教师/管理员账号，系统将无法登录（导入功能也需要登录，无法在页面上自救）。'
+            + '请确认 .env 的 DB_NAME 指向的库是否正确，或通过 SQL / 快照恢复账号。';
+        }
+      } catch { /* profiles 表不存在则跳过 */ }
     } catch (e) {
       if (txOpen) {
         try { await conn.rollback(); } catch { /* 回滚失败也要继续复位并归还连接 */ }

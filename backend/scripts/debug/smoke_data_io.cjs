@@ -93,12 +93,13 @@ function readZipEntry(zipPath, entryName) {
   });
 }
 
-// multipart 执行导入（直传文件，不走预览复用）
-function executeWithFile(zipPath, modes, auth) {
+// multipart 执行导入（直传文件，不走预览复用）；extra: 额外表单字段
+function executeWithFile(zipPath, modes, auth, extra = {}) {
   const fd = new FormData();
   fd.append('file', new Blob([fs.readFileSync(zipPath)]), path.basename(zipPath));
   fd.append('modes', JSON.stringify(modes));
   fd.append('confirm', 'yes');
+  for (const [k, v] of Object.entries(extra)) fd.append(k, String(v));
   return api('/api/admin/data-io/import/execute', { method: 'POST', headers: auth, body: fd });
 }
 
@@ -408,10 +409,71 @@ async function main() {
   assert('清理超期上传包', !fs.existsSync(path.join(gcDir, 'import-smoke-old.xgpybak')) && gc.files >= 1, JSON.stringify(gc));
   assert('未超期的上传包保留', fs.existsSync(path.join(gcDir, 'import-smoke-fresh.xgpybak')));
 
+  // ---- M. 空包防呆 + 导入后账号自检 + 失败登录记录 ----
+  console.log('\n--- M. 空包防呆 / 账号自检 / 未知用户名登录记录 ---');
+  // M0 先用 SQL 记下 profiles 全量（validateToken JOIN profiles，清空后 API 会 401，只能用 SQL 恢复）
+  const [profAllM] = await conn.query('SELECT * FROM profiles');
+  const profAllSer = profAllM.map(ser);
+
+  // M1 手工构造"包内 profiles 为 0 行"的包（正是事故场景）
+  const emptyZip = await makePackage(path.join(TMP, 'empty-accounts.xgpybak'), {
+    'manifest.json': manifestOf([{ id: 'accounts', name: '学生账号', tables: [{ table: 'profiles', rows: 0 }] }]),
+    'data/profiles.json': '[]',
+  });
+
+  // M2 预览应标记 empty_overwrite
+  const fdEmpty = new FormData();
+  fdEmpty.append('file', new Blob([fs.readFileSync(emptyZip)]), 'empty-accounts.xgpybak');
+  const prevEmpty = await api('/api/admin/data-io/import/preview', { method: 'POST', headers: AUTH, body: fdEmpty });
+  assert('空表包预览 200', prevEmpty.status === 200, JSON.stringify(prevEmpty.json?.error));
+  const m2t = prevEmpty.json?.data?.domains?.find(d => d.id === 'accounts')?.tables?.find(t => t.table === 'profiles');
+  assert('预览标记 empty_overwrite（包内 0 行 & 目标库有数据）', m2t?.empty_overwrite === true, JSON.stringify(m2t));
+
+  // M3 未显式确认 → 后端直接阻止，数据不动，也不产生快照
+  const exM3 = await executeWithFile(emptyZip, { accounts: 'overwrite' }, AUTH);
+  assert('包内 0 行 + 覆盖 → 被 400 阻止', exM3.status === 400, `status=${exM3.status} err=${exM3.json?.error}`);
+  assert('阻止信息点名 profiles 并说明后果', /已阻止导入/.test(exM3.json?.error || '') && /profiles/.test(exM3.json?.error || ''), exM3.json?.error);
+  const [[cntM3]] = await conn.query('SELECT COUNT(*) n FROM profiles');
+  assert('被阻止后 profiles 行数不变', cntM3.n === profAllSer.length, `${cntM3.n} vs ${profAllSer.length}`);
+
+  // M4 显式确认后放行 → 真清空，但报告必须给出"无可登录账号"的 error 级警告
+  const exM4 = await executeWithFile(emptyZip, { accounts: 'overwrite' }, AUTH, { allow_empty_overwrite: 'true' });
+  assert('显式确认 allow_empty_overwrite 后放行 200', exM4.status === 200, JSON.stringify(exM4.json?.error));
+  const [[cntM4]] = await conn.query('SELECT COUNT(*) n FROM profiles');
+  assert('profiles 被清空为 0 行（确认后的预期行为）', cntM4.n === 0, `${cntM4.n}`);
+  assert('导入报告给出"无可登录账号"警告', /无法登录/.test(exM4.json?.data?.account_warning || ''), exM4.json?.data?.account_warning);
+  assert('放行路径照常生成快照', (exM4.json?.data?.snapshot?.name || '').startsWith('snapshot-'));
+
+  // M5 SQL 恢复 profiles（模拟"从快照/备份把账号救回来"）
+  for (let i = 0; i < profAllSer.length; i += 100) {
+    const batch = profAllSer.slice(i, i + 100);
+    const cols = Object.keys(batch[0]);
+    await conn.query(
+      `INSERT INTO profiles (${cols.map(c => '`' + c + '`').join(',')}) VALUES ${batch.map(() => `(${cols.map(() => '?').join(',')})`).join(',')}`,
+      batch.map(r => cols.map(c => r[c])).flat()
+    );
+  }
+  const [[cntM5]] = await conn.query('SELECT COUNT(*) n FROM profiles');
+  assert('profiles 已恢复到导入前行数', cntM5.n === profAllSer.length, `${cntM5.n} vs ${profAllSer.length}`);
+
+  // M6 用户名不存在时登录：不再抛 1048，且 login_history 留下 user_id='unknown' 的痕迹
+  const badLogin = await api('/api/auth/secure-login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'smoke_nouser_xz', password: 'whatever-123' }),
+  });
+  assert('不存在用户名的登录返回 401', badLogin.status === 401, `status=${badLogin.status}`);
+  assert('返回"用户名或密码错误"而非 500', /用户名或密码错误/.test(badLogin.json?.error || ''), badLogin.json?.error);
+  const [[unknownRow]] = await conn.query(
+    "SELECT id FROM login_history WHERE user_id = 'unknown' AND failure_reason LIKE '%smoke_nouser_xz%' ORDER BY id DESC LIMIT 1"
+  );
+  assert('失败登录写入 user_id=unknown 且记录尝试的用户名', !!unknownRow);
+
   // ---- 清理 ----
   console.log('\n--- 清理 ---');
   await conn.query('DELETE FROM profiles WHERE id LIKE "smoke_dio_%"');
   await conn.query("DELETE FROM login_sessions WHERE device_info = 'smoke'");
+  await conn.query("DELETE FROM login_history WHERE user_id = 'unknown' AND failure_reason LIKE '%smoke_nouser_xz%'");
   fs.rmSync(TMP, { recursive: true, force: true });
   await conn.end();
 

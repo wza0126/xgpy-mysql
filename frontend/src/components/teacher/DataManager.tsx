@@ -23,7 +23,7 @@ type FileMeta = {
 
 type MetaResponse = { domains: DomainMeta[]; files: FileMeta };
 
-type PreviewTable = { table: string; package_rows: number; current_rows: number | null };
+type PreviewTable = { table: string; package_rows: number; current_rows: number | null; empty_overwrite?: boolean };
 type PreviewDomain = { id: string; name: string; tables: PreviewTable[]; total_package: number };
 type PreviewData = {
   manifest: { platform_version: string; exported_at: string; file_mode: string; schema_migrations_max: number | null };
@@ -35,7 +35,8 @@ type PreviewData = {
 };
 
 type ImportReport = {
-  snapshot: { name: string; size: number };
+  snapshot: { name: string; size: number } | null;
+  account_warning?: string;
   tables: { table: string; mode: string; status: string; package_rows: number; deleted: number; inserted: number; skipped?: number }[];
   files: { mode?: string; added?: number; overwritten?: number; deleted?: number; note?: string } | null;
 };
@@ -70,6 +71,7 @@ export function DataManager() {
   const [uploading, setUploading] = useState(false);
   const [importing, setImporting] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
+  const [allowEmpty, setAllowEmpty] = useState(false);
   const [report, setReport] = useState<ImportReport | null>(null);
   const [importError, setImportError] = useState('');
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
@@ -156,6 +158,7 @@ export function DataManager() {
     setReport(null);
     setImportError('');
     setConfirmed(false);
+    setAllowEmpty(false);
     try {
       const fd = new FormData();
       fd.append('file', file);
@@ -184,7 +187,7 @@ export function DataManager() {
       const resp = await fetch(`${API_BASE}/api/admin/data-io/import/execute`, {
         method: 'POST',
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ modes, confirm: 'yes', reuse_file: preview.temp_file }),
+        body: JSON.stringify({ modes, confirm: 'yes', reuse_file: preview.temp_file, allow_empty_overwrite: allowEmpty }),
       });
       const json = await resp.json();
       if (json.error) { setImportError(json.error); return; }
@@ -199,6 +202,11 @@ export function DataManager() {
   };
 
   const hasActive = Object.values(modes).some((m) => m === 'overwrite' || m === 'append');
+  // 本次将以"覆盖"导入、且包内为 0 行而目标库有数据的表 —— 必须显式确认才放行（后端也会二次拦截）
+  const emptyOverwriteTables = preview
+    ? preview.domains.flatMap((d) => (modes[d.id] === 'overwrite' ? d.tables.filter((t) => t.empty_overwrite) : [])).map((t) => t.table)
+    : [];
+  const needEmptyConfirm = emptyOverwriteTables.length > 0;
 
   return (
     <div>
@@ -269,6 +277,11 @@ export function DataManager() {
                 </button>
                 <span className="text-sm text-gray-500">预估体积 ≈ {fmtSize(estSize())}</span>
               </div>
+              {selected.size > 0 && ![...selected].some((id) => id !== 'files') && (
+                <div className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2 max-w-2xl">
+                  ⚠ 当前只选择了文件资源：导出的包将不含任何数据库表数据，无法用于恢复系统与账号。如需完整备份，请至少勾选一个数据域。
+                </div>
+              )}
               {exportMsg && <div className="text-sm text-blue-600">{exportMsg}</div>}
             </>
           )}
@@ -314,6 +327,11 @@ export function DataManager() {
                     <div className="text-xs text-gray-400 mt-1">
                       包内 {d.total_package} 行；{d.tables.slice(0, 4).map((t) => `${t.table}: ${t.package_rows}`).join('，')}{d.tables.length > 4 ? ` 等 ${d.tables.length} 表` : ''}
                     </div>
+                    {d.tables.some((t) => t.empty_overwrite) && (
+                      <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1 mt-1.5">
+                        ⚠ 该域内包内为 0 行的表：{d.tables.filter((t) => t.empty_overwrite).map((t) => `${t.table}（当前库 ${t.current_rows} 行）`).join('、')}。选择"覆盖"会把这些表清空。
+                      </div>
+                    )}
                   </div>
                 ))}
                 {preview.files && (
@@ -339,8 +357,14 @@ export function DataManager() {
                 <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} className="w-4 h-4" />
                 我已了解覆盖模式的后果（被选域的现有数据将被替换）
               </label>
+              {needEmptyConfirm && (
+                <label className="flex items-start gap-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-4 py-2">
+                  <input type="checkbox" checked={allowEmpty} onChange={(e) => setAllowEmpty(e.target.checked)} className="w-4 h-4 mt-0.5" />
+                  <span>我确认要清空包内为 0 行的表：{emptyOverwriteTables.join('、')}。这些表在目标库的现有数据将全部丢失（特别注意"学生账号"域——清空后系统将无法登录）。</span>
+                </label>
+              )}
               <div className="flex gap-3">
-                <button onClick={handleExecute} disabled={importing || !confirmed || !hasActive} className="px-5 py-2.5 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 disabled:opacity-50">
+                <button onClick={handleExecute} disabled={importing || !confirmed || !hasActive || (needEmptyConfirm && !allowEmpty)} className="px-5 py-2.5 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 disabled:opacity-50">
                   {importing ? '正在导入…' : '执行导入'}
                 </button>
                 <button onClick={() => setPreview(null)} className="px-5 py-2.5 bg-gray-100 text-gray-600 rounded-lg text-sm hover:bg-gray-200">取消</button>
@@ -351,8 +375,13 @@ export function DataManager() {
           {report && (
             <div className="max-w-3xl space-y-3">
               <div className="text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg px-4 py-2">
-                导入完成。已自动快照当前库：{report.snapshot.name}（{fmtSize(report.snapshot.size)}），保留在服务器 backups 目录。
+                导入完成。已自动快照当前库：{report.snapshot?.name}（{fmtSize(report.snapshot?.size || 0)}），保留在服务器 backups 目录。
               </div>
+              {report.account_warning && (
+                <div className="text-sm text-red-700 bg-red-50 border border-red-300 rounded-lg px-4 py-2 font-medium">
+                  ⚠ {report.account_warning}
+                </div>
+              )}
               <div className="border border-gray-200 rounded-lg overflow-hidden">
                 <table className="w-full text-sm">
                   <thead className="bg-gray-50 text-gray-500">

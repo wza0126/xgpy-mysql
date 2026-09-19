@@ -302,13 +302,19 @@ class SecureAuth {
                 [username]
             );
             
-            const userId = users.length > 0 ? users[0].id : null;
+            // 用户名不存在时不能写 NULL（user_id 是 NOT NULL，写 NULL 会抛 1048、把真实原因淹没在日志里）。
+            // 用 'unknown' 占位，并把尝试的用户名记进 failure_reason，便于排查"库里到底有没有这个账号"。
+            const userId = users.length > 0 ? users[0].id : 'unknown';
+            const finalReason = users.length > 0 ? reason : `${reason} (username: ${username})`;
+            if (users.length === 0) {
+                console.warn(`[auth] 登录失败：用户名不存在 username=${username} ip=${ipAddress}（请确认 .env 的 DB_NAME 指向的库是否正确）`);
+            }
             
             await this.pool.query(`
                 INSERT INTO login_history (
                     user_id, login_time, ip_address, user_agent, login_status, failure_reason
                 ) VALUES (?, NOW(), ?, ?, 'failed', ?)
-            `, [userId, ipAddress, userAgent, reason]);
+            `, [userId, ipAddress, userAgent, finalReason]);
             
             // 检查是否连续失败多次（可选的安全措施）
             await this.checkBruteForce(userId, ipAddress);
