@@ -11,7 +11,10 @@ const config = {
   waitForConnections: true,
   connectionLimit: parseInt(process.env.DB_CONNECTION_LIMIT) || 100,
   queueLimit: 0,
-  timezone: '+08:00'
+  timezone: '+08:00',
+  // 归还连接前重置会话（COM_RESET_CONNECTION）：防止"未结束的事务""SET FOREIGN_KEY_CHECKS=0"这类会话状态
+  // 随连接泄漏给后续请求。默认 false —— 一旦漏写 rollback，半成品事务会被后续请求的 START TRANSACTION 隐式提交。
+  resetOnRelease: true,
 };
 
 // 创建不带数据库的连接池（用于初始化）
@@ -23,7 +26,8 @@ const poolNoDB = mysql.createPool({
   waitForConnections: config.waitForConnections,
   connectionLimit: config.connectionLimit,
   queueLimit: config.queueLimit,
-  timezone: config.timezone
+  timezone: config.timezone,
+  resetOnRelease: config.resetOnRelease,
 });
 
 // 创建带数据库的连接池（正常使用）

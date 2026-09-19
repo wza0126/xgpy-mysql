@@ -57,6 +57,20 @@ function deserializeValue(colType, v) {
   return v;
 }
 
+// 读取表结构：区分可写列与生成列（STORED/VIRTUAL GENERATED 不能显式赋值）
+// 生成列若被显式 INSERT，MariaDB 会报 3105（覆盖模式中断导入；追加模式的 INSERT IGNORE 会静默降级成 warning）
+async function getTableColumns(conn, table) {
+  const [cols] = await conn.query(`SHOW COLUMNS FROM \`${table}\``);
+  const generated = cols.filter(c => /GENERATED/i.test(String(c.Extra || ''))).map(c => c.Field);
+  const generatedSet = new Set(generated);
+  return {
+    all: cols.map(c => c.Field),
+    generated,
+    writable: cols.map(c => c.Field).filter(f => !generatedSet.has(f)),
+    types: Object.fromEntries(cols.map(c => [c.Field, String(c.Type).toLowerCase()])),
+  };
+}
+
 // 递归列出目录下所有文件（相对路径、大小、mtime）
 function walkFiles(dir, baseDir, excludedDirs, out = []) {
   if (!fs.existsSync(dir)) return out;
@@ -163,8 +177,11 @@ async function writeBackup(pool, uploadsDir, appBaseDir, opts, target) {
           for (const t of d.tables) {
             let offset = 0;
             let total = 0;
+            // 显式列出可写列，剔除生成列（生成列由目标库自行计算，写入即报错）
+            const { writable } = await getTableColumns(pool, t);
+            const selectCols = writable.length > 0 ? writable.map(c => `\`${c}\``).join(',') : 'NULL';
             for (;;) {
-              const [rows] = await pool.query(`SELECT * FROM \`${t}\` LIMIT ? OFFSET ?`, [BATCH, offset]);
+              const [rows] = await pool.query(`SELECT ${selectCols} FROM \`${t}\` LIMIT ? OFFSET ?`, [BATCH, offset]);
               if (rows.length === 0) break;
               total += rows.length;
               archive.append(JSON.stringify(rows.map(serializeRow)), { name: `${DATA_PREFIX}${t}.json` });
@@ -206,9 +223,10 @@ async function createSnapshot(pool, uploadsDir, backupsDir) {
   if (!fs.existsSync(backupsDir)) fs.mkdirSync(backupsDir, { recursive: true });
   const ts = fmtDateTime(new Date()).replace(/[-: ]/g, '').slice(0, 14);
   const file = path.join(backupsDir, `snapshot-${ts}.xgpybak`);
-  // 快照 = 全部域全量（含文件），但不包含运行日志以外也不排除任何目录
+  // 快照 = 全部域全量（含 files/uploads），不排除任何目录
   const registry = await buildRegistry(pool);
-  const allIds = registry.map(d => d.id);
+  // 注意：注册表里没有 files 域（它不是一个表域），必须显式补上，否则快照 file_mode 会是 none、不含任何文件
+  const allIds = [...registry.map(d => d.id), 'files'];
   const out = fs.createWriteStream(file);
   const result = await writeBackup(pool, uploadsDir, path.dirname(backupsDir), { domainIds: allIds, fileMode: 'full', excludeDirs: [] }, out);
   // 只保留最近 5 份
@@ -362,9 +380,15 @@ async function runImport(pool, uploadsDir, backupsDir, zipPath, plan) {
 
     const conn = await pool.getConnection();
     let importedFiles = null;
+    let txOpen = false; // 事务是否已开启：失败时必须回滚，绝不能让"持锁的未结束事务"跟着连接回到连接池
     try {
       await conn.query('SET FOREIGN_KEY_CHECKS = 0');
+      // 撞锁时尽快失败，别按默认 50s 挂死（可用 DB_IMPORT_LOCK_WAIT_TIMEOUT 覆盖，冒烟测试用它压到几秒）
+      const lockWait = Number.parseInt(process.env.DB_IMPORT_LOCK_WAIT_TIMEOUT, 10) || 30;
+      await conn.query(`SET SESSION innodb_lock_wait_timeout = ${Number.isFinite(lockWait) && lockWait > 0 ? lockWait : 30}`);
+      await conn.query(`SET SESSION lock_wait_timeout = ${Number.isFinite(lockWait) && lockWait > 0 ? lockWait : 30}`);
       await conn.beginTransaction();
+      txOpen = true;
       for (const d of manifest.domains || []) {
         const mode = plan.modes[d.id];
         if (!mode || mode === 'skip') continue;
@@ -377,11 +401,14 @@ async function runImport(pool, uploadsDir, backupsDir, zipPath, plan) {
           }
           let rows;
           try { rows = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { rows = []; }
-          // 当前库的列集合（包可能来自更新版本，多余列跳过）
-          const [cols] = await conn.query(`SHOW COLUMNS FROM \`${t.table}\``);
-          const colNames = cols.map(c => c.Field);
-          const colTypes = Object.fromEntries(cols.map(c => [c.Field, String(c.Type).toLowerCase()]));
-          const useCols = rows.length > 0 ? Object.keys(rows[0]).filter(k => colNames.includes(k)) : [];
+          // 当前库的可写列：包若来自更新版本，多余列跳过；生成列必须剔除，否则 INSERT 直接报 3105
+          const { writable, generated, types: colTypes } = await getTableColumns(conn, t.table);
+          const writableSet = new Set(writable);
+          const useCols = rows.length > 0 ? Object.keys(rows[0]).filter(k => writableSet.has(k)) : [];
+          if (rows.length > 0) {
+            const dropped = generated.filter(g => Object.prototype.hasOwnProperty.call(rows[0], g));
+            if (dropped.length > 0) report.warnings.push(`${t.table}：包内的生成列 ${dropped.join('、')} 已跳过，由目标库自行计算`);
+          }
 
           let deleted = 0;
           let inserted = 0;
@@ -404,13 +431,24 @@ async function runImport(pool, uploadsDir, backupsDir, zipPath, plan) {
         }
       }
       await conn.commit();
-    } catch (e) {
+      txOpen = false;
       await conn.query('SET FOREIGN_KEY_CHECKS = 1').catch(() => {});
-      conn.release();
+    } catch (e) {
+      if (txOpen) {
+        try { await conn.rollback(); } catch { /* 回滚失败也要继续复位并归还连接 */ }
+        txOpen = false;
+      }
+      await conn.query('SET FOREIGN_KEY_CHECKS = 1').catch(() => {});
+      if (e && (e.errno === 1205 || e.errno === 1213)) {
+        const hint = new Error(`目标库存在未结束的事务/锁（${e.errno === 1205 ? '等待锁超时' : '死锁'}），本次导入已整体回滚，数据保持原样。`
+          + `请重启后端服务或等持锁事务结束后再试。原始错误：${e.message}`);
+        hint.errno = e.errno;
+        throw hint;
+      }
       throw e;
+    } finally {
+      conn.release();
     }
-    await conn.query('SET FOREIGN_KEY_CHECKS = 1');
-    conn.release();
 
     // 文件域：增改不删
     if (wantFiles && manifest.file_mode === 'full') {
@@ -442,6 +480,27 @@ async function runImport(pool, uploadsDir, backupsDir, zipPath, plan) {
   }
 }
 
+// 清理临时目录：孤儿解压目录 + 超期上传包（导入被中断/预览后没执行时会残留）
+// 只清理超过 maxAgeMs 的，避免打断正在进行的导入
+function cleanupTemp(tmpDir, maxAgeMs = 6 * 60 * 60 * 1000) {
+  const removed = { dirs: 0, files: 0 };
+  if (!fs.existsSync(tmpDir)) return removed;
+  for (const name of fs.readdirSync(tmpDir)) {
+    const full = path.join(tmpDir, name);
+    try {
+      if (Date.now() - fs.statSync(full).mtimeMs <= maxAgeMs) continue;
+      if (name.startsWith('extract-') && fs.statSync(full).isDirectory()) {
+        fs.rmSync(full, { recursive: true, force: true });
+        removed.dirs++;
+      } else if (name.startsWith('import-') && name.endsWith('.xgpybak')) {
+        fs.unlinkSync(full);
+        removed.files++;
+      }
+    } catch { /* 单个文件失败不影响整体 */ }
+  }
+  return removed;
+}
+
 module.exports = {
   buildRegistry,
   getExportMeta,
@@ -451,5 +510,7 @@ module.exports = {
   listSnapshots,
   previewImport,
   runImport,
+  cleanupTemp,
+  getTableColumns,
   SKIP_TABLES,
 };

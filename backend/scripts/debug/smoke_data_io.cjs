@@ -9,19 +9,98 @@
  *   E. 文件域仅清单模式
  *   F. 排除目录
  *   G. 导入前自动快照
+ *   H. 生成列（exchange_records.exchanged_date）：导出剔除 + 旧包导入不报 3105 且值由目标库算出
+ *   I. 中途失败必须整体回滚、不留残锁（不泄漏未结束事务）
+ *   J. 撞锁时快速失败并给出中文提示
+ *   K. 导入前快照确实含 uploads 文件
+ *   L. 临时目录清理（孤儿解压目录 + 超期上传包）
  *
  * 运行：先启动后端（node src/index.js），再 node scripts/debug/smoke_data_io.cjs
+ * 提示：以 DB_IMPORT_LOCK_WAIT_TIMEOUT=3 启动后端可让 J 用例几秒内跑完（默认 30s）
  */
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const mysql = require('mysql2/promise');
+const archiver = require('archiver');
+const yauzl = require('yauzl');
+const dataIO = require('../../src/data-io');
 
 const BASE = process.env.SMOKE_BASE || 'http://127.0.0.1:3101';
 const DB = { host: '127.0.0.1', port: 3306, user: 'root', password: '122201', database: 'xgpy' };
 const TMP = path.join(__dirname, 'tmp-dio');
 const failures = [];
 let passed = 0;
+
+// 与 data-io.js 一致的序列化：Date → 'YYYY-MM-DD HH:MM:SS'，Buffer → base64 标记
+function ser(row) {
+  const p = (n) => String(n).padStart(2, '0');
+  const out = {};
+  for (const [k, v] of Object.entries(row)) {
+    if (v === null || v === undefined) { out[k] = null; continue; }
+    if (v instanceof Date) {
+      out[k] = `${v.getFullYear()}-${p(v.getMonth() + 1)}-${p(v.getDate())} ${p(v.getHours())}:${p(v.getMinutes())}:${p(v.getSeconds())}`;
+      continue;
+    }
+    if (Buffer.isBuffer(v)) { out[k] = { __buffer_b64: v.toString('base64') }; continue; }
+    out[k] = v;
+  }
+  return out;
+}
+
+function manifestOf(domains, extra = {}) {
+  return JSON.stringify({
+    format: 'xgpybak', version: 1,
+    platform_version: require('../../package.json').version,
+    exported_at: new Date().toISOString(),
+    file_mode: 'none', exclude_dirs: [], domains, files: [],
+    ...extra,
+  });
+}
+
+// 手工打包（构造旧版本包 / 故障包用）
+function makePackage(zipPath, entries) {
+  return new Promise((resolve, reject) => {
+    const out = fs.createWriteStream(zipPath);
+    const arc = archiver('zip', { zlib: { level: 1 } });
+    out.on('close', () => resolve(zipPath));
+    arc.on('error', reject);
+    out.on('error', reject);
+    arc.pipe(out);
+    for (const [name, data] of Object.entries(entries)) arc.append(data, { name });
+    arc.finalize();
+  });
+}
+
+function readZipEntry(zipPath, entryName) {
+  return new Promise((resolve, reject) => {
+    yauzl.open(zipPath, { lazyEntries: true }, (err, zip) => {
+      if (err) return reject(err);
+      zip.readEntry();
+      zip.on('entry', (e) => {
+        if (e.fileName === entryName) {
+          zip.openReadStream(e, (er, rs) => {
+            if (er) return reject(er);
+            const bufs = [];
+            rs.on('data', (d) => bufs.push(d));
+            rs.on('end', () => { zip.close(); resolve(Buffer.concat(bufs)); });
+          });
+        } else zip.readEntry();
+      });
+      zip.on('end', () => resolve(null));
+      zip.on('error', reject);
+    });
+  });
+}
+
+// multipart 执行导入（直传文件，不走预览复用）
+function executeWithFile(zipPath, modes, auth) {
+  const fd = new FormData();
+  fd.append('file', new Blob([fs.readFileSync(zipPath)]), path.basename(zipPath));
+  fd.append('modes', JSON.stringify(modes));
+  fd.append('confirm', 'yes');
+  return api('/api/admin/data-io/import/execute', { method: 'POST', headers: auth, body: fd });
+}
 
 function assert(name, cond, extra = '') {
   if (cond) { passed++; console.log(`  ✓ ${name}`); }
@@ -229,6 +308,105 @@ async function main() {
   console.log('\n--- G. 快照 ---');
   const snaps = await api('/api/admin/data-io/snapshots', { headers: AUTH });
   assert('快照列表 200 且非空', snaps.status === 200 && (snaps.json?.data || []).length > 0);
+
+  // ---- H. 生成列 ----
+  console.log('\n--- H. 生成列（exchange_records.exchanged_date） ---');
+  const expP = await api('/api/admin/data-io/export?domains=points', { headers: AUTH, raw: true });
+  const zipP = path.join(TMP, 'points.xgpybak');
+  fs.writeFileSync(zipP, Buffer.from(await expP.res.arrayBuffer()));
+  const pkgEx = JSON.parse((await readZipEntry(zipP, 'data/exchange_records.json')).toString('utf8'));
+  assert('导出包已剔除生成列 exchanged_date', pkgEx.length > 0 && !('exchanged_date' in pkgEx[0]),
+    JSON.stringify(Object.keys(pkgEx[0] || {})));
+
+  const [exRows] = await conn.query('SELECT * FROM exchange_records');
+  assert('exchange_records 有测试数据', exRows.length > 0, `rows=${exRows.length}`);
+  const legacyJson = JSON.stringify(exRows.map(ser));
+  assert('构造的老包 JSON 里确实带生成列', legacyJson.includes('exchanged_date'));
+  const legacyZip = await makePackage(path.join(TMP, 'legacy-points.xgpybak'), {
+    'manifest.json': manifestOf([{ id: 'points', name: '积分与游戏化', tables: [{ table: 'exchange_records', rows: exRows.length }] }]),
+    'data/exchange_records.json': legacyJson,
+  });
+  const exH = await executeWithFile(legacyZip, { points: 'overwrite' }, AUTH);
+  assert('含生成列的旧包导入不再报 3105', exH.status === 200, JSON.stringify(exH.json?.error));
+  assert('导入报告提示生成列已跳过', (exH.json?.data?.warnings || []).some((w) => w.includes('生成列')),
+    JSON.stringify(exH.json?.data?.warnings));
+  const [[genBad]] = await conn.query('SELECT COUNT(*) c FROM exchange_records WHERE exchanged_date IS NULL OR exchanged_date <> DATE(exchanged_at)');
+  assert('生成列由目标库重新计算且全部正确', genBad.c === 0, `bad=${genBad.c}`);
+  const [[cntEx]] = await conn.query('SELECT COUNT(*) n FROM exchange_records');
+  assert('exchange_records 行数保真', cntEx.n === exRows.length, `${cntEx.n} vs ${exRows.length}`);
+
+  // ---- I. 中途失败必须整体回滚 ----
+  console.log('\n--- I. 中途失败 → 整体回滚、不留残锁 ---');
+  const [profRows] = await conn.query('SELECT * FROM profiles');
+  const [kpRows] = await conn.query('SELECT * FROM knowledge_points LIMIT 2');
+  if (kpRows.length < 1) {
+    console.log('  ! knowledge_points 无数据，跳过本用例');
+  } else {
+    const dup = kpRows.length >= 2 ? [ser(kpRows[0]), ser(kpRows[1]), ser(kpRows[0])] : [ser(kpRows[0]), ser(kpRows[0])];
+    const badZip = await makePackage(path.join(TMP, 'bad-order.xgpybak'), {
+      'manifest.json': manifestOf([{
+        id: 'accounts', name: '学生账号',
+        tables: [{ table: 'profiles', rows: profRows.length }, { table: 'knowledge_points', rows: dup.length }],
+      }]),
+      'data/profiles.json': JSON.stringify(profRows.map(ser)),
+      'data/knowledge_points.json': JSON.stringify(dup),
+    });
+    const exI = await executeWithFile(badZip, { accounts: 'overwrite' }, AUTH);
+    assert('第二张表重复主键 → 导入失败 500', exI.status === 500, `status=${exI.status} err=${exI.json?.error}`);
+    const [[afterP]] = await conn.query('SELECT COUNT(*) n FROM profiles');
+    assert('第一张表已做的删除/插入被回滚（行数不变）', afterP.n === profRows.length, `${afterP.n} vs ${profRows.length}`);
+    const [[trxI]] = await conn.query('SELECT COUNT(*) n FROM information_schema.innodb_trx');
+    assert('失败后没有残留事务（未泄漏未结束事务）', trxI.n === 0, `trx=${trxI.n}`);
+  }
+
+  // ---- J. 撞锁快速失败 ----
+  console.log('\n--- J. 撞锁 → 快速失败 + 中文提示 ---');
+  const locker = await mysql.createConnection(DB);
+  await locker.query('START TRANSACTION');
+  await locker.query('UPDATE exchange_records SET id = id');
+  const lockZip = await makePackage(path.join(TMP, 'points-locked.xgpybak'), {
+    'manifest.json': manifestOf([{ id: 'points', name: '积分与游戏化', tables: [{ table: 'exchange_records', rows: exRows.length }] }]),
+    'data/exchange_records.json': JSON.stringify(exRows.map(ser)),
+  });
+  const t0 = Date.now();
+  const exJ = await executeWithFile(lockZip, { points: 'overwrite' }, AUTH);
+  const cost = (Date.now() - t0) / 1000;
+  await locker.query('ROLLBACK');
+  await locker.end();
+  assert('撞锁导入失败 500', exJ.status === 500, `status=${exJ.status}`);
+  assert('错误信息是可读中文提示', /未结束的事务|等待锁超时|死锁/.test(exJ.json?.error || ''), exJ.json?.error);
+  console.log(`  · 撞锁失败耗时 ${cost.toFixed(1)}s（由后端 DB_IMPORT_LOCK_WAIT_TIMEOUT 决定上限）`);
+  const [[cntJ]] = await conn.query('SELECT COUNT(*) n FROM exchange_records');
+  assert('撞锁失败后数据完好（DELETE 已回滚）', cntJ.n === exRows.length, `${cntJ.n} vs ${exRows.length}`);
+  const [[trxJ]] = await conn.query('SELECT COUNT(*) n FROM information_schema.innodb_trx');
+  assert('撞锁失败后无残留事务', trxJ.n === 0, `trx=${trxJ.n}`);
+
+  // ---- K. 快照含 uploads ----
+  console.log('\n--- K. 导入前快照含文件 ---');
+  const snapsK = await api('/api/admin/data-io/snapshots', { headers: AUTH });
+  const newest = (snapsK.json?.data || [])[0];
+  assert('快照列表非空', !!newest);
+  if (newest) {
+    const snapRaw = await readZipEntry(path.join(__dirname, '..', '..', 'backups', newest.name), 'manifest.json');
+    const snapManifest = JSON.parse(snapRaw.toString('utf8'));
+    assert('快照 file_mode = full（含 uploads 本体）', snapManifest.file_mode === 'full', `file_mode=${snapManifest.file_mode}`);
+    assert('快照 manifest 含文件清单', (snapManifest.files || []).length > 0, `files=${(snapManifest.files || []).length}`);
+  }
+
+  // ---- L. 临时目录清理 ----
+  console.log('\n--- L. 临时目录清理 ---');
+  const gcDir = path.join(TMP, 'gc');
+  fs.mkdirSync(path.join(gcDir, 'extract-smoke-old'), { recursive: true });
+  fs.writeFileSync(path.join(gcDir, 'extract-smoke-old', 'dummy.txt'), 'x');
+  fs.writeFileSync(path.join(gcDir, 'import-smoke-old.xgpybak'), 'x');
+  fs.writeFileSync(path.join(gcDir, 'import-smoke-fresh.xgpybak'), 'x');
+  const oldStamp = Date.now() / 1000 - 10 * 3600;
+  fs.utimesSync(path.join(gcDir, 'extract-smoke-old'), oldStamp, oldStamp);
+  fs.utimesSync(path.join(gcDir, 'import-smoke-old.xgpybak'), oldStamp, oldStamp);
+  const gc = dataIO.cleanupTemp(gcDir);
+  assert('清理孤儿解压目录', !fs.existsSync(path.join(gcDir, 'extract-smoke-old')) && gc.dirs >= 1, JSON.stringify(gc));
+  assert('清理超期上传包', !fs.existsSync(path.join(gcDir, 'import-smoke-old.xgpybak')) && gc.files >= 1, JSON.stringify(gc));
+  assert('未超期的上传包保留', fs.existsSync(path.join(gcDir, 'import-smoke-fresh.xgpybak')));
 
   // ---- 清理 ----
   console.log('\n--- 清理 ---');

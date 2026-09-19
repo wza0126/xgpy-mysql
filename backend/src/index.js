@@ -1912,6 +1912,11 @@ const dataIO = require('./data-io');
 const backupsDir = path.join(appBaseDir, 'backups');
 const importTmpDir = path.join(appBaseDir, 'tmp-data-io');
 if (!fs.existsSync(importTmpDir)) fs.mkdirSync(importTmpDir, { recursive: true });
+// 启动时清一次残留（导入被强杀/中断会留下解压目录与上传包）
+try {
+  const gc = dataIO.cleanupTemp(importTmpDir);
+  if (gc.dirs || gc.files) console.log('[data-io] 启动清理临时文件 dirs=', gc.dirs, 'files=', gc.files);
+} catch { /* 忽略 */ }
 
 const importUpload = multer({
   storage: multer.diskStorage({
@@ -1976,14 +1981,10 @@ app.post('/api/admin/data-io/import/preview', authenticate, requireTeachingRole,
 
 // 执行导入：两种方式二选一 —— ① 重新上传包（multipart file 字段）；② 复用预览时上传的临时文件（JSON body.reuse_file）
 app.post('/api/admin/data-io/import/execute', authenticate, requireTeachingRole, importUpload.single('file'), async (req, res) => {
-  // 清理超过 2 小时的遗留临时文件
+  // 清理残留临时文件（孤儿解压目录 + 超期上传包），只清 2 小时以上的，不碰正在进行的导入
   try {
-    const staleMs = 2 * 60 * 60 * 1000;
-    for (const f of fs.readdirSync(importTmpDir)) {
-      const fp = path.join(importTmpDir, f);
-      const st = fs.statSync(fp);
-      if (Date.now() - st.mtimeMs > staleMs) fs.unlink(fp, () => {});
-    }
+    const gc = dataIO.cleanupTemp(importTmpDir, 2 * 60 * 60 * 1000);
+    if (gc.dirs || gc.files) console.log('[data-io] 清理临时文件 dirs=', gc.dirs, 'files=', gc.files);
   } catch { /* 忽略 */ }
 
   let zipPath = null;
