@@ -1917,6 +1917,12 @@ try {
   const gc = dataIO.cleanupTemp(importTmpDir);
   if (gc.dirs || gc.files) console.log('[data-io] 启动清理临时文件 dirs=', gc.dirs, 'files=', gc.files);
 } catch { /* 忽略 */ }
+// 启动时也把历史堆积的快照裁到保留份数（早期版本按文件名排序清理，同秒多份时会漏删导致目录膨胀）
+try {
+  const keep = Math.max(1, Number.parseInt(process.env.DB_SNAPSHOT_KEEP, 10) || 5);
+  const removed = dataIO.pruneSnapshots(backupsDir, keep);
+  if (removed > 0) console.log(`[data-io] 启动清理旧快照 ${removed} 份（保留 ${keep} 份）`);
+} catch { /* 忽略 */ }
 
 const importUpload = multer({
   storage: multer.diskStorage({

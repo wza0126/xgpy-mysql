@@ -6,6 +6,7 @@
 //  - 文件域"增改不删"：包内文件写入并覆盖同名，本地多出的文件保留
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 const archiver = require('archiver');
 const yauzl = require('yauzl');
 
@@ -223,34 +224,117 @@ async function exportToResponse(pool, uploadsDir, appBaseDir, opts, res) {
 }
 
 // 导出为本地快照文件（导入前自动备份）
+// 可通过环境变量调节（生产 uploads 很大时，含文件的快照会迅速吃掉磁盘）：
+//   DB_SNAPSHOT_INCLUDE_FILES=0  快照只备份数据库表，不含 uploads（省空间；但恢复时文件回不来）
+//   DB_SNAPSHOT_KEEP=5           保留最近多少份（默认 5）
 async function createSnapshot(pool, uploadsDir, backupsDir) {
   if (!fs.existsSync(backupsDir)) fs.mkdirSync(backupsDir, { recursive: true });
   const ts = fmtDateTime(new Date()).replace(/[-: ]/g, '').slice(0, 14);
   const file = path.join(backupsDir, `snapshot-${ts}.xgpybak`);
-  // 快照 = 全部域全量（含 files/uploads），不排除任何目录
+  // 是否把 uploads 一起打进快照。默认含文件（行为与 2.3.0~2.3.3 一致，保证可整库还原）；
+  // 显式设为 0/false/no/off 时改为"只备份数据表"，快照体积从 uploads 量级降到数据量级。
+  const includeFiles = !['0', 'false', 'no', 'off'].includes(
+    String(process.env.DB_SNAPSHOT_INCLUDE_FILES ?? '1').trim().toLowerCase()
+  );
+  const keep = Math.max(1, Number.parseInt(process.env.DB_SNAPSHOT_KEEP, 10) || 5);
+  // 快照 = 全部域全量，是否含 files/uploads 由开关决定，不排除任何目录
   const registry = await buildRegistry(pool);
   // 注意：注册表里没有 files 域（它不是一个表域），必须显式补上，否则快照 file_mode 会是 none、不含任何文件
-  const allIds = [...registry.map(d => d.id), 'files'];
+  const allIds = includeFiles ? [...registry.map(d => d.id), 'files'] : registry.map(d => d.id);
   const out = fs.createWriteStream(file);
   const result = await writeBackup(pool, uploadsDir, path.dirname(backupsDir), { domainIds: allIds, fileMode: 'full', excludeDirs: [] }, out);
-  // 只保留最近 5 份
-  const snaps = fs.readdirSync(backupsDir).filter(f => f.startsWith('snapshot-') && f.endsWith('.xgpybak')).sort();
-  while (snaps.length > 5) {
-    const old = snaps.shift();
-    try { fs.unlinkSync(path.join(backupsDir, old)); } catch { /* 忽略 */ }
+  // 只保留最近 keep 份（按 mtime，避免同秒多份时排序失效）
+  pruneSnapshots(backupsDir, keep);
+  return { file, bytes: result.bytes, include_files: includeFiles };
+}
+
+// 清理超出保留份数的旧快照。
+// 必须按 mtime 排序而不是文件名：同一秒内可能生成多份（文件名时间戳只到秒），
+// 按名字排序在时间戳相同时顺序未定义，会导致"保留 5 份"失效、目录无限膨胀。
+function pruneSnapshots(backupsDir, keep) {
+  if (!fs.existsSync(backupsDir)) return 0;
+  const items = fs.readdirSync(backupsDir)
+    .filter(f => f.startsWith('snapshot-') && f.endsWith('.xgpybak'))
+    .map(f => {
+      const full = path.join(backupsDir, f);
+      let mtime = 0;
+      try { mtime = fs.statSync(full).mtimeMs; } catch { /* 忽略 */ }
+      return { f, full, mtime };
+    })
+    .sort((a, b) => b.mtime - a.mtime); // 新的在前
+  let removed = 0;
+  for (const it of items.slice(keep)) {
+    try { fs.unlinkSync(it.full); removed++; } catch { /* 忽略 */ }
   }
-  return { file, bytes: result.bytes };
+  return removed;
 }
 
 function listSnapshots(backupsDir) {
   if (!fs.existsSync(backupsDir)) return [];
   return fs.readdirSync(backupsDir)
     .filter(f => f.startsWith('snapshot-') && f.endsWith('.xgpybak'))
-    .sort().reverse()
     .map(f => {
-      const st = fs.statSync(path.join(backupsDir, f));
-      return { name: f, size: st.size, created_at: st.mtime.toISOString() };
-    });
+      const full = path.join(backupsDir, f);
+      let st = { size: 0, mtime: new Date(0) };
+      try { st = fs.statSync(full); } catch { /* 忽略 */ }
+      // 读出 manifest 的 file_mode，让界面能区分"含文件的快照"与"仅数据表的快照"
+      let fileMode = 'unknown';
+      try {
+        const raw = readZipEntrySync(full, MANIFEST_NAME);
+        if (raw) fileMode = JSON.parse(raw.toString('utf8')).file_mode || 'none';
+      } catch { /* 读不出就留 unknown，不影响列表 */ }
+      return { name: f, size: st.size, created_at: st.mtime.toISOString(), file_mode: fileMode };
+    })
+    .sort((a, b) => b.created_at.localeCompare(a.created_at)); // 新的在前
+}
+
+// 同步读 zip 内单个 entry（用于列表这种小读取；包内 manifest 很小）
+function readZipEntrySync(zipPath, entryName) {
+  const fd = fs.openSync(zipPath, 'r');
+  try {
+    const stat = fs.fstatSync(fd);
+    const tailLen = Math.min(stat.size, 66 * 1024); // EOCD 定位：从尾部回扫
+    const tail = Buffer.alloc(tailLen);
+    fs.readSync(fd, tail, 0, tailLen, stat.size - tailLen);
+    let eocd = -1;
+    for (let i = tail.length - 22; i >= 0; i--) {
+      if (tail.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+    }
+    if (eocd < 0) return null;
+    const cdCount = tail.readUInt16LE(eocd + 10);
+    const cdSize = tail.readUInt32LE(eocd + 12);
+    const cdOffset = tail.readUInt32LE(eocd + 16);
+    const cd = Buffer.alloc(cdSize);
+    fs.readSync(fd, cd, 0, cdSize, cdOffset);
+    let p = 0;
+    for (let n = 0; n < cdCount && p + 46 <= cd.length; n++) {
+      if (cd.readUInt32LE(p) !== 0x02014b50) break;
+      const method = cd.readUInt16LE(p + 10);
+      const compSize = cd.readUInt32LE(p + 20);
+      const nameLen = cd.readUInt16LE(p + 28);
+      const extraLen = cd.readUInt16LE(p + 30);
+      const commentLen = cd.readUInt16LE(p + 32);
+      const localOffset = cd.readUInt32LE(p + 42);
+      const name = cd.toString('utf8', p + 46, p + 46 + nameLen);
+      if (name === entryName) {
+        // 读本地头拿到真实数据起点
+        const lh = Buffer.alloc(30);
+        fs.readSync(fd, lh, 0, 30, localOffset);
+        const lNameLen = lh.readUInt16LE(26);
+        const lExtraLen = lh.readUInt16LE(28);
+        const dataStart = localOffset + 30 + lNameLen + lExtraLen;
+        const raw = Buffer.alloc(compSize);
+        fs.readSync(fd, raw, 0, compSize, dataStart);
+        if (method === 0) return raw;
+        if (method === 8) return zlib.inflateRawSync(raw);
+        return null;
+      }
+      p += 46 + nameLen + extraLen + commentLen;
+    }
+    return null;
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 // yauzl 读取 zip 内单个 entry
@@ -393,7 +477,11 @@ async function runImport(pool, uploadsDir, backupsDir, zipPath, plan) {
     }
 
     const snapshot = await createSnapshot(pool, uploadsDir, backupsDir);
-    report.snapshot = { name: path.basename(snapshot.file), size: snapshot.bytes };
+    report.snapshot = { name: path.basename(snapshot.file), size: snapshot.bytes, include_files: snapshot.include_files };
+    if (!snapshot.include_files) {
+      report.warnings.push('本次导入前快照未包含 uploads 文件资源（DB_SNAPSHOT_INCLUDE_FILES=0），'
+        + '该快照可还原数据表，但无法还原已上传的图片/视频等文件。');
+    }
 
     // 只解压被选中域需要的 data/*.json；有文件域时全包解压
     const needed = new Set();
@@ -586,6 +674,7 @@ module.exports = {
   writeBackup,
   createSnapshot,
   listSnapshots,
+  pruneSnapshots,
   previewImport,
   runImport,
   cleanupTemp,
