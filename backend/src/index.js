@@ -2024,7 +2024,7 @@ app.post('/api/admin/data-io/import/execute', authenticate, requireTeachingRole,
     res.json({ data: report, error: null });
   } catch (error) {
     console.error('Error in POST /api/admin/data-io/import/execute:', error);
-    const status = error && error.code === 'EMPTY_OVERWRITE_BLOCKED' ? 400 : 500;
+    const status = (error && (error.code === 'EMPTY_OVERWRITE_BLOCKED' || error.code === 'TRUNCATED_PACKAGE_BLOCKED')) ? 400 : 500;
     res.status(status).json({ data: null, error: `导入失败: ${error.message}` });
   } finally {
     cleanup();

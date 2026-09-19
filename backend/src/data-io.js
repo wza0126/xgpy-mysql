@@ -180,17 +180,21 @@ async function writeBackup(pool, uploadsDir, appBaseDir, opts, target) {
             // 显式列出可写列，剔除生成列（生成列由目标库自行计算，写入即报错）
             const { writable } = await getTableColumns(pool, t);
             const selectCols = writable.length > 0 ? writable.map(c => `\`${c}\``).join(',') : 'NULL';
+            // 【重要】整表只能有一个 zip 条目。
+            // 历史上这里每批 500 行都用同一个 name（data/<table>.json）append 一次，
+            // zip 允许多个同名条目、但解压时只有最后一条生效 —— 结果 >500 行的表被静默截断成"最后一批"，
+            // 覆盖导入后行数骤减（如 questions 1107 → 107）。必须把各批拼成同一个 JSON 数组后再写一次。
+            const chunks = [];
             for (;;) {
               const [rows] = await pool.query(`SELECT ${selectCols} FROM \`${t}\` LIMIT ? OFFSET ?`, [BATCH, offset]);
               if (rows.length === 0) break;
               total += rows.length;
-              archive.append(JSON.stringify(rows.map(serializeRow)), { name: `${DATA_PREFIX}${t}.json` });
+              chunks.push(JSON.stringify(rows.map(serializeRow)).slice(1, -1)); // 去掉 [ ]
               offset += BATCH;
               if (rows.length < BATCH) break;
             }
-            if (total === 0) {
-              archive.append('[]', { name: `${DATA_PREFIX}${t}.json` });
-            }
+            archive.append(total === 0 ? '[]' : `[${chunks.join(',')}]`, { name: `${DATA_PREFIX}${t}.json` });
+            chunks.length = 0;
           }
         }
         if (includeFiles && fileMode === 'full') {
@@ -401,6 +405,45 @@ async function runImport(pool, uploadsDir, backupsDir, zipPath, plan) {
     }
     const wantFiles = plan.modes.files === 'overwrite' || plan.modes.files === 'append';
     await extractZip(zipPath, tmpDir);
+
+    // 旧包数据截断检测：
+    // 2.3.2 及更早的导出把每批 500 行用同一个 zip 条目名写入，解压后只剩最后一批
+    // （manifest 里记的是真实总行数）。这里逐表比对"manifest 声明行数 vs 解出文件实际行数"：
+    //   - 追加模式：只提示（INSERT IGNORE 不会删本地数据，最多是少进一些行）
+    //   - 覆盖模式：直接阻止（DELETE 会先把本地整表清掉，再只插回残缺的一批 → 灾难性丢数据）
+    const truncationBlocked = [];
+    for (const d of manifest.domains || []) {
+      if (d.id === 'files') continue;
+      const mode = plan.modes[d.id];
+      if (!mode || mode === 'skip') continue;
+      for (const t of (d.tables || [])) {
+        const declared = t.rows || 0;
+        if (declared <= 500) continue; // 未跨批次，老包也是完整的
+        const file = path.join(tmpDir, DATA_PREFIX + t.table + '.json');
+        if (!fs.existsSync(file)) continue;
+        let actual = -1;
+        try { actual = JSON.parse(fs.readFileSync(file, 'utf8')).length; } catch { actual = -1; }
+        if (actual >= 0 && actual < declared) {
+          const lost = declared - actual;
+          const msg = `${t.table}：备份包声明 ${declared} 行，包内实际只有 ${actual} 行（少了 ${lost} 行）`;
+          if (mode === 'overwrite') {
+            truncationBlocked.push(msg);
+          } else {
+            report.warnings.push(`【包数据不完整】${msg}。该包由 2.3.3 之前的版本导出，`
+              + `超过 500 行的表被错误截断；追加模式下不影响本地已有数据，但只能补进这 ${actual} 行。`);
+          }
+        }
+      }
+    }
+    if (truncationBlocked.length > 0) {
+      const err = new Error('已阻止导入：备份包内以下表的数据不完整——' + truncationBlocked.join('；')
+        + '。这些包来自 2.3.3 之前的版本，导出时超过 500 行的表被错误截断，'
+        + '用"覆盖"方式导入会把当前库的整表清空成残缺内容。'
+        + '请用 2.3.3 及以上版本重新导出该库后再导入；'
+        + '若只想补充数据而不清空本地，请改用"追加"模式。');
+      err.code = 'TRUNCATED_PACKAGE_BLOCKED';
+      throw err;
+    }
 
     const conn = await pool.getConnection();
     let importedFiles = null;

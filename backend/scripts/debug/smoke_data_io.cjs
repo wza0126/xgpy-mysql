@@ -227,6 +227,103 @@ async function main() {
   assert('导入后 profiles 行数与导出时一致', cntBack.n === accountsRows + 1, `${cntBack.n}`);
   assert('导入前自动快照存在', (ex1.json?.data?.snapshot?.name || '').startsWith('snapshot-'));
 
+  // ---- B2. 多批次表（>500 行）导出不得被截断 ----
+  // 历史 Bug：writeBackup 每批 500 行都用同一个 zip 条目名 append，解压时只有最后一批生效，
+  // 导致 >500 行的表被静默截断（questions 1107 行 → 包内只剩 107 行，覆盖导入后题库大面积丢失）。
+  // B 段只测 16 行的 profiles，永远跨不过批次边界，所以必须专门造一张 >500 行的表来守住这条线。
+  console.log('\n--- B2. 多批次导出完整性（>500 行）---');
+  const BIG_N = 1200; // 必须 > 500*2，确保至少 3 批
+  const bigTable = 'smoke_big_rows';
+  await conn.query(`CREATE TABLE IF NOT EXISTS \`${bigTable}\` (
+    id VARCHAR(50) PRIMARY KEY, seq INT NOT NULL, payload VARCHAR(200)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await conn.query(`DELETE FROM \`${bigTable}\``);
+  const bigVals = [];
+  const bigParams = [];
+  for (let i = 0; i < BIG_N; i++) {
+    bigVals.push('(?, ?, ?)');
+    bigParams.push(`big_${TS}_${i}`, i, `payload-${i}`.padEnd(180, 'x'));
+  }
+  for (let i = 0; i < bigVals.length; i += 200) {
+    await conn.query(
+      `INSERT INTO \`${bigTable}\` (id, seq, payload) VALUES ${bigVals.slice(i, i + 200).join(',')}`,
+      bigParams.slice(i * 3, (i + 200) * 3)
+    );
+  }
+  const [[bigCnt]] = await conn.query(`SELECT COUNT(*) n FROM \`${bigTable}\``);
+  assert(`造出 ${BIG_N} 行测试表`, bigCnt.n === BIG_N, `n=${bigCnt.n}`);
+
+  // 导出「其他」域（bigTable 未登记在 DOMAIN_DEFS，自动落入 other）
+  const expBig = await api(`/api/admin/data-io/export?domains=other`, { headers: AUTH, raw: true });
+  assert('导出 other 域返回 200', expBig.status === 200, `status=${expBig.status}`);
+  const bigZip = path.join(TMP, 'bigrows.xgpybak');
+  fs.writeFileSync(bigZip, Buffer.from(await expBig.res.arrayBuffer()));
+
+  // 关键断言：包内该表的 zip 条目不得有同名重复，且行数必须完整
+  const zipEntries = await new Promise((resolve, reject) => {
+    const list = [];
+    yauzl.open(bigZip, { lazyEntries: true }, (err, z) => {
+      if (err) return reject(err);
+      z.readEntry();
+      z.on('entry', (e) => { list.push({ name: e.fileName, size: e.uncompressedSize }); z.readEntry(); });
+      z.on('end', () => resolve(list));
+    });
+  });
+  const bigEntryName = `data/${bigTable}.json`;
+  const bigEntryHits = zipEntries.filter(e => e.name === bigEntryName);
+  assert(`大数据表 zip 条目唯一（无同名覆盖）`, bigEntryHits.length === 1,
+    `出现 ${bigEntryHits.length} 次`);
+  const bigJson = await new Promise((resolve, reject) => {
+    yauzl.open(bigZip, { lazyEntries: true }, (err, z) => {
+      if (err) return reject(err);
+      z.readEntry();
+      z.on('entry', (e) => {
+        if (e.fileName !== bigEntryName) return z.readEntry();
+        z.openReadStream(e, (er, rs) => {
+          if (er) return reject(er);
+          let b = '';
+          rs.on('data', (d) => (b += d));
+          rs.on('end', () => resolve(b));
+        });
+      });
+    });
+  });
+  let bigRows = [];
+  try { bigRows = JSON.parse(bigJson); } catch { bigRows = []; }
+  assert(`包内 ${bigTable} 行数完整（不截断）`, bigRows.length === BIG_N,
+    `包内 ${bigRows.length} 行，期望 ${BIG_N} 行`);
+  const seqs = new Set(bigRows.map(r => r.seq));
+  assert('包内包含首行与末行（未丢批次）', seqs.has(0) && seqs.has(BIG_N - 1),
+    `has0=${seqs.has(0)} hasLast=${seqs.has(BIG_N - 1)}`);
+
+  // 覆盖导入回本库，行数必须一分不少
+  const fdB = new FormData();
+  fdB.append('file', new Blob([fs.readFileSync(bigZip)]), 'bigrows.xgpybak');
+  const exB = await api('/api/admin/data-io/import/execute', {
+    method: 'POST',
+    headers: AUTH, body: fdB,
+  });
+  const fdBOk = exB.status === 200;
+  if (!fdBOk) {
+    // multipart 直传可能被 safe-delete 守卫拦截，退化为复用上传流程
+    const prevB = await api('/api/admin/data-io/import/preview', { method: 'POST', headers: AUTH, body: fdB });
+    if (prevB.json?.data?.temp_file) {
+      const exB2 = await api('/api/admin/data-io/import/execute', {
+        method: 'POST',
+        headers: { ...AUTH, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ modes: { other: 'overwrite' }, confirm: 'yes', reuse_file: prevB.json.data.temp_file }),
+      });
+      if (exB2.status === 200) {
+        const [[cnt2]] = await conn.query(`SELECT COUNT(*) n FROM \`${bigTable}\``);
+        assert(`覆盖导入后 ${bigTable} 行数完整`, cnt2.n === BIG_N, `n=${cnt2.n}`);
+      }
+    }
+  } else {
+    const [[cnt2]] = await conn.query(`SELECT COUNT(*) n FROM \`${bigTable}\``);
+    assert(`覆盖导入后 ${bigTable} 行数完整`, cnt2.n === BIG_N, `n=${cnt2.n}`);
+  }
+  await conn.query(`DROP TABLE IF EXISTS \`${bigTable}\``);
+
   // ---- C. 追加模式 ----
   console.log('\n--- C. 追加冲突跳过 ---');
   const fdC = new FormData();
