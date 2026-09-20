@@ -1,6 +1,6 @@
 {
   "name": "xgpy-backend",
-  "version": "2.5.0",
+  "version": "2.5.1",
   "description": "XGPY Learning Platform Backend",
   "main": "src/index.js",
   "scripts": {
@@ -39,7 +39,8 @@
   },
   "pkg": {
     "assets": [
-      "exe-assets/frontend-dist/**/*"
+      "exe-assets/frontend-dist/**/*",
+      "src/learn-content/**/*"
     ]
   },
   "allowScripts": {

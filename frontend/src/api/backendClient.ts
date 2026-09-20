@@ -84,7 +84,15 @@ async function fetchApi(endpoint, options = {}) {
     err.status = response.status;
     throw err;
   }
-  
+
+  // 支持 responseType: 'text' —— 用于下发 CSS 等非 JSON 资源。
+  // 注意：必须显式传 options.responseType，否则一律按 JSON 解析
+  //（历史 bug：学习模块请求讲义 CSS 时被 response.json() 解析，抛
+  //  "Unexpected token '.' ... is not valid JSON"，样式永远注入不进去）。
+  if (options.responseType === 'text') {
+    return response.text();
+  }
+
   return response.json();
 }
 
@@ -97,12 +105,17 @@ class MariaDBClient {
     return fetchApi('/api/health');
   }
 
-  async get(endpoint, params = {}) {
+  async get(endpoint, params = {}, options = {}) {
+    // 约定：params 全部作为 query string。需要非 JSON 响应时用第三个参数传
+    // options，例如 get('/x.css', {}, { responseType: 'text' })。
+    // ⚠️ 历史 bug：曾把 { responseType:'text' } 当 params 传进第二个参数，
+    //    结果拼成了 ?responseType=text 的查询串，options 根本没生效，
+    //    讲义 CSS 被 response.json() 解析失败，样式永远注入不进去。
     const queryString = Object.keys(params).map(key => 
       `${encodeURIComponent(key)}=${encodeURIComponent(params[key])}`
     ).join('&');
     const url = queryString ? `${endpoint}?${queryString}` : endpoint;
-    return fetchApi(url);
+    return fetchApi(url, options);
   }
 
   async post(endpoint, data = {}) {
@@ -720,7 +733,7 @@ export interface BackendQuery {
 
 export interface BackendClient {
   healthCheck(): Promise<any>;
-  get(endpoint: string, params?: any): Promise<any>;
+  get(endpoint: string, params?: any, options?: any): Promise<any>;
   post(endpoint: string, data?: any): Promise<any>;
   put(endpoint: string, data?: any): Promise<any>;
   delete(endpoint: string): Promise<any>;

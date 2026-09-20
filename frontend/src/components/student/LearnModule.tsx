@@ -17,6 +17,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
 import { getSelfTest } from '../../data/learnSelfTest';
 import { useDesktopStore } from '../../store/desktopStore';
+import { PracticeModule } from './PracticeModule';
 
 interface ChapterSection {
   name: string;
@@ -60,7 +61,7 @@ export const LearnModule: React.FC = () => {
   // 加载讲义样式（一次性）
   useEffect(() => {
     if (cssInjected || document.getElementById('xs-lecture-css')) { setCssInjected(true); return; }
-    backendClient.get('/api/student/learn-lecture.css', { responseType: 'text' })
+    backendClient.get('/api/student/learn-lecture.css', {}, { responseType: 'text' })
       .then((css: any) => {
         const text = typeof css === 'string' ? css : (css?.data ?? '');
         if (!text) return;
@@ -140,14 +141,18 @@ export const LearnModule: React.FC = () => {
   const goPractice = (clusterId?: string) => {
     const cid = clusterId || selectedChapter;
     if (!cid) return;
-    // 一级章 = 整章练习；二级 = 该小节练习
-    window.dispatchEvent(new CustomEvent('openPracticeWithCluster', { detail: { cluster_id: cid } }));
+    // 打开练习窗口，并通过 initialCluster 让组件首屏就套用章节筛选。
+    // 同时派发事件，兼容「练习窗口已经开着」的情况（组件已挂载，直接响应事件）。
+    // 【必须传 component】WindowFrame 渲染的是 window.component，
+    // 漏传会导致练习窗口整片空白（历史 bug）。
     useDesktopStore.getState().openWindow({
       id: 'practice',
       title: '练习',
       icon: 'fa-pen-to-square',
       color: 'bg-green-500',
+      component: <PracticeModule initialCluster={cid} />,
     } as any);
+    window.dispatchEvent(new CustomEvent('openPracticeWithCluster', { detail: { cluster_id: cid } }));
   };
 
   /** 标记已看（仅进度用，不再触发 buff） */

@@ -109,7 +109,16 @@ const parseTags = (tags: any): string[] => {
   return [];
 };
 
-export const PracticeModule: React.FC = () => {
+/** 把「章名」或「章名/小节名」转成练习筛选用的两级选中值 */
+const clusterToSelection = (cid: string | null | undefined) => {
+  if (!cid || typeof cid !== 'string') return null;
+  const parts = cid.split('/');
+  return parts.length === 1
+    ? { primary: [parts[0]], secondary: [] as string[] }   // 整章：只选一级
+    : { primary: [parts[0]], secondary: [cid] };           // 小节：一级 + 二级
+};
+
+export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialCluster }) => {
   const [questions, setQuestions] = useState<Question[]>([]);
   const [filteredQuestions, setFilteredQuestions] = useState<Question[]>([]);
   const [allTags, setAllTags] = useState<string[]>([]);
@@ -128,11 +137,15 @@ export const PracticeModule: React.FC = () => {
   const [sessionStats, setSessionStats] = useState({ correct: 0, total: 0 });
   const [loading, setLoading] = useState(true);
   const [showConfig, setShowConfig] = useState(true);
-  const [config, setConfig] = useState<PracticeConfig>({
-    order: 'random',
-    selectedTags: [],
-    selectedClusterPrimary: [],
-    selectedClusterSecondary: [],
+  // 从学习模块「去练习这一章」进入时，首屏就套用该章筛选
+  const [config, setConfig] = useState<PracticeConfig>(() => {
+    const sel = clusterToSelection(initialCluster);
+    return {
+      order: 'random',
+      selectedTags: [],
+      selectedClusterPrimary: sel?.primary ?? [],
+      selectedClusterSecondary: sel?.secondary ?? [],
+    };
   });
   const [masteredQuestionIds, setMasteredQuestionIds] = useState<Set<string>>(new Set());
   const [masterThreshold, setMasterThreshold] = useState(3);
@@ -157,8 +170,9 @@ export const PracticeModule: React.FC = () => {
   const [currentCritStreak, setCurrentCritStreak] = useState(0);
   const [currentWrong, setCurrentWrong] = useState(0);
   const [buffs, setBuffs] = useState<BuffInfo[]>([]);
+  // 从学习模块带筛选跳转而来的提示（关掉设置面板后清除）
+  const [filterFromLearn, setFilterFromLearn] = useState(false);
   const gameSystem = useGameSystem();
-
   // 同步 gameSystem.buffs 到本地状态
   useEffect(() => {
     setBuffs(gameSystem.buffs);
@@ -172,27 +186,24 @@ export const PracticeModule: React.FC = () => {
 
   // 学习模块「去练习这一章」：接收章节点选事件，自动套用 cluster 筛选并进入练习
   // detail.cluster_id 可以是「章名」（整章）或「章名/小节名」（单小节）
+  // 组件首次挂载时由 initialCluster 初始化（见 config 的 useState），此处负责
+  // 「练习窗口已经开着、再点另一章」的情况。
   useEffect(() => {
     const handler = (e: Event) => {
       const cid = (e as CustomEvent).detail?.cluster_id;
-      if (!cid || typeof cid !== 'string') return;
-      const parts = cid.split('/');
-      if (parts.length === 1) {
-        // 整章：只选一级
-        setConfig(prev => ({ ...prev, selectedClusterPrimary: [parts[0]], selectedClusterSecondary: [] }));
-      } else {
-        // 小节：一级 + 二级同时选
-        setConfig(prev => ({ ...prev, selectedClusterPrimary: [parts[0]], selectedClusterSecondary: [cid] }));
-      }
+      const sel = clusterToSelection(cid);
+      if (!sel) return;
+      setConfig(prev => ({
+        ...prev,
+        selectedClusterPrimary: sel.primary,
+        selectedClusterSecondary: sel.secondary,
+      }));
       setShowConfig(true);
       setFilterFromLearn(true);
     };
     window.addEventListener('openPracticeWithCluster', handler);
     return () => window.removeEventListener('openPracticeWithCluster', handler);
   }, []);
-
-  // 从学习模块带筛选跳转而来的提示（关掉设置面板后清除）
-  const [filterFromLearn, setFilterFromLearn] = useState(false);
 
   // 在显示设置界面时重新获取配置
   useEffect(() => {
