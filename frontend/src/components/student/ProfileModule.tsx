@@ -563,7 +563,7 @@ export const ProfileModule: React.FC = () => {
                   <p className="text-lg font-bold text-blue-700">{gameSystem.honorStats.studious_times ?? 0}</p>
                   <p className="text-xs text-gray-600">勤学好问</p>
                   <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 bg-gray-800 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10 pointer-events-none shadow-lg">
-                    学习10个问题
+                    当天 AI 答疑成功提问满 10 次（每天一次）
                     <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-800"></div>
                   </div>
                 </div>

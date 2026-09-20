@@ -170,6 +170,30 @@ export const PracticeModule: React.FC = () => {
     fetchPointsConfig();
   }, []);
 
+  // 学习模块「去练习这一章」：接收章节点选事件，自动套用 cluster 筛选并进入练习
+  // detail.cluster_id 可以是「章名」（整章）或「章名/小节名」（单小节）
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const cid = (e as CustomEvent).detail?.cluster_id;
+      if (!cid || typeof cid !== 'string') return;
+      const parts = cid.split('/');
+      if (parts.length === 1) {
+        // 整章：只选一级
+        setConfig(prev => ({ ...prev, selectedClusterPrimary: [parts[0]], selectedClusterSecondary: [] }));
+      } else {
+        // 小节：一级 + 二级同时选
+        setConfig(prev => ({ ...prev, selectedClusterPrimary: [parts[0]], selectedClusterSecondary: [cid] }));
+      }
+      setShowConfig(true);
+      setFilterFromLearn(true);
+    };
+    window.addEventListener('openPracticeWithCluster', handler);
+    return () => window.removeEventListener('openPracticeWithCluster', handler);
+  }, []);
+
+  // 从学习模块带筛选跳转而来的提示（关掉设置面板后清除）
+  const [filterFromLearn, setFilterFromLearn] = useState(false);
+
   // 在显示设置界面时重新获取配置
   useEffect(() => {
     if (showConfig) {

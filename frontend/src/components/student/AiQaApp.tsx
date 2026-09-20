@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { useAuth } from '../../hooks/useAuth';
 import { backendClient } from '../../api/backendClient';
 import { useDesktopStore } from '../../store/desktopStore';
+import { useGameEventStore } from '../../store/gameEventStore';
 
 /** 测试 / 课堂任务窗口打开期间的答疑拦截提示语 */
 export const EXAM_QA_BLOCKED_MESSAGE = '测试期间禁止答疑';
@@ -56,6 +57,10 @@ export function AiQaApp({ onClose, initialData }: AiQaAppProps) {
   const [error, setError] = useState<string | null>(null);
   const [displayedQuestions, setDisplayedQuestions] = useState<string[]>([]);
   const hasAutoSent = useRef(false);
+  // 勤学好问 Buff：当天成功提问进度 & 触发横幅
+  const [studiousProgress, setStudiousProgress] = useState<{ today: number; threshold: number; remaining: number } | null>(null);
+  const [studiousBanner, setStudiousBanner] = useState<{ name: string; description: string; crit?: number; minutes?: number } | null>(null);
+  const emitGameEvent = useGameEventStore.getState().emitEvent;
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -196,6 +201,21 @@ export function AiQaApp({ onClose, initialData }: AiQaAppProps) {
         if (response.data.profile) {
           await refreshProfile();
         }
+
+        // 勤学好问 Buff 进度 / 触发提示
+        const s = response.data.studious;
+        if (s) {
+          setStudiousProgress({ today: s.today_count, threshold: s.threshold, remaining: s.remaining });
+          if (s.triggered && s.honor) {
+            setStudiousBanner({
+              name: s.honor.name,
+              description: s.honor.description,
+              crit: s.buff?.crit_modifier,
+              minutes: s.buff?.duration_minutes,
+            });
+            emitGameEvent('studious');
+          }
+        }
       } else {
         setError(response.error || '获取回答失败');
       }
@@ -226,6 +246,11 @@ export function AiQaApp({ onClose, initialData }: AiQaAppProps) {
             {config && (
               <p className="text-sm text-gray-500">
                 每次提问消耗 {config.pointsPerQuestion} 积分
+                {studiousProgress && !studiousBanner && (
+                  <span className="ml-2 text-blue-500">
+                    · 勤学好问 {studiousProgress.today}/{studiousProgress.threshold}
+                  </span>
+                )}
               </p>
             )}
           </div>
@@ -254,6 +279,24 @@ export function AiQaApp({ onClose, initialData }: AiQaAppProps) {
           </button>
         </div>
       </div>
+
+      {studiousBanner && (
+        <div className="mx-4 mt-3 p-3 rounded-xl bg-gradient-to-r from-blue-500 to-teal-500 text-white flex items-start gap-3 shadow-md">
+          <span className="text-2xl flex-shrink-0">📚</span>
+          <div className="flex-1">
+            <p className="font-bold text-sm">荣誉达成 · {studiousBanner.name}</p>
+            <p className="text-xs text-white/90 mt-0.5">{studiousBanner.description}</p>
+            {studiousBanner.crit !== undefined && (
+              <p className="text-xs text-white/90 mt-0.5">
+                暴击加成 +{studiousBanner.crit}% · 持续 {studiousBanner.minutes} 分钟
+              </p>
+            )}
+          </div>
+          <button onClick={() => setStudiousBanner(null)} className="text-white/70 hover:text-white flex-shrink-0">
+            <i className="fa-solid fa-times text-sm"></i>
+          </button>
+        </div>
+      )}
 
       {showHistory ? (
         <div className="flex-1 overflow-y-auto p-4">

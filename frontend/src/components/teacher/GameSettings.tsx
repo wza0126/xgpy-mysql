@@ -20,6 +20,7 @@ export const GameSettings: React.FC = () => {
     honor_wrong_debuff_minutes: 1,
     honor_studious_buff_crit: 8,
     honor_studious_buff_minutes: 30,
+    honor_studious_questions: 10,
     honor_typingfast_buff_crit: 10,
     honor_typingfast_buff_minutes: 30,
   };
@@ -150,6 +151,7 @@ export const GameSettings: React.FC = () => {
       honor_critstreak_buff_minutes: '三连暴击Buff时长(分钟)',
       honor_studious_buff_crit: '勤学好问Buff暴击加成(%)',
       honor_studious_buff_minutes: '勤学好问Buff时长(分钟)',
+      honor_studious_questions: '勤学好问触发所需AI答疑次数',
       honor_typingfast_buff_crit: '运指如飞Buff暴击加成(%)',
       honor_typingfast_buff_minutes: '运指如飞Buff时长(分钟)',
       honor_wrong_debuff_crit: '三连错Debuff暴击降低(%)',
@@ -292,7 +294,7 @@ export const GameSettings: React.FC = () => {
                     <li>• <strong>暴击机制：</strong>答题时有概率触发暴击，获得额外积分奖励</li>
                     <li>• <strong>连对奖励：</strong>连续答对10题可获得额外积分和暴击加成Buff</li>
                     <li>• <strong>三连暴击：</strong>连续3次暴击触发更强的暴击Buff</li>
-                    <li>• <strong>勤学好问：</strong>学习模块每日看满10题获得暴击加成Buff</li>
+                    <li>• <strong>勤学好问：</strong>当天 AI 答疑成功提问满 {configs.honor_studious_questions ?? 10} 次获得暴击加成Buff（每日限一次）</li>
                     <li>• <strong>三连错惩罚：</strong>连续答错3题会降低暴击率</li>
                     <li>• <strong>装备掉落：</strong>练习答对随机掉落装备，考试及格掉率为10倍，装备暴击加成永久叠加</li>
                   </ul>
@@ -395,6 +397,18 @@ export const GameSettings: React.FC = () => {
                         onChange={(e) => setConfigs({ ...configs, honor_studious_buff_minutes: parseInt(e.target.value) || 30 })}
                         className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
                       />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">勤学好问触发所需AI答疑次数</label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="100"
+                        value={configs.honor_studious_questions ?? 10}
+                        onChange={(e) => setConfigs({ ...configs, honor_studious_questions: parseInt(e.target.value) || 10 })}
+                        className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
+                      />
+                      <p className="text-xs text-gray-500 mt-1">当天 AI 答疑成功提问达到该次数即触发 Buff（每日限一次）</p>
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-2">运指如飞Buff暴击加成(%)</label>

@@ -6708,14 +6708,24 @@ app.post('/api/ai-qa/ask', authenticate, async (req, res) => {
       'SELECT * FROM profiles WHERE id = ?',
       [userId]
     );
-    
+
+    // 勤学好问 Buff：答疑成功后检查当天成功提问数是否达标
+    // 单独 try/catch，失败不影响答疑主流程
+    let studiousResult = null;
+    try {
+      studiousResult = await checkStudiousBuff(userId);
+    } catch (e) {
+      console.warn('勤学好问 buff 检查失败:', e.message);
+    }
+
     res.json({ 
       data: { 
         answer, 
         historyId, 
         profile: formatRow(updatedProfiles[0]),
         pointsSpent: pointsPerQuestion,
-        fromKnowledgeBase
+        fromKnowledgeBase,
+        studious: studiousResult
       }, 
       error: null 
     });
@@ -6897,7 +6907,8 @@ app.delete('/api/ai-qa-kb/:id', authenticate, async (req, res) => {
 // 4. cluster_id 不暴露给学生筛选页，仅用于内部检索
 
 // 分类总纲（唯一分类标准，与学习模块 16 章目录、练习模块章节筛选同源）
-const { CHAPTER_NAMES, SECTION_PATHS, SECTIONS_BY_CHAPTER, CHAPTER_ALLOW_SELF } = require('./chapter-taxonomy');
+const { CHAPTER_NAMES, SECTION_PATHS, SECTIONS_BY_CHAPTER, CHAPTER_ALLOW_SELF, CHAPTER_BY_CODE } = require('./chapter-taxonomy');
+const CHAPTER_CODES = Object.fromEntries(Object.entries(CHAPTER_BY_CODE).map(([code, name]) => [name, code]));
 const { buildTaxonomyPromptText } = require('./chapter-taxonomy');
 
 // 聚类提示词：**强制枚举**（不再给"参考类目"，AI 不得自造类目名）
@@ -7638,6 +7649,148 @@ app.get('/api/teacher/questions/cluster-stats', authenticate, requireTeacher, as
 
 // ==================== 题目聚类 / 同类题推荐 API 结束 ====================
 
+// ==================== 学习模块（按考点章节词表驱动）API 开始 ====================
+// 设计：学习模块 16 章目录、讲义正文、章内小节题量，全部由 chapter-taxonomy.js 词表统一驱动，
+//       与题库聚类 cluster_id、练习模块章节筛选共享同一套分类标准。
+
+const { getChapterLecture, getLectureMeta } = require('./learn-content');
+
+/** 取某学生某章的已看小节集合 */
+async function getVisitedSet(studentId, clusterId) {
+  // learn_visited_records.question_key 现约定格式为 "chapter::section::index"
+  const [rows] = await pool.query(
+    'SELECT question_key FROM learn_visited_records WHERE student_id = ? AND question_key LIKE ?',
+    [studentId, `${clusterId}::%`]
+  );
+  return new Set(rows.map(r => r.question_key));
+}
+
+// 学习模块目录：16 章 + 每章小节题量 + 学生进度
+app.get('/api/student/learn-chapters', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId || req.user.id;
+    const meta = getLectureMeta();
+
+    // 各 cluster_id 的题量（一级章 + 二级"章/小节"）
+    const [clusterRows] = await pool.query(
+      `SELECT cluster_id, COUNT(*) AS cnt FROM questions
+       WHERE cluster_id IS NOT NULL AND cluster_id <> ''
+       GROUP BY cluster_id`
+    );
+    const chapterCount = new Map();
+    const sectionCount = new Map();
+    for (const r of clusterRows) {
+      const cid = r.cluster_id;
+      const n = Number(r.cnt) || 0;
+      if (cid.includes('/')) {
+        sectionCount.set(cid, n);
+        const ch = cid.split('/')[0];
+        chapterCount.set(ch, (chapterCount.get(ch) || 0) + n);
+      } else {
+        chapterCount.set(cid, (chapterCount.get(cid) || 0) + n);
+      }
+    }
+
+    // 该生已看记录（按章归组）
+    const [visitedRows] = await pool.query(
+      'SELECT question_key FROM learn_visited_records WHERE student_id = ?',
+      [userId]
+    );
+    const visitedByChapter = new Map();
+    for (const r of visitedRows) {
+      const parts = String(r.question_key || '').split('::');
+      if (parts.length < 2) continue;
+      const ch = parts[0];
+      if (!visitedByChapter.has(ch)) visitedByChapter.set(ch, new Set());
+      visitedByChapter.get(ch).add(r.question_key);
+    }
+
+    const lectureByChapter = new Map(meta.chapters.map(c => [c.cluster_id, c]));
+
+    const chapters = CHAPTER_NAMES.map((name, idx) => {
+      const lec = lectureByChapter.get(name);
+      const secs = (SECTIONS_BY_CHAPTER[name] || []).map(s => {
+        const path = `${name}/${s}`;
+        return { name: s, path, question_count: sectionCount.get(path) || 0 };
+      });
+      const chapterSelf = chapterCount.get(name) || 0;
+      const sectionSum = secs.reduce((a, s) => a + s.question_count, 0);
+      // 章级兜底题（只挂章名的题）单独计
+      const selfOnly = Math.max(0, chapterSelf - sectionSum);
+      return {
+        index: idx + 1,
+        cluster_id: name,
+        code: CHAPTER_CODES[name] || '',
+        cn: lec?.cn || '',
+        badge: lec?.badge || '',
+        part: lec?.part || '',
+        part_index: lec?.part_index || 0,
+        has_lecture: !!lec,
+        sections: secs,
+        chapter_only_count: selfOnly,
+        question_count: chapterSelf,
+        visited_count: (visitedByChapter.get(name)?.size) || 0,
+      };
+    });
+
+    res.json({ data: { chapters, source: meta.source, generated_at: meta.generatedAt }, error: null });
+  } catch (error) {
+    console.error('获取学习章节目录失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 取某章讲义正文 + 该章自测题（原问答内容保留为章末自测）
+app.get('/api/student/learn-chapter/:clusterId', authenticate, async (req, res) => {
+  try {
+    const clusterId = decodeURIComponent(req.params.clusterId);
+    if (!CHAPTER_NAMES.includes(clusterId)) {
+      return res.status(404).json({ data: null, error: '章节不存在' });
+    }
+    const lec = getChapterLecture(clusterId);
+    const secs = SECTIONS_BY_CHAPTER[clusterId] || [];
+    // 各小节题量
+    const placeholders = secs.map(() => '?').join(',');
+    let counts = [];
+    if (secs.length) {
+      const paths = secs.map(s => `${clusterId}/${s}`);
+      const [rows] = await pool.query(
+        `SELECT cluster_id, COUNT(*) AS cnt FROM questions
+         WHERE cluster_id IN (${placeholders}) GROUP BY cluster_id`,
+        paths
+      );
+      counts = rows;
+    }
+    const countMap = new Map(counts.map(r => [r.cluster_id, Number(r.cnt) || 0]));
+    res.json({
+      data: {
+        cluster_id: clusterId,
+        cn: lec?.cn || '',
+        badge: lec?.badge || '',
+        part: lec?.part || '',
+        html: lec?.html || '',
+        sections: secs.map(s => ({ name: s, path: `${clusterId}/${s}`, question_count: countMap.get(`${clusterId}/${s}`) || 0 })),
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('获取章节讲义失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 讲义样式（前端首屏 fetch 后注入 <style>，避免打包体积 & 便于更新）
+app.get('/api/student/learn-lecture.css', (req, res) => {
+  try {
+    const { getLectureCss } = require('./learn-content');
+    res.type('text/css').send(getLectureCss());
+  } catch (error) {
+    res.status(500).type('text/plain').send('/* lecture css error */');
+  }
+});
+
+// ==================== 学习模块 API 结束 ====================
+
 // ==================== 心理健康模块 API 开始 ====================
 
 // 心理健康咨询系统提示词
@@ -8267,11 +8420,11 @@ app.get('/api/student/honors', authenticate, async (req, res) => {
         studious_times: rows[0].studious_times || 0,
         typing_fast_times: rows[0].typing_fast_times || 0,
         honors: [
-          { type: 'perfect_10', name: '十全十美', times: rows[0].perfect_10_times || 0 },
-          { type: 'triple_crit', name: '三连暴击', times: rows[0].triple_crit_times || 0 },
-          { type: 'wrong_3', name: '三连错', times: rows[0].wrong_3_times || 0 },
-          { type: 'studious', name: '勤学好问', times: rows[0].studious_times || 0 },
-          { type: 'typing_fast', name: '运指如飞', times: rows[0].typing_fast_times || 0 }
+          { type: 'perfect_10', name: '十全十美', times: rows[0].perfect_10_times || 0, description: '练习连对10题' },
+          { type: 'triple_crit', name: '三连暴击', times: rows[0].triple_crit_times || 0, description: '连续暴击3次' },
+          { type: 'wrong_3', name: '屡败屡战', times: rows[0].wrong_3_times || 0, description: '练习时连错3题' },
+          { type: 'studious', name: '勤学好问', times: rows[0].studious_times || 0, description: '当天 AI 答疑成功提问满 10 次（每天一次）' },
+          { type: 'typing_fast', name: '运指如飞', times: rows[0].typing_fast_times || 0, description: '键盘星域单人模式速度达标' }
         ]
       },
       error: null
@@ -8319,12 +8472,18 @@ app.post('/api/student/learn-visited', authenticate, async (req, res) => {
   }
 });
 
-// 学习打卡：每看10题触发勤学好问buff，每日限一次
-app.post('/api/student/learn-studious-checkin', authenticate, async (req, res) => {
+// 勤学好问 Buff：当天 AI 答疑成功提问满 N 次即触发，每日限一次
+// 【规则变更 v2.5.0】原「学习模块看满 10 题」通道已彻底废弃，改为统计当天 AI 答疑成功次数。
+//   「成功」定义：AI 正常返回答案（命中答疑库 或 调用 AI 成功），失败/被拦截的不计。
+//   N 由 system_config.honor_studious_questions 控制，默认 10。
+//
+// 核心逻辑抽成 checkStudiousBuff()，由以下两处调用：
+//   1. POST /api/ai-qa/ask —— 每次答疑成功后自动检查（主通道）
+//   2. POST /api/student/learn-studious-checkin —— 保留给学生端主动查询进度
+async function checkStudiousBuff(userId) {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
-    const userId = req.user.userId || req.user.id;
 
     // 锁定 profiles 行，确保同一用户的并发请求串行执行
     await connection.query(
@@ -8332,16 +8491,32 @@ app.post('/api/student/learn-studious-checkin', authenticate, async (req, res) =
       [userId]
     );
 
-    // 1. 统计今日已看题目数
+    // 1. 统计当天 AI 答疑成功次数
     const [todayRows] = await connection.query(
-      `SELECT COUNT(*) AS cnt FROM learn_visited_records 
-       WHERE student_id = ? AND DATE(visited_at) = CURDATE()`,
+      `SELECT COUNT(*) AS cnt FROM ai_qa_history
+       WHERE student_id = ? AND DATE(created_at) = CURDATE()`,
       [userId]
     );
-    const todayCount = todayRows[0]?.cnt || 0;
+    const todayCount = Number(todayRows[0]?.cnt) || 0;
 
-    // 2. 使用 studious_checkins 表原子性检查今日是否已触发
-    //    先尝试插入今日打卡记录（唯一索引保证不会重复插入）
+    // 2. 读取触发阈值（失败时用默认 10）
+    let threshold = 10;
+    try {
+      const [thRows] = await connection.query(
+        "SELECT value FROM system_config WHERE config_key = 'honor_studious_questions'"
+      );
+      if (thRows.length) {
+        let v = thRows[0].value;
+        if (typeof v === 'string') { try { v = JSON.parse(v); } catch {} }
+        if (typeof v === 'object' && v !== null && v.value !== undefined) v = v.value;
+        const n = parseInt(v);
+        if (Number.isFinite(n) && n > 0) threshold = n;
+      }
+    } catch (e) {
+      console.warn('读取 honor_studious_questions 失败，使用默认 10:', e.message);
+    }
+
+    // 3. 使用 studious_checkins 表原子性检查今日是否已触发（唯一索引兜底）
     const checkinId = `sc_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const [insertResult] = await connection.query(
       `INSERT IGNORE INTO studious_checkins (id, student_id, check_date, question_count)
@@ -8349,7 +8524,6 @@ app.post('/api/student/learn-studious-checkin', authenticate, async (req, res) =
       [checkinId, userId, todayCount]
     );
 
-    // 如果 insertResult.affectedRows === 0，说明今日记录已存在，读取现有记录
     let triggeredToday = false;
     if (insertResult.affectedRows === 0) {
       const [existingRows] = await connection.query(
@@ -8359,7 +8533,7 @@ app.post('/api/student/learn-studious-checkin', authenticate, async (req, res) =
       triggeredToday = !!existingRows[0]?.triggered;
     }
 
-    // 更新今日看题数
+    // 同步今日计数
     await connection.query(
       'UPDATE studious_checkins SET question_count = ? WHERE student_id = ? AND check_date = CURDATE()',
       [todayCount, userId]
@@ -8369,9 +8543,8 @@ app.post('/api/student/learn-studious-checkin', authenticate, async (req, res) =
     let honorInfo = null;
     let buffInfo = null;
 
-    // 3. 今日看题>=10 且 今日未触发过 → 发放勤学好问buff
-    if (todayCount >= 10 && !triggeredToday) {
-      // 读取系统配置
+    // 4. 达到阈值 且 今日未触发过 → 发放勤学好问 buff
+    if (todayCount >= threshold && !triggeredToday) {
       const [cfgRows] = await connection.query(
         "SELECT config_key, value FROM system_config WHERE config_key IN ('honor_studious_buff_crit', 'honor_studious_buff_minutes')"
       );
@@ -8390,45 +8563,59 @@ app.post('/api/student/learn-studious-checkin', authenticate, async (req, res) =
       const studiousBuffCrit = parseFloat(cfg['honor_studious_buff_crit']) || 8;
       const studiousBuffMinutes = parseInt(cfg['honor_studious_buff_minutes']) || 30;
 
-      // 发放buff（同类型不叠加，仅刷新时间）
-      await grantOrRefreshBuff(connection, userId, 'studious_crit', studiousBuffCrit, studiousBuffMinutes);
+      const granted = await grantOrRefreshBuff(connection, userId, 'studious_crit', studiousBuffCrit, studiousBuffMinutes);
 
-      // 增加勤学好问荣誉次数
       await connection.query(
         'UPDATE profiles SET studious_times = studious_times + 1 WHERE id = ?',
         [userId]
       );
-
-      // 标记今日已触发
       await connection.query(
         'UPDATE studious_checkins SET triggered = 1 WHERE student_id = ? AND check_date = CURDATE()',
         [userId]
       );
 
       triggered = true;
-      honorInfo = { type: 'studious', name: '勤学好问', description: `今日学习10题，获得暴击加成Buff` };
-      buffInfo = { id: buffId, buff_type: 'studious_crit', crit_modifier: studiousBuffCrit, duration_minutes: studiousBuffMinutes };
+      honorInfo = {
+        type: 'studious',
+        name: '勤学好问',
+        description: `今日 AI 答疑成功提问 ${todayCount} 次，获得暴击加成Buff`,
+      };
+      buffInfo = {
+        refreshed: !!granted?.refreshed,
+        buff_type: 'studious_crit',
+        crit_modifier: studiousBuffCrit,
+        duration_minutes: studiousBuffMinutes,
+      };
     }
 
     await connection.commit();
 
-    res.json({
-      data: {
-        success: true,
-        today_count: todayCount,
-        triggered,
-        triggered_today: triggeredToday || triggered,
-        honor: honorInfo,
-        buff: buffInfo,
-      },
-      error: null
-    });
+    return {
+      success: true,
+      today_count: todayCount,
+      threshold,
+      remaining: Math.max(0, threshold - todayCount),
+      triggered,
+      triggered_today: triggeredToday || triggered,
+      honor: honorInfo,
+      buff: buffInfo,
+    };
   } catch (error) {
     await connection.rollback();
-    console.error('学习打卡失败:', error);
-    res.status(500).json({ data: null, error: error.message });
+    throw error;
   } finally {
     connection.release();
+  }
+}
+
+app.post('/api/student/learn-studious-checkin', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId || req.user.id;
+    const data = await checkStudiousBuff(userId);
+    res.json({ data, error: null });
+  } catch (error) {
+    console.error('勤学好问打卡失败:', error);
+    res.status(500).json({ data: null, error: error.message });
   }
 });
 

@@ -335,5 +335,9 @@ module.exports = [
   {
     "version": "081_fix_cluster_task_mode_enum.sql",
     "sql": "-- 081: 修正 080 建表时 mode 枚举值不全的问题\n--\n-- 080 把 question_cluster_tasks.mode 定义成 ENUM('incremental','full','retry','manual')，\n-- 但接口还支持 mode='selected'（聚类指定题目），写入时会报\n--   Data truncated for column 'mode' at row 1\n-- 本迁移补齐枚举值。\n--\n-- 说明：080 若已在生产库执行，这里改列定义即可；未执行过的库两者结果一致。\n\nALTER TABLE `question_cluster_tasks`\nMODIFY COLUMN `mode` ENUM('incremental','full','retry','manual','selected','resume')\n  NOT NULL DEFAULT 'incremental'\n  COMMENT 'incremental=只跑未聚类 / full=全量重跑(保留manual) / retry=只重试失败 / manual=单题改挂 / selected=聚类指定题 / resume=断点续跑';\n"
+  },
+  {
+    "version": "082_studious_question_rule.sql",
+    "sql": "-- 082: 勤学好问 Buff 规则变更\n--\n-- 【规则变更】原规则「学习模块当天看满 10 题」已彻底废弃，改为：\n--   当天 AI 答疑**成功提问**满 N 次即触发（每日限一次）。\n--   加成 / 时长仍沿用 honor_studious_buff_crit / honor_studious_buff_minutes。\n--\n-- 新增可配置项 honor_studious_questions：触发所需的成功提问次数（默认 10）。\n--\n-- system_config 结构：id / config_key(唯一) / value(JSON {\"value\":...}) / updated_at\n-- 幂等：ON DUPLICATE KEY UPDATE 保证重复执行不报错，且不覆盖教师已改过的值。\n\nINSERT INTO system_config (id, config_key, value, updated_at)\nVALUES ('config_honor_studious_questions', 'honor_studious_questions', '{\"value\": 10}', NOW())\nON DUPLICATE KEY UPDATE config_key = config_key;\n"
   }
 ];
