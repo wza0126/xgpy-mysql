@@ -5,6 +5,8 @@ import { Question, KnowledgePoint } from '../../types';
 import { useAuth } from '../../hooks/useAuth';
 import { RichTextEditor } from '../common/RichTextEditor';
 import { sanitizeHtml, htmlToPlainText, plainTextToHtml, uploadImagesFromHtml } from '../../utils/htmlUtils';
+// 分类总纲（16 章 / 70 小节），与后端聚类提示词、学习模块目录同源
+import { CHAPTER_TAXONOMY } from '../../data/chapterTaxonomy';
 
 const parseJsonField = (field: any) => {
   if (typeof field === 'string') {
@@ -160,11 +162,28 @@ export const QuestionManager: React.FC = () => {
   const [showClusterModal, setShowClusterModal] = useState(false);
   const [clustering, setClustering] = useState(false);
   const [clusterResult, setClusterResult] = useState<any>(null);
-  const [clusterStats, setClusterStats] = useState<{ total: number; clustered: number; unclustered: number; clusters: { cluster_id: string; cnt: number }[] } | null>(null);
+  const [clusterStats, setClusterStats] = useState<{
+    total: number;
+    clustered: number;
+    unclustered: number;
+    failed: number;
+    pending: number;
+    manual: number;
+    clusters: { cluster_id: string; cnt: number }[];
+    invalid_clusters: { cluster_id: string; cnt: number }[];
+    invalid_total: number;
+    empty_sections: string[];
+    taxonomy_chapters: number;
+    taxonomy_sections: number;
+  } | null>(null);
   // 异步任务进度（每 2 秒轮询一次）
   const [clusterProgress, setClusterProgress] = useState<{ processedBatches: number; totalBatches: number; processed: number; total: number; lastBatchError?: string } | null>(null);
   // 知识树展开状态（记录哪些一级类目被展开）
   const [expandedClusters, setExpandedClusters] = useState<Record<string, boolean>>({});
+  // 人工改挂：选中的词表章节
+  const [manualClusterId, setManualClusterId] = useState<string>('');
+  // 最近一次任务（用于中断后显示「继续」按钮）
+  const [latestJob, setLatestJob] = useState<{ jobId: string; status: string } | null>(null);
   const { profile } = useAuth();
 
   useEffect(() => {
@@ -419,39 +438,12 @@ export const QuestionManager: React.FC = () => {
     fetchData();
   };
 
-  // AI 批量聚类：异步任务模式
-  // 后端 /api/teacher/questions/cluster 立即返回 jobId，前端轮询 /cluster-status/:jobId 进度
-  // 避免长连接被浏览器/代理掐断（500+题需要数分钟，原同步模式会 ERR_EMPTY_RESPONSE）
-  const handleAiCluster = async (mode: 'selected' | 'all') => {
-    if (mode === 'selected' && selectedIds.length === 0) {
-      alert('请先选择要聚类的题目');
-      return;
-    }
-    if (!window.confirm(
-      mode === 'selected'
-        ? `确认为选中的 ${selectedIds.length} 道题执行 AI 聚类？每批 50 题，后台异步处理，请勿刷新页面。`
-        : '确认为题库中所有题目执行 AI 聚类？后台异步处理，预计 1~3 分钟，请勿刷新页面。'
-    )) return;
-
-    setClustering(true);
-    setClusterResult(null);
-    setClusterProgress({ processedBatches: 0, totalBatches: 0, processed: 0, total: 0 });
-
+  // 轮询聚类任务直到完成/失败；返回最终 job 对象
+  const pollClusterJob = async (jobId: string) => {
     let pollTimer: ReturnType<typeof setInterval> | null = null;
     let abortTimer: ReturnType<typeof setTimeout> | null = null;
-
     try {
-      const body = mode === 'selected'
-        ? { questionIds: selectedIds }
-        : { all: true, type: filters.type || undefined, tag: tagFilterEnabled ? (filters.tags[0] || undefined) : undefined };
-      const startResult = await backendClient.post('/api/teacher/questions/cluster', body);
-      if (startResult.error) throw new Error(startResult.error);
-
-      const { jobId, total, totalBatches } = startResult.data;
-      setClusterProgress({ processedBatches: 0, totalBatches, processed: 0, total });
-
-      // 轮询任务状态，直到 completed / failed
-      await new Promise<void>((resolve, reject) => {
+      return await new Promise<any>((resolve, reject) => {
         pollTimer = setInterval(async () => {
           try {
             const statusResult = await backendClient.get(`/api/teacher/questions/cluster-status/${jobId}`);
@@ -473,12 +465,11 @@ export const QuestionManager: React.FC = () => {
             if (job.status === 'completed') {
               clearInterval(pollTimer!);
               pollTimer = null;
-              setClusterResult({ updated: job.updated, skipped: job.skipped, total: job.total });
-              resolve();
-            } else if (job.status === 'failed') {
+              resolve(job);
+            } else if (job.status === 'failed' || job.status === 'paused') {
               clearInterval(pollTimer!);
               pollTimer = null;
-              reject(new Error(job.error || '聚类任务失败'));
+              resolve(job); // 交给调用方决定如何处理（failed 可重试，paused 可续跑）
             }
           } catch (e) {
             // 单次轮询请求失败不立即终止，给后端容错空间
@@ -495,6 +486,75 @@ export const QuestionManager: React.FC = () => {
           reject(new Error('聚类任务超时（30分钟无响应，可能是后端重启或网络异常）'));
         }, 30 * 60 * 1000);
       });
+    } finally {
+      if (pollTimer) clearInterval(pollTimer);
+      if (abortTimer) clearTimeout(abortTimer);
+    }
+  };
+
+  // AI 批量聚类：异步任务模式
+  // 后端 /api/teacher/questions/cluster 立即返回 jobId，前端轮询 /cluster-status/:jobId 进度
+  // 任务状态落库，后端重启后仍可查询/续跑（原内存 Map 实现重启即丢）
+  const handleAiCluster = async (
+    mode: 'incremental' | 'full' | 'selected' | 'retry' | 'resume',
+    opts?: { jobId?: string }
+  ) => {
+    if (mode === 'selected' && selectedIds.length === 0) {
+      alert('请先选择要聚类的题目');
+      return;
+    }
+    const confirmText: Record<string, string> = {
+      incremental: '增量聚类：只处理尚未聚类成功的题目（新增题目用这个），已有的分类不动。',
+      full: '全量重跑：所有题目按新版章节词表重新分类。人工改挂过的题目会自动跳过，不会被覆盖。',
+      selected: `聚类选中的 ${selectedIds.length} 道题。`,
+      retry: '只重试上一次任务中失败的题目。',
+      resume: '从断点继续上次被中断的聚类任务（只补跑尚未完成的题）。',
+    };
+    if (!window.confirm(confirmText[mode] + '\n\n后台异步处理，请勿刷新页面。')) return;
+
+    setClustering(true);
+    setClusterResult(null);
+    setClusterProgress({ processedBatches: 0, totalBatches: 0, processed: 0, total: 0 });
+
+    try {
+      let jobId: string;
+      if (mode === 'resume') {
+        // 续跑：用独立接口
+        const resumeResult = await backendClient.post(`/api/teacher/questions/cluster-resume/${opts?.jobId}`, {});
+        if (resumeResult.error) throw new Error(resumeResult.error);
+        jobId = opts!.jobId!;
+        if (resumeResult.data.resumed === 0) {
+          setClusterResult({ updated: 0, skipped: 0, total: 0, note: resumeResult.data.message });
+          await fetchClusterStats();
+          return;
+        }
+      } else {
+        const body: any =
+          mode === 'selected' ? { mode, questionIds: selectedIds }
+          : mode === 'retry' ? { mode, jobId: opts?.jobId }
+          : { mode, type: filters.type || undefined, tag: tagFilterEnabled ? (filters.tags[0] || undefined) : undefined };
+        const startResult = await backendClient.post('/api/teacher/questions/cluster', body);
+        if (startResult.error) throw new Error(startResult.error);
+        jobId = startResult.data.jobId;
+        setClusterProgress({
+          processedBatches: 0,
+          totalBatches: startResult.data.totalBatches,
+          processed: 0,
+          total: startResult.data.total,
+        });
+      }
+
+      const job = await pollClusterJob(jobId);
+      setLatestJob({ jobId, status: job.status });
+      setClusterResult({
+        updated: job.updated,
+        skipped: job.skipped,
+        total: job.total,
+        status: job.status,
+        failedCount: (job.failedIds || []).length,
+        error: job.error,
+        jobId,
+      });
 
       // 完成后刷新
       await fetchData();
@@ -503,9 +563,36 @@ export const QuestionManager: React.FC = () => {
     } catch (e: any) {
       alert('AI 聚类失败: ' + (e.message || e));
     } finally {
-      if (pollTimer) clearInterval(pollTimer);
-      if (abortTimer) clearTimeout(abortTimer);
       setClustering(false);
+    }
+  };
+
+  // 人工改挂分类：把选中题目直接挂到指定章节（不调用 AI，来源记为 manual，重跑时跳过）
+  const handleManualCluster = async () => {
+    if (selectedIds.length === 0) {
+      alert('请先选择要改挂分类的题目');
+      return;
+    }
+    if (!manualClusterId) {
+      alert('请先在下方选择目标章节');
+      return;
+    }
+    if (!window.confirm(`确定把选中的 ${selectedIds.length} 道题改挂到「${manualClusterId}」？\n\n人工指定的分类在后续 AI 重跑时会被跳过。`)) return;
+
+    try {
+      const result = await backendClient.post('/api/teacher/questions/cluster', {
+        mode: 'manual',
+        questionIds: selectedIds,
+        clusterId: manualClusterId,
+      });
+      if (result.error) throw new Error(result.error);
+      alert(`已改挂 ${result.data.updated} 道题到「${result.data.clusterId}」`);
+      setSelectedIds([]);
+      setManualClusterId('');
+      await fetchData();
+      await fetchClusterStats();
+    } catch (e: any) {
+      alert('改挂失败: ' + (e.message || e));
     }
   };
 
@@ -515,6 +602,18 @@ export const QuestionManager: React.FC = () => {
       const result = await backendClient.get('/api/teacher/questions/cluster-stats');
       if (!result.error && result.data) {
         setClusterStats(result.data);
+      }
+    } catch {
+      // 静默失败
+    }
+  };
+
+  // 拉取最近一次任务（用于显示「继续」按钮）
+  const fetchLatestJob = async () => {
+    try {
+      const result = await backendClient.get('/api/teacher/questions/cluster-latest');
+      if (!result.error && result.data) {
+        setLatestJob({ jobId: result.data.jobId, status: result.data.status });
       }
     } catch {
       // 静默失败
@@ -1273,9 +1372,10 @@ ${isChoice ? `5. 对于选择题，answers字段必须填写选项字母（A、B
             onClick={() => {
               setShowClusterModal(true);
               fetchClusterStats();
+              fetchLatestJob();
             }}
             className="px-4 py-2 bg-cyan-500 text-white rounded-lg hover:bg-cyan-600 transition-colors"
-            title="使用 AI 为题目自动分类知识点，便于学生端做错后推荐同类题"
+            title="使用 AI 按考点章节词表为题目自动分类，便于学生端做错后推荐同类题"
           >
             <i className="fa-solid fa-layer-group mr-2"></i>
             AI聚类
@@ -2729,7 +2829,7 @@ ${isChoice ? `5. 对于选择题，answers字段必须填写选项字母（A、B
               {/* 当前聚类状态 */}
               {clusterStats && (
                 <div className="bg-gray-50 rounded-lg p-4 mb-4">
-                  <div className="grid grid-cols-3 gap-3 text-center mb-3">
+                  <div className="grid grid-cols-4 gap-3 text-center mb-3">
                     <div>
                       <div className="text-2xl font-bold text-cyan-600">{clusterStats.clustered}</div>
                       <div className="text-xs text-gray-500">已聚类</div>
@@ -2739,10 +2839,38 @@ ${isChoice ? `5. 对于选择题，answers字段必须填写选项字母（A、B
                       <div className="text-xs text-gray-500">未聚类</div>
                     </div>
                     <div>
-                      <div className="text-2xl font-bold text-purple-600">{clusterStats.clusters.length}</div>
-                      <div className="text-xs text-gray-500">聚类簇数</div>
+                      <div className={`text-2xl font-bold ${clusterStats.failed > 0 ? 'text-red-600' : 'text-gray-400'}`}>
+                        {clusterStats.failed || 0}
+                      </div>
+                      <div className="text-xs text-gray-500">待重试</div>
+                    </div>
+                    <div>
+                      <div className="text-2xl font-bold text-purple-600">{clusterStats.manual || 0}</div>
+                      <div className="text-xs text-gray-500">人工指定</div>
                     </div>
                   </div>
+
+                  {/* 词表合规性：不在词表内的遗留类目 */}
+                  {clusterStats.invalid_total > 0 && (
+                    <div className="bg-red-50 border border-red-200 rounded p-2 mb-3 text-xs text-red-700">
+                      <i className="fa-solid fa-triangle-exclamation mr-1"></i>
+                      有 <b>{clusterStats.invalid_clusters.length}</b> 个类目不在词表内（涉及 <b>{clusterStats.invalid_total}</b> 题），
+                      这些是旧版聚类的遗留。执行一次「全量重跑」即可对齐。
+                      <div className="mt-1 text-red-500 max-h-20 overflow-y-auto">
+                        {clusterStats.invalid_clusters.slice(0, 12).map((x, i) => (
+                          <span key={i} className="inline-block mr-2">{x.cluster_id}({x.cnt})</span>
+                        ))}
+                        {clusterStats.invalid_clusters.length > 12 && <span>…等 {clusterStats.invalid_clusters.length} 个</span>}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 词表覆盖提示 */}
+                  <div className="text-xs text-gray-500 mb-3">
+                    分类总纲：{clusterStats.taxonomy_chapters} 章 / {clusterStats.taxonomy_sections} 小节，
+                    其中 {clusterStats.empty_sections.length} 个小节暂无题目
+                  </div>
+
                   {clusterStats.clusters.length > 0 && (() => {
                     // 把 cluster_id（"一级/二级"格式）整理为树结构
                     // 无 "/" 的视为「未分类」一级类目下的兜底子节点
@@ -2847,29 +2975,110 @@ ${isChoice ? `5. 对于选择题，answers字段必须填写选项字母（A、B
               {!clustering && !clusterResult && (
                 <div className="space-y-3">
                   <p className="text-sm text-gray-600">
-                    AI 聚类会为每道题分配一个「一级类目/二级类目」格式的知识点路径（如「信息系统/分类与类型」），
-                    存入 cluster_id 字段。<b>此字段不暴露给学生筛选页</b>，仅用于学生做错后推荐同类题。
+                    AI 会为每道题从<b>分类总纲（16 章 / 70 小节）</b>中逐字选取一个知识点路径，存入 cluster_id。
+                    学生端做错题时按此推荐同类题，学期/章节筛选也依赖它。
                   </p>
-                  <div className="flex gap-3">
+
+                  {/* 四种模式 */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      onClick={() => handleAiCluster('incremental')}
+                      className="py-3 bg-emerald-500 text-white rounded-lg hover:bg-emerald-600 transition-colors text-sm"
+                      title="只处理尚未聚类成功的题目，已有的分类不动。新加题目后用这个。"
+                    >
+                      <i className="fa-solid fa-plus-circle mr-1"></i>
+                      增量聚类
+                      <div className="text-[11px] opacity-80 font-normal mt-0.5">
+                        {clusterStats ? `待处理 ${clusterStats.unclustered + (clusterStats.failed || 0)} 题` : '只跑未聚类的题'}
+                      </div>
+                    </button>
                     <button
                       onClick={() => handleAiCluster('selected')}
                       disabled={selectedIds.length === 0}
-                      className="flex-1 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      className="py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm"
+                      title="只聚类当前选中的题目"
                     >
                       <i className="fa-solid fa-check-double mr-1"></i>
-                      聚类选中题 ({selectedIds.length})
+                      聚类选中题
+                      <div className="text-[11px] opacity-80 font-normal mt-0.5">已选 {selectedIds.length} 题</div>
                     </button>
                     <button
-                      onClick={() => handleAiCluster('all')}
-                      className="flex-1 py-3 bg-cyan-500 text-white rounded-lg hover:bg-cyan-600 transition-colors"
+                      onClick={() => handleAiCluster('full')}
+                      className="py-3 bg-cyan-500 text-white rounded-lg hover:bg-cyan-600 transition-colors text-sm"
+                      title="按新版词表重跑全部题目；人工改挂过的题会自动跳过"
                     >
-                      <i className="fa-solid fa-database mr-1"></i>
-                      聚类全部题
+                      <i className="fa-solid fa-rotate mr-1"></i>
+                      全量重跑
+                      <div className="text-[11px] opacity-80 font-normal mt-0.5">
+                        {clusterStats ? `共 ${clusterStats.total} 题（跳过 ${clusterStats.manual || 0} 个人工）` : '按词表重跑全部'}
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => handleAiCluster('retry', { jobId: latestJob?.jobId })}
+                      disabled={!latestJob || !clusterStats || (clusterStats.failed || 0) === 0}
+                      className="py-3 bg-amber-500 text-white rounded-lg hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm"
+                      title="只重试上一次任务中失败的题目"
+                    >
+                      <i className="fa-solid fa-arrows-rotate mr-1"></i>
+                      重试失败题
+                      <div className="text-[11px] opacity-80 font-normal mt-0.5">
+                        待重试 {clusterStats?.failed || 0} 题
+                      </div>
                     </button>
                   </div>
+
+                  {/* 中断续跑 */}
+                  {latestJob && latestJob.status === 'paused' && (
+                    <button
+                      onClick={() => handleAiCluster('resume', { jobId: latestJob.jobId })}
+                      className="w-full py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-colors text-sm"
+                    >
+                      <i className="fa-solid fa-play mr-1"></i>
+                      上次任务被中断，从断点继续
+                    </button>
+                  )}
+
+                  {/* 人工改挂 */}
+                  <div className="border-t border-gray-200 pt-3">
+                    <div className="text-xs text-gray-500 mb-2">
+                      <i className="fa-solid fa-hand-pointer mr-1"></i>
+                      人工改挂：AI 分错的题可手动指定章节。人工指定的题在后续重跑时<b>不会被覆盖</b>。
+                    </div>
+                    <div className="flex gap-2">
+                      <select
+                        value={manualClusterId}
+                        onChange={(e) => setManualClusterId(e.target.value)}
+                        className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                      >
+                        <option value="">— 选择目标章节 —</option>
+                        {CHAPTER_TAXONOMY.map((part) => (
+                          <optgroup key={part.group} label={part.group}>
+                            {part.chapters.map((ch) => (
+                              <optgroup key={ch.id} label={`　${ch.code} ${ch.name}`}>
+                                {ch.sections.map((s) => (
+                                  <option key={s} value={`${ch.name}/${s}`}>{s}</option>
+                                ))}
+                                {ch.allowChapter && (
+                                  <option value={ch.name}>{ch.name}（整章）</option>
+                                )}
+                              </optgroup>
+                            ))}
+                          </optgroup>
+                        ))}
+                      </select>
+                      <button
+                        onClick={handleManualCluster}
+                        disabled={selectedIds.length === 0 || !manualClusterId}
+                        className="px-4 py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm whitespace-nowrap"
+                      >
+                        改挂选中题 ({selectedIds.length})
+                      </button>
+                    </div>
+                  </div>
+
                   <p className="text-xs text-gray-400">
                     参考 Token 消耗：1000 题约 16 万 token，DeepSeek 价格约 ¥0.25。
-                    分批 50 题/次，支持失败重试。
+                    分批 50 题/次；失败的批次会被记录下来，可单独重试，不再静默跳过。
                   </p>
                 </div>
               )}
@@ -2905,10 +3114,10 @@ ${isChoice ? `5. 对于选择题，answers字段必须填写选项字母（A、B
               {/* 完成结果 */}
               {clusterResult && !clustering && (
                 <div className="space-y-3">
-                  <div className="bg-green-50 border border-green-200 rounded-lg p-4">
-                    <div className="flex items-center gap-2 text-green-700 font-medium mb-2">
-                      <i className="fa-solid fa-circle-check"></i>
-                      聚类完成
+                  <div className={`border rounded-lg p-4 ${clusterResult.status === 'completed' ? 'bg-green-50 border-green-200' : 'bg-amber-50 border-amber-200'}`}>
+                    <div className={`flex items-center gap-2 font-medium mb-2 ${clusterResult.status === 'completed' ? 'text-green-700' : 'text-amber-700'}`}>
+                      <i className={`fa-solid ${clusterResult.status === 'completed' ? 'fa-circle-check' : 'fa-triangle-exclamation'}`}></i>
+                      {clusterResult.status === 'completed' ? '聚类完成' : '任务未正常结束'}
                     </div>
                     <div className="grid grid-cols-3 gap-3 text-center text-sm">
                       <div>
@@ -2917,14 +3126,39 @@ ${isChoice ? `5. 对于选择题，answers字段必须填写选项字母（A、B
                       </div>
                       <div>
                         <div className="text-xl font-bold text-amber-700">{clusterResult.skipped}</div>
-                        <div className="text-xs text-gray-500">跳过</div>
+                        <div className="text-xs text-gray-500">未成功</div>
                       </div>
                       <div>
                         <div className="text-xl font-bold text-gray-700">{clusterResult.total}</div>
                         <div className="text-xs text-gray-500">总计</div>
                       </div>
                     </div>
+                    {clusterResult.error && (
+                      <p className="text-xs text-red-600 mt-2">{clusterResult.error}</p>
+                    )}
+                    {clusterResult.note && (
+                      <p className="text-xs text-gray-600 mt-2">{clusterResult.note}</p>
+                    )}
+                    {clusterResult.failedCount > 0 && (
+                      <p className="text-xs text-amber-700 mt-2">
+                        <i className="fa-solid fa-circle-info mr-1"></i>
+                        有 {clusterResult.failedCount} 道题未成功（AI 返回了词表外的类目或调用失败），可点下方「重试失败题」。
+                      </p>
+                    )}
                   </div>
+
+                  {clusterResult.failedCount > 0 && (
+                    <button
+                      onClick={() => {
+                        setClusterResult(null);
+                        handleAiCluster('retry', { jobId: clusterResult.jobId });
+                      }}
+                      className="w-full py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 transition-colors"
+                    >
+                      <i className="fa-solid fa-arrows-rotate mr-1"></i>
+                      重试失败题 ({clusterResult.failedCount})
+                    </button>
+                  )}
                   <button
                     onClick={() => {
                       setClusterResult(null);

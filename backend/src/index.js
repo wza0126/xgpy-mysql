@@ -6896,109 +6896,239 @@ app.delete('/api/ai-qa-kb/:id', authenticate, async (req, res) => {
 // 3. 学生练习做错后调用 /api/practice/similar/:questionId 获取同 cluster_id 的同类题
 // 4. cluster_id 不暴露给学生筛选页，仅用于内部检索
 
-const CLUSTER_SYSTEM_PROMPT = [
-  '你是江苏省高中信息技术、Python编程题库分类专家。',
-  '给定一组题目（含题干和选项），请为每道题分配一个知识点聚类ID。',
-  '聚类ID采用「一级类目/二级类目」路径格式，例如：「信息系统/分类与类型」、「Python基础/循环结构」、「数据与信息/数据编码」。',
-  '一级类目参考：信息技术基础、信息系统、Python基础、数据与信息、网络基础、人工智能、多媒体、信息安全、信息技术与社会、数据与数据结构、算法与程序设计、其他。',
-  '若题目属于同一知识点，应分配相同的 cluster_id，便于同类题推荐。',
-  '请严格输出 JSON 数组，不要包裹在代码块中，格式为：',
-  '[{"question_id":"题目ID","cluster_id":"一级/二级","sub_topic":"一句话子主题"}]',
-].join('\n');
+// 分类总纲（唯一分类标准，与学习模块 16 章目录、练习模块章节筛选同源）
+const { CHAPTER_NAMES, SECTION_PATHS, SECTIONS_BY_CHAPTER, CHAPTER_ALLOW_SELF } = require('./chapter-taxonomy');
+const { buildTaxonomyPromptText } = require('./chapter-taxonomy');
+
+// 聚类提示词：**强制枚举**（不再给"参考类目"，AI 不得自造类目名）
+// 历史问题：老提示词写"一级类目参考：信息系统、Python基础…"→ AI 自由发挥，
+// 79 个一级类目里 67 个是题干误判（如「整除运算符」「123」「{"options":[...」）。
+function buildClusterSystemPrompt() {
+  const allowList = Object.keys(CHAPTER_ALLOW_SELF).filter(k => CHAPTER_ALLOW_SELF[k]);
+  return [
+    '你是江苏省高中信息技术、Python 编程题库分类专家。',
+    '任务：给定一组题目（含题干和选项），为每道题从下方**固定词表**中选出一个知识点路径。',
+    '',
+    '== 唯一合法分类标准（词表）==',
+    buildTaxonomyPromptText(),
+    '',
+    '== 硬性规则（违反即判为无效输出）==',
+    '1. cluster_id 必须**逐字**取自上表：可以用「章名」，也可以「章名/小节名」，禁止创造、改写、新增任何类目。',
+    '2. 严禁把题干内容、选项文字、数字、代码片段当作类目名。',
+    '3. 优先选到**小节**；只有当题目确实无法归入该章任何小节时，才允许只写章名',
+    `   （仅以下章支持只写章名：${allowList.join('、')}）。`,
+    '4. 一道题只输出一个 cluster_id。同一知识点的题目应给相同 cluster_id，便于同类题推荐。',
+    '5. 若某题确实与全部 16 章都无关，cluster_id 填 "其他"，并在 sub_topic 里用一句话说明它考什么。',
+    '',
+    '== 输出格式 ==',
+    '严格输出 JSON 数组，不要包裹在代码块中：',
+    '[{"question_id":"题目ID","cluster_id":"章名/小节名","sub_topic":"一句话子主题"}]',
+  ].join('\n');
+}
 
 const CLUSTER_BATCH_SIZE = 50;
 
-// 聚类任务内存存储（重启后清空；用于支持长任务异步处理，避免 HTTP 长连接被代理/浏览器掐断）
-const clusterJobs = new Map();
-const CLUSTER_JOB_TTL_MS = 30 * 60 * 1000; // 30 分钟后清理已完成的任务记录
+// ===== 聚类任务的合法性校验（AI 返回的 cluster_id 必须落在词表内）=====
+function validateClusterId(rawId) {
+  const id = String(rawId || '').trim();
+  if (!id) return null;
+  if (id === '其他') return { clusterId: '其他', allowSelf: true };
+  if (SECTION_PATHS.includes(id)) return { clusterId: id, allowSelf: true };
+  // 只到章级：仅当该章声明 allowChapter
+  if (CHAPTER_NAMES.includes(id)) {
+    return CHAPTER_ALLOW_SELF[id] ? { clusterId: id, allowSelf: true } : null;
+  }
+  return null;
+}
 
-// 清理过期的聚类任务记录（防止 Map 无限增长）
-function cleanupClusterJobs() {
-  const now = Date.now();
-  for (const [id, job] of clusterJobs.entries()) {
-    const age = now - (job.startedAt || 0);
-    if (job.status !== 'running' && age > CLUSTER_JOB_TTL_MS) {
-      clusterJobs.delete(id);
+// 聚类任务的持久化存储（落库 question_cluster_tasks，替代原内存 Map）
+// 原实现 clusterJobs = new Map() 在后端一重启就清空，前端轮询直接 404，任务无法断点续跑。
+const CLUSTER_TASK_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 天后清理已完成任务记录
+
+function parseJsonColumn(value) {
+  if (value == null) return null;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
+// 把一行 question_cluster_tasks 转成前端需要的任务对象（含兼容字段）
+function rowToClusterJob(row) {
+  if (!row) return null;
+  return {
+    jobId: row.id,
+    mode: row.mode,
+    status: row.status,                       // running | paused | completed | failed
+    total: row.total,
+    totalBatches: row.total_batches,
+    processedBatches: row.processed_batches,
+    updated: row.updated,
+    skipped: row.skipped,
+    failedIds: parseJsonColumn(row.failed_ids) || [],
+    lastBatchError: row.last_error || undefined,
+    startedAt: row.created_at ? new Date(row.created_at).getTime() : 0,
+    updatedAt: row.updated_at ? new Date(row.updated_at).getTime() : 0,
+    completedAt: row.completed_at ? new Date(row.completed_at).getTime() : 0,
+    error: row.status === 'failed' ? (row.last_error || '聚类任务失败') : undefined,
+  };
+}
+
+async function loadClusterJob(jobId) {
+  const [rows] = await pool.query('SELECT * FROM question_cluster_tasks WHERE id = ?', [jobId]);
+  return rows.length > 0 ? rows[0] : null;
+}
+
+// 清理过期的已完成任务（防止任务表无限增长）
+async function cleanupClusterJobs() {
+  try {
+    const [result] = await pool.query(
+      'DELETE FROM question_cluster_tasks WHERE status IN (?, ?) AND updated_at < DATE_SUB(NOW(), INTERVAL ? SECOND)',
+      ['completed', 'failed', CLUSTER_TASK_TTL_MS / 1000]
+    );
+    if (result.affectedRows > 0) {
+      console.log(`[cluster] 清理过期聚类任务 ${result.affectedRows} 条`);
     }
+    // 兜底：把启动前残留的 running 任务标记为 paused（后端重启导致的中断）
+    const [stale] = await pool.query(
+      'UPDATE question_cluster_tasks SET status = ?, last_error = ? WHERE status = ?',
+      ['paused', '后端重启导致任务中断，可点击「继续」从断点续跑', 'running']
+    );
+    if (stale.affectedRows > 0) {
+      console.log(`[cluster] ${stale.affectedRows} 个聚类任务因后端重启被标记为可续跑`);
+    }
+  } catch (err) {
+    console.error('[cluster] 清理聚类任务失败:', err.message);
   }
 }
 
 // 异步执行聚类任务（不阻塞 HTTP 响应；前端通过 /cluster-status/:jobId 轮询进度）
+// 所有进度都写库，因此后端重启后任务可查、可续跑。
 async function processClusterJob(jobId, ids, config) {
-  const job = clusterJobs.get(jobId);
-  if (!job) return;
+  const row = await loadClusterJob(jobId);
+  if (!row) return;
 
   const batches = [];
   for (let i = 0; i < ids.length; i += CLUSTER_BATCH_SIZE) {
     batches.push(ids.slice(i, i + CLUSTER_BATCH_SIZE));
   }
-  job.totalBatches = batches.length;
+
+  // details 与 failedIds 采用「读改写累加」模式：每次落库前重新读当前值，
+  // 避免长任务期间的内存副本覆盖掉其它进程写入的进度。
+  const appendDetails = async (newDetails, failedIds, counters) => {
+    const [cur] = await pool.query('SELECT details, failed_ids FROM question_cluster_tasks WHERE id = ?', [jobId]);
+    const prevDetails = parseJsonColumn(cur[0]?.details) || [];
+    const prevFailed = parseJsonColumn(cur[0]?.failed_ids) || [];
+    const mergedFailed = Array.from(new Set([...prevFailed, ...failedIds]));
+    await pool.query(
+      'UPDATE question_cluster_tasks SET details = ?, failed_ids = ?, updated = ?, skipped = ?, processed_batches = ?, last_error = ? WHERE id = ?',
+      [
+        JSON.stringify(prevDetails.concat(newDetails)),
+        JSON.stringify(mergedFailed),
+        counters.updated, counters.skipped, counters.processedBatches,
+        counters.lastError || null, jobId,
+      ]
+    );
+  };
+
+  const totalUpdated = { n: 0 };
+  const totalSkipped = { n: 0 };
 
   try {
     for (let bi = 0; bi < batches.length; bi++) {
       const batchIds = batches[bi];
       const [rows] = await pool.query(
-        'SELECT id, type, content, options FROM questions WHERE id IN (?)',
+        'SELECT id, type, content, options, cluster_source FROM questions WHERE id IN (?)',
         [batchIds]
       );
-      if (rows.length === 0) {
-        job.processedBatches = bi + 1;
+
+      // 人工改挂过的题（cluster_source = manual）跳过，防止 AI 覆盖教师的修正
+      const aiTargets = rows.filter(r => r.cluster_source !== 'manual');
+      if (aiTargets.length === 0) {
+        await pool.query(
+          'UPDATE question_cluster_tasks SET processed_batches = ? WHERE id = ?',
+          [bi + 1, jobId]
+        );
         continue;
       }
 
-      const inputList = rows.map(q => ({
+      const inputList = aiTargets.map(q => ({
         question_id: q.id,
         type: q.type,
         text: buildQuestionTextForCluster(q),
       }));
 
-      const userContent = `请为以下 ${inputList.length} 道题目分配知识点聚类。题目列表（JSON）：\n${JSON.stringify(inputList)}`;
+      const userContent = `请为以下 ${inputList.length} 道题目分配知识点聚类（cluster_id 必须逐字取自词表）。题目列表（JSON）：\n${JSON.stringify(inputList)}`;
       let aiResponse = '';
       try {
         aiResponse = await callAiApi(config, [
-          { role: 'system', content: CLUSTER_SYSTEM_PROMPT },
+          { role: 'system', content: buildClusterSystemPrompt() },
           { role: 'user', content: userContent },
         ]);
       } catch (err) {
         console.error(`聚类任务 ${jobId} 批次 ${bi + 1}/${batches.length} AI 调用失败:`, err.message);
-        // 该批失败计入 skipped，继续下一批（部分聚类比全部失败好）
-        for (const id of batchIds) {
-          job.skipped++;
-          job.details.push({ question_id: id, cluster_id: null, sub_topic: null, status: 'ai_error' });
-        }
-        job.processedBatches = bi + 1;
-        job.lastBatchError = err.message;
+        // 该批标记为 failed（不再是静默 skipped），下次可单独「重试失败题」
+        const errDetails = batchIds.map(id => ({ question_id: id, cluster_id: null, sub_topic: null, status: 'ai_error', error: err.message }));
+        await pool.query(
+          'UPDATE questions SET cluster_status = ? WHERE id IN (?) AND cluster_source <> ?',
+          ['failed', batchIds, 'manual']
+        );
+        totalSkipped.n += batchIds.length;
+        await appendDetails(errDetails, batchIds, {
+          updated: totalUpdated.n, skipped: totalSkipped.n, processedBatches: bi + 1, lastError: err.message,
+        });
         continue;
       }
 
       const parsed = parseClusterResponse(aiResponse);
       const parsedMap = new Map(parsed.map(p => [p.question_id, p]));
 
+      const batchDetails = [];
+      const batchFailed = [];
       for (const id of batchIds) {
         const p = parsedMap.get(id);
-        if (p && p.cluster_id) {
+        const checked = p ? validateClusterId(p.cluster_id) : null;
+        if (checked) {
           await pool.query(
-            'UPDATE questions SET cluster_id = ?, sub_topic = ? WHERE id = ?',
-            [String(p.cluster_id).slice(0, 100), p.sub_topic ? String(p.sub_topic).slice(0, 100) : null, id]
+            'UPDATE questions SET cluster_id = ?, sub_topic = ?, cluster_status = ?, cluster_source = ?, clustered_at = NOW() WHERE id = ?',
+            [
+              checked.clusterId.slice(0, 100),
+              p.sub_topic ? String(p.sub_topic).slice(0, 100) : null,
+              'done', 'ai', id,
+            ]
           );
-          job.updated++;
-          job.details.push({ question_id: id, cluster_id: p.cluster_id, sub_topic: p.sub_topic || null, status: 'updated' });
+          totalUpdated.n++;
+          batchDetails.push({ question_id: id, cluster_id: checked.clusterId, sub_topic: p.sub_topic || null, status: 'updated' });
         } else {
-          job.skipped++;
-          job.details.push({ question_id: id, cluster_id: null, sub_topic: null, status: 'no_result' });
+          // AI 没给结果，或给了词表外的野类目名 → 记为 failed，可重试
+          totalSkipped.n++;
+          batchFailed.push(id);
+          await pool.query(
+            "UPDATE questions SET cluster_status = 'failed' WHERE id = ? AND cluster_source <> 'manual'",
+            [id]
+          );
+          batchDetails.push({
+            question_id: id, cluster_id: null, sub_topic: null,
+            status: p ? 'invalid_category' : 'no_result',
+            raw: p ? String(p.cluster_id || '').slice(0, 100) : null,
+          });
         }
       }
-      job.processedBatches = bi + 1;
-      job.updatedAt = Date.now();
+
+      await appendDetails(batchDetails, batchFailed, {
+        updated: totalUpdated.n, skipped: totalSkipped.n, processedBatches: bi + 1, lastError: null,
+      });
     }
-    job.status = 'completed';
-    job.completedAt = Date.now();
-    console.log(`聚类任务 ${jobId} 完成: 更新 ${job.updated}/${job.total}，跳过 ${job.skipped}`);
+
+    await pool.query(
+      'UPDATE question_cluster_tasks SET status = ?, completed_at = NOW() WHERE id = ?',
+      ['completed', jobId]
+    );
+    console.log(`聚类任务 ${jobId} 完成: 更新 ${totalUpdated.n}/${ids.length}，跳过 ${totalSkipped.n}`);
   } catch (err) {
     console.error(`聚类任务 ${jobId} 失败:`, err);
-    job.status = 'failed';
-    job.error = err.message;
-    job.completedAt = Date.now();
+    await pool.query(
+      'UPDATE question_cluster_tasks SET status = ?, last_error = ?, completed_at = NOW() WHERE id = ?',
+      ['failed', err.message, jobId]
+    );
   }
 }
 
@@ -7033,35 +7163,105 @@ function parseClusterResponse(content) {
   }
 }
 
-// 教师端：批量聚类选定题目（异步任务模式）
-// 请求体：{ questionIds: string[] } 或 { all: true, type?: 'choice'|'fill_blank'|'code', tag?: string }
-// 响应：{ jobId, total, totalBatches } —— 立即返回，前端通过 /api/teacher/questions/cluster-status/:jobId 轮询进度
-// 设计原因：500+ 题聚类需要数分钟，HTTP 长连接会被浏览器/代理掐断（ERR_EMPTY_RESPONSE），
-// 后端实际仍在处理并消耗 token；改为异步可避免连接超时，且能给前端实时进度反馈
+// 教师端：批量聚类选定题目（异步任务模式，任务状态落库）
+//
+// 请求体（四选一，mode 决定选题范围）：
+//   { mode: 'incremental', type?, tag? }  —— 只聚类还没成功的题（cluster_status <> 'done'），新增题目走这个
+//   { mode: 'full',        type?, tag? }  —— 全量重跑（cluster_source='manual' 的人工修正会被跳过）
+//   { mode: 'retry',       jobId }        —— 只重试某个历史任务里失败的题
+//   { mode: 'selected',    questionIds }  —— 聚类指定题目（兼容老调用）
+//   { mode: 'manual',      questionIds, clusterId } —— 人工指定分类（写 cluster_source='manual'）
+// 兼容旧参数：传 { all: true } 等价于 mode: 'full'；传 { questionIds } 等价于 mode: 'selected'
+//
+// 响应：{ jobId, mode, total, totalBatches } —— 立即返回，前端轮询 /cluster-status/:jobId
 app.post('/api/teacher/questions/cluster', authenticate, requireTeacher, async (req, res) => {
   try {
-    cleanupClusterJobs();
-    const { questionIds, all, type, tag } = req.body || {};
-    let ids = Array.isArray(questionIds) ? questionIds.filter(Boolean) : [];
+    await cleanupClusterJobs();
+    const body = req.body || {};
+    let { questionIds, all, type, tag, jobId: retryJobId, clusterId } = body;
 
-    // 模式二：聚类全部题目（可按 type/tag 过滤）
-    if (all) {
-      let sql = 'SELECT id FROM questions WHERE 1=1';
+    // 归一化 mode（向后兼容 all / questionIds 两种老写法）
+    let mode = body.mode;
+    if (!mode) {
+      mode = all ? 'full' : (Array.isArray(questionIds) && questionIds.length > 0 ? 'selected' : 'incremental');
+    }
+
+    let ids = [];
+
+    if (mode === 'manual') {
+      // ---------- 人工指定分类：不调用 AI ----------
+      const manualIds = Array.isArray(questionIds) ? questionIds.filter(Boolean) : [];
+      if (manualIds.length === 0) {
+        return res.status(400).json({ data: null, error: '请先选择要改挂分类的题目' });
+      }
+      const checkedManual = validateClusterId(clusterId);
+      if (!checkedManual) {
+        return res.status(400).json({ data: null, error: `分类「${clusterId || ''}」不在词表内，请从章节词表中选择` });
+      }
+      const [upd] = await pool.query(
+        "UPDATE questions SET cluster_id = ?, cluster_status = 'done', cluster_source = 'manual', clustered_at = NOW() WHERE id IN (?)",
+        [checkedManual.clusterId.slice(0, 100), manualIds]
+      );
+      return res.json({
+        data: {
+          jobId: null, mode: 'manual', total: manualIds.length,
+          updated: upd.affectedRows, clusterId: checkedManual.clusterId,
+        },
+        error: null,
+      });
+    }
+
+    if (mode === 'retry') {
+      // ---------- 只重试历史任务里失败的题 ----------
+      const taskRow = await loadClusterJob(retryJobId);
+      if (!taskRow) {
+        return res.status(404).json({ data: null, error: '原任务不存在或已过期' });
+      }
+      const failedIds = parseJsonColumn(taskRow.failed_ids) || [];
+      if (failedIds.length === 0) {
+        return res.status(400).json({ data: null, error: '该任务没有失败的题目需要重试' });
+      }
+      const [existRows] = await pool.query(
+        "SELECT id FROM questions WHERE id IN (?) AND cluster_source <> 'manual'",
+        [failedIds]
+      );
+      ids = existRows.map(r => r.id);
+    } else if (mode === 'incremental') {
+      // ---------- 增量：只跑还没成功的题 ----------
+      let sql = `SELECT id FROM questions
+                 WHERE (cluster_status <> 'done' OR cluster_status IS NULL)
+                   AND cluster_source <> 'manual'`;
       const params = [];
-      if (type && type !== 'all') {
-        sql += ' AND type = ?';
-        params.push(type);
-      }
-      if (tag) {
-        sql += ' AND (tags IS NOT NULL AND JSON_CONTAINS(tags, JSON_QUOTE(?)))';
-        params.push(tag);
-      }
+      if (type && type !== 'all') { sql += ' AND type = ?'; params.push(type); }
+      if (tag) { sql += ' AND (tags IS NOT NULL AND JSON_CONTAINS(tags, JSON_QUOTE(?)))'; params.push(tag); }
       const [rows] = await pool.query(sql, params);
+      ids = rows.map(r => r.id);
+    } else if (mode === 'full') {
+      // ---------- 全量重跑（人工修正的题自动跳过，在 processClusterJob 内过滤）----------
+      let sql = 'SELECT id FROM questions WHERE cluster_source <> ?';
+      const params = ['manual'];
+      if (type && type !== 'all') { sql += ' AND type = ?'; params.push(type); }
+      if (tag) { sql += ' AND (tags IS NOT NULL AND JSON_CONTAINS(tags, JSON_QUOTE(?)))'; params.push(tag); }
+      const [rows] = await pool.query(sql, params);
+      ids = rows.map(r => r.id);
+    } else {
+      // ---------- selected：聚类指定题目 ----------
+      const selectedIds = Array.isArray(questionIds) ? questionIds.filter(Boolean) : [];
+      if (selectedIds.length === 0) {
+        return res.status(400).json({ data: null, error: '没有可聚类的题目，请先选择题目' });
+      }
+      const [rows] = await pool.query('SELECT id FROM questions WHERE id IN (?)', [selectedIds]);
       ids = rows.map(r => r.id);
     }
 
     if (ids.length === 0) {
-      return res.status(400).json({ data: null, error: '没有可聚类的题目，请先选择题目' });
+      const msgByMode = {
+        incremental: '没有待聚类的题目（所有题目都已聚类成功）',
+        full: '没有可全量重跑的题目',
+        retry: '失败的题目已不存在',
+        selected: '没有可聚类的题目，请先选择题目',
+      };
+      return res.status(400).json({ data: null, error: msgByMode[mode] || '没有可聚类的题目' });
     }
 
     const config = await getAiQaConfig(pool);
@@ -7070,33 +7270,37 @@ app.post('/api/teacher/questions/cluster', authenticate, requireTeacher, async (
     }
 
     const totalBatches = Math.ceil(ids.length / CLUSTER_BATCH_SIZE);
-    const jobId = `cluster_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-    clusterJobs.set(jobId, {
-      jobId,
-      status: 'running',          // running | completed | failed
-      total: ids.length,
-      totalBatches,
-      processedBatches: 0,
-      updated: 0,
-      skipped: 0,
-      startedAt: Date.now(),
-      updatedAt: Date.now(),
-      details: [],
-    });
+    const newJobId = `cluster_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+
+    // 任务落库（替代原内存 Map）
+    await pool.query(
+      `INSERT INTO question_cluster_tasks
+         (id, mode, status, total, total_batches, processed_batches, updated, skipped, question_ids, failed_ids, details, created_by)
+       VALUES (?, ?, 'running', ?, ?, 0, 0, 0, ?, ?, ?, ?)`,
+      [newJobId, mode, ids.length, totalBatches, JSON.stringify(ids), JSON.stringify([]), JSON.stringify([]), req.user.userId]
+    );
+
+    // 标记为处理中（便于教师端统计"待聚类/已聚类/失败"）
+    await pool.query(
+      "UPDATE questions SET cluster_status = 'running' WHERE id IN (?) AND cluster_source <> 'manual'",
+      [ids]
+    );
 
     // 异步执行，不阻塞响应
-    processClusterJob(jobId, ids, config).catch(err => {
-      console.error(`聚类任务 ${jobId} 异常退出:`, err);
-      const job = clusterJobs.get(jobId);
-      if (job) {
-        job.status = 'failed';
-        job.error = err.message;
-        job.completedAt = Date.now();
+    processClusterJob(newJobId, ids, config).catch(async (err) => {
+      console.error(`聚类任务 ${newJobId} 异常退出:`, err);
+      try {
+        await pool.query(
+          'UPDATE question_cluster_tasks SET status = ?, last_error = ?, completed_at = NOW() WHERE id = ?',
+          ['failed', err.message, newJobId]
+        );
+      } catch (e) {
+        console.error(`聚类任务 ${newJobId} 状态落库失败:`, e.message);
       }
     });
 
     res.json({
-      data: { jobId, total: ids.length, totalBatches },
+      data: { jobId: newJobId, mode, total: ids.length, totalBatches },
       error: null,
     });
   } catch (error) {
@@ -7106,16 +7310,95 @@ app.post('/api/teacher/questions/cluster', authenticate, requireTeacher, async (
 });
 
 // 教师端：查询聚类任务进度（前端 2 秒轮询一次）
+// 任务在 question_cluster_tasks 表里，后端重启后依然可查
 app.get('/api/teacher/questions/cluster-status/:jobId', authenticate, requireTeacher, async (req, res) => {
   try {
     const { jobId } = req.params;
-    const job = clusterJobs.get(jobId);
-    if (!job) {
-      return res.status(404).json({ data: null, error: '任务不存在或已过期（重启后端会清空任务记录）' });
+    const row = await loadClusterJob(jobId);
+    if (!row) {
+      return res.status(404).json({ data: null, error: '任务不存在或已过期（已完成任务保留 7 天）' });
     }
-    res.json({ data: job, error: null });
+    res.json({ data: rowToClusterJob(row), error: null });
   } catch (error) {
     console.error('查询聚类任务状态失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 教师端：中断的聚类任务续跑（后端重启后 status 被置为 paused）
+// 从 question_ids 里排除已成功（cluster_status='done'）的题，只补跑剩下的
+app.post('/api/teacher/questions/cluster-resume/:jobId', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    const row = await loadClusterJob(jobId);
+    if (!row) {
+      return res.status(404).json({ data: null, error: '任务不存在或已过期' });
+    }
+    if (row.status === 'completed') {
+      return res.status(400).json({ data: null, error: '该任务已完成，无需续跑' });
+    }
+
+    const allIds = parseJsonColumn(row.question_ids) || [];
+    if (allIds.length === 0) {
+      return res.status(400).json({ data: null, error: '该任务没有记录题目清单，无法续跑' });
+    }
+
+    const [todoRows] = await pool.query(
+      "SELECT id FROM questions WHERE id IN (?) AND cluster_status <> 'done' AND cluster_source <> 'manual'",
+      [allIds]
+    );
+    const todoIds = todoRows.map(r => r.id);
+    if (todoIds.length === 0) {
+      await pool.query(
+        'UPDATE question_cluster_tasks SET status = ?, completed_at = NOW() WHERE id = ?',
+        ['completed', jobId]
+      );
+      return res.json({ data: { jobId, resumed: 0, message: '剩余题目已全部处理完毕' }, error: null });
+    }
+
+    const config = await getAiQaConfig(pool);
+    if (!config.ai_api_base_url || !config.ai_api_key) {
+      return res.status(400).json({ data: null, error: 'AI 服务未配置，请联系管理员在系统设置中配置 AI API' });
+    }
+
+    // 重置进度指标，保留 details / failed_ids 便于累加
+    await pool.query(
+      "UPDATE question_cluster_tasks SET status = 'running', failed_ids = ?, last_error = NULL, completed_at = NULL WHERE id = ?",
+      [JSON.stringify([]), jobId]
+    );
+    await pool.query(
+      "UPDATE questions SET cluster_status = 'running' WHERE id IN (?) AND cluster_source <> 'manual'",
+      [todoIds]
+    );
+
+    processClusterJob(jobId, todoIds, config).catch(async (err) => {
+      console.error(`聚类任务 ${jobId} 续跑异常:`, err);
+      try {
+        await pool.query(
+          'UPDATE question_cluster_tasks SET status = ?, last_error = ?, completed_at = NOW() WHERE id = ?',
+          ['failed', err.message, jobId]
+        );
+      } catch (e) {
+        console.error(`聚类任务 ${jobId} 状态落库失败:`, e.message);
+      }
+    });
+
+    res.json({ data: { jobId, resumed: todoIds.length }, error: null });
+  } catch (error) {
+    console.error('续跑聚类任务失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 教师端：最近一次聚类任务（用于教师端打开弹窗时恢复进度显示）
+app.get('/api/teacher/questions/cluster-latest', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      'SELECT * FROM question_cluster_tasks ORDER BY created_at DESC LIMIT 1'
+    );
+    res.json({ data: rows.length > 0 ? rowToClusterJob(rows[0]) : null, error: null });
+  } catch (error) {
+    console.error('查询最近聚类任务失败:', error);
     res.status(500).json({ data: null, error: error.message });
   }
 });
@@ -7299,7 +7582,10 @@ app.get('/api/teacher/questions/cluster-stats', authenticate, requireTeacher, as
       SELECT
         COUNT(*) AS total,
         SUM(CASE WHEN cluster_id IS NOT NULL AND cluster_id <> '' THEN 1 ELSE 0 END) AS clustered,
-        SUM(CASE WHEN cluster_id IS NULL OR cluster_id = '' THEN 1 ELSE 0 END) AS unclustered
+        SUM(CASE WHEN cluster_id IS NULL OR cluster_id = '' THEN 1 ELSE 0 END) AS unclustered,
+        SUM(CASE WHEN cluster_status = 'failed' THEN 1 ELSE 0 END) AS failed,
+        SUM(CASE WHEN cluster_status = 'pending' THEN 1 ELSE 0 END) AS pending,
+        SUM(CASE WHEN cluster_source = 'manual' THEN 1 ELSE 0 END) AS manual
       FROM questions
     `);
     const [clusters] = await pool.query(`
@@ -7309,12 +7595,38 @@ app.get('/api/teacher/questions/cluster-stats', authenticate, requireTeacher, as
       GROUP BY cluster_id
       ORDER BY cluster_id ASC
     `);
+
+    // 与分类总纲比对：标出「不在词表内」的遗留野类目，以及词表里题量为 0 的小节
+    const sectionCounts = new Map();
+    for (const c of clusters) sectionCounts.set(c.cluster_id, Number(c.cnt) || 0);
+    const invalid = [];
+    const missing = [];
+    for (const sp of SECTION_PATHS) {
+      if (!sectionCounts.has(sp)) missing.push(sp);
+    }
+    for (const c of clusters) {
+      if (!validateClusterId(c.cluster_id)) {
+        invalid.push({ cluster_id: c.cluster_id, cnt: Number(c.cnt) || 0 });
+      }
+    }
+    // 章级兜底：只写章名且该章允许的，不在 invalid 里；不允许章级却只有章名的会被 validateClusterId 判为无效
+    invalid.sort((a, b) => b.cnt - a.cnt);
+
     res.json({
       data: {
         total: stats[0].total,
         clustered: stats[0].clustered,
         unclustered: stats[0].unclustered,
+        failed: Number(stats[0].failed) || 0,
+        pending: Number(stats[0].pending) || 0,
+        manual: Number(stats[0].manual) || 0,
         clusters,
+        // 合规性检查结果
+        invalid_clusters: invalid,
+        invalid_total: invalid.reduce((s, x) => s + x.cnt, 0),
+        empty_sections: missing,
+        taxonomy_chapters: CHAPTER_NAMES.length,
+        taxonomy_sections: SECTION_PATHS.length,
       },
       error: null,
     });
