@@ -22,6 +22,8 @@ import { PracticeModule } from './PracticeModule';
 interface ChapterSection {
   name: string;
   path: string;
+  /** 讲义正文里该小节标题的 DOM id（后端注入；讲义无对应标题时为空串） */
+  anchor?: string;
   question_count: number;
 }
 
@@ -62,6 +64,8 @@ export const LearnModule: React.FC = () => {
   // 右下角「回到顶部」悬浮按钮：讲义很长时免去手动滚回顶部
   const scrollRef = React.useRef<HTMLDivElement | null>(null);
   const [showBackTop, setShowBackTop] = useState(false);
+  // 讲义正文容器：用于往小节标题里注入「去练习」按钮
+  const lectureRef = React.useRef<HTMLDivElement | null>(null);
 
   // 监听右侧正文容器的滚动位置，超过阈值才显示按钮
   useEffect(() => {
@@ -77,8 +81,63 @@ export const LearnModule: React.FC = () => {
     scrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  /**
+   * 滚动右侧正文到某个小节锚点。
+   *
+   * 为什么不用 `el.scrollIntoView()`：学习模块是**桌面窗口内的应用**，
+   * scrollIntoView 会连带滚动外层窗口容器与页面，把窗口顶跑偏。
+   * 这里手动算相对偏移，只滚右侧这个 overflow-y-auto 容器，行为可控。
+   *
+   * @param anchor 后端下发的小节锚点 id；空串表示该小节讲义里没有对应标题
+   */
+  const scrollToAnchor = (anchor?: string | null) => {
+    const scroller = scrollRef.current;
+    if (!scroller || !anchor) return false;
+    const target = document.getElementById(anchor);
+    if (!target) return false;
+    const offset = target.getBoundingClientRect().top
+      - scroller.getBoundingClientRect().top
+      + scroller.scrollTop;
+    scroller.scrollTo({ top: Math.max(0, offset - 12), behavior: 'smooth' });
+    return true;
+  };
+
   // 加载讲义样式（一次性）
   useEffect(() => {
+    if (!document.getElementById('xs-lp-css')) {
+      // 【学练结合】讲义小节标题右侧的「去练习」胶囊样式。
+      // 讲义正文里插的是裸 DOM（不走 React），类名也不在 Tailwind 扫描范围内，
+      // 所以必须在这里以普通 CSS 注入。
+      const style = document.createElement('style');
+      style.id = 'xs-lp-css';
+      style.textContent = `
+.xs-lecture .lp-inline-practice {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 10px;
+  padding: 1px 8px;
+  border: 1px solid #c7d2fe;
+  border-radius: 999px;
+  background: #eef2ff;
+  color: #4f46e5;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.6;
+  vertical-align: middle;
+  cursor: pointer;
+  opacity: .5;
+  transition: opacity .15s, background-color .15s, color .15s, border-color .15s;
+}
+.xs-lecture h4:hover > .lp-inline-practice,
+.xs-lecture h5:hover > .lp-inline-practice,
+.xs-lecture h6:hover > .lp-inline-practice,
+.xs-lecture .lp-inline-practice:hover,
+.xs-lecture .lp-inline-practice:focus-visible { opacity: 1; }
+.xs-lecture .lp-inline-practice:hover { background: #4f46e5; border-color: #4f46e5; color: #fff; }
+.xs-lecture .xs-anchor { display: block; height: 0; overflow: hidden; }
+`;
+      document.head.appendChild(style);
+    }
     if (cssInjected || document.getElementById('xs-lecture-css')) { setCssInjected(true); return; }
     backendClient.get('/api/student/learn-lecture.css', {}, { responseType: 'text' })
       .then((css: any) => {
@@ -181,10 +240,25 @@ export const LearnModule: React.FC = () => {
     ? Math.min(100, Math.round((selfTestVisited / selfTestTotal) * 100))
     : 0;
 
-  /** 跳练习模块并带上章节筛选 */
-  const goPractice = (clusterId?: string) => {
+  /**
+   * 跳练习模块并带上章节筛选。
+   *
+   * 【学练结合】传 sec 时（从右侧小节的「去练习」按钮进来），会**先把学习页正文
+   * 滚到该小节**，再打开练习窗口：学生点完按钮，左边讲义同步定位到考点，
+   * 练习窗口盖在上面，看讲义 / 做题来回切不用再手工找位置。
+   *
+   * @param clusterId 筛选用的 cluster_id（「章名」= 整章，「章名/小节名」= 单小节）
+   * @param sec       可选，被点击的小节（用于页面内滚动定位）
+   */
+  const goPractice = (clusterId?: string, sec?: ChapterSection) => {
     const cid = clusterId || selectedChapter;
     if (!cid) return;
+    // 先滚动学习页（讲义已经渲染好了，字体变化不影响定位；若还没渲染则等一帧再试）
+    if (sec?.anchor) {
+      if (!scrollToAnchor(sec.anchor)) {
+        setTimeout(() => scrollToAnchor(sec.anchor), 120);
+      }
+    }
     // 打开练习窗口，并通过 initialCluster 让组件首屏就套用章节筛选。
     // 同时派发事件，兼容「练习窗口已经开着」的情况（组件已挂载，直接响应事件）。
     // 【必须传 component】WindowFrame 渲染的是 window.component，
@@ -198,6 +272,85 @@ export const LearnModule: React.FC = () => {
     } as any);
     window.dispatchEvent(new CustomEvent('openPracticeWithCluster', { detail: { cluster_id: cid } }));
   };
+
+  /**
+   * 【学练结合】讲义渲染后，给每小节标题右侧挂一个「去练习 N」小胶囊。
+   *
+   * 为什么用 DOM 注入而不是改讲义 HTML：
+   *   - 讲义是教师维护的考点精讲手册，不该混入业务按钮；
+   *   - 按钮要显示实时题量、要绑 React 的跳转逻辑，只有在前端拿得到。
+   *
+   * 【坑】讲义外层是 <AnimatePresence mode="wait">，换章时旧节点先播退出动画、
+   * 新节点才挂载 —— effect 首次执行时 lectureRef.current 还指着旧节点或为 null。
+   * 所以这里不能"跑一次就完"，必须轮询重试（最多 INJECT_RETRY 次）直到：
+   *   a) ref 指向的本章讲义容器已就绪（内部含本章的锚点），且 b) 胶囊已插入。
+   * 靠 data-lp-key 标记保证幂等，重试不会重复插入。
+   */
+  useEffect(() => {
+    if (!chapterDetail?.html || !current) return;
+    const wantChapter = current.cluster_id;
+    const secs = current.sections.filter((s) => s.anchor && s.question_count > 0);
+    if (!secs.length) return;
+
+    const INJECT_RETRY = 24;      // 24 × 150ms ≈ 3.6s，足够覆盖换章动画 + 接口往返
+    let tries = 0;
+    let timer: number | null = null;
+    let disposed = false;
+
+    const run = () => {
+      if (disposed) return;
+      const host = lectureRef.current;
+      // 讲义容器还没挂上（或还是旧章的）→ 稍后重试
+      if (!host) { retry(); return; }
+      // 用本章第一个锚点判断"这一章的讲义确实已经渲染出来了"
+      if (!host.querySelector(`#${CSS.escape(secs[0].anchor!)}`)) { retry(); return; }
+
+      secs.forEach((sec) => {
+        const marker = `lecturePracticeBtn_${sec.path}`;
+        if (host.querySelector(`[data-lp-key="${marker}"]`)) return; // 已注入，幂等
+        const head = host.querySelector(`#${CSS.escape(sec.anchor!)}`);
+        // 锚点可能挂在标题上，也可能是标题前插入的空 span → 统一找到它所在/后随的标题
+        const heading = (head?.tagName && /^H[1-6]$/.test(head.tagName)
+          ? head
+          : head?.nextElementSibling) as HTMLElement | null;
+        if (!heading) return;
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.dataset.lpKey = marker;
+        btn.textContent = `去练习 ${sec.question_count}`;
+        btn.title = `去练习：${sec.name}`;
+        btn.className = 'lp-inline-practice';
+        // 用 dataset 传参，避免闭包持有旧 sec 对象
+        btn.dataset.lpPath = sec.path;
+        btn.dataset.lpName = sec.name;
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const p = btn.dataset.lpPath || '';
+          const n = btn.dataset.lpName || '';
+          const live = current.sections.find((x) => x.path === p) || sec;
+          console.log(`[learn] 讲义内「去练习」点击：${n} (${p}) anchor=${live.anchor}`);
+          goPractice(p, live);
+        });
+        heading.appendChild(btn);
+      });
+    };
+
+    const retry = () => {
+      if (disposed || tries >= INJECT_RETRY) return;
+      tries++;
+      timer = window.setTimeout(run, 150);
+    };
+
+    run();
+
+    return () => {
+      disposed = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chapterDetail?.html, current?.cluster_id, loadingDetail]);
 
   /** 标记已看（仅进度用，不再触发 buff） */
   const markVisited = (key: string, text: string) => {
@@ -315,7 +468,11 @@ export const LearnModule: React.FC = () => {
                             {ch.sections.map((sec) => (
                               <button
                                 key={sec.path}
-                                onClick={() => { setSelectedChapter(ch.cluster_id); setTimeout(() => { document.getElementById(`sec-${encodeURIComponent(sec.path)}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 120); }}
+                                onClick={() => {
+                                  setSelectedChapter(ch.cluster_id);
+                                  // 讲义渲染是异步的（换章要重新拉 html），所以延迟到 DOM 就绪后再滚动
+                                  setTimeout(() => scrollToAnchor(sec.anchor), 160);
+                                }}
                                 className="w-full text-left px-2 py-1.5 rounded-lg text-xs text-gray-600 hover:bg-gray-100 flex items-center gap-2"
                               >
                                 <span className="flex-1 leading-snug">{sec.name}</span>
@@ -406,13 +563,14 @@ export const LearnModule: React.FC = () => {
                 </button>
                 {current.sections.length > 0 && (
                   <div className="flex items-center gap-1.5 flex-wrap ml-auto">
-                    {/* 显示本章全部有题的小节（不再截断为前 4 个，方便一章知识点多时逐个去练） */}
+                    {/* 显示本章全部有题的小节（不再截断为前 4 个，方便一章知识点多时逐个去练）
+                        点击后：学习页滚动到该小节 + 弹出带该小节筛选的练习窗口 */}
                     {current.sections.filter(s => s.question_count > 0).map(s => (
                       <button
                         key={s.path}
-                        onClick={() => goPractice(s.path)}
+                        onClick={() => goPractice(s.path, s)}
                         className="px-2.5 py-1.5 rounded-lg text-xs bg-white border border-gray-200 text-gray-600 hover:border-indigo-300 hover:text-indigo-600 transition-colors"
-                        title={`去练习：${s.name}`}
+                        title={`去练习并跳到讲义对应小节：${s.name}`}
                       >
                         {s.name} <span className="text-gray-400">{s.question_count}</span>
                       </button>
@@ -467,6 +625,7 @@ export const LearnModule: React.FC = () => {
               {/* 讲义正文 */}
               {chapterDetail?.html ? (
                 <div
+                  ref={lectureRef}
                   className={`bg-white rounded-2xl border ${colors.border} shadow-sm p-1`}
                   dangerouslySetInnerHTML={{ __html: chapterDetail.html }}
                 />

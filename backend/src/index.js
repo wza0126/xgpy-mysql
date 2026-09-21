@@ -7774,7 +7774,8 @@ app.get('/api/teacher/questions/cluster-stats', authenticate, requireTeacher, as
 // 设计：学习模块 16 章目录、讲义正文、章内小节题量，全部由 chapter-taxonomy.js 词表统一驱动，
 //       与题库聚类 cluster_id、练习模块章节筛选共享同一套分类标准。
 
-const { getChapterLecture, getLectureMeta } = require('./learn-content');
+const { getChapterLecture, getLectureMeta, getChapterAnchorIds } = require('./learn-content');
+const { anchorId, computeChapterAnchors } = require('./lecture-anchors');
 
 /** 取某学生某章的已看小节集合 */
 async function getVisitedSet(studentId, clusterId) {
@@ -7898,9 +7899,17 @@ app.get('/api/student/learn-chapters', authenticate, async (req, res) => {
 
     const chapters = CHAPTER_NAMES.map((name, idx) => {
       const lec = lectureByChapter.get(name);
+      // 该章已注入讲义的锚点集合（前端「去练习」要靠它滚动到对应小节）
+      const anchorIds = getChapterAnchorIds(name);
       const secs = (SECTIONS_BY_CHAPTER[name] || []).map(s => {
         const path = `${name}/${s}`;
-        return { name: s, path, question_count: sectionCount.get(path) || 0 };
+        const aid = anchorId(s);
+        return {
+          name: s,
+          path,
+          anchor: anchorIds.has(aid) ? aid : '',
+          question_count: sectionCount.get(path) || 0,
+        };
       });
       const chapterSelf = chapterCount.get(name) || 0;
       const sectionSum = secs.reduce((a, s) => a + s.question_count, 0);
@@ -7961,6 +7970,10 @@ app.get('/api/student/learn-chapter/:clusterId', authenticate, async (req, res) 
       counts = rows;
     }
     const countMap = new Map(counts.map(r => [r.cluster_id, Number(r.cnt) || 0]));
+    // anchor 是讲义正文里该小节标题的 DOM id（后端注入，见 lecture-anchors.js）。
+    // 前端靠它做「点小节按钮 → 学习页滚动到位 + 弹出练习」的联动，
+    // 也顺带修好左侧目录点击小节不跳转的老问题（以前讲义没有 id）。
+    const anchorInfo = computeChapterAnchors(clusterId, lec?.html || '', secs);
     res.json({
       data: {
         cluster_id: clusterId,
@@ -7968,7 +7981,12 @@ app.get('/api/student/learn-chapter/:clusterId', authenticate, async (req, res) 
         badge: lec?.badge || '',
         part: lec?.part || '',
         html: lec?.html || '',
-        sections: secs.map(s => ({ name: s, path: `${clusterId}/${s}`, question_count: countMap.get(`${clusterId}/${s}`) || 0 })),
+        sections: secs.map(s => ({
+          name: s,
+          path: `${clusterId}/${s}`,
+          anchor: anchorInfo.map[s]?.index >= 0 ? anchorId(s) : '',
+          question_count: countMap.get(`${clusterId}/${s}`) || 0,
+        })),
       },
       error: null,
     });
