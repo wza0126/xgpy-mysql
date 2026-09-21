@@ -59,6 +59,23 @@ export const LearnModule: React.FC = () => {
   const [showSelfTest, setShowSelfTest] = useState(false);
   const [visitedQuestions, setVisitedQuestions] = useState<Set<string>>(new Set());
   const [cssInjected, setCssInjected] = useState(false);
+  // 右下角「回到顶部」悬浮按钮：讲义很长时免去手动滚回顶部
+  const scrollRef = React.useRef<HTMLDivElement | null>(null);
+  const [showBackTop, setShowBackTop] = useState(false);
+
+  // 监听右侧正文容器的滚动位置，超过阈值才显示按钮
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onScroll = () => setShowBackTop(el.scrollTop > 240);
+    onScroll();
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, [selectedChapter, loadingDetail]);
+
+  const scrollToTop = () => {
+    scrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+  };
 
   // 加载讲义样式（一次性）
   useEffect(() => {
@@ -320,7 +337,7 @@ export const LearnModule: React.FC = () => {
       </div>
 
       {/* 右侧正文 */}
-      <div className="flex-1 overflow-y-auto">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto relative">
         {loadingDetail ? (
           <div className="flex items-center justify-center h-full text-gray-400">
             <i className="fas fa-spinner fa-spin mr-2 text-2xl"></i> 加载讲义中…
@@ -389,7 +406,8 @@ export const LearnModule: React.FC = () => {
                 </button>
                 {current.sections.length > 0 && (
                   <div className="flex items-center gap-1.5 flex-wrap ml-auto">
-                    {current.sections.filter(s => s.question_count > 0).slice(0, 4).map(s => (
+                    {/* 显示本章全部有题的小节（不再截断为前 4 个，方便一章知识点多时逐个去练） */}
+                    {current.sections.filter(s => s.question_count > 0).map(s => (
                       <button
                         key={s.path}
                         onClick={() => goPractice(s.path)}
@@ -461,6 +479,29 @@ export const LearnModule: React.FC = () => {
             </motion.div>
           </AnimatePresence>
         )}
+
+        {/* 回到顶部（悬浮在正文右下角，随滚动出现/隐藏）
+            用 sticky 而非 fixed：学习模块是桌面窗口内的应用，fixed 会相对视口定位而跑出窗口。
+            sticky + bottom 的容器高度为 0，所以不会占位、也不会把内容顶开。 */}
+        <div className="sticky bottom-0 h-0 pointer-events-none">
+          <AnimatePresence>
+            {showBackTop && (
+              <motion.button
+                key="back-top"
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.8 }}
+                transition={{ duration: 0.15 }}
+                onClick={scrollToTop}
+                title="回到顶部"
+                aria-label="回到顶部"
+                className="pointer-events-auto absolute right-6 -top-16 w-11 h-11 rounded-full bg-indigo-600 text-white shadow-lg hover:bg-indigo-700 active:scale-95 flex items-center justify-center transition-colors"
+              >
+                <i className="fas fa-arrow-up"></i>
+              </motion.button>
+            )}
+          </AnimatePresence>
+        </div>
       </div>
     </div>
   );
