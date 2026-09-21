@@ -2,8 +2,19 @@
 /**
  * 生成前端章末自测题数据 frontend/src/data/learnSelfTest.ts
  *
- * 来源：改造前 LearnModule.tsx 里硬编码的「Python百问 / IT百问」（共 24 组问答）。
- * 目标：按 chapter-taxonomy.js 的 16 章重新归组，作为每章末尾的「章末自测」。
+ * 【数据来源】
+ *   1. 既有的 src/data/learnSelfTest.ts —— 作为「基线数据」读回（保住历史题库，绝不清空）；
+ *   2. scripts/selftest-extra.json   —— 增量补充题（当前用于补「数据与信息」「信息社会及其特征」两章）。
+ *
+ * 【为什么这样设计】
+ *   旧版脚本依赖一个一次性的中间文件 _tmp_selftest.json（原「Python百问/IT百问」的导出），
+ *   该文件早已删除 → 旧脚本一跑就 ENOENT，**而且一旦中间文件丢失就再也无法重建题库**。
+ *   改成「读回自身产物 + 增量补丁」后，脚本自洽可重跑，不会再出现"越跑越少"的事故。
+ *
+ * 【合并语义】
+ *   - extra 里同一 cluster_id 的同名 group 与基线合并，题目去重（按题面）；
+ *   - extra 里新的 cluster_id / group 直接追加；
+ *   - 章节顺序按 chapter-taxonomy.js 的 CHAPTER_NAMES 排。
  *
  * 用法：node scripts/gen-learn-selftest.js
  */
@@ -11,75 +22,84 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
-const SELFTEST_JSON = path.join(ROOT, '_tmp_selftest.json');
 const OUT = path.join(ROOT, 'src', 'data', 'learnSelfTest.ts');
+const EXTRA = path.join(ROOT, 'scripts', 'selftest-extra.json');
 
-// 原「第 N 层 / 一、二、三」→ 16 章词表章名
-// 说明：一章可对应多个原分组，题目会按分组顺序合并。
-const PY_MAP = {
-  'PY0': ['程序设计语言的基本知识'],                                  // Python初印象与环境操作
-  'PY1': ['程序设计语言的基本知识'],                                  // 数据、常量、变量与数据类型
-  'PY2': ['程序设计语言的基本知识'],                                  // 运算符、表达式与类型转换
-  'PY3': ['程序设计语言的基本知识'],                                  // 常用内置函数
-  'PY4': ['算法的程序实现'],                                          // 顺序结构
-  'PY5': ['算法的程序实现'],                                          // 选择结构
-  'PY6': ['算法的程序实现'],                                          // for 循环
-  'PY7': ['算法的程序实现'],                                          // while 循环与流程控制
-  'PY8': ['算法的程序实现'],                                          // 字符串
-  'PY9': ['算法的程序实现'],                                          // 列表
-  'PY10': ['函数及其应用'],                                           // 函数与模块
-  'PY11': ['算法的程序实现'],                                         // 异常处理
-  'PY12': ['算法与问题解决', '经典算法应用'],                          // 算法基础与流程图
-  'PY13': ['算法与问题解决', '经典算法应用'],                          // 综合与易错陷阱
-};
+/** 从当前产物里读回基线数据；文件不存在或解析失败则返回空数组（首次生成场景） */
+function readBaseline() {
+  if (!fs.existsSync(OUT)) return [];
+  const src = fs.readFileSync(OUT, 'utf8');
+  const m = src.match(/LEARN_SELF_TEST[^=]*=\s*(\[[\s\S]*?\]);/);
+  if (!m) return [];
+  try {
+    const arr = JSON.parse(m[1]);
+    return Array.isArray(arr) ? arr : [];
+  } catch (e) {
+    console.warn('[warn] 无法解析现有 learnSelfTest.ts，按空基线处理：', e.message);
+    return [];
+  }
+}
 
-const IT_MAP = {
-  'IT0': ['信息技术发展及其影响'],                                    // 信息与信息技术
-  'IT1': ['信息系统的支撑技术'],                                      // 计算机基础（硬件）
-  'IT2': ['信息系统的支撑技术'],                                      // 计算机基础（软件）
-  'IT3': ['数据编码'],                                               // 进制与编码
-  'IT4': ['信息系统的支撑技术'],                                      // 网络技术基础
-  'IT5': ['信息系统的支撑技术'],                                      // 物联网
-  'IT6': ['信息系统的安全', '信息社会伦理道德与法律法规'],              // 信息安全与信息社会
-  'IT7': ['人工智能'],                                               // 人工智能
-  'IT8': ['信息系统概述', '信息系统的设计与开发'],                     // 信息系统与数据管理
-  'IT9': ['数据获取与表达'],                                          // 多媒体技术
-};
+function readExtra() {
+  if (!fs.existsSync(EXTRA)) return [];
+  const j = JSON.parse(fs.readFileSync(EXTRA, 'utf8'));
+  return Array.isArray(j.chapters) ? j.chapters : [];
+}
 
 function main() {
-  const data = JSON.parse(fs.readFileSync(SELFTEST_JSON, 'utf8'));
+  const baseline = readBaseline();
+  const extra = readExtra();
 
-  /** @type {Map<string, {cluster_id:string, groups:{title:string, questions:string[]}[]}>} */
+  const baseTotal = baseline.reduce((s, c) => s + c.groups.reduce((a, g) => a + g.questions.length, 0), 0);
+  const extraTotal = extra.reduce((s, c) => s + c.groups.reduce((a, g) => a + g.questions.length, 0), 0);
+  console.log(`[info] 基线 ${baseline.length} 章 / ${baseTotal} 问；补充 ${extra.length} 章 / ${extraTotal} 问`);
+
+  // cluster_id -> { cluster_id, groups: [{title, questions:[]}] }
   const byChapter = new Map();
-
-  const push = (prefix, list, map, chapterField) => {
-    list.forEach((sec, i) => {
-      const key = `${prefix}${i}`;
-      const targets = map[key];
-      if (!targets) { console.warn(`[warn] ${key} "${sec.title}" 未映射，跳过`); return; }
-      targets.forEach((chapter) => {
-        if (!byChapter.has(chapter)) byChapter.set(chapter, { cluster_id: chapter, groups: [] });
-        byChapter.get(chapter).groups.push({ title: sec.title, questions: sec.questions.slice() });
-      });
+  for (const ch of baseline) {
+    byChapter.set(ch.cluster_id, {
+      cluster_id: ch.cluster_id,
+      groups: ch.groups.map(g => ({ title: g.title, questions: g.questions.slice() })),
     });
-  };
-  push('PY', data.pythonSections, PY_MAP);
-  push('IT', data.itSections, IT_MAP);
+  }
+
+  let added = 0, dup = 0;
+  for (const ch of extra) {
+    if (!byChapter.has(ch.cluster_id)) {
+      byChapter.set(ch.cluster_id, { cluster_id: ch.cluster_id, groups: [] });
+    }
+    const target = byChapter.get(ch.cluster_id);
+    for (const g of ch.groups) {
+      let tg = target.groups.find(x => x.title === g.title);
+      if (!tg) {
+        tg = { title: g.title, questions: [] };
+        target.groups.push(tg);
+      }
+      const seen = new Set(tg.questions);
+      for (const q of g.questions) {
+        if (seen.has(q)) { dup++; continue; }
+        seen.add(q);
+        tg.questions.push(q);
+        added++;
+      }
+    }
+  }
 
   // 按 16 章词表顺序输出
   const { CHAPTER_NAMES } = require(path.resolve(ROOT, '..', 'backend', 'src', 'chapter-taxonomy.js'));
   const chapters = CHAPTER_NAMES.filter(n => byChapter.has(n)).map(n => {
-    const g = byChapter.get(n);
-    return { cluster_id: n, groups: g.groups };
+    const c = byChapter.get(n);
+    return { cluster_id: n, groups: c.groups.filter(g => g.questions.length > 0) };
   });
 
   const missing = CHAPTER_NAMES.filter(n => !byChapter.has(n));
   if (missing.length) console.warn('[warn] 以下章没有自测题：', missing.join('、'));
 
   const ts = `/**
- * 章末自测题（原「Python百问 / IT百问」按 16 章词表重新归组）
+ * 章末自测题（原「Python百问 / IT百问」按 16 章词表重新归组 + 缺失章补充）
  *
- * 自动生成，请勿手工编辑 —— 数据源见 scripts/gen-learn-selftest.js
+ * 自动生成，请勿手工编辑 —— 数据源与生成逻辑见 scripts/gen-learn-selftest.js
+ * 增量补充题见 scripts/selftest-extra.json
  * 说明：这些是「思考题/自测提问」，点击会打开 AI 答疑窗口，不计入练习积分。
  */
 export interface SelfTestGroup {
@@ -107,11 +127,14 @@ export function getSelfTest(chapterId: string): { title: string; question: strin
   fs.mkdirSync(path.dirname(OUT), { recursive: true });
   fs.writeFileSync(OUT, ts, 'utf8');
 
-  console.log(`[ok] 生成 ${path.relative(ROOT, OUT)} —— ${chapters.length} 章`);
+  const finalTotal = chapters.reduce((s, c) => s + c.groups.reduce((a, g) => a + g.questions.length, 0), 0);
+  console.log(`[ok] 生成 ${path.relative(ROOT, OUT)} —— ${chapters.length} 章 / ${finalTotal} 问（新增 ${added}，跳过重复 ${dup}）`);
   chapters.forEach(c => {
     const total = c.groups.reduce((a, g) => a + g.questions.length, 0);
     console.log(`     ${c.cluster_id.padEnd(20, '　')} ${c.groups.length} 组 / ${total} 题`);
   });
+  const stillMissing = CHAPTER_NAMES.filter(n => !chapters.some(c => c.cluster_id === n));
+  if (stillMissing.length) console.warn('[warn] 仍未覆盖的章：', stillMissing.join('、'));
 }
 
 main();

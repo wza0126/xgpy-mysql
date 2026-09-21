@@ -38,6 +38,8 @@ interface ChapterItem {
   chapter_only_count: number;
   question_count: number;
   visited_count: number;
+  /** 已掌握题数（口径与练习模块一致：练习来源答对次数 >= 掌握阈值） */
+  mastered_count: number;
 }
 
 const PART_COLORS: Record<number, { grad: string; accent: string; border: string }> = {
@@ -132,10 +134,35 @@ export const LearnModule: React.FC = () => {
     [selectedChapter]
   );
 
+  /** 本章自测已看数（供按钮显示进度，与顶部进度条同源） */
+  const selfTestDoneInChapter = useMemo(
+    () => (selectedChapter
+      ? selfTest.reduce((n, _, i) => n + (visitedQuestions.has(`${selectedChapter}::selftest::${i}`) ? 1 : 0), 0)
+      : 0),
+    [selectedChapter, selfTest, visitedQuestions]
+  );
+
   const colors = PART_COLORS[current?.part_index || 1] || PART_COLORS[1];
 
-  const totalQuestions = chapters.reduce((s, c) => s + c.question_count, 0);
-  const totalVisited = chapters.reduce((s, c) => s + c.visited_count, 0);
+  /**
+   * 进度口径（v2.5.2 修正）：
+   * 进度分子的唯一来源是「章末自测」点击记录（learn-visited，key 形如 `章名::selftest::序号`），
+   * 所以**分母也必须是章末自测的总问数**，否则口径不对齐 —— 旧版用题库总数 1107 当分母，
+   * 而自测只有 350 问、且两者根本不是同一个集合，导致学生永远看不到「已看满」，
+   * 进度条实质失效（真实 bug：用户做了题进度不动）。
+   */
+  const selfTestTotal = useMemo(
+    () => chapters.reduce((s, c) => s + getSelfTest(c.cluster_id).length, 0),
+    [chapters]
+  );
+  // 只统计真正落在「章末自测」键空间内的记录，避免把历史脏数据算进来
+  const selfTestVisited = useMemo(
+    () => Array.from(visitedQuestions).filter(k => k.includes('::selftest::')).length,
+    [visitedQuestions]
+  );
+  const progressPercent = selfTestTotal > 0
+    ? Math.min(100, Math.round((selfTestVisited / selfTestTotal) * 100))
+    : 0;
 
   /** 跳练习模块并带上章节筛选 */
   const goPractice = (clusterId?: string) => {
@@ -203,8 +230,17 @@ export const LearnModule: React.FC = () => {
               </div>
               <div className="flex-1">
                 <h2 className="font-bold leading-tight">考点精讲</h2>
-                <div className="text-xs text-white/80">
-                  已看 <span className="font-bold">{totalVisited}</span>/{totalQuestions} 题
+                {/* 进度 = 章末自测已看/总问数（与分子的记录来源同一口径） */}
+                <div className="text-xs text-white/80 flex items-center gap-2">
+                  <span>
+                    自测已看 <span className="font-bold">{selfTestVisited}</span>/{selfTestTotal}
+                  </span>
+                  <span className="flex-1 h-1 rounded-full bg-white/25 overflow-hidden min-w-[40px]">
+                    <span
+                      className="block h-full rounded-full bg-white/80 transition-all duration-300"
+                      style={{ width: `${progressPercent}%` }}
+                    />
+                  </span>
                 </div>
               </div>
             </div>
@@ -314,6 +350,10 @@ export const LearnModule: React.FC = () => {
                 <p className="text-sm text-white/85 mt-1">
                   本章共 {current.question_count} 道练习题
                   {current.chapter_only_count > 0 && `（含章级综合题 ${current.chapter_only_count} 道）`}
+                  <span className="ml-2 inline-flex items-center gap-1 bg-white/20 px-2 py-0.5 rounded-full text-xs font-medium">
+                    <i className="fas fa-circle-check text-[11px]"></i>
+                    已掌握 {current.mastered_count ?? 0} 题
+                  </span>
                 </p>
               </div>
 
@@ -343,7 +383,9 @@ export const LearnModule: React.FC = () => {
                   }`}
                 >
                   <i className="fas fa-circle-question"></i>
-                  章末自测（{selfTest.length} 问）
+                  {selfTest.length > 0
+                    ? `章末自测（${selfTestDoneInChapter}/${selfTest.length} 问）`
+                    : '章末自测（本章暂未配备）'}
                 </button>
                 {current.sections.length > 0 && (
                   <div className="flex items-center gap-1.5 flex-wrap ml-auto">

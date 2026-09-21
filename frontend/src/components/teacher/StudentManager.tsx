@@ -84,7 +84,7 @@ export const StudentManager: React.FC = () => {
   const [selectedStudents, setSelectedStudents] = useState<Set<string>>(new Set());
   const [batchEditField, setBatchEditField] = useState<'current_points' | 'max_points'>('current_points');
   const [batchEditValue, setBatchEditValue] = useState(0);
-  const [batchResetPassword, setBatchResetPassword] = useState('');
+  const [batchResetPassword, setBatchResetPassword] = useState('123456');
   const [sortField, setSortField] = useState<SortField>('real_name');
   const [sortOrder, setSortOrder] = useState<SortOrder>('asc');
   const [passwordForm, setPasswordForm] = useState({ newPassword: '', confirmPassword: '' });
@@ -498,38 +498,32 @@ export const StudentManager: React.FC = () => {
       alert('请先选择学生');
       return;
     }
-    if (!batchResetPassword) {
-      alert('请输入新密码');
-      return;
-    }
+    // 不填则默认重置为 123456
+    const targetPassword = batchResetPassword || '123456';
 
-    let success = 0;
-    let failed = 0;
-
-    // 计算 SHA256 哈希
-    const passwordHash = await calculateSHA256(batchResetPassword);
-
-    for (const studentId of selectedStudents) {
-      const { error } = await backendClient
-        .from('profiles')
-        .update({ password_hash: passwordHash })
-        .eq('id', studentId);
-
+    try {
+      const { data, error } = await backendClient.post('/api/teacher/students/reset-password', {
+        student_ids: Array.from(selectedStudents),
+        new_password: targetPassword,
+      });
       if (error) {
-        failed++;
-      } else {
-        success++;
+        alert('批量重置失败：' + error);
+        return;
       }
-    }
+      const successCount = Number((data as any)?.success_count || 0);
+      const failedList = (data as any)?.failed || [];
 
-    setShowBatchResetPasswordModal(false);
-    setBatchResetPassword('');
-    setSelectedStudents(new Set());
+      setShowBatchResetPasswordModal(false);
+      setBatchResetPassword('123456');
+      setSelectedStudents(new Set());
 
-    if (failed > 0) {
-      alert(`批量重置完成: ${success} 个成功, ${failed} 个失败`);
-    } else {
-      alert(`已成功重置 ${success} 个学生的密码`);
+      if (failedList.length > 0) {
+        alert(`批量重置完成：${successCount} 个成功，${failedList.length} 个失败\n默认密码：${targetPassword}`);
+      } else {
+        alert(`已成功重置 ${successCount} 个学生的密码\n新密码：${targetPassword}`);
+      }
+    } catch (e) {
+      alert('批量重置失败：' + (e as Error).message);
     }
   };
 
@@ -1283,25 +1277,28 @@ export const StudentManager: React.FC = () => {
             </h3>
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">新密码</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  新密码 <span className="text-gray-400 font-normal">（留空则使用默认密码 123456）</span>
+                </label>
                 <input
-                  type="password"
+                  type="text"
                   value={batchResetPassword}
                   onChange={(e) => setBatchResetPassword(e.target.value)}
-                  placeholder="请输入新密码"
+                  placeholder="123456"
                   className="w-full p-3 border border-gray-300 rounded-lg"
                 />
               </div>
               <div className="bg-yellow-50 p-3 rounded-lg text-sm text-yellow-700">
                 <i className="fa-solid fa-exclamation-triangle mr-1"></i>
-                将为选中的 {selectedStudents.size} 个学生统一重置为此密码
+                将为选中的 {selectedStudents.size} 个学生统一重置为
+                <b className="mx-1">{batchResetPassword || '123456'}</b>，并强制其下线重新登录
               </div>
             </div>
             <div className="flex gap-3 mt-6">
               <button
                 onClick={() => {
                   setShowBatchResetPasswordModal(false);
-                  setBatchResetPassword('');
+                  setBatchResetPassword('123456');
                 }}
                 className="flex-1 py-2 bg-gray-200 text-gray-700 rounded-lg"
               >
@@ -1309,8 +1306,7 @@ export const StudentManager: React.FC = () => {
               </button>
               <button
                 onClick={handleBatchResetPassword}
-                disabled={!batchResetPassword}
-                className="flex-1 py-2 bg-orange-500 text-white rounded-lg disabled:opacity-50"
+                className="flex-1 py-2 bg-orange-500 text-white rounded-lg"
               >
                 确认重置
               </button>

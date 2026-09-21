@@ -6,6 +6,13 @@ backend/dist/
 frontend/dist/
 backend/exe-assets/
 
+# 本地打包验证的临时目录（exe 产物与下载的 CI artifact）
+_test-build/
+tmp-release/
+
+# 浏览器自动化残留
+.tmp-chrome-progress/
+
 # 环境配置与密钥（含数据库密码，绝不上传）
 .env
 .env.*

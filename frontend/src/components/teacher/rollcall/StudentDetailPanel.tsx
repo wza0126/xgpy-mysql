@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { RollCallStudent, RollCallMode } from '../../../hooks/useRollCall';
+import { backendClient } from '../../../api/backendClient';
 
 interface StudentDetailPanelProps {
   student: RollCallStudent | null;
@@ -16,6 +17,9 @@ interface StudentDetailPanelProps {
   onToggleRecommend?: (studentId: string, current: boolean) => void;
   onSaveNote?: (studentId: string, note: string) => void;
 }
+
+/** 重置学生密码时的默认密码（与「学生管理 → 批量重置密码」保持一致） */
+const DEFAULT_RESET_PASSWORD = '123456';
 
 export const StudentDetailPanel: React.FC<StudentDetailPanelProps> = ({
   student,
@@ -35,9 +39,19 @@ export const StudentDetailPanel: React.FC<StudentDetailPanelProps> = ({
   // 备注本地编辑状态（仅在切换学生时同步，轮询刷新不重置，避免打断编辑）
   const [noteText, setNoteText] = useState('');
   const [noteSaving, setNoteSaving] = useState(false);
+  // 重置密码
+  const [showResetPassword, setShowResetPassword] = useState(false);
+  const [resetPasswordValue, setResetPasswordValue] = useState(DEFAULT_RESET_PASSWORD);
+  const [resetPasswordLoading, setResetPasswordLoading] = useState(false);
 
   useEffect(() => {
     setNoteText(student?.rollcall_note || '');
+  }, [student?.id]);
+
+  // 切换学生时收起重置密码面板并恢复默认值
+  useEffect(() => {
+    setShowResetPassword(false);
+    setResetPasswordValue(DEFAULT_RESET_PASSWORD);
   }, [student?.id]);
 
   const saveNote = async () => {
@@ -45,6 +59,35 @@ export const StudentDetailPanel: React.FC<StudentDetailPanelProps> = ({
     setNoteSaving(true);
     await onSaveNote(student.id, noteText);
     setNoteSaving(false);
+  };
+
+  const handleResetPassword = async () => {
+    if (!student) return;
+    const pwd = resetPasswordValue || DEFAULT_RESET_PASSWORD;
+    setResetPasswordLoading(true);
+    try {
+      const { data, error } = await backendClient.post('/api/teacher/students/reset-password', {
+        student_ids: [student.id],
+        new_password: pwd,
+      });
+      if (error) {
+        alert('重置密码失败：' + error);
+        return;
+      }
+      const ok = Number((data as any)?.success_count || 0);
+      if (ok > 0) {
+        alert(`已将 ${student.real_name || student.username} 的密码重置为：${pwd}\n该生已被强制下线，需用新密码重新登录。`);
+        setShowResetPassword(false);
+        setResetPasswordValue(DEFAULT_RESET_PASSWORD);
+      } else {
+        const failed = (data as any)?.failed || [];
+        alert('重置密码失败：' + (failed[0]?.error || '未知原因'));
+      }
+    } catch (e) {
+      alert('重置密码失败：' + (e as Error).message);
+    } finally {
+      setResetPasswordLoading(false);
+    }
   };
 
   if (!student || seatNumber == null) {
@@ -270,6 +313,58 @@ export const StudentDetailPanel: React.FC<StudentDetailPanelProps> = ({
             </button>
           );
         })()}
+
+        {mode === 'teacher' && (
+        <button
+          onClick={() => setShowResetPassword((v) => !v)}
+          className={`
+            w-full px-4 py-2 rounded text-sm flex items-center justify-center gap-2 transition-colors
+            ${showResetPassword
+              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+              : 'bg-slate-800 hover:bg-amber-500/20 text-slate-200 hover:text-amber-300 border border-slate-700 hover:border-amber-500/40'
+            }
+          `}
+          title="将该学生密码重置为指定值（默认 123456），并将其强制下线"
+        >
+          <i className="fa-solid fa-key"></i>
+          重置该生密码
+        </button>
+        )}
+
+        {mode === 'teacher' && showResetPassword && (
+          <div className="p-3 rounded bg-amber-500/10 border border-amber-500/30 space-y-2">
+            <label className="text-[10px] font-mono text-amber-300/80 flex items-center gap-1">
+              <i className="fa-solid fa-key"></i>新密码（默认 {DEFAULT_RESET_PASSWORD}）
+            </label>
+            <input
+              type="text"
+              value={resetPasswordValue}
+              onChange={(e) => setResetPasswordValue(e.target.value)}
+              placeholder={DEFAULT_RESET_PASSWORD}
+              className="w-full bg-slate-800/80 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:border-amber-500 focus:ring-1 focus:ring-amber-500 outline-none font-mono"
+            />
+            <div className="text-[10px] text-slate-400 leading-relaxed">
+              将把 <b className="text-slate-200">{student.real_name || student.username}</b> 的密码重置为
+              <b className="text-amber-300 mx-1">{resetPasswordValue || DEFAULT_RESET_PASSWORD}</b>
+              ，并强制其下线重新登录。
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => { setShowResetPassword(false); setResetPasswordValue(DEFAULT_RESET_PASSWORD); }}
+                className="flex-1 py-1.5 rounded text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleResetPassword}
+                disabled={resetPasswordLoading}
+                className="flex-1 py-1.5 rounded text-xs bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-900 font-medium"
+              >
+                {resetPasswordLoading ? '重置中...' : '确认重置'}
+              </button>
+            </div>
+          </div>
+        )}
 
         {mode === 'teacher' && (
         <button

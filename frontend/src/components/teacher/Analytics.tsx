@@ -307,6 +307,10 @@ export const Analytics: React.FC = () => {
       </div>
 
       <div className="mt-6">
+        <ChapterMasterySection classId={selectedClass} />
+      </div>
+
+      <div className="mt-6">
         <WrongQuestionsSection classId={selectedClass} />
       </div>
       <div className="mt-6">
@@ -366,6 +370,25 @@ interface AtRiskStudent {
 interface ExamBucket {
   range: string;
   count: number;
+}
+
+interface ChapterMasteryChapter {
+  cluster_id: string;
+  question_count: number;
+}
+
+interface ChapterMasteryStudent {
+  id: string;
+  real_name: string;
+  username: string;
+  total_mastered: number;
+  by_chapter: Record<string, number>;
+}
+
+interface ChapterMasteryData {
+  chapters: ChapterMasteryChapter[];
+  students: ChapterMasteryStudent[];
+  master_threshold: number;
 }
 
 interface ExamDistribution {
@@ -1033,6 +1056,155 @@ const AtRiskSection: React.FC<{ classId: string }> = ({ classId }) => {
             </tbody>
           </table>
         </div>
+      )}
+    </div>
+  );
+};
+
+// 4+. 章节掌握进度（每名学生 × 每章）
+const ChapterMasterySection: React.FC<{ classId: string }> = ({ classId }) => {
+  const [data, setData] = useState<ChapterMasteryData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [onlyStarted, setOnlyStarted] = useState(false);
+  const [sortBy, setSortBy] = useState<'name' | 'mastered' | 'rate'>('name');
+
+  useEffect(() => {
+    if (!classId) return;
+    setLoading(true);
+    analyticsFetch<ChapterMasteryData>(`/api/teacher/analytics/chapter-mastery/${classId}`)
+      .then((d) => setData(d))
+      .catch((e) => {
+        console.error('获取章节掌握进度失败:', e);
+        setData(null);
+      })
+      .finally(() => setLoading(false));
+  }, [classId]);
+
+  const chapters = data?.chapters || [];
+  const allStudents = data?.students || [];
+  const threshold = data?.master_threshold ?? 3;
+
+  const students = React.useMemo(() => {
+    const list = onlyStarted ? allStudents.filter((s) => s.total_mastered > 0) : allStudents.slice();
+    if (sortBy === 'mastered') list.sort((a, b) => b.total_mastered - a.total_mastered);
+    else if (sortBy === 'rate') list.sort((a, b) => (b.total_mastered / Math.max(1, totalQuestions(b))) - (a.total_mastered / Math.max(1, totalQuestions(a))));
+    else list.sort((a, b) => (a.real_name || a.username).localeCompare(b.real_name || b.username, 'zh-Hans-CN'));
+    return list;
+  }, [allStudents, onlyStarted, sortBy, chapters]);
+
+  const totalQuestions = (s: ChapterMasteryStudent) =>
+    chapters.reduce((sum, c) => sum + c.question_count, 0);
+
+  // 单元格底色：按该章掌握数 / 该章题量分档
+  const cellClass = (n: number, total: number) => {
+    if (n <= 0) return 'text-gray-300';
+    const rate = total > 0 ? n / total : 0;
+    if (rate >= 0.6) return 'bg-emerald-100 text-emerald-700 font-bold';
+    if (rate >= 0.3) return 'bg-blue-100 text-blue-700 font-semibold';
+    return 'bg-gray-100 text-gray-600';
+  };
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+      <div className="flex items-start justify-between flex-wrap gap-3">
+        <div>
+          <h3 className={sectionTitleCls}>章节掌握进度</h3>
+          <p className={sectionSubCls}>
+            每名学生在各章「已掌握」的题目数（同一道题练习答对 {threshold} 次记为掌握，与刷题模块口径一致）
+          </p>
+        </div>
+        {data && allStudents.length > 0 && (
+          <div className="flex items-center gap-2 flex-wrap">
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value as 'name' | 'mastered' | 'rate')}
+              className="p-2 border border-gray-300 rounded-lg text-sm"
+            >
+              <option value="name">按姓名排序</option>
+              <option value="mastered">按掌握总数排序</option>
+              <option value="rate">按掌握率排序</option>
+            </select>
+            <label className="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={onlyStarted}
+                onChange={(e) => setOnlyStarted(e.target.checked)}
+                className="w-4 h-4"
+              />
+              只看有进度的学生
+            </label>
+          </div>
+        )}
+      </div>
+
+      {loading ? (
+        <SectionSpinner />
+      ) : !data || allStudents.length === 0 ? (
+        <div className="text-center text-gray-400 py-10">该班级暂无学生数据</div>
+      ) : (
+        <>
+          {/* 章节总题量概览 */}
+          <div className="flex flex-wrap gap-2 mb-4">
+            {chapters.map((c) => (
+              <span key={c.cluster_id} className="px-2.5 py-1 rounded-lg bg-gray-50 border border-gray-200 text-xs text-gray-600">
+                {c.cluster_id}
+                <span className="text-gray-400 ml-1">{c.question_count}</span>
+              </span>
+            ))}
+          </div>
+
+          <div className="overflow-auto border border-gray-200 rounded-lg" style={{ maxHeight: '520px' }}>
+            <table className="w-full border-collapse">
+              <thead className="bg-gray-50 sticky top-0 z-10">
+                <tr>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-600 sticky left-0 bg-gray-50 min-w-[110px] border-b border-gray-200">
+                    学生
+                  </th>
+                  <th className="px-3 py-2 text-center text-xs font-medium text-gray-600 border-b border-l border-gray-200 min-w-[70px]">
+                    掌握总数
+                  </th>
+                  {chapters.map((c) => (
+                    <th
+                      key={c.cluster_id}
+                      className="px-2 py-2 text-center text-xs font-medium text-gray-600 border-b border-l border-gray-200 whitespace-nowrap"
+                      title={`${c.cluster_id}　本章题量 ${c.question_count}`}
+                    >
+                      {c.cluster_id}
+                      <div className="text-[10px] text-gray-400 font-normal">题量 {c.question_count}</div>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {students.map((s) => (
+                  <tr key={s.id} className="hover:bg-blue-50/40">
+                    <td className="px-3 py-2 text-sm text-gray-800 sticky left-0 bg-white whitespace-nowrap border-r border-gray-100">
+                      {s.real_name || s.username}
+                    </td>
+                    <td className="px-3 py-2 text-center text-sm font-bold text-indigo-600 border-l border-gray-100">
+                      {s.total_mastered}
+                    </td>
+                    {chapters.map((c) => {
+                      const n = s.by_chapter[c.cluster_id] || 0;
+                      return (
+                        <td key={c.cluster_id} className="px-2 py-2 text-center border-l border-gray-100">
+                          <span
+                            className={`inline-block min-w-[28px] px-1.5 py-0.5 rounded text-xs ${cellClass(n, c.question_count)}`}
+                          >
+                            {n}
+                          </span>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-xs text-gray-400 mt-2">
+            共 {students.length} 名学生 · 数值为「已掌握题数」；颜色越绿表示该章掌握比例越高
+          </p>
+        </>
       )}
     </div>
   );

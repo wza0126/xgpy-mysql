@@ -1128,257 +1128,286 @@ export const ExamManager: React.FC = () => {
               initial={{ scale: 0.9 }}
               animate={{ scale: 1 }}
               exit={{ scale: 0.9 }}
-              className="bg-white rounded-xl shadow-xl w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col"
+              className="bg-white rounded-xl shadow-xl w-full max-w-[1400px] h-[92vh] overflow-hidden flex flex-col"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="p-6 border-b border-gray-200">
-                <h3 className="text-xl font-bold text-gray-800">选择题目</h3>
-                <div className="mt-4 flex gap-4 flex-wrap">
-                  <input
-                    type="text"
-                    placeholder="搜索题目内容..."
-                    value={searchText}
-                    onChange={(e) => setSearchText(e.target.value)}
-                    className="flex-1 min-w-[200px] px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                  />
-                  <select
-                    value={filterType}
-                    onChange={(e) => setFilterType(e.target.value)}
-                    className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                  >
-                    <option value="">全部类型</option>
-                    <option value="choice">选择题</option>
-                    <option value="fill">填空题</option>
-                    <option value="fill_blank">填空题</option>
-                    <option value="judge">判断题</option>
-                    <option value="code">编程题</option>
-                  </select>
+              <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
+                <div>
+                  <h3 className="text-xl font-bold text-gray-800">选择题目</h3>
+                  <p className="text-sm text-gray-500 mt-0.5">
+                    左侧筛选条件可滚动，右侧题目列表已加大浏览空间
+                  </p>
                 </div>
-                {allTags.length > 0 && (
-                  <div className="mt-3">
-                    <p className="text-sm text-gray-600 mb-2">标签筛选：</p>
-                    <div className="flex flex-wrap gap-2">
-                      {allTags.map(tag => (
-                        <button
-                          key={tag}
-                          onClick={() => {
-                            setFilterTags(prev => 
-                              prev.includes(tag) 
-                                ? prev.filter(t => t !== tag)
-                                : [...prev, tag]
-                            );
-                          }}
-                          className={`px-3 py-1 text-sm rounded-full transition-colors ${
-                            filterTags.includes(tag)
-                              ? 'bg-blue-500 text-white'
-                              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                          }`}
-                        >
-                          {tag}
-                        </button>
-                      ))}
-                      {filterTags.length > 0 && (
-                        <button
-                          onClick={() => setFilterTags([])}
-                          className="px-3 py-1 text-sm text-gray-500 hover:text-gray-700"
-                        >
-                          清除筛选
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )}
-                {Object.keys(clusterTree).length > 0 && (
-                  <div className="mt-3">
-                    <p className="text-sm text-gray-600 mb-2">
-                      AI 聚类筛选：
-                      {(filterClusterPrimary.length > 0 || filterClusterSecondary.length > 0) && (
-                        <span className="ml-2 text-violet-600">
-                          已选 一级 {filterClusterPrimary.length} / 二级 {filterClusterSecondary.length}
-                        </span>
-                      )}
-                    </p>
-                    <div className="grid grid-cols-2 gap-3">
-                      {/* 一级类目 */}
-                      <div className="border border-gray-200 rounded-lg p-3">
-                        <div className="text-xs text-gray-500 mb-2 font-semibold">一级类目</div>
-                        <div className="flex flex-wrap gap-2">
-                          {Object.keys(clusterTree).map((primary) => {
-                            const active = filterClusterPrimary.includes(primary);
-                            const secondaryCount = (clusterTree[primary] || new Set()).size;
-                            return (
-                              <button
-                                key={primary}
-                                onClick={() => toggleClusterPrimary(primary)}
-                                className={`px-3 py-1.5 rounded-full text-sm transition-all ${
-                                  active
-                                    ? 'bg-violet-500 text-white'
-                                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                                }`}
-                                title={secondaryCount > 0 ? `${secondaryCount} 个二级类目` : '仅一级'}
-                              >
-                                {primary}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                      {/* 二级类目：仅当选中一级类目时才显示对应二级 */}
-                      <div className="border border-gray-200 rounded-lg p-3">
-                        <div className="text-xs text-gray-500 mb-2 font-semibold">
-                          二级类目
-                          <span className="ml-1 text-gray-400">
-                            {filterClusterPrimary.length === 0
-                              ? '（请先选择一级类目）'
-                              : '（仅显示已选一级下的二级）'}
-                          </span>
-                        </div>
-                        <div className="flex flex-wrap gap-2 min-h-[40px] max-h-[160px] overflow-y-auto pr-1">
-                          {filterClusterPrimary.length === 0 ? (
-                            <span className="text-xs text-gray-400 self-center">未选一级类目</span>
-                          ) : (() => {
-                            const list: { fullKey: string; label: string }[] = [];
-                            filterClusterPrimary.forEach((p) => {
-                              Array.from(clusterTree[p] || []).forEach((s) => {
-                                list.push({ fullKey: `${p}/${s}`, label: s });
-                              });
-                            });
-                            if (list.length === 0) {
-                              return <span className="text-xs text-gray-400 self-center">所选一级下无二级类目</span>;
-                            }
-                            const seen = new Set<string>();
-                            return list.filter((item) => {
-                              if (seen.has(item.fullKey)) return false;
-                              seen.add(item.fullKey);
-                              return true;
-                            }).map((item) => {
-                              const active = filterClusterSecondary.includes(item.fullKey);
-                              return (
-                                <button
-                                  key={item.fullKey}
-                                  onClick={() => toggleClusterSecondary(item.fullKey)}
-                                  className={`px-3 py-1.5 rounded-full text-sm transition-all ${
-                                    active
-                                      ? 'bg-indigo-500 text-white'
-                                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                                  }`}
-                                >
-                                  {item.label}
-                                </button>
-                              );
-                            });
-                          })()}
-                        </div>
-                      </div>
-                    </div>
-                    {(filterClusterPrimary.length > 0 || filterClusterSecondary.length > 0) && (
-                      <button
-                        onClick={() => { setFilterClusterPrimary([]); setFilterClusterSecondary([]); }}
-                        className="mt-2 text-sm text-gray-500 hover:text-gray-700"
-                      >
-                        清除聚类筛选
-                      </button>
-                    )}
-                  </div>
-                )}
+                <button
+                  onClick={() => setShowQuestionSelector(false)}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <i className="fa-solid fa-times text-xl"></i>
+                </button>
               </div>
 
-              <div className="flex-1 overflow-y-auto p-6">
-                {filteredQuestions.length > 0 && (
-                  <div className="mb-4 flex items-center justify-between gap-4 flex-wrap">
-                    <span className="text-sm text-gray-600">
-                      共 {filteredQuestions.length} 道题目
-                    </span>
-                    <div className="flex gap-2 items-center">
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="number"
-                          id="randomCount"
-                          min="1"
-                          max={filteredQuestions.length}
-                          placeholder="数量"
-                          className="w-20 px-3 py-1 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                        />
-                        <button
-                          onClick={() => {
-                            const countInput = document.getElementById('randomCount') as HTMLInputElement;
-                            const count = parseInt(countInput.value) || 1;
-                            const shuffled = [...filteredQuestions].sort(() => Math.random() - 0.5);
-                            const selected = shuffled.slice(0, Math.min(count, filteredQuestions.length));
-                            const newIds = new Set([...formData.question_ids, ...selected.map(q => q.id)]);
-                            setFormData(prev => ({
-                              ...prev,
-                              question_ids: Array.from(newIds)
-                            }));
-                            countInput.value = '';
-                          }}
-                          className="px-3 py-1 text-sm bg-green-100 text-green-600 rounded-lg hover:bg-green-200 transition-colors"
-                        >
-                          <i className="fa-solid fa-shuffle mr-1"></i>随机选取
-                        </button>
-                      </div>
-                      <button
-                        onClick={selectAllFiltered}
-                        className="px-3 py-1 text-sm bg-blue-100 text-blue-600 rounded-lg hover:bg-blue-200 transition-colors"
-                      >
-                        {filteredQuestions.every(q => formData.question_ids.includes(q.id)) 
-                          ? '取消全选' 
-                          : '一键全选'}
-                      </button>
-                    </div>
-                  </div>
-                )}
-                <div className="space-y-2">
-                  {filteredQuestions.map((question) => {
-                    const isSelected = formData.question_ids.includes(question.id);
-                    return (
-                      <div
-                        key={question.id}
-                        onClick={() => toggleQuestionSelection(question.id)}
-                        className={`p-3 rounded-lg cursor-pointer transition-colors ${
-                          isSelected
-                            ? 'bg-blue-100 border-2 border-blue-500'
-                            : 'bg-gray-50 hover:bg-gray-100 border-2 border-transparent'
-                        }`}
-                      >
-                        <div className="flex items-start gap-3">
-                          <div
-                            className={`w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 mt-0.5 ${
-                              isSelected
-                                ? 'bg-blue-500 border-blue-500'
-                                : 'border-gray-300'
-                            }`}
+              <div className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden">
+                {/* 左：筛选条件（独立滚动） */}
+                <div className="lg:w-[380px] flex-shrink-0 border-b lg:border-b-0 lg:border-r border-gray-200 flex flex-col min-h-0 max-h-[45vh] lg:max-h-none">
+                  <div className="p-4 space-y-4 overflow-y-auto flex-1">
+                    <input
+                      type="text"
+                      placeholder="搜索题目内容..."
+                      value={searchText}
+                      onChange={(e) => setSearchText(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    />
+                    <select
+                      value={filterType}
+                      onChange={(e) => setFilterType(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="">全部类型</option>
+                      <option value="choice">选择题</option>
+                      <option value="fill">填空题</option>
+                      <option value="fill_blank">填空题</option>
+                      <option value="judge">判断题</option>
+                      <option value="code">编程题</option>
+                    </select>
+
+                    {allTags.length > 0 && (
+                      <div>
+                        <p className="text-sm text-gray-600 mb-2">
+                          标签筛选：
+                          {filterTags.length > 0 && (
+                            <span className="ml-1 text-blue-600">已选 {filterTags.length}</span>
+                          )}
+                        </p>
+                        <div className="flex flex-wrap gap-1.5 max-h-[150px] overflow-y-auto pr-1">
+                          {allTags.map(tag => (
+                            <button
+                              key={tag}
+                              onClick={() => {
+                                setFilterTags(prev =>
+                                  prev.includes(tag)
+                                    ? prev.filter(t => t !== tag)
+                                    : [...prev, tag]
+                                );
+                              }}
+                              className={`px-2.5 py-1 text-xs rounded-full transition-colors ${
+                                filterTags.includes(tag)
+                                  ? 'bg-blue-500 text-white'
+                                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                              }`}
+                            >
+                              {tag}
+                            </button>
+                          ))}
+                        </div>
+                        {filterTags.length > 0 && (
+                          <button
+                            onClick={() => setFilterTags([])}
+                            className="mt-2 text-xs text-gray-500 hover:text-gray-700"
                           >
-                            {isSelected && (
-                              <i className="fa-solid fa-check text-white text-xs"></i>
-                            )}
+                            清除标签筛选
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {Object.keys(clusterTree).length > 0 && (
+                      <div>
+                        <p className="text-sm text-gray-600 mb-2">
+                          AI 聚类筛选：
+                          {(filterClusterPrimary.length > 0 || filterClusterSecondary.length > 0) && (
+                            <span className="ml-2 text-violet-600">
+                              一级 {filterClusterPrimary.length} / 二级 {filterClusterSecondary.length}
+                            </span>
+                          )}
+                        </p>
+                        <div className="space-y-3">
+                          {/* 一级类目 */}
+                          <div className="border border-gray-200 rounded-lg p-3">
+                            <div className="text-xs text-gray-500 mb-2 font-semibold">一级类目</div>
+                            <div className="flex flex-wrap gap-1.5 max-h-[130px] overflow-y-auto pr-1">
+                              {Object.keys(clusterTree).map((primary) => {
+                                const active = filterClusterPrimary.includes(primary);
+                                const secondaryCount = (clusterTree[primary] || new Set()).size;
+                                return (
+                                  <button
+                                    key={primary}
+                                    onClick={() => toggleClusterPrimary(primary)}
+                                    className={`px-2.5 py-1 rounded-full text-xs transition-all ${
+                                      active
+                                        ? 'bg-violet-500 text-white'
+                                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                    }`}
+                                    title={secondaryCount > 0 ? `${secondaryCount} 个二级类目` : '仅一级'}
+                                  >
+                                    {primary}
+                                  </button>
+                                );
+                              })}
+                            </div>
                           </div>
-                          <div className="flex-1">
-                            <p className="text-sm text-gray-800 line-clamp-2">
-                              {htmlToPlainText(question.content)}
-                            </p>
-                            <div className="flex gap-2 mt-1 text-xs text-gray-500">
-                              <span>[{getQuestionTypeName(question.type)}]</span>
+                          {/* 二级类目 */}
+                          <div className="border border-gray-200 rounded-lg p-3">
+                            <div className="text-xs text-gray-500 mb-2 font-semibold">
+                              二级类目
+                              <span className="ml-1 text-gray-400">
+                                {filterClusterPrimary.length === 0 ? '（先选一级）' : '（已选一级下）'}
+                              </span>
+                            </div>
+                            <div className="flex flex-wrap gap-1.5 min-h-[32px] max-h-[150px] overflow-y-auto pr-1">
+                              {filterClusterPrimary.length === 0 ? (
+                                <span className="text-xs text-gray-400 self-center">未选一级类目</span>
+                              ) : (() => {
+                                const list: { fullKey: string; label: string }[] = [];
+                                filterClusterPrimary.forEach((p) => {
+                                  Array.from(clusterTree[p] || []).forEach((s) => {
+                                    list.push({ fullKey: `${p}/${s}`, label: s });
+                                  });
+                                });
+                                if (list.length === 0) {
+                                  return <span className="text-xs text-gray-400 self-center">所选一级下无二级类目</span>;
+                                }
+                                const seen = new Set<string>();
+                                return list.filter((item) => {
+                                  if (seen.has(item.fullKey)) return false;
+                                  seen.add(item.fullKey);
+                                  return true;
+                                }).map((item) => {
+                                  const active = filterClusterSecondary.includes(item.fullKey);
+                                  return (
+                                    <button
+                                      key={item.fullKey}
+                                      onClick={() => toggleClusterSecondary(item.fullKey)}
+                                      className={`px-2.5 py-1 rounded-full text-xs transition-all ${
+                                        active
+                                          ? 'bg-indigo-500 text-white'
+                                          : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                      }`}
+                                    >
+                                      {item.label}
+                                    </button>
+                                  );
+                                });
+                              })()}
                             </div>
                           </div>
                         </div>
+                        {(filterClusterPrimary.length > 0 || filterClusterSecondary.length > 0) && (
+                          <button
+                            onClick={() => { setFilterClusterPrimary([]); setFilterClusterSecondary([]); }}
+                            className="mt-2 text-xs text-gray-500 hover:text-gray-700"
+                          >
+                            清除聚类筛选
+                          </button>
+                        )}
                       </div>
-                    );
-                  })}
+                    )}
+                  </div>
+                </div>
 
-                  {filteredQuestions.length === 0 && (
-                    <div className="text-center py-8 text-gray-400">
-                      <i className="fa-solid fa-search text-4xl mb-2"></i>
-                      <p>没有找到符合条件的题目</p>
-                      <p className="text-sm mt-1">
-                        请确保题目开启了"可用于考试"选项
-                      </p>
-                    </div>
-                  )}
+                {/* 右：题目列表（主要浏览空间） */}
+                <div className="flex-1 min-h-0 flex flex-col">
+                  <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between gap-3 flex-wrap flex-shrink-0 bg-gray-50">
+                    <span className="text-sm text-gray-600">
+                      共 <b className="text-gray-800">{filteredQuestions.length}</b> 道题目
+                      {formData.question_ids.length > 0 && (
+                        <span className="ml-2 text-blue-600">已选 {formData.question_ids.length} 道</span>
+                      )}
+                    </span>
+                    {filteredQuestions.length > 0 && (
+                      <div className="flex gap-2 items-center">
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number"
+                            id="randomCount"
+                            min="1"
+                            max={filteredQuestions.length}
+                            placeholder="数量"
+                            className="w-20 px-3 py-1 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                          />
+                          <button
+                            onClick={() => {
+                              const countInput = document.getElementById('randomCount') as HTMLInputElement;
+                              const count = parseInt(countInput.value) || 1;
+                              const shuffled = [...filteredQuestions].sort(() => Math.random() - 0.5);
+                              const selected = shuffled.slice(0, Math.min(count, filteredQuestions.length));
+                              const newIds = new Set([...formData.question_ids, ...selected.map(q => q.id)]);
+                              setFormData(prev => ({
+                                ...prev,
+                                question_ids: Array.from(newIds)
+                              }));
+                              countInput.value = '';
+                            }}
+                            className="px-3 py-1 text-sm bg-green-100 text-green-600 rounded-lg hover:bg-green-200 transition-colors"
+                          >
+                            <i className="fa-solid fa-shuffle mr-1"></i>随机选取
+                          </button>
+                        </div>
+                        <button
+                          onClick={selectAllFiltered}
+                          className="px-3 py-1 text-sm bg-blue-100 text-blue-600 rounded-lg hover:bg-blue-200 transition-colors"
+                        >
+                          {filteredQuestions.every(q => formData.question_ids.includes(q.id))
+                            ? '取消全选'
+                            : '一键全选'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-2">
+                    {filteredQuestions.map((question) => {
+                      const isSelected = formData.question_ids.includes(question.id);
+                      return (
+                        <div
+                          key={question.id}
+                          onClick={() => toggleQuestionSelection(question.id)}
+                          className={`p-3 rounded-lg cursor-pointer transition-colors ${
+                            isSelected
+                              ? 'bg-blue-100 border-2 border-blue-500'
+                              : 'bg-gray-50 hover:bg-gray-100 border-2 border-transparent'
+                          }`}
+                        >
+                          <div className="flex items-start gap-3">
+                            <div
+                              className={`w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 mt-0.5 ${
+                                isSelected
+                                  ? 'bg-blue-500 border-blue-500'
+                                  : 'border-gray-300'
+                              }`}
+                            >
+                              {isSelected && (
+                                <i className="fa-solid fa-check text-white text-xs"></i>
+                              )}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm text-gray-800">
+                                {htmlToPlainText(question.content)}
+                              </p>
+                              <div className="flex gap-2 mt-1 text-xs text-gray-500">
+                                <span>[{getQuestionTypeName(question.type)}]</span>
+                                {(question as any).cluster_id && (
+                                  <span className="text-violet-500">{(question as any).cluster_id}</span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    {filteredQuestions.length === 0 && (
+                      <div className="text-center py-8 text-gray-400">
+                        <i className="fa-solid fa-search text-4xl mb-2"></i>
+                        <p>没有找到符合条件的题目</p>
+                        <p className="text-sm mt-1">
+                          请确保题目开启了"可用于考试"选项
+                        </p>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
 
-              <div className="p-6 border-t border-gray-200 flex justify-between items-center">
+              <div className="px-6 py-4 border-t border-gray-200 flex justify-between items-center flex-shrink-0">
                 <p className="text-sm text-gray-600">
                   已选择 {formData.question_ids.length} 道题目
                 </p>

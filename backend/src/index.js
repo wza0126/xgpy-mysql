@@ -719,6 +719,95 @@ app.get('/api/teacher/analytics/exam-distribution/:classId', authenticate, requi
 
 // ==================== 数据分析模块接口结束 ====================
 
+/**
+ * 学情分析：班级每名学生 × 每章的「已掌握」进度
+ *
+ * 口径与练习模块完全一致：同一道题练习来源答对次数 >= master_question_threshold 记为已掌握。
+ * 章节划分沿用 chapter-taxonomy.js 的 16 章词表（cluster_id 的 '/' 前缀即一级章）。
+ * 返回：
+ *   { chapters:[{cluster_id, question_count}], students:[{id, real_name, username, total_mastered, by_chapter:{章:掌握数}}] }
+ */
+app.get('/api/teacher/analytics/chapter-mastery/:classId', authenticate, requireTeacher, requireLicense(FEATURES.ANALYTICS), async (req, res) => {
+  try {
+    const { classId } = req.params;
+    if (!(await assertTeacherOwnsClass(req, res, classId))) return;
+
+    const masterThreshold = await getMasterThreshold();
+
+    // 各章题库总量（与学习模块的分母口径一致）
+    const [clusterRows] = await pool.query(
+      `SELECT cluster_id, COUNT(*) AS cnt FROM questions
+       WHERE cluster_id IS NOT NULL AND cluster_id <> ''
+       GROUP BY cluster_id`
+    );
+    const chapterQCount = new Map();
+    for (const r of clusterRows) {
+      const cid = String(r.cluster_id);
+      const ch = cid.includes('/') ? cid.split('/')[0] : cid;
+      chapterQCount.set(ch, (chapterQCount.get(ch) || 0) + (Number(r.cnt) || 0));
+    }
+
+    const chapters = CHAPTER_NAMES.map(name => ({
+      cluster_id: name,
+      question_count: chapterQCount.get(name) || 0,
+    }));
+
+    // 班级学生
+    const [students] = await pool.query(
+      "SELECT id, real_name, username FROM profiles WHERE class_id = ? AND role = 'student' ORDER BY real_name, username",
+      [classId]
+    );
+    if (students.length === 0) {
+      return res.json({ data: { chapters, students: [], master_threshold: masterThreshold }, error: null });
+    }
+    const studentIds = students.map(s => s.id);
+
+    // 一次性取出「学生 × 章」的掌握题数（避免 N+1 查询）
+    const [rows] = await pool.query(
+      `SELECT m.student_id, q.cluster_id AS cid, COUNT(*) AS n FROM (
+         SELECT student_id, question_id FROM student_answers
+         WHERE student_id IN (?) AND source = 'practice' AND is_correct = 1
+         GROUP BY student_id, question_id
+         HAVING COUNT(*) >= ?
+       ) m
+       JOIN questions q ON q.id = m.question_id
+       WHERE q.cluster_id IS NOT NULL AND q.cluster_id <> ''
+       GROUP BY m.student_id, q.cluster_id`,
+      [studentIds, masterThreshold]
+    );
+    const byStudent = new Map();
+    for (const r of rows) {
+      const ch = String(r.cid).includes('/') ? String(r.cid).split('/')[0] : String(r.cid);
+      if (!byStudent.has(r.student_id)) byStudent.set(r.student_id, new Map());
+      const m = byStudent.get(r.student_id);
+      m.set(ch, (m.get(ch) || 0) + (Number(r.n) || 0));
+    }
+
+    const data = students.map(s => {
+      const m = byStudent.get(s.id) || new Map();
+      const by_chapter = {};
+      let total = 0;
+      for (const name of CHAPTER_NAMES) {
+        const n = m.get(name) || 0;
+        by_chapter[name] = n;
+        total += n;
+      }
+      return {
+        id: s.id,
+        real_name: s.real_name,
+        username: s.username,
+        total_mastered: total,
+        by_chapter,
+      };
+    });
+
+    res.json({ data: { chapters, students: data, master_threshold: masterThreshold }, error: null });
+  } catch (error) {
+    console.error('Error in GET /api/teacher/analytics/chapter-mastery/:classId:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
 function formatRow(row, forWriting = false) {
   const formatted = { ...row };
   
@@ -3224,22 +3313,54 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
     // 这里按前端同一套抽题规则算出「本该抽到多少道」，与实际提交题数取较大值作为分母。
     let poolCount = 0;
     let testTagFilters = [];
+    let testClusterFilters = [];
     {
       let parsedTags = testEarly.tag_filters;
       if (typeof parsedTags === 'string') {
         try { parsedTags = JSON.parse(parsedTags); } catch { parsedTags = null; }
       }
       if (Array.isArray(parsedTags)) testTagFilters = parsedTags.filter(t => typeof t === 'string' && t);
+      // AI 聚类筛选（与标签筛选叠加）：[{primary:'一级', secondary:'二级'|''}, ...]
+      let parsedClusters = testEarly.cluster_filters;
+      if (typeof parsedClusters === 'string') {
+        try { parsedClusters = JSON.parse(parsedClusters); } catch { parsedClusters = null; }
+      }
+      if (Array.isArray(parsedClusters)) {
+        testClusterFilters = parsedClusters
+          .filter(c => c && typeof c.primary === 'string' && c.primary)
+          .map(c => ({ primary: c.primary, secondary: typeof c.secondary === 'string' ? c.secondary : '' }));
+      }
     }
+    // 该题是否命中聚类筛选（一级 OR、二级 OR；选了二级必须精确命中）
+    const hitClusterFilter = (clusterId) => {
+      if (testClusterFilters.length === 0) return true;
+      if (!clusterId || typeof clusterId !== 'string') return false;
+      const trimmed = clusterId.trim();
+      const idx = trimmed.indexOf('/');
+      const primary = idx < 0 ? trimmed : trimmed.slice(0, idx).trim();
+      const secondary = idx < 0 ? '' : trimmed.slice(idx + 1).trim();
+      const primaries = new Set(testClusterFilters.map(c => c.primary));
+      if (!primaries.has(primary)) return false;
+      const secondaries = testClusterFilters
+        .filter(c => c.primary === primary && c.secondary)
+        .map(c => c.secondary);
+      if (secondaries.length === 0) return true;      // 只选了一级
+      if (!secondary) return false;
+      return secondaries.includes(secondary);
+    };
     if (testTagFilters.length > 0) {
-      const [poolRows] = await connection.query('SELECT tags FROM questions WHERE exam_enabled = 1');
+      const [poolRows] = await connection.query('SELECT tags, cluster_id FROM questions WHERE exam_enabled = 1');
       poolCount = poolRows.filter(r => {
         let t = r.tags;
         if (typeof t === 'string') {
           try { t = JSON.parse(t); } catch { t = null; }
         }
-        return Array.isArray(t) && t.some(x => testTagFilters.includes(x));
+        const tagHit = Array.isArray(t) && t.some(x => testTagFilters.includes(x));
+        return tagHit && hitClusterFilter(r.cluster_id);
       }).length;
+    } else if (testClusterFilters.length > 0) {
+      const [poolRows] = await connection.query('SELECT cluster_id FROM questions WHERE exam_enabled = 1');
+      poolCount = poolRows.filter(r => hitClusterFilter(r.cluster_id)).length;
     } else {
       const [poolCountRows] = await connection.query('SELECT COUNT(*) n FROM questions WHERE exam_enabled = 1');
       poolCount = Number(poolCountRows[0]?.n || 0);
@@ -7665,6 +7786,70 @@ async function getVisitedSet(studentId, clusterId) {
   return new Set(rows.map(r => r.question_key));
 }
 
+/**
+ * 读取「掌握题目阈值」（system_config.master_question_threshold，默认 3）。
+ * 与练习模块 / submit-answer 门禁用的是同一个配置，保证口径一致 —— 不要另设阈值。
+ */
+async function getMasterThreshold() {
+  const [rows] = await pool.query(
+    "SELECT value FROM system_config WHERE config_key = 'master_question_threshold' LIMIT 1"
+  );
+  if (!rows.length) return 3;
+  let v = rows[0].value;
+  if (typeof v === 'string') {
+    try { v = JSON.parse(v); } catch {}
+  }
+  const parsed = parseInt(typeof v === 'object' && v !== null ? v.value : v, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 3;
+}
+
+/**
+ * 统计「已掌握」题目。
+ * 口径（与练习模块 PracticeModule.fetchMasteredQuestions / submit-answer 门禁完全一致）：
+ *   同一道题在 **source='practice'** 的来源下 **答对次数 >= master_question_threshold**。
+ *   测试 / 考试不计入（与门禁口径保持一致）。
+ *
+ * @param {object} conn 数据库连接或连接池
+ * @param {string} studentId
+ * @param {number} threshold
+ * @returns {Promise<Map<string, number>>} question_id -> 该章掌握题数不在此处，返回 question_id 集合
+ */
+async function getMasteredQuestionIds(conn, studentId, threshold) {
+  const [rows] = await conn.query(
+    `SELECT question_id FROM student_answers
+     WHERE student_id = ? AND source = 'practice' AND is_correct = 1
+     GROUP BY question_id
+     HAVING COUNT(*) >= ?`,
+    [studentId, threshold]
+  );
+  return new Set(rows.map(r => r.question_id));
+}
+
+/**
+ * 按章节聚合「已掌握题数」。
+ * 返回 Map<章名, 掌握数>；章名取 cluster_id 的 '/' 前缀（一级章），章级兜底题直接归本章。
+ */
+async function getMasteredByChapter(conn, studentId, threshold) {
+  const [rows] = await conn.query(
+    `SELECT q.cluster_id AS cid, COUNT(*) AS n FROM (
+       SELECT question_id FROM student_answers
+       WHERE student_id = ? AND source = 'practice' AND is_correct = 1
+       GROUP BY question_id
+       HAVING COUNT(*) >= ?
+     ) m
+     JOIN questions q ON q.id = m.question_id
+     WHERE q.cluster_id IS NOT NULL AND q.cluster_id <> ''
+     GROUP BY q.cluster_id`,
+    [studentId, threshold]
+  );
+  const byChapter = new Map();
+  for (const r of rows) {
+    const ch = String(r.cid).includes('/') ? String(r.cid).split('/')[0] : String(r.cid);
+    byChapter.set(ch, (byChapter.get(ch) || 0) + (Number(r.n) || 0));
+  }
+  return byChapter;
+}
+
 // 学习模块目录：16 章 + 每章小节题量 + 学生进度
 app.get('/api/student/learn-chapters', authenticate, async (req, res) => {
   try {
@@ -7707,6 +7892,10 @@ app.get('/api/student/learn-chapters', authenticate, async (req, res) => {
 
     const lectureByChapter = new Map(meta.chapters.map(c => [c.cluster_id, c]));
 
+    // 已掌握题数（按章）——口径与练习模块一致：练习来源答对次数 >= 掌握阈值
+    const masterThreshold = await getMasterThreshold();
+    const masteredByChapter = await getMasteredByChapter(pool, userId, masterThreshold);
+
     const chapters = CHAPTER_NAMES.map((name, idx) => {
       const lec = lectureByChapter.get(name);
       const secs = (SECTIONS_BY_CHAPTER[name] || []).map(s => {
@@ -7730,10 +7919,20 @@ app.get('/api/student/learn-chapters', authenticate, async (req, res) => {
         chapter_only_count: selfOnly,
         question_count: chapterSelf,
         visited_count: (visitedByChapter.get(name)?.size) || 0,
+        // 已掌握题数（学生自己在该章达掌握标准的题数）
+        mastered_count: masteredByChapter.get(name) || 0,
       };
     });
 
-    res.json({ data: { chapters, source: meta.source, generated_at: meta.generatedAt }, error: null });
+    res.json({
+      data: {
+        chapters,
+        source: meta.source,
+        generated_at: meta.generatedAt,
+        master_threshold: masterThreshold,
+      },
+      error: null,
+    });
   } catch (error) {
     console.error('获取学习章节目录失败:', error);
     res.status(500).json({ data: null, error: error.message });
@@ -8459,6 +8658,16 @@ app.post('/api/student/learn-visited', authenticate, async (req, res) => {
     const { question_key, question_text } = req.body;
     if (!question_key) {
       return res.status(400).json({ data: null, error: '缺少 question_key' });
+    }
+    // 长度兜底：question_key 列宽 80（迁移 083）。
+    // 超长在非严格模式下会被 MySQL **静默截断**，截断后的键再也匹配不回原题，
+    // 进度统计会凭空少数据且毫无报错 —— 必须在这里显式拒绝并记日志。
+    if (typeof question_key !== 'string' || question_key.length > 80) {
+      console.error('[learn-visited] question_key 超长或非法，已拒绝:', {
+        userId, len: typeof question_key === 'string' ? question_key.length : typeof question_key,
+        key: String(question_key).slice(0, 120),
+      });
+      return res.status(400).json({ data: null, error: 'question_key 超长（上限 80 字符）' });
     }
     // 使用 INSERT IGNORE 避免重复键报错
     await pool.query(
@@ -9438,6 +9647,81 @@ app.post('/api/student/points/adjust', authenticate, async (req, res) => {
     res.status(500).json({ data: null, error: error.message });
   } finally {
     connection.release();
+  }
+});
+
+/**
+ * 重置学生密码（教师端：课堂点名「选中学生重置密码」+ 学生管理「批量重置密码」）
+ * body: { student_ids: string[], new_password?: string }
+ * 默认重置为 123456；密码一律服务端 SHA-256 后写入 password_hash。
+ * 归属校验：只能重置「自己班」的学生（super_admin 不受限）。
+ * 返回 { success_count, failed: [{ id, error }] }，单条失败不影响其它。
+ */
+app.post('/api/teacher/students/reset-password', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const rawIds = Array.isArray(req.body?.student_ids) ? req.body.student_ids : [];
+    const studentIds = [...new Set(rawIds.filter(id => typeof id === 'string' && id))];
+    const newPassword = (typeof req.body?.new_password === 'string' && req.body.new_password)
+      ? req.body.new_password
+      : '123456';
+
+    if (studentIds.length === 0) {
+      return res.status(400).json({ data: null, error: '请至少选择一名学生' });
+    }
+    if (studentIds.length > 500) {
+      return res.status(400).json({ data: null, error: '单次最多重置 500 名学生' });
+    }
+
+    const isSuperAdmin = req.user.role === 'super_admin';
+    // 取这些学生的班级，用于归属校验
+    const [rows] = await pool.query(
+      'SELECT id, username, real_name, class_id FROM profiles WHERE id IN (?) AND role = ?',
+      [studentIds, 'student']
+    );
+    const foundIds = new Set(rows.map(r => r.id));
+
+    let allowedClassIds = null;
+    if (!isSuperAdmin) {
+      const [classRows] = await pool.query('SELECT id FROM classes WHERE teacher_id = ?', [req.user.userId]);
+      allowedClassIds = new Set(classRows.map(c => c.id));
+    }
+
+    const passwordHash = crypto.createHash('sha256').update(newPassword).digest('hex');
+    const failed = [];
+    const updatable = [];
+    for (const row of rows) {
+      if (!isSuperAdmin && !allowedClassIds.has(row.class_id)) {
+        failed.push({ id: row.id, error: '不属于本人班级' });
+        continue;
+      }
+      updatable.push(row.id);
+    }
+    // 请求了但库里没有 / 不是学生
+    for (const id of studentIds) {
+      if (!foundIds.has(id)) failed.push({ id, error: '学生不存在' });
+    }
+
+    let successCount = 0;
+    if (updatable.length > 0) {
+      // 批量重置密码后强制下线：清空该批学生的登录会话，避免旧 token 继续可用
+      await pool.query(
+        'UPDATE profiles SET password_hash = ? WHERE id IN (?)',
+        [passwordHash, updatable]
+      );
+      await pool.query(
+        'UPDATE login_sessions SET is_active = 0 WHERE user_id IN (?)',
+        [updatable]
+      );
+      successCount = updatable.length;
+    }
+
+    res.json({
+      data: { success_count: successCount, failed, password: newPassword },
+      error: null,
+    });
+  } catch (error) {
+    console.error('Error in POST /api/teacher/students/reset-password:', error);
+    res.status(500).json({ data: null, error: error.message });
   }
 });
 
@@ -11439,8 +11723,8 @@ function requireTeachingRole(req, res, next) {
 // 0. 获取题库列表（支持标签/类型/关键词筛选和分页）
 app.get('/api/teacher/questions', authenticate, requireTeacher, async (req, res) => {
   try {
-    const { type, tag, keyword, page, pageSize } = req.query;
-    let sql = 'SELECT id, type, content, options, answers, tags, explanation FROM questions WHERE 1=1';
+    const { type, tag, keyword, page, pageSize, cluster } = req.query;
+    let sql = 'SELECT id, type, content, options, answers, tags, explanation, cluster_id FROM questions WHERE 1=1';
     const params = [];
     if (type && type !== 'all') {
       sql += ' AND type = ?';
@@ -11454,8 +11738,30 @@ app.get('/api/teacher/questions', authenticate, requireTeacher, async (req, res)
       sql += ' AND content LIKE ?';
       params.push(`%${keyword}%`);
     }
+    // AI 聚类筛选：cluster 支持逗号分隔多选（OR），每项形如 "一级/"（前缀匹配该一级下全部）
+    // 或 "一级/二级"（精确匹配）
+    if (cluster) {
+      const items = String(cluster).split(',').map(s => s.trim()).filter(Boolean);
+      if (items.length > 0) {
+        const orParts = [];
+        for (const c of items) {
+          if (c.endsWith('/')) {
+            const p = c.slice(0, -1);
+            if (!p) continue;
+            orParts.push('(cluster_id = ? OR cluster_id LIKE ?)');
+            params.push(p, `${p}/%`);
+          } else {
+            orParts.push('cluster_id = ?');
+            params.push(c);
+          }
+        }
+        if (orParts.length > 0) {
+          sql += ' AND (' + orParts.join(' OR ') + ')';
+        }
+      }
+    }
     // 获取总数
-    const countSql = sql.replace('SELECT id, type, content, options, answers, tags, explanation', 'SELECT COUNT(*) AS total');
+    const countSql = sql.replace('SELECT id, type, content, options, answers, tags, explanation, cluster_id', 'SELECT COUNT(*) AS total');
     const [[{ total }]] = await pool.query(countSql, params);
     // 分页
     const pageNum = parseInt(page) || 1;
@@ -11475,7 +11781,23 @@ app.get('/api/teacher/questions', authenticate, requireTeacher, async (req, res)
         } catch {}
       }
     });
-    res.json({ data: formatRows(rows), total, tags: Array.from(allTagsSet), page: pageNum, pageSize: pageSizeNum, error: null });
+    // 收集 AI 聚类树（一级 → 二级集合），供前端做聚类筛选
+    const [clusterRows] = await pool.query(
+      "SELECT DISTINCT cluster_id FROM questions WHERE cluster_id IS NOT NULL AND cluster_id <> ''"
+    );
+    const clusterTree = {};
+    clusterRows.forEach(r => {
+      const cid = String(r.cluster_id).trim();
+      if (!cid) return;
+      const idx = cid.indexOf('/');
+      const primary = idx < 0 ? cid : cid.slice(0, idx).trim();
+      const secondary = idx < 0 ? '' : cid.slice(idx + 1).trim();
+      if (!primary) return;
+      if (!clusterTree[primary]) clusterTree[primary] = [];
+      if (secondary && !clusterTree[primary].includes(secondary)) clusterTree[primary].push(secondary);
+    });
+    Object.keys(clusterTree).forEach(p => clusterTree[p].sort());
+    res.json({ data: formatRows(rows), total, tags: Array.from(allTagsSet), cluster_tree: clusterTree, page: pageNum, pageSize: pageSizeNum, error: null });
   } catch (error) {
     console.error('获取题库列表失败:', error);
     res.status(500).json({ data: null, error: error.message });

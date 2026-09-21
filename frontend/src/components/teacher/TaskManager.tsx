@@ -761,6 +761,11 @@ const TaskEditPanel: React.FC<{
   const [bankFilterType, setBankFilterType] = useState('');
   const [bankFilterTag, setBankFilterTag] = useState('');
   const [bankAllTags, setBankAllTags] = useState<string[]>([]);
+  /** AI 聚类树（一级 → 二级集合），由后端 /api/teacher/questions 返回 */
+  const [bankClusterTree, setBankClusterTree] = useState<Record<string, string[]>>({});
+  const [bankFilterClusters, setBankFilterClusters] = useState<string[]>([]);
+  const [filterClusterPrimary, setFilterClusterPrimary] = useState<string[]>([]);
+  const [filterClusterSecondary, setFilterClusterSecondary] = useState<string[]>([]);
   const [bankTotal, setBankTotal] = useState(0);
   const [bankPage, setBankPage] = useState(1);
   const [bankHasSearched, setBankHasSearched] = useState(false);
@@ -1047,16 +1052,18 @@ const TaskEditPanel: React.FC<{
   };
 
   // ============ 习题操作 ============
-  const loadBankQuestions = async (searchParams?: { keyword?: string; type?: string; tag?: string; page?: number }) => {
+  const loadBankQuestions = async (searchParams?: { keyword?: string; type?: string; tag?: string; cluster?: string; page?: number }) => {
     setBankLoading(true);
     const params = new URLSearchParams();
     const keyword = searchParams?.keyword ?? bankSearch;
     const type = searchParams?.type ?? bankFilterType;
     const tag = searchParams?.tag ?? bankFilterTag;
+    const cluster = searchParams?.cluster ?? bankFilterClusters.join(',');
     const page = searchParams?.page ?? 1;
     if (keyword) params.set('keyword', keyword);
     if (type) params.set('type', type);
     if (tag) params.set('tag', tag);
+    if (cluster) params.set('cluster', cluster);
     params.set('page', String(page));
     params.set('pageSize', '20');
     try {
@@ -1072,6 +1079,7 @@ const TaskEditPanel: React.FC<{
       }
       setBankQuestions(result.data || []);
       if (result.tags) setBankAllTags(result.tags);
+      if (result.cluster_tree) setBankClusterTree(result.cluster_tree);
       if (result.total !== undefined) setBankTotal(result.total);
       setBankHasSearched(true);
     } catch (err) {
@@ -1954,15 +1962,138 @@ const TaskEditPanel: React.FC<{
                               {bankAllTags.map(t => <option key={t} value={t}>{t}</option>)}
                             </select>
                           )}
-                          {(bankSearch || bankFilterType || bankFilterTag) && (
+                          {(bankSearch || bankFilterType || bankFilterTag || bankFilterClusters.length > 0) && (
                             <button
-                              onClick={() => { setBankSearch(''); setBankFilterType(''); setBankFilterTag(''); setBankPage(1); loadBankQuestions({ keyword: '', type: '', tag: '', page: 1 }); }}
+                              onClick={() => {
+                                setBankSearch(''); setBankFilterType(''); setBankFilterTag('');
+                                setBankFilterClusters([]); setFilterClusterPrimary([]); setFilterClusterSecondary([]);
+                                setBankPage(1);
+                                loadBankQuestions({ keyword: '', type: '', tag: '', cluster: '', page: 1 });
+                              }}
                               className="px-2 py-1.5 text-gray-500 text-sm hover:text-gray-700"
                             >
                               <i className="fa-solid fa-xmark mr-1"></i>清除筛选
                             </button>
                           )}
                         </div>
+
+                        {/* AI 聚类筛选 */}
+                        {Object.keys(bankClusterTree).length > 0 && (
+                          <div className="pt-2 border-t border-gray-200">
+                            <p className="text-xs text-gray-500 mb-2 font-medium">
+                              AI 聚类筛选
+                              {bankFilterClusters.length > 0 && (
+                                <span className="ml-2 text-violet-600">已选 {bankFilterClusters.length} 项</span>
+                              )}
+                            </p>
+                            <div className="space-y-2">
+                              <div className="flex flex-wrap gap-1.5 max-h-[110px] overflow-y-auto pr-1">
+                                {Object.keys(bankClusterTree).map((primary) => {
+                                  const active = filterClusterPrimary.includes(primary);
+                                  return (
+                                    <button
+                                      key={primary}
+                                      type="button"
+                                      onClick={() => {
+                                        let nextP: string[];
+                                        if (active) {
+                                          nextP = filterClusterPrimary.filter((p) => p !== primary);
+                                        } else {
+                                          nextP = [...filterClusterPrimary, primary];
+                                        }
+                                        setFilterClusterPrimary(nextP);
+                                        // 只保留仍属于已选一级的二级
+                                        const keptSec = filterClusterSecondary.filter((s) => nextP.some((p) => s.startsWith(`${p}/`)));
+                                        setFilterClusterSecondary(keptSec);
+                                      }}
+                                      className={`px-2.5 py-1 rounded-full text-xs transition-all ${
+                                        active ? 'bg-violet-500 text-white' : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-300'
+                                      }`}
+                                    >
+                                      {primary}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                              {filterClusterPrimary.length > 0 && (
+                                <div className="flex flex-wrap gap-1.5 max-h-[110px] overflow-y-auto pr-1 pl-3 border-l-2 border-violet-200">
+                                  {(() => {
+                                    const list: string[] = [];
+                                    filterClusterPrimary.forEach((p) => {
+                                      (bankClusterTree[p] || []).forEach((s) => {
+                                        const full = `${p}/${s}`;
+                                        if (!list.includes(full)) list.push(full);
+                                      });
+                                    });
+                                    if (list.length === 0) {
+                                      return <span className="text-xs text-gray-400">所选一级下无二级类目</span>;
+                                    }
+                                    return list.map((full) => {
+                                      const active = filterClusterSecondary.includes(full);
+                                      const label = full.slice(full.indexOf('/') + 1);
+                                      return (
+                                        <button
+                                          key={full}
+                                          type="button"
+                                          onClick={() => {
+                                            setFilterClusterSecondary((prev) =>
+                                              prev.includes(full) ? prev.filter((s) => s !== full) : [...prev, full]
+                                            );
+                                          }}
+                                          className={`px-2.5 py-1 rounded-full text-xs transition-all ${
+                                            active ? 'bg-indigo-500 text-white' : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-300'
+                                          }`}
+                                        >
+                                          {label}
+                                        </button>
+                                      );
+                                    });
+                                  })()}
+                                </div>
+                              )}
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    // 一级 → "一级/"（后端前缀匹配，命中该一级下全部题目）
+                                    // 二级 → "一级/二级"（精确匹配）
+                                    const list: string[] = [];
+                                    const covered = new Set<string>();
+                                    filterClusterSecondary.forEach((full) => {
+                                      const p = full.slice(0, full.indexOf('/'));
+                                      covered.add(p);
+                                      list.push(full);
+                                    });
+                                    filterClusterPrimary.forEach((p) => {
+                                      if (!covered.has(p)) list.push(`${p}/`);
+                                    });
+                                    setBankFilterClusters(list);
+                                    setBankPage(1);
+                                    loadBankQuestions({ cluster: list.join(','), page: 1 });
+                                  }}
+                                  className="px-3 py-1 bg-violet-500 text-white rounded-lg text-xs hover:bg-violet-600"
+                                >
+                                  应用聚类筛选
+                                </button>
+                                {bankFilterClusters.length > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setBankFilterClusters([]);
+                                      setFilterClusterPrimary([]);
+                                      setFilterClusterSecondary([]);
+                                      setBankPage(1);
+                                      loadBankQuestions({ cluster: '', page: 1 });
+                                    }}
+                                    className="text-xs text-gray-500 hover:text-gray-700"
+                                  >
+                                    清除聚类筛选
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-3 p-3 bg-blue-50 rounded-lg">
@@ -2011,8 +2142,11 @@ const TaskEditPanel: React.FC<{
                                     </div>
                                     <div className="flex-1 min-w-0">
                                       <p className="text-sm text-gray-700 line-clamp-2">{stripHtml(q.content || '')}</p>
-                                      <div className="flex items-center gap-2 mt-1">
+                                      <div className="flex items-center gap-2 mt-1 flex-wrap">
                                         <span className="text-xs text-gray-400">[{q.type === 'fill_blank' ? '填空题' : q.type === 'code' ? '编程题' : '选择题'}]</span>
+                                        {(q as any).cluster_id && (
+                                          <span className="text-xs px-1.5 py-0.5 bg-violet-50 text-violet-600 rounded">{(q as any).cluster_id}</span>
+                                        )}
                                         {q.tags && Array.isArray(q.tags) && q.tags.length > 0 && (
                                           q.tags.map((t, i) => (
                                             <span key={i} className="text-xs px-1.5 py-0.5 bg-green-50 text-green-600 rounded">{t}</span>

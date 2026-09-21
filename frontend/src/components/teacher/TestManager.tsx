@@ -4,6 +4,7 @@ import { backendClient } from '../../api/backendClient';
 import { Test, Question } from '../../types';
 import { useAuth } from '../../hooks/useAuth';
 import { ExamManager } from './ExamManager';
+import { ClusterFilter, buildClusterTree, type ClusterTree } from '../common/ClusterFilter';
 
 const parseTags = (tags: any): string[] => {
   if (!tags) return [];
@@ -28,6 +29,7 @@ export const TestManager: React.FC = () => {
   const [formData, setFormData] = useState({
     title: '',
     tag_filters: [] as string[],
+    cluster_filters: [] as { primary: string; secondary: string }[],
     question_count: 20,
     points_reward: 50,
     time_limit: 30,
@@ -45,6 +47,10 @@ export const TestManager: React.FC = () => {
   });
   const [allTags, setAllTags] = useState<string[]>([]);
   const [showTagModal, setShowTagModal] = useState(false);
+  /** AI 聚类：一级 → 二级集合（仅统计“可用于考试”的题目） */
+  const [clusterTree, setClusterTree] = useState<ClusterTree>({});
+  const [filterClusterPrimary, setFilterClusterPrimary] = useState<string[]>([]);
+  const [filterClusterSecondary, setFilterClusterSecondary] = useState<string[]>([]);
   const [activeSubTab, setActiveSubTab] = useState<'tests' | 'exams'>('tests');
   const { profile } = useAuth();
 
@@ -56,7 +62,7 @@ export const TestManager: React.FC = () => {
   }, [profile]);
 
   const fetchAllTags = async () => {
-    const { data: questions } = await backendClient.from('questions').select('tags').eq('exam_enabled', true);
+    const { data: questions } = await backendClient.from('questions').select('*').eq('exam_enabled', true);
     if (questions) {
       const tagSet = new Set<string>();
       (questions as Question[]).forEach((q) => {
@@ -64,6 +70,8 @@ export const TestManager: React.FC = () => {
         tags.forEach((t) => tagSet.add(t));
       });
       setAllTags(Array.from(tagSet).sort());
+      // 顺带构建 AI 聚类树（只用可用于考试的题目）
+      setClusterTree(buildClusterTree((questions as any[]).map((q) => q.cluster_id)));
     }
   };
 
@@ -90,6 +98,10 @@ export const TestManager: React.FC = () => {
       created_by: profile.id,
     };
     data.tag_filters = JSON.stringify(formData.tag_filters);
+    // 聚类筛选：与标签筛选叠加；为空时写 null（后端按“不限”处理）
+    data.cluster_filters = formData.cluster_filters.length > 0
+      ? JSON.stringify(formData.cluster_filters)
+      : null;
 
     if (!data.qualification_correct_count) {
       delete data.qualification_correct_count;
@@ -132,6 +144,7 @@ export const TestManager: React.FC = () => {
     setFormData({
       title: '',
       tag_filters: [],
+      cluster_filters: [],
       question_count: 20,
       points_reward: 50,
       time_limit: 30,
@@ -190,9 +203,23 @@ export const TestManager: React.FC = () => {
       }
     }
 
+    let clusterFilters: { primary: string; secondary: string }[] = [];
+    if (testData.cluster_filters) {
+      let parsed: any = testData.cluster_filters;
+      if (typeof parsed === 'string') {
+        try { parsed = JSON.parse(parsed); } catch { parsed = null; }
+      }
+      if (Array.isArray(parsed)) {
+        clusterFilters = parsed
+          .filter((c: any) => c && typeof c.primary === 'string' && c.primary)
+          .map((c: any) => ({ primary: c.primary, secondary: typeof c.secondary === 'string' ? c.secondary : '' }));
+      }
+    }
+
     setFormData({
       title: testData.title || test.name || '',
       tag_filters: tagFilters,
+      cluster_filters: clusterFilters,
       question_count: test.question_count || 20,
       points_reward: test.points_reward || 50,
       time_limit: test.time_limit || 30,
@@ -434,8 +461,8 @@ export const TestManager: React.FC = () => {
                         onClick={() => setShowTagModal(true)}
                         className="text-xs text-blue-600 hover:text-blue-800 underline"
                       >
-                        {formData.tag_filters.length > 0
-                          ? `已选 ${formData.tag_filters.length} 个标签`
+                        {formData.tag_filters.length > 0 || formData.cluster_filters.length > 0
+                          ? `题目范围：标签 ${formData.tag_filters.length} · 聚类 ${formData.cluster_filters.length}`
                           : '题目范围（可选）'}
                       </button>
                     </div>
@@ -456,6 +483,25 @@ export const TestManager: React.FC = () => {
                               type="button"
                               onClick={() => toggleTag(tag)}
                               className="ml-1.5 text-blue-400 hover:text-blue-700"
+                            >
+                              ×
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {formData.cluster_filters.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-1.5">
+                        {formData.cluster_filters.map((c, i) => (
+                          <span key={`${c.primary}/${c.secondary}/${i}`} className="px-2 py-0.5 bg-violet-100 text-violet-700 rounded-full text-xs">
+                            {c.secondary ? `${c.primary} / ${c.secondary}` : `${c.primary}（整章）`}
+                            <button
+                              type="button"
+                              onClick={() => setFormData((prev) => ({
+                                ...prev,
+                                cluster_filters: prev.cluster_filters.filter((_, idx) => idx !== i),
+                              }))}
+                              className="ml-1.5 text-violet-400 hover:text-violet-700"
                             >
                               ×
                             </button>
@@ -657,37 +703,63 @@ export const TestManager: React.FC = () => {
               initial={{ scale: 0.9 }}
               animate={{ scale: 1 }}
               exit={{ scale: 0.9 }}
-              className="bg-white rounded-2xl p-6 max-w-lg w-full"
+              className="bg-white rounded-2xl p-6 max-w-2xl w-full max-h-[88vh] overflow-y-auto"
               onClick={(e) => e.stopPropagation()}
             >
-              <h3 className="text-lg font-bold text-gray-800 mb-2">选择题目范围（标签）</h3>
-              <p className="text-sm text-gray-500 mb-4">只有包含所选标签的题目才会被抽到，不选则从全部题目中抽取</p>
-              <div className="flex flex-wrap gap-2 mb-4">
-                {allTags.length === 0 && (
-                  <p className="text-sm text-gray-400">题库中暂无标签</p>
-                )}
-                {allTags.map((tag) => {
-                  const selected = formData.tag_filters.includes(tag);
-                  return (
-                    <button
-                      key={tag}
-                      type="button"
-                      onClick={() => toggleTag(tag)}
-                      className={`px-3 py-1.5 rounded-full text-sm transition-all ${
-                        selected
-                          ? 'bg-blue-500 text-white shadow-sm'
-                          : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                      }`}
-                    >
-                      {tag}
-                    </button>
-                  );
-                })}
+              <h3 className="text-lg font-bold text-gray-800 mb-2">选择题目范围</h3>
+              <p className="text-sm text-gray-500 mb-4">
+                可按标签、AI 聚类分别收窄抽题范围；两类都选时需同时满足。都不选则从全部题目中抽取。
+              </p>
+
+              <div className="mb-5">
+                <p className="text-sm font-medium text-gray-700 mb-2">
+                  标签筛选
+                  {formData.tag_filters.length > 0 && (
+                    <span className="ml-2 text-xs text-blue-600">已选 {formData.tag_filters.length} 个</span>
+                  )}
+                </p>
+                <div className="flex flex-wrap gap-2 max-h-[160px] overflow-y-auto pr-1 border border-gray-100 rounded-lg p-3">
+                  {allTags.length === 0 && (
+                    <p className="text-sm text-gray-400">题库中暂无标签</p>
+                  )}
+                  {allTags.map((tag) => {
+                    const selected = formData.tag_filters.includes(tag);
+                    return (
+                      <button
+                        key={tag}
+                        type="button"
+                        onClick={() => toggleTag(tag)}
+                        className={`px-3 py-1.5 rounded-full text-sm transition-all ${
+                          selected
+                            ? 'bg-blue-500 text-white shadow-sm'
+                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                        }`}
+                      >
+                        {tag}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
+
+              <div className="mb-4">
+                <ClusterFilter
+                  clusterTree={clusterTree}
+                  selectedPrimary={filterClusterPrimary}
+                  selectedSecondary={filterClusterSecondary}
+                  onChange={(p, s) => { setFilterClusterPrimary(p); setFilterClusterSecondary(s); }}
+                />
+                {Object.keys(clusterTree).length === 0 && (
+                  <p className="text-sm text-gray-400">题库中暂无 AI 聚类信息</p>
+                )}
+              </div>
+
               <div className="flex gap-3">
                 <button
                   onClick={() => {
-                    setFormData((prev) => ({ ...prev, tag_filters: [] }));
+                    setFormData((prev) => ({ ...prev, tag_filters: [], cluster_filters: [] }));
+                    setFilterClusterPrimary([]);
+                    setFilterClusterSecondary([]);
                     setShowTagModal(false);
                   }}
                   className="flex-1 py-2 bg-gray-200 text-gray-700 rounded-lg"
@@ -695,10 +767,29 @@ export const TestManager: React.FC = () => {
                   清除选择
                 </button>
                 <button
-                  onClick={() => setShowTagModal(false)}
+                  onClick={() => {
+                    // 把「一级 + 二级」的选中态固化成 cluster_filters（与后端 DB 结构一致）
+                    const list: { primary: string; secondary: string }[] = [];
+                    const covered = new Set<string>();
+                    filterClusterSecondary.forEach((full) => {
+                      const idx = full.indexOf('/');
+                      if (idx < 0) return;
+                      const primary = full.slice(0, idx);
+                      const secondary = full.slice(idx + 1);
+                      if (!primary || !secondary) return;
+                      covered.add(primary);
+                      list.push({ primary, secondary });
+                    });
+                    filterClusterPrimary.forEach((p) => {
+                      if (covered.has(p)) return;
+                      list.push({ primary: p, secondary: '' });
+                    });
+                    setFormData((prev) => ({ ...prev, cluster_filters: list }));
+                    setShowTagModal(false);
+                  }}
                   className="flex-1 py-2 bg-blue-500 text-white rounded-lg"
                 >
-                  确定（{formData.tag_filters.length}个）
+                  确定（标签 {formData.tag_filters.length} · 聚类 {filterClusterPrimary.length + filterClusterSecondary.length}）
                 </button>
               </div>
             </motion.div>

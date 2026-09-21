@@ -339,5 +339,13 @@ module.exports = [
   {
     "version": "082_studious_question_rule.sql",
     "sql": "-- 082: 勤学好问 Buff 规则变更\n--\n-- 【规则变更】原规则「学习模块当天看满 10 题」已彻底废弃，改为：\n--   当天 AI 答疑**成功提问**满 N 次即触发（每日限一次）。\n--   加成 / 时长仍沿用 honor_studious_buff_crit / honor_studious_buff_minutes。\n--\n-- 新增可配置项 honor_studious_questions：触发所需的成功提问次数（默认 10）。\n--\n-- system_config 结构：id / config_key(唯一) / value(JSON {\"value\":...}) / updated_at\n-- 幂等：ON DUPLICATE KEY UPDATE 保证重复执行不报错，且不覆盖教师已改过的值。\n\nINSERT INTO system_config (id, config_key, value, updated_at)\nVALUES ('config_honor_studious_questions', 'honor_studious_questions', '{\"value\": 10}', NOW())\nON DUPLICATE KEY UPDATE config_key = config_key;\n"
+  },
+  {
+    "version": "083_widen_learn_visited_key.sql",
+    "sql": "-- 学习模块「已看记录」加固（v2.5.2）\n--\n-- 背景：learn_visited_records.question_key 原为 VARCHAR(50)，注释写明格式是\n--       \"sectionIndex-questionIndex\"（如 \"0-0\"、\"13-0\"）。\n--       学习模块改版后（v2.5.0）键格式变为 `章名::selftest::序号`\n--       （如 \"信息系统的支撑技术::selftest::12\"），最长可达 40+ 字符；\n--       将来若章名变长或增加段位，极易超过 50 被 MySQL **静默截断**（非严格模式）\n--       或直接报错（严格模式），导致进度记录丢失且难以排查。\n--\n-- 本次改动：\n--   1) 加宽 question_key 到 VARCHAR(80)，留足余量；\n--   2) 补一条格式说明注释，避免后来者再按老格式写入。\n--\n-- 注：历史脏数据（老格式 \"0-0\" / \"py-0-0\"）的清理与迁移见 083 同批的\n--     scripts/debug/migrate_learn_visited_keys.cjs（不在迁移里做，因为需要 JS 逻辑映射章名）。\nALTER TABLE `learn_visited_records`\n  MODIFY COLUMN `question_key` VARCHAR(80) NOT NULL\n  COMMENT '问题唯一标识；当前格式 \"章名::selftest::序号\"（历史格式 \"sectionIndex-questionIndex\" / \"模块-节-题\"）';\n"
+  },
+  {
+    "version": "084_add_test_cluster_filters.sql",
+    "sql": "-- 普通测试 / 考试 支持「AI 聚类筛选」\n-- 教师端创建测试时可在「题目范围」里按 AI 聚类（一级/二级类目）收窄抽题范围。\n-- 与已有的 tag_filters 叠加生效（两者都满足才进入抽题池）；为空表示不按聚类过滤。\n-- 存储格式：[{\"primary\":\"一级类目\",\"secondary\":\"二级类目\"}, {\"primary\":\"一级类目\",\"secondary\":\"\"}]\n--   secondary 为空串 = 只按一级筛选（命中该一级下全部题目，含仅挂一级的题）。\n-- 服务端在 submit-test 的抽题池计算中读取本字段，保证分母口径与前端抽题一致。\nALTER TABLE `tests`\nADD COLUMN IF NOT EXISTS `cluster_filters` JSON NULL COMMENT 'AI聚类筛选条件（一级/二级类目，与 tag_filters 叠加）';\n"
   }
 ];
