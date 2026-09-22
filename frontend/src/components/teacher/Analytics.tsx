@@ -6,6 +6,7 @@ import { useAuth } from '../../hooks/useAuth';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, ComposedChart, Line, Legend } from 'recharts';
 import { API_CONFIG } from '../../api/config';
 import { sanitizeHtml } from '../../utils/htmlUtils';
+import { studentLabel } from '../../utils/studentLabel';
 import { LicenseGuard } from '../common/LicenseGuard';
 
 interface StudentWithStats extends Profile {
@@ -16,6 +17,12 @@ interface StudentWithStats extends Profile {
   has_pet?: boolean;
   pet_level?: number;
 }
+
+/**
+ * 表格里的学生显示名：账号在前、姓名在后，合成一个字段（如「20230101 张三」）。
+ * 实现见 utils/studentLabel.ts（同名同姓靠账号区分；缺账号/姓名自动退化）。
+ */
+
 
 export const Analytics: React.FC = () => {
   const [classes, setClasses] = useState<Class[]>([]);
@@ -275,7 +282,7 @@ export const Analytics: React.FC = () => {
         <table className="w-full">
           <thead className="bg-gray-50">
             <tr>
-              <th className="px-6 py-3 text-left text-sm font-medium text-gray-600">姓名</th>
+              <th className="px-6 py-3 text-left text-sm font-medium text-gray-600">账号 姓名</th>
               <th className="px-6 py-3 text-center text-sm font-medium text-gray-600">当前积分</th>
               <th className="px-6 py-3 text-center text-sm font-medium text-gray-600">最高积分</th>
               <th className="px-6 py-3 text-center text-sm font-medium text-gray-600">做题量</th>
@@ -286,7 +293,7 @@ export const Analytics: React.FC = () => {
           <tbody className="divide-y divide-gray-200">
             {students.map((student) => (
               <tr key={student.id} className="hover:bg-gray-50">
-                <td className="px-6 py-3 font-medium text-gray-800">{student.real_name}</td>
+                <td className="px-6 py-3 font-medium text-gray-800">{studentLabel(student)}</td>
                 <td className="px-6 py-3 text-center text-yellow-600 font-medium">{student.current_points || 0}</td>
                 <td className="px-6 py-3 text-center text-purple-600">{student.max_points || 0}</td>
                 <td className="px-6 py-3 text-center text-gray-600">{student.total_answers || 0}</td>
@@ -926,7 +933,7 @@ const StudentTrendSection: React.FC<{ classId: string; students: StudentWithStat
           className="p-2 border border-gray-300 rounded-lg"
         >
           {students.map((s) => (
-            <option key={s.id} value={s.id}>{s.real_name || s.username}</option>
+            <option key={s.id} value={s.id}>{studentLabel(s)}</option>
           ))}
         </select>
       </div>
@@ -1028,7 +1035,7 @@ const AtRiskSection: React.FC<{ classId: string }> = ({ classId }) => {
           <table className="w-full">
             <thead className="bg-gray-50">
               <tr>
-                <th className="px-4 py-3 text-left text-sm font-medium text-gray-600">姓名</th>
+                <th className="px-4 py-3 text-left text-sm font-medium text-gray-600">账号 姓名</th>
                 <th className="px-4 py-3 text-left text-sm font-medium text-gray-600">预警标签</th>
                 <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">近7天正确率</th>
                 <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">前7天正确率</th>
@@ -1038,7 +1045,7 @@ const AtRiskSection: React.FC<{ classId: string }> = ({ classId }) => {
             <tbody className="divide-y divide-gray-200">
               {data.map((s) => (
                 <tr key={s.id} className="hover:bg-gray-50">
-                  <td className="px-4 py-3 font-medium text-gray-800">{s.real_name || s.username}</td>
+                  <td className="px-4 py-3 font-medium text-gray-800">{studentLabel(s)}</td>
                   <td className="px-4 py-3">
                     <div className="flex flex-wrap gap-1.5">
                       {flagBadges(s).map((b) => (
@@ -1157,8 +1164,8 @@ const ChapterMasterySection: React.FC<{ classId: string }> = ({ classId }) => {
             <table className="w-full border-collapse">
               <thead className="bg-gray-50 sticky top-0 z-10">
                 <tr>
-                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-600 sticky left-0 bg-gray-50 min-w-[110px] border-b border-gray-200">
-                    学生
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-600 sticky left-0 bg-gray-50 min-w-[160px] border-b border-gray-200">
+                    账号 姓名
                   </th>
                   <th className="px-3 py-2 text-center text-xs font-medium text-gray-600 border-b border-l border-gray-200 min-w-[70px]">
                     掌握总数
@@ -1179,7 +1186,7 @@ const ChapterMasterySection: React.FC<{ classId: string }> = ({ classId }) => {
                 {students.map((s) => (
                   <tr key={s.id} className="hover:bg-blue-50/40">
                     <td className="px-3 py-2 text-sm text-gray-800 sticky left-0 bg-white whitespace-nowrap border-r border-gray-100">
-                      {s.real_name || s.username}
+                      {studentLabel(s)}
                     </td>
                     <td className="px-3 py-2 text-center text-sm font-bold text-indigo-600 border-l border-gray-100">
                       {s.total_mastered}

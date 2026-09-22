@@ -6,6 +6,7 @@ import { useAuth } from '../../hooks/useAuth';
 import { usePoints } from '../../hooks/usePoints';
 import { toDatabaseDateTime } from '../../utils/dateUtils';
 import { sanitizeHtml, htmlToPlainText } from '../../utils/htmlUtils';
+import { parseDbClusterFilters, matchDbClusterFilters } from '../../utils/clusterFilters';
 import { EquipmentDropEffect } from './game/EquipmentDropEffect';
 import { useGameEventStore } from '../../store/gameEventStore';
 
@@ -997,8 +998,24 @@ export const TestModule: React.FC = () => {
         }
       }
 
+      // AI 聚类筛选（与标签筛选叠加，两者都需满足）
+      // 修复：此前 startTest 只过滤了标签，聚类筛选被完全忽略 —— 教师选中类目后
+      // 抽出的题目并不落在所选类目中。口径与后端 submit-test 的 hitClusterFilter 一致。
+      const clusterFilters = parseDbClusterFilters(testData.cluster_filters);
+      console.log('startTest - clusterFilters after parse:', clusterFilters);
+      if (clusterFilters.length > 0) {
+        filtered = filtered.filter((q) => matchDbClusterFilters((q as any).cluster_id, clusterFilters));
+        console.log('startTest - after cluster filter count:', filtered.length);
+      }
+
       if (filtered.length === 0) {
-        alert(`当前标签范围内没有可用题目（共${allQuestions.length}道，标签筛选后0道），请联系老师调整测试设置`);
+        const scope: string[] = [];
+        if (testData.tag_filters) scope.push('标签');
+        if (clusterFilters.length > 0) scope.push('聚类');
+        alert(
+          `当前${scope.length > 0 ? scope.join(' + ') + '筛选' : '抽题'}范围内没有可用题目` +
+          `（启用考试的题目共${allQuestions.length}道，筛选后0道），请联系老师调整测试设置`
+        );
         return;
       }
 
