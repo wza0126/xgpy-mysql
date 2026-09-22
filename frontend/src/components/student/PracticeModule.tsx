@@ -699,7 +699,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
   if (showConfig) {
     return (
       <div className="p-6 max-w-4xl mx-auto">
-        <div className="grid grid-cols-5 gap-4 mb-6">
+        <div className="grid grid-cols-5 gap-4 mb-4">
           <div className="bg-blue-50 rounded-lg p-4 text-center">
             <p className="text-sm text-gray-600">总做题数</p>
             <p className="text-2xl font-bold text-blue-600">{stats.total}</p>
@@ -722,19 +722,20 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
           </div>
         </div>
 
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <h2 className="text-xl font-bold text-gray-800 mb-6">练习设置</h2>
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+          <h2 className="text-xl font-bold text-gray-800 mb-4">练习设置</h2>
 
-          <div className="space-y-6">
+          <div className="space-y-5">
             {allTags.length > 0 && (
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-3">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
                   标签筛选（可选）
                   {config.selectedTags.length > 0 && (
                     <span className="ml-2 text-blue-600">已选 {config.selectedTags.length} 个</span>
                   )}
                 </label>
-                <div className="flex flex-wrap gap-2">
+                {/* 限高两行（pill 32px + gap 8px = 72px），标签多时内部滚动，避免把「开始练习」挤出视口 */}
+                <div className="flex flex-wrap gap-2 max-h-[72px] overflow-y-auto pr-1">
                   {allTags.map((tag) => (
                     <button
                       key={tag}
@@ -762,7 +763,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
 
             {Object.keys(clusterTree).length > 0 && (
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-3">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
                   AI 聚类筛选（可选）
                   {(config.selectedClusterPrimary.length > 0 || config.selectedClusterSecondary.length > 0) && (
                     <span className="ml-2 text-violet-600">
@@ -775,7 +776,8 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                   {/* 一级类目 */}
                   <div className="border border-gray-200 rounded-lg p-3">
                     <div className="text-xs text-gray-500 mb-2 font-semibold">一级类目</div>
-                    <div className="flex flex-wrap gap-2">
+                    {/* 限高四行（pill 32px + gap 8px = 152px），类目多时内部滚动 */}
+                    <div className="flex flex-wrap gap-2 max-h-[152px] overflow-y-auto pr-1">
                       {Object.keys(clusterTree).map((primary) => {
                         const active = config.selectedClusterPrimary.includes(primary);
                         // 当前一级下未被一级筛选排除的二级列表（用于联动展示）
@@ -862,7 +864,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
               </div>
             )}
 
-            <div className="bg-gray-50 p-4 rounded-lg">
+            <div className="bg-gray-50 p-3 rounded-lg">
               <p className="text-sm text-gray-600">
                 <i className="fa-solid fa-info-circle mr-1"></i>
                 当前符合条件的题目：

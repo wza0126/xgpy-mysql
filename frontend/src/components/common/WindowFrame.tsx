@@ -15,6 +15,28 @@ interface WindowFrameProps {
 const MIN_WIDTH = 280;
 const MIN_HEIGHT = 200;
 
+/** 默认初始尺寸（未在 WINDOW_SIZE_PRESET 里登记的窗口都用它） */
+const DEFAULT_WINDOW_SIZE = { width: 850, height: 720 };
+
+/**
+ * 各窗口的默认初始尺寸（只写与默认值不同的项）。
+ * practice：练习设置页筛选区较长，加高后不滚动就能看到底部「开始练习」按钮。
+ */
+const WINDOW_SIZE_PRESET: Record<string, { width?: number; height?: number }> = {
+  practice: { height: 880 },
+};
+
+/** 按窗口 id 与当前视口算出初始尺寸（小屏上按视口高度收敛，避免窗口超出视野） */
+function resolveInitialSize(id: string) {
+  const preset = WINDOW_SIZE_PRESET[id] || {};
+  const vh = typeof window !== 'undefined' ? window.innerHeight : 900;
+  const maxHeight = Math.max(MIN_HEIGHT, vh - 96);
+  return {
+    width: preset.width ?? DEFAULT_WINDOW_SIZE.width,
+    height: Math.min(preset.height ?? DEFAULT_WINDOW_SIZE.height, maxHeight),
+  };
+}
+
 // 生成星点（星河璀璨皮肤用）
 function generateStars(count: number) {
   return Array.from({ length: count }, (_, i) => ({
@@ -47,7 +69,7 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({
   const { closeWindow, minimizeWindow, maximizeWindow, restoreWindow, activateWindow } = useDesktopStore();
   const skin = useSkinStore((s) => s.activeSkin);
   const [position, setPosition] = useState({ x: 80, y: 80 });
-  const [size, setSize] = useState({ width: 850, height: 720 });
+  const [size, setSize] = useState(() => resolveInitialSize(id));
   const [isDragging, setIsDragging] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
   const [resizeDirection, setResizeDirection] = useState('');
