@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>积分负分排查报告 · 徐泽丰 25010447</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#ffffff; --line:#e4e7ec; --text:#1f2937; --muted:#6b7280;
+    --blue:#2563eb; --red:#dc2626; --green:#059669; --amber:#b45309;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:32px 20px 64px;background:var(--bg);color:var(--text);
+       font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+       font-size:15px;line-height:1.75}
+  .wrap{max-width:960px;margin:0 auto}
+  h1{font-size:24px;margin:0 0 6px;letter-spacing:.5px}
+  .sub{color:var(--muted);font-size:13.5px;margin-bottom:28px}
+  h2{font-size:17px;margin:34px 0 12px;padding-left:11px;border-left:4px solid var(--blue)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:20px 22px;margin-bottom:18px}
+  .verdict{background:#fff7ed;border:1px solid #fed7aa;border-left:4px solid #ea580c}
+  .verdict strong{color:#c2410c}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;margin:10px 0}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left}
+  th{background:#f3f4f6;font-weight:600;white-space:nowrap}
+  td.n{text-align:right;font-variant-numeric:tabular-nums}
+  .neg{color:var(--red);font-weight:600}
+  .pos{color:var(--green);font-weight:600}
+  code{background:#f1f5f9;padding:1px 6px;border-radius:4px;font-size:13px;
+       font-family:Consolas,Monaco,monospace}
+  ul{margin:8px 0 8px 4px;padding-left:20px}
+  li{margin:5px 0}
+  .tag{display:inline-block;font-size:12px;padding:1px 8px;border-radius:999px;
+       background:#e0e7ff;color:#3730a3;margin-right:6px}
+  .tag.warn{background:#fee2e2;color:#991b1b}
+  .tag.ok{background:#d1fae5;color:#065f46}
+  .kv{display:grid;grid-template-columns:150px 1fr;gap:6px 16px;font-size:14px}
+  .kv dt{color:var(--muted)}
+  .kv dd{margin:0;font-weight:600}
+  .foot{color:var(--muted);font-size:12.5px;margin-top:30px;text-align:center}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>积分负分排查报告</h1>
+  <div class="sub">
+    学生：徐泽丰 &nbsp;·&nbsp; 学号 25010447 &nbsp;·&nbsp; 账号 ID <code>local_1788740383758_zp5mssd8n</code><br>
+    数据源：<code>xgpy.sql</code>（学校学习系统数据库导出，含 45749 条积分流水、951 名师生档案）
+  </div>
+
+  <div class="card verdict">
+    <strong>结论：-4900 分不是任何一次「正常扣分」造成的，而是被「绕过积分流水、直接改写积分字段」的路径写出来的。</strong><br>
+    该生的积分流水是完整且自洽的，里面根本就不存在 -4900 这个数——最高一笔扣分只有 -300（兑换 A4 草稿纸）。
+  </div>
+
+  <h2>一、他的积分流水长什么样</h2>
+  <div class="card">
+    <div class="kv">
+      <dt>流水总条数</dt><dd>304 条</dd>
+      <dt>时间跨度</dt><dd>2026-09-10 14:42 ~ 2026-09-17 14:46</dd>
+      <dt>有记录的日期</dt><dd>仅 9-10（194 条）与 9-17（110 条）；<span class="neg">9-11 ~ 9-16 完全空白</span></dd>
+      <dt>流水净额</dt><dd class="pos">+196</dd>
+      <dt>收入侧合计</dt><dd class="pos">+1221（＝ profiles.total_points_earned，完全吻合）</dd>
+      <dt>支出侧合计</dt><dd class="neg">-1025</dd>
+    </div>
+  </div>
+
+  <table>
+    <tr><th>原因</th><th>条数</th><th>积分合计</th><th>说明</th></tr>
+    <tr><td>答题正确</td><td class="n">104</td><td class="n pos">+1040</td><td>正常</td></tr>
+    <tr><td>答题暴击额外奖励</td><td class="n">104</td><td class="n pos">+181</td><td>正常</td></tr>
+    <tr><td>答题错误</td><td class="n">93</td><td class="n neg">-465</td><td>正常</td></tr>
+    <tr><td>兑换：A4 草稿纸</td><td class="n">1</td><td class="n neg">-300</td><td>9-10 14:50，有兑换记录</td></tr>
+    <tr><td>兑换：海洋蓝（皮肤）</td><td class="n">1</td><td class="n neg">-250</td><td>9-10 14:54，有兑换记录</td></tr>
+    <tr><td>AI 答疑提问</td><td class="n">1</td><td class="n neg">-10</td><td>9-10 14:53，有答疑记录</td></tr>
+    <tr><td colspan="3"><strong>最大单笔扣分</strong></td><td class="neg"><strong>-300</strong></td></tr>
+  </table>
+
+  <p>也就是说：<strong>304 条流水里最大的扣分是 -300，和 -4900 差了 16 倍</strong>；而且 9-11 到 9-16 这六天他连登录记录都没有，却出现了 -4900。</p>
+
+  <h2>二、全库横向对比：这不是他一个人的问题</h2>
+  <div class="card">
+    <p style="margin-top:0">把 951 份档案的 <code>current_points</code> 与各自流水求和逐一对账，发现
+    <strong>49 名学生的积分比流水少了整百的分数</strong>（-100、-200、-300 …… -1375），而这 49 人
+    <strong>全部持有宠物记录</strong>。</p>
+    <table>
+      <tr><th>学号</th><th>姓名</th><th>当前积分</th><th>流水和</th><th>差额</th></tr>
+      <tr><td>261025</td><td>王崎</td><td class="n">-375</td><td class="n">1000</td><td class="n neg">-1375</td></tr>
+      <tr><td>261030</td><td>屠方星</td><td class="n">-72</td><td class="n">1028</td><td class="n neg">-1100</td></tr>
+      <tr><td>261044</td><td>周露</td><td class="n">5</td><td class="n">905</td><td class="n neg">-900</td></tr>
+      <tr><td>261037</td><td>董宇彤</td><td class="n">250</td><td class="n">950</td><td class="n neg">-700</td></tr>
+      <tr><td colspan="4">……（其余 45 人同理，差额均为 100 的整数倍）</td><td class="n neg">…</td></tr>
+      <tr><td>25010447</td><td>徐泽丰</td><td class="n">28</td><td class="n">196</td><td class="n neg">-168</td></tr>
+    </table>
+    <p style="margin-bottom:0">差 100 分正好对应「<strong>换养宠物每次扣 100 分</strong>」——而这个动作<strong>完全不写积分流水</strong>。
+    另有 14 名学生当前积分是负数（最低 -375），同样得不到任何流水解释。</p>
+  </div>
+
+  <h2>三、根因：一条「查—算—写」的暗扣通道</h2>
+  <div class="card">
+    <p style="margin-top:0"><span class="tag warn">核心</span><code>frontend/src/hooks/usePoints.ts</code> 的 <code>updatePoints()</code>：</p>
+    <ul>
+      <li>先从 <code>profiles</code> 读出 <code>current_points</code>；</li>
+      <li>本地算出 <code>新值 = 旧值 + 变动量</code>；</li>
+      <li>再把 <strong>新值整体写回</strong> <code>profiles.current_points</code>。</li>
+    </ul>
+    <p>它有三个致命性质：<strong>没有加锁、没有下限保护、完全不写 <code>point_transactions</code></strong>。
+    而且它走的是通用的 <code>PUT /api/tables/profiles/:id</code> 接口——老版本里这个接口
+    <strong>任何已登录用户都能改任意表的任意字段</strong>。</p>
+
+    <p>调用它的地方，每一个都会造成「扣了分但流水里查不到」：</p>
+    <table>
+      <tr><th>位置</th><th>动作</th><th>单次扣分</th></tr>
+      <tr><td>PetModule.tsx:197</td><td>换养宠物</td><td class="neg">-100</td></tr>
+      <tr><td>PetModule.tsx:275</td><td>喂食（业务接口失败时的降级分支）</td><td class="neg">-50 / -200 / -500 / -1000</td></tr>
+      <tr><td>PracticeModule.tsx:474</td><td>答题（业务接口失败时的降级分支）</td><td class="neg">-5 / +10</td></tr>
+      <tr><td>TestModule.tsx:1123</td><td>测试得分（正常分支也调用）</td><td>视得分</td></tr>
+      <tr><td>WrongQuestions.tsx:393/403</td><td>错题重做（降级分支）</td><td class="neg">-5 / +10</td></tr>
+    </table>
+
+    <p><strong>徐泽丰自己的数据也印证了「降级通道」被频繁启用：</strong></p>
+    <table>
+      <tr><th></th><th>答题记录 student_answers</th><th>积分流水 point_transactions</th><th>差额</th></tr>
+      <tr><td>答对 +10</td><td class="n">163 次</td><td class="n">104 次</td><td class="n neg">59 次无流水</td></tr>
+      <tr><td>答错 -5</td><td class="n">118 次</td><td class="n">93 次</td><td class="n neg">25 次无流水</td></tr>
+      <tr><td><strong>合计</strong></td><td class="n"><strong>281 次</strong></td><td class="n"><strong>197 次</strong></td><td class="n neg"><strong>84 次答题只留了记录、没留流水</strong></td></tr>
+    </table>
+    <p style="margin-bottom:0">这 84 次说明：他的浏览器与后端业务接口之间经常通信失败，于是大量操作落到「前端自己扣分」的分支上——
+    而这条分支既不留流水、也没有下限，正是负分滋生的土壤。</p>
+  </div>
+
+  <h2>四、时间线还原（9 月 17 日）</h2>
+  <table>
+    <tr><th>时刻</th><th>事件</th><th>来源</th></tr>
+    <tr><td>14:20:09</td><td>登录（IP 192.168.7.26）</td><td>login_sessions</td></tr>
+    <tr><td>14:20 ~ 14:31:59</td><td>连续答题</td><td>积分流水</td></tr>
+    <tr><td>14:34:59</td><td>仍有答题行为（产生「三连错」debuff）<strong>但流水已断</strong></td><td>student_buffs</td></tr>
+    <tr><td>14:37:25</td><td>同一台机器重新登录（会话被中断过一次）</td><td>login_sessions</td></tr>
+    <tr><td>14:45:33 ~ 14:46:03</td><td>最后 6 条答题流水，积分停在 28</td><td>积分流水</td></tr>
+    <tr><td>14:49:10</td><td>换到另一台机器登录（IP 192.168.7.37）</td><td>login_sessions</td></tr>
+    <tr><td>14:49:56</td><td>做了一次测试，20 题全 0 分（points_earned = 0）</td><td>test_records</td></tr>
+  </table>
+  <p>中间 14:32 ~ 14:45 这段「流水空白 + 会话中断 + 换机器」的窗口，正是 -4900 出现、并被改成 0 的时段。</p>
+
+  <h2>五、为什么现在「28 分」和流水对不上</h2>
+  <div class="card">
+    <p style="margin-top:0">你手工把 -4900 改成 0 之后，他又答题赚了 28 分，所以现在是 28。
+    但他的流水仍然保留着被抹掉之前的历史累计 196，于是：</p>
+    <p style="text-align:center;font-size:16px;margin:14px 0">
+      <code>28 − 196 = −168</code> &nbsp;←&nbsp; 这个差额就是被手工归零抹掉的那一段，属于正常现象，不代表还有新的扣分。
+    </p>
+  </div>
+
+  <h2>六、已经做的修复（工作区待提交）</h2>
+  <ul>
+    <li><span class="tag ok">原子接口</span>新增 <code>POST /api/student/points/adjust</code>，余额判断写进 <code>WHERE current_points &gt;= ?</code>，并发安全、天然不会为负；前端 <code>usePoints</code> 已改为调用它。</li>
+    <li><span class="tag ok">写保护</span><code>PUT /api/tables</code> 对 <code>profiles</code> 收口：学生只能改自己、且不能碰积分与权限字段；教师可改但积分强制钳制 ≥ 0。</li>
+    <li><span class="tag ok">归属校验</span>兑换 / 答题 / 喂食接口加 <code>student_id</code> 归属校验，杜绝用他人 ID 扣分。</li>
+    <li><span class="tag ok">原子扣减</span>AI 答疑、喂食、换背景、应用扣费全部改为条件 UPDATE + <code>GREATEST(0, ...)</code>。</li>
+    <li><span class="tag ok">皮肤限兑</span>同一皮肤只能兑换一次，重复兑换直接 400 且不影响积分。</li>
+    <li><span class="tag ok">数据库兜底</span>新增迁移 077 归零历史负分，并在启动时创建 <code>profiles</code> 的 BEFORE INSERT/UPDATE 触发器，把三个积分字段强制钳制 ≥ 0。</li>
+  </ul>
+  <p>已验证 36 项断言全过（含触发器钳制、并发只成功一次、0 分再扣被拒、学生越权 403 等）。</p>
+
+  <h2>七、建议</h2>
+  <ul>
+    <li><strong>尽快把修复部署到学校生产环境</strong>——目前生产跑的还是旧版本，漏洞依然存在。</li>
+    <li>对被手工改过分的同学（含徐泽丰），可以按流水重算一次基准分；若需要，我可以写一条 SQL 把所有学生的 <code>current_points</code> 直接对齐到流水求和，一次性消除历史脏数据。</li>
+    <li>学生端建议不要在同一节课中途换机器，或换机器后强制刷新页面——这会加剧前端缓存与云端不一致。</li>
+  </ul>
+
+  <div class="foot">
+    报告由本地 <code>xgpy.sql</code> 离线解析生成 · 分析脚本保留在 <code>.workbuddy/tools/</code>
+  </div>
+</div>
+</body>
+</html>

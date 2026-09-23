@@ -3433,6 +3433,26 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
       }
     }
 
+    // 资格验证（服务端硬校验）：做对题数与已掌握题数两项同时满足才能参加
+    // 教师/管理员代提交不校验（与归属校验同一原则）；前端拦截只是提示，这里才是最终裁定
+    if (!isTeacherSubmitTest && test.type !== 'exam') {
+      const qualDetail = await checkQualification(student_id, test);
+      if (!qualDetail.passed) {
+        await connection.rollback();
+        const parts = [];
+        if (qualDetail.correct.enabled && !qualDetail.correct.passed) {
+          parts.push(`做对 ${qualDetail.correct.required} 道题（当前 ${qualDetail.correct.current} 道）`);
+        }
+        if (qualDetail.mastered.enabled && !qualDetail.mastered.passed) {
+          parts.push(`掌握 ${qualDetail.mastered.required} 道题（当前 ${qualDetail.mastered.current} 道）`);
+        }
+        return res.status(403).json({
+          data: { qualification: qualDetail },
+          error: `资格不足：需要先${parts.join('，且')}才能参加该测试`
+        });
+      }
+    }
+
     const passingScore = test.passing_score || 60;
     const isPassed = score >= passingScore;
     const pointsEarned = isPassed ? Math.round((score / 100) * (test.points_reward || 50)) : 0;
@@ -7827,6 +7847,112 @@ async function getMasteredQuestionIds(conn, studentId, threshold) {
 }
 
 /**
+ * 统计「指定一级类目范围内」的已掌握题数（资格验证用）。
+ *
+ * 口径与 getMasteredByChapter 完全一致：练习来源答对次数 >= 掌握阈值记为已掌握；
+ * 一级类目命中判定取 cluster_id 的 '/' 前缀，因此「数据与信息」会把该章下所有小节
+ * （如「数据与信息/数据、信息与知识的概念」）以及仅挂章级的题一并计入。
+ *
+ * @param {object} conn 数据库连接或连接池
+ * @param {string} studentId
+ * @param {number} threshold 掌握阈值（来自 getMasterThreshold）
+ * @param {string[]|null} primaryNames 一级类目名数组；null / 空数组 = 全部范围（不限类目）
+ * @returns {Promise<number>} 该范围内已掌握题数
+ */
+async function getMasteredCountInClusters(conn, studentId, threshold, primaryNames) {
+  const names = Array.isArray(primaryNames)
+    ? primaryNames.map(n => String(n || '').trim()).filter(Boolean)
+    : [];
+  // 不限类目：直接统计学生全部已掌握题数
+  if (names.length === 0) {
+    const [rows] = await conn.query(
+      `SELECT COUNT(*) AS n FROM (
+         SELECT question_id FROM student_answers
+         WHERE student_id = ? AND source = 'practice' AND is_correct = 1
+         GROUP BY question_id
+         HAVING COUNT(*) >= ?
+       ) m`,
+      [studentId, threshold]
+    );
+    return Number(rows[0]?.n) || 0;
+  }
+
+  const [rows] = await conn.query(
+    `SELECT q.cluster_id AS cid FROM (
+       SELECT question_id FROM student_answers
+       WHERE student_id = ? AND source = 'practice' AND is_correct = 1
+       GROUP BY question_id
+       HAVING COUNT(*) >= ?
+     ) m
+     JOIN questions q ON q.id = m.question_id
+     WHERE q.cluster_id IS NOT NULL AND q.cluster_id <> ''`,
+    [studentId, threshold]
+  );
+  // 一级类目匹配在 JS 侧做（与 getMasteredByChapter 的取前缀逻辑同源，避免 SQL 里处理 '/'
+  // 的差异导致口径不一致；已掌握题数规模有限，代价可接受）
+  const wanted = new Set(names);
+  let count = 0;
+  for (const r of rows) {
+    const cid = String(r.cid);
+    const primary = cid.includes('/') ? cid.split('/')[0] : cid;
+    if (wanted.has(primary)) count += 1;
+  }
+  return count;
+}
+
+/**
+ * 统计「指定一级类目范围内」可用于练习的题量（资格设置界面的参考上限）。
+ *
+ * 口径必须用 practice_enabled = 1：已掌握题数只来自练习来源（source='practice'），
+ * 练习池也只抽 practice_enabled=1 的题。若按全库统计会把不可练的题算进来，
+ * 导致教师设出一个学生永远达不到的阈值。
+ *
+ * 一级类目命中同样取 cluster_id 的 '/' 前缀 ⇒ 含该章全部小节 + 仅挂章级的题。
+ *
+ * @param {string[]|null} primaryNames 一级类目名数组；null / 空数组 = 全部范围
+ * @returns {Promise<number>} 该范围内可练习题量
+ */
+async function getPracticableCountInClusters(primaryNames) {
+  const names = Array.isArray(primaryNames)
+    ? primaryNames.map(n => String(n || '').trim()).filter(Boolean)
+    : [];
+  if (names.length === 0) {
+    const [rows] = await pool.query(
+      'SELECT COUNT(*) AS n FROM questions WHERE practice_enabled = 1'
+    );
+    return Number(rows[0]?.n) || 0;
+  }
+  const [rows] = await pool.query(
+    `SELECT cluster_id FROM questions
+     WHERE practice_enabled = 1 AND cluster_id IS NOT NULL AND cluster_id <> ''`
+  );
+  const wanted = new Set(names);
+  let count = 0;
+  for (const r of rows) {
+    const cid = String(r.cluster_id);
+    const primary = cid.includes('/') ? cid.split('/')[0] : cid;
+    if (wanted.has(primary)) count += 1;
+  }
+  return count;
+}
+
+/**
+ * 把库里的 qualification_mastered_clusters 解析成字符串数组。
+ * 兼容 JSON 列（mysql2 可能已解析为数组/对象）与 TEXT；非法值一律按「全部范围」处理。
+ */
+function parseMasteredClusters(raw) {
+  if (raw == null) return [];
+  let v = raw;
+  if (typeof v === 'string') {
+    try { v = JSON.parse(v); } catch { return []; }
+  }
+  if (Array.isArray(v)) {
+    return v.map(n => String(n || '').trim()).filter(Boolean);
+  }
+  return [];
+}
+
+/**
  * 按章节聚合「已掌握题数」。
  * 返回 Map<章名, 掌握数>；章名取 cluster_id 的 '/' 前缀（一级章），章级兜底题直接归本章。
  */
@@ -7850,6 +7976,152 @@ async function getMasteredByChapter(conn, studentId, threshold) {
   }
   return byChapter;
 }
+
+/**
+ * 统一资格判定（普通测试 / 试卷PK 共用）。
+ *
+ * 两项条件同时满足才算通过：
+ *   1. 做对题数  —— student_answers 中 is_correct=1 的累计条数 >= qualification_correct_count
+ *   2. 已掌握题数 —— 练习来源答对次数 >= 掌握阈值 的题数（限定一级类目范围）>= qualification_mastered_count
+ * 任一阈值为 NULL / 0 / 空 即视为该条件不启用（不影响通过）。
+ *
+ * @param {string} studentId
+ * @param {object} rule 形如 { qualification_correct_count, qualification_mastered_count, qualification_mastered_clusters }
+ * @returns {Promise<object>} 判定明细，供接口回执与前端展示复用（口径只有这一处）
+ */
+async function checkQualification(studentId, rule) {
+  const requiredCorrect = Number(rule?.qualification_correct_count) || 0;
+  const requiredMastered = Number(rule?.qualification_mastered_count) || 0;
+  const masteredClusters = parseMasteredClusters(rule?.qualification_mastered_clusters);
+
+  const [cntRows] = await pool.query(
+    'SELECT COUNT(*) AS cnt FROM student_answers WHERE student_id = ? AND is_correct = 1',
+    [studentId]
+  );
+  const currentCorrect = Number(cntRows[0]?.cnt) || 0;
+
+  let currentMastered = 0;
+  let masterThreshold = 3;
+  if (requiredMastered > 0) {
+    masterThreshold = await getMasterThreshold();
+    currentMastered = await getMasteredCountInClusters(pool, studentId, masterThreshold, masteredClusters);
+  }
+
+  const correctPassed = requiredCorrect <= 0 || currentCorrect >= requiredCorrect;
+  const masteredPassed = requiredMastered <= 0 || currentMastered >= requiredMastered;
+
+  return {
+    passed: correctPassed && masteredPassed,
+    correct: {
+      required: requiredCorrect,
+      current: currentCorrect,
+      enabled: requiredCorrect > 0,
+      passed: correctPassed,
+    },
+    mastered: {
+      required: requiredMastered,
+      current: currentMastered,
+      enabled: requiredMastered > 0,
+      passed: masteredPassed,
+      clusters: masteredClusters,       // 空数组 = 全部范围
+      master_threshold: masterThreshold,
+    },
+  };
+}
+
+/**
+ * 取某条测试/考试记录的资格规则（供学生端查询与参加校验共用）。
+ * 找不到记录时返回空规则（等于不限制）。
+ */
+async function getTestQualificationRule(testId) {
+  const [rows] = await pool.query(
+    `SELECT id, title, name, is_active, qualification_correct_count,
+            qualification_mastered_count, qualification_mastered_clusters
+     FROM tests WHERE id = ? LIMIT 1`,
+    [testId]
+  );
+  if (!rows.length) return null;
+  return rows[0];
+}
+
+// 教师端：查询各一级类目可练习题量（供「已掌握题数」资格设置时参考上限）
+// 返回 { total, by_primary: {章名: 题量} }；全部范围 = total
+app.get('/api/teacher/qualification/counts', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT cluster_id, COUNT(*) AS cnt FROM questions
+       WHERE practice_enabled = 1 AND cluster_id IS NOT NULL AND cluster_id <> ''
+       GROUP BY cluster_id`
+    );
+    const byPrimary = {};
+    let total = 0;
+    for (const r of rows) {
+      const cid = String(r.cluster_id);
+      const primary = cid.includes('/') ? cid.split('/')[0] : cid;
+      const n = Number(r.cnt) || 0;
+      byPrimary[primary] = (byPrimary[primary] || 0) + n;
+      total += n;
+    }
+    res.json({ data: { total, by_primary: byPrimary }, error: null });
+  } catch (err) {
+    console.error('查类目题量失败:', err);
+    res.status(500).json({ data: null, error: '查询失败' });
+  }
+});
+
+// 学生端：查询某测试的资格明细（供卡片展示两项条件进度）
+app.get('/api/student/qualification/test/:testId', authenticate, requireStudent, async (req, res) => {
+  try {
+    const rule = await getTestQualificationRule(req.params.testId);
+    if (!rule) return res.status(404).json({ data: null, error: '测试不存在' });
+    const detail = await checkQualification(req.user.userId, rule);
+    res.json({ data: detail, error: null });
+  } catch (err) {
+    console.error('查询测试资格失败:', err);
+    res.status(500).json({ data: null, error: '查询失败' });
+  }
+});
+
+// 学生端：批量查询测试资格明细（供测试列表一次拉全，避免 N 次请求）
+app.post('/api/student/qualification/tests', authenticate, requireStudent, async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body?.test_ids) ? req.body.test_ids.filter(Boolean) : [];
+    if (ids.length === 0) return res.json({ data: {}, error: null });
+    const placeholders = ids.map(() => '?').join(',');
+    const [rows] = await pool.query(
+      `SELECT id, qualification_correct_count,
+              qualification_mastered_count, qualification_mastered_clusters
+       FROM tests WHERE id IN (${placeholders})`,
+      ids
+    );
+    const out = {};
+    for (const row of rows) {
+      out[row.id] = await checkQualification(req.user.userId, row);
+    }
+    res.json({ data: out, error: null });
+  } catch (err) {
+    console.error('批量查询测试资格失败:', err);
+    res.status(500).json({ data: null, error: '查询失败' });
+  }
+});
+
+// 学生端：查询某个 PK 对战配置的资格明细
+app.get('/api/student/qualification/pk/:configId', authenticate, requireStudent, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT id, name, is_active, qualification_correct_count,
+              qualification_mastered_count, qualification_mastered_clusters
+       FROM pk_battle_configs WHERE id = ? LIMIT 1`,
+      [req.params.configId]
+    );
+    if (!rows.length) return res.status(404).json({ data: null, error: '对战配置不存在' });
+    const detail = await checkQualification(req.user.userId, rows[0]);
+    res.json({ data: detail, error: null });
+  } catch (err) {
+    console.error('查询PK资格失败:', err);
+    res.status(500).json({ data: null, error: '查询失败' });
+  }
+});
 
 // 学习模块目录：16 章 + 每章小节题量 + 学生进度
 app.get('/api/student/learn-chapters', authenticate, async (req, res) => {
@@ -14620,6 +14892,38 @@ registerCreativeWorkshop(app, pool, authenticate, requireTeacher, requireStudent
 // ===== PK 对战 REST API =====
 // 注：crypto 已在文件顶部 require，此处直接复用
 
+/**
+ * 归一化 PK 奖励配置字段（教师端传入 → 落库值）
+ *
+ * 校验要点：
+ * - 倍率限制在 0.1~10（超出会给积分体系造成不可控冲击）
+ * - 加成比例限制在 0~5
+ * - 积分类一律取非负整数（负奖励应通过「不给奖励」表达，而不是扣分）
+ * - 缺省值与迁移 086 的列默认值保持一致，保证「不填 = 旧行为」
+ */
+function normalizePkRewardFields(raw = {}) {
+  const dec = (v, fallback, min, max) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.min(max, Math.max(min, Math.round(n * 100) / 100));
+  };
+  const int = (v, fallback) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(0, Math.floor(n));
+  };
+  return {
+    points_multiplier: dec(raw.points_multiplier, 1, 0.1, 10),
+    win_bonus_rate: dec(raw.win_bonus_rate, 0.5, 0, 5),
+    draw_bonus_rate: dec(raw.draw_bonus_rate, 0, 0, 5),
+    consolation_points: int(raw.consolation_points, 0),
+    consolation_gap: int(raw.consolation_gap, 2),
+    first_battle_points: int(raw.first_battle_points, 0),
+    daily_battles_target: int(raw.daily_battles_target, 0),
+    daily_battles_points: int(raw.daily_battles_points, 0),
+  };
+}
+
 // 教师端：对战配置 CRUD
 app.get('/api/pk/battle-configs', authenticate, requireTeacher, async (req, res) => {
   try {
@@ -14638,21 +14942,41 @@ app.post('/api/pk/battle-configs', authenticate, requireTeacher, async (req, res
   try {
     const { name, mode, duration_seconds, question_count, tag_filters,
       cluster_filters, difficulty_min, difficulty_max, is_active, daily_limit,
-      qualification_correct_count } = req.body;
+      qualification_correct_count, qualification_mastered_count,
+      qualification_mastered_clusters,
+      points_multiplier, win_bonus_rate, draw_bonus_rate,
+      consolation_points, consolation_gap, first_battle_points,
+      daily_battles_target, daily_battles_points } = req.body;
     const id = 'pbc_' + crypto.randomBytes(8).toString('hex');
+    // 已掌握类目范围：空数组/NULL 均写 null（表示全部范围，不限类目）
+    const masteredClusters = Array.isArray(qualification_mastered_clusters)
+      && qualification_mastered_clusters.length > 0
+      ? JSON.stringify(qualification_mastered_clusters) : null;
+    const reward = normalizePkRewardFields({
+      points_multiplier, win_bonus_rate, draw_bonus_rate,
+      consolation_points, consolation_gap, first_battle_points,
+      daily_battles_target, daily_battles_points,
+    });
     await pool.query(
       `INSERT INTO pk_battle_configs
        (id, teacher_id, name, mode, duration_seconds, question_count,
         tag_filters, cluster_filters, difficulty_min, difficulty_max, is_active, daily_limit,
-        qualification_correct_count)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        qualification_correct_count, qualification_mastered_count, qualification_mastered_clusters,
+        points_multiplier, win_bonus_rate, draw_bonus_rate,
+        consolation_points, consolation_gap, first_battle_points,
+        daily_battles_target, daily_battles_points)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, req.user.userId, name, mode || 'timed',
        duration_seconds || 180, question_count || 20,
        tag_filters ? JSON.stringify(tag_filters) : null,
        cluster_filters ? JSON.stringify(cluster_filters) : null,
        difficulty_min || null, difficulty_max || null,
        is_active === false ? 0 : 1, daily_limit || null,
-       qualification_correct_count || null]
+       qualification_correct_count || null,
+       qualification_mastered_count || null, masteredClusters,
+       reward.points_multiplier, reward.win_bonus_rate, reward.draw_bonus_rate,
+       reward.consolation_points, reward.consolation_gap, reward.first_battle_points,
+       reward.daily_battles_target, reward.daily_battles_points]
     );
     res.json({ data: { id }, error: null });
   } catch (err) {
@@ -14665,12 +14989,28 @@ app.put('/api/pk/battle-configs/:id', authenticate, requireTeacher, async (req, 
   try {
     const { name, mode, duration_seconds, question_count, tag_filters,
       cluster_filters, difficulty_min, difficulty_max, is_active, daily_limit,
-      qualification_correct_count } = req.body;
+      qualification_correct_count, qualification_mastered_count,
+      qualification_mastered_clusters,
+      points_multiplier, win_bonus_rate, draw_bonus_rate,
+      consolation_points, consolation_gap, first_battle_points,
+      daily_battles_target, daily_battles_points } = req.body;
+    const masteredClusters = Array.isArray(qualification_mastered_clusters)
+      && qualification_mastered_clusters.length > 0
+      ? JSON.stringify(qualification_mastered_clusters) : null;
+    const reward = normalizePkRewardFields({
+      points_multiplier, win_bonus_rate, draw_bonus_rate,
+      consolation_points, consolation_gap, first_battle_points,
+      daily_battles_target, daily_battles_points,
+    });
     await pool.query(
       `UPDATE pk_battle_configs SET
         name = ?, mode = ?, duration_seconds = ?, question_count = ?,
         tag_filters = ?, cluster_filters = ?, difficulty_min = ?, difficulty_max = ?,
-        is_active = ?, daily_limit = ?, qualification_correct_count = ?
+        is_active = ?, daily_limit = ?, qualification_correct_count = ?,
+        qualification_mastered_count = ?, qualification_mastered_clusters = ?,
+        points_multiplier = ?, win_bonus_rate = ?, draw_bonus_rate = ?,
+        consolation_points = ?, consolation_gap = ?, first_battle_points = ?,
+        daily_battles_target = ?, daily_battles_points = ?
        WHERE id = ? AND teacher_id = ?`,
       [name, mode || 'timed', duration_seconds || 180, question_count || 20,
        tag_filters ? JSON.stringify(tag_filters) : null,
@@ -14678,6 +15018,10 @@ app.put('/api/pk/battle-configs/:id', authenticate, requireTeacher, async (req, 
        difficulty_min || null, difficulty_max || null,
        is_active === false ? 0 : 1, daily_limit || null,
        qualification_correct_count || null,
+       qualification_mastered_count || null, masteredClusters,
+       reward.points_multiplier, reward.win_bonus_rate, reward.draw_bonus_rate,
+       reward.consolation_points, reward.consolation_gap, reward.first_battle_points,
+       reward.daily_battles_target, reward.daily_battles_points,
        req.params.id, req.user.userId]
     );
     res.json({ data: { id: req.params.id }, error: null });
@@ -14704,7 +15048,7 @@ app.delete('/api/pk/battle-configs/:id', authenticate, requireTeacher, async (re
 app.get('/api/pk/battle-configs/active', authenticate, requireStudent, async (req, res) => {
   try {
     const [rows] = await pool.query(
-      'SELECT id, name, mode, duration_seconds, question_count, daily_limit, qualification_correct_count FROM pk_battle_configs WHERE is_active = 1 ORDER BY created_at DESC'
+      'SELECT id, name, mode, duration_seconds, question_count, daily_limit, qualification_correct_count, qualification_mastered_count, qualification_mastered_clusters FROM pk_battle_configs WHERE is_active = 1 ORDER BY created_at DESC'
     );
     res.json({ data: rows, error: null });
   } catch (err) {
@@ -14923,6 +15267,256 @@ app.get('/api/pk/classes/:class_id/students/stats', authenticate, requireTeacher
     );
     res.json({ data: rows, error: null });
   } catch (err) {
+    res.status(500).json({ data: null, error: '查询失败' });
+  }
+});
+
+// ============================================================
+// 教师端：PK 数据统计（P0）
+// ============================================================
+// 数据来源：pk_rooms（对局）+ pk_room_players（每人每局结果，含开局快照）
+// 口径说明：
+// - 只统计已结算的对局（status='finished' 且 result != 'pending'），避免把中途放弃算进去
+// - 正确率 = SUM(final_correct) / SUM(final_correct + final_wrong)，分母为 0 时返回 null
+// - 活动归属用 pk_room_players.config_id（开局快照），不受配置改名/删除影响
+
+// 1) 总览卡：参与度 / 场次 / 正确率 / 平均每题耗时
+app.get('/api/pk/stats/overview', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { class_id, date_from, date_to } = req.query;
+    if (!class_id) return res.status(400).json({ data: null, error: '缺少 class_id' });
+
+    const params = [];
+    let scope = `p.room_id IN (SELECT r.id FROM pk_rooms r WHERE r.status = 'finished')
+                 AND p.result <> 'pending' AND pr.class_id = ?`;
+    params.push(class_id);
+    if (date_from) { scope += ' AND p.joined_at >= ?'; params.push(date_from); }
+    if (date_to) { scope += ' AND p.joined_at < DATE_ADD(?, INTERVAL 1 DAY)'; params.push(date_to); }
+
+    // 参与度：班级学生总数 vs 有对战记录的学生数
+    const [classCntRows] = await pool.query(
+      "SELECT COUNT(*) AS cnt FROM profiles WHERE class_id = ? AND role = 'student'",
+      [class_id]
+    );
+
+    const [aggRows] = await pool.query(
+      `SELECT
+         COUNT(DISTINCT p.room_id) AS total_rooms,
+         COUNT(DISTINCT p.user_id) AS players,
+         SUM(p.final_correct) AS total_correct,
+         SUM(p.final_correct + p.final_wrong) AS total_answered,
+         SUM(p.system_points_earned) AS total_system_points,
+         SUM(p.bonus_points) AS total_bonus_points,
+         ROUND(AVG(p.final_duration_ms)) AS avg_duration_ms
+       FROM pk_room_players p
+       JOIN profiles pr ON p.user_id = pr.id
+       WHERE ${scope}`,
+      params
+    );
+
+    // 平均每题耗时：从作答流水算（更准确，排除未作答时间）
+    const [perQRows] = await pool.query(
+      `SELECT ROUND(AVG(a.cost_ms)) AS avg_cost_ms, COUNT(*) AS answered_cnt
+       FROM pk_match_answers a
+       JOIN profiles pr ON a.user_id = pr.id
+       WHERE a.room_id IN (SELECT r.id FROM pk_rooms r WHERE r.status = 'finished')
+         AND pr.class_id = ?`,
+      [class_id]
+    );
+
+    const agg = aggRows[0] || {};
+    const totalStudents = classCntRows[0]?.cnt || 0;
+    const players = Number(agg.players || 0);
+    const totalRooms = Number(agg.total_rooms || 0);
+    const totalCorrect = Number(agg.total_correct || 0);
+    const totalAnswered = Number(agg.total_answered || 0);
+
+    res.json({
+      data: {
+        total_students: totalStudents,
+        players,
+        participation_rate: totalStudents > 0 ? Math.round((players / totalStudents) * 1000) / 10 : 0,
+        total_rooms: totalRooms,
+        avg_rooms_per_player: players > 0 ? Math.round((totalRooms / players) * 100) / 100 : 0,
+        total_correct: totalCorrect,
+        total_answered: totalAnswered,
+        avg_correct_rate: totalAnswered > 0 ? Math.round((totalCorrect / totalAnswered) * 1000) / 10 : null,
+        avg_cost_ms: perQRows[0]?.avg_cost_ms != null ? Number(perQRows[0].avg_cost_ms) : null,
+        total_system_points: Number(agg.total_system_points || 0),
+        total_bonus_points: Number(agg.total_bonus_points || 0),
+      },
+      error: null,
+    });
+  } catch (err) {
+    console.error('PK 总览统计失败:', err);
+    res.status(500).json({ data: null, error: '统计失败' });
+  }
+});
+
+// 2) 按活动统计：哪个配置真被用了
+app.get('/api/pk/stats/by-config', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { class_id } = req.query;
+    if (!class_id) return res.status(400).json({ data: null, error: '缺少 class_id' });
+
+    // 活动列表：本班出现过的所有活动（含未参与过的？—— 这里合并教师配置列表，未参与场次为 0）
+    const [rows] = await pool.query(
+      `SELECT
+         p.config_id,
+         MAX(p.config_name) AS config_name,
+         COUNT(DISTINCT p.room_id) AS rooms,
+         COUNT(DISTINCT p.user_id) AS players,
+         SUM(p.final_correct) AS total_correct,
+         SUM(p.final_correct + p.final_wrong) AS total_answered,
+         ROUND(AVG(p.final_duration_ms)) AS avg_duration_ms
+       FROM pk_room_players p
+       JOIN profiles pr ON p.user_id = pr.id
+       WHERE p.room_id IN (SELECT r.id FROM pk_rooms r WHERE r.status = 'finished')
+         AND p.result <> 'pending' AND pr.class_id = ?
+       GROUP BY p.config_id
+       ORDER BY rooms DESC`,
+      [class_id]
+    );
+
+    // 补齐：教师已配置但零参与的活动（让老师看到"这个活动没人玩"）
+    const [cfgRows] = await pool.query(
+      `SELECT id, name, is_active FROM pk_battle_configs WHERE teacher_id = ? ORDER BY created_at DESC`,
+      [req.user.userId]
+    );
+    const seen = new Set(rows.map((r) => r.config_id).filter(Boolean));
+    const merged = rows.map((r) => ({
+      config_id: r.config_id,
+      config_name: r.config_name || (r.config_id ? '(已删除的活动)' : '快速匹配（无活动）'),
+      rooms: Number(r.rooms || 0),
+      players: Number(r.players || 0),
+      total_correct: Number(r.total_correct || 0),
+      total_answered: Number(r.total_answered || 0),
+      avg_correct_rate: Number(r.total_answered || 0) > 0
+        ? Math.round((Number(r.total_correct) / Number(r.total_answered)) * 1000) / 10 : null,
+      avg_duration_ms: r.avg_duration_ms != null ? Number(r.avg_duration_ms) : null,
+    }));
+    for (const c of cfgRows) {
+      if (!seen.has(c.id)) {
+        merged.push({
+          config_id: c.id, config_name: c.name, rooms: 0, players: 0,
+          total_correct: 0, total_answered: 0, avg_correct_rate: null,
+          avg_duration_ms: null, is_active: !!c.is_active, never_used: true,
+        });
+      }
+    }
+
+    res.json({ data: merged, error: null });
+  } catch (err) {
+    console.error('PK 按活动统计失败:', err);
+    res.status(500).json({ data: null, error: '统计失败' });
+  }
+});
+
+// 3) 按学生统计：活跃度 / 正确率 / 连败 / 最近对战
+app.get('/api/pk/stats/by-student', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { class_id } = req.query;
+    if (!class_id) return res.status(400).json({ data: null, error: '缺少 class_id' });
+
+    const [rows] = await pool.query(
+      `SELECT
+         pr.id, pr.username, pr.real_name,
+         pr.pk_rank_tier, pr.pk_rank_stars, pr.pk_points,
+         pr.pk_total_wins, pr.pk_total_losses, pr.pk_total_draws,
+         COUNT(p.id) AS rooms_played,
+         SUM(p.result = 'win') AS wins,
+         SUM(p.result = 'lose') AS losses,
+         SUM(p.result = 'draw') AS draws,
+         SUM(p.final_correct) AS total_correct,
+         SUM(p.final_correct + p.final_wrong) AS total_answered,
+         SUM(p.system_points_earned) AS system_points,
+         SUM(p.bonus_points) AS bonus_points,
+         SUM(p.consolation_points) AS consolation_points,
+         MAX(p.joined_at) AS last_battle_at
+       FROM profiles pr
+       LEFT JOIN pk_room_players p
+         ON p.user_id = pr.id
+        AND p.result <> 'pending'
+        AND p.room_id IN (SELECT r.id FROM pk_rooms r WHERE r.status = 'finished')
+       WHERE pr.class_id = ? AND pr.role = 'student'
+       GROUP BY pr.id
+       ORDER BY rooms_played DESC, pr.username ASC`,
+      [class_id]
+    );
+
+    // 连败场次：取每人最近若干场的胜负序列，从最近往前数连续 lose
+    const [recentRows] = await pool.query(
+      `SELECT p.user_id, p.result, p.joined_at
+       FROM pk_room_players p
+       JOIN profiles pr ON p.user_id = pr.id
+       WHERE pr.class_id = ? AND p.result <> 'pending'
+         AND p.room_id IN (SELECT r.id FROM pk_rooms r WHERE r.status = 'finished')
+       ORDER BY p.user_id ASC, p.joined_at DESC`,
+      [class_id]
+    );
+    const streakMap = {};
+    const playedMap = {};
+    for (const r of recentRows) {
+      playedMap[r.user_id] = (playedMap[r.user_id] || 0) + 1;
+      // 只统计最近 10 场内的连败
+      if (playedMap[r.user_id] > 10) continue;
+      if (streakMap[r.user_id] === undefined) {
+        streakMap[r.user_id] = r.result === 'lose' ? 1 : 0;
+      } else if (r.result === 'lose' && streakMap[r.user_id] === playedMap[r.user_id] - 1) {
+        streakMap[r.user_id] += 1;
+      }
+    }
+
+    const data = rows.map((r) => {
+      const wins = Number(r.wins || 0);
+      const losses = Number(r.losses || 0);
+      const draws = Number(r.draws || 0);
+      const decided = wins + losses;
+      const totalCorrect = Number(r.total_correct || 0);
+      const totalAnswered = Number(r.total_answered || 0);
+      return {
+        id: r.id,
+        username: r.username,
+        real_name: r.real_name,
+        pk_rank_tier: r.pk_rank_tier,
+        pk_rank_stars: r.pk_rank_stars,
+        pk_points: r.pk_points,
+        rooms_played: Number(r.rooms_played || 0),
+        wins, losses, draws,
+        win_rate: decided > 0 ? Math.round((wins / decided) * 1000) / 10 : null,
+        total_correct: totalCorrect,
+        total_answered: totalAnswered,
+        correct_rate: totalAnswered > 0 ? Math.round((totalCorrect / totalAnswered) * 1000) / 10 : null,
+        system_points: Number(r.system_points || 0),
+        bonus_points: Number(r.bonus_points || 0),
+        consolation_points: Number(r.consolation_points || 0),
+        lose_streak: streakMap[r.id] || 0,
+        last_battle_at: r.last_battle_at || null,
+      };
+    });
+
+    res.json({ data, error: null });
+  } catch (err) {
+    console.error('PK 按学生统计失败:', err);
+    res.status(500).json({ data: null, error: '统计失败' });
+  }
+});
+
+// 4) 教师端：PK 积分流水摘要（验证 source_type='pk_battle' 是否通了）
+app.get('/api/pk/stats/points-summary', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { class_id } = req.query;
+    if (!class_id) return res.status(400).json({ data: null, error: '缺少 class_id' });
+    const [rows] = await pool.query(
+      `SELECT COUNT(*) AS tx_count, COALESCE(SUM(t.amount), 0) AS total_amount
+       FROM point_transactions t
+       JOIN profiles pr ON t.student_id = pr.id
+       WHERE t.source_type = 'pk_battle' AND pr.class_id = ?`,
+      [class_id]
+    );
+    res.json({ data: rows[0] || { tx_count: 0, total_amount: 0 }, error: null });
+  } catch (err) {
+    console.error('PK 积分摘要失败:', err);
     res.status(500).json({ data: null, error: '查询失败' });
   }
 });

@@ -30,42 +30,171 @@ function parseJsonField(v) {
 }
 
 /**
- * 资格验证：该对战配置要求学生累计做对指定题数才能参加（参考测试资格验证）
+ * 读取「掌握题目阈值」（system_config.master_question_threshold，默认 3）。
+ * 与练习门禁 / 学情分析 / index.js 的 getMasterThreshold 同源，不要另设阈值。
+ */
+async function getMasterThreshold(pool) {
+  try {
+    const [rows] = await pool.query(
+      "SELECT value FROM system_config WHERE config_key = 'master_question_threshold' LIMIT 1"
+    );
+    if (!rows.length) return 3;
+    let v = rows[0].value;
+    if (typeof v === 'string') {
+      try { v = JSON.parse(v); } catch { /* 保持字符串 */ }
+    }
+    const parsed = parseInt(typeof v === 'object' && v !== null ? v.value : v, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 3;
+  } catch {
+    return 3;
+  }
+}
+
+/** 把 qualification_mastered_clusters 解析为字符串数组（兼容 mysql2 已解析的 JSON 与 TEXT） */
+function parseMasteredClusters(raw) {
+  if (raw == null) return [];
+  let v = raw;
+  if (typeof v === 'string') {
+    try { v = JSON.parse(v); } catch { return []; }
+  }
+  if (Array.isArray(v)) return v.map(n => String(n || '').trim()).filter(Boolean);
+  return [];
+}
+
+/**
+ * 统计指定一级类目范围（含全部小节）内的已掌握题数。
+ * 口径与练习模块一致：source='practice' 且同一题答对次数 >= 掌握阈值。
+ * @param {string[]} primaryNames 一级类目名；空数组 = 全部范围
+ */
+async function getMasteredCountInClusters(pool, userId, threshold, primaryNames) {
+  const names = Array.isArray(primaryNames) ? primaryNames.filter(Boolean) : [];
+  if (names.length === 0) {
+    const [rows] = await pool.query(
+      `SELECT COUNT(*) AS n FROM (
+         SELECT question_id FROM student_answers
+         WHERE student_id = ? AND source = 'practice' AND is_correct = 1
+         GROUP BY question_id
+         HAVING COUNT(*) >= ?
+       ) m`,
+      [userId, threshold]
+    );
+    return Number(rows[0]?.n) || 0;
+  }
+  const [rows] = await pool.query(
+    `SELECT q.cluster_id AS cid FROM (
+       SELECT question_id FROM student_answers
+       WHERE student_id = ? AND source = 'practice' AND is_correct = 1
+       GROUP BY question_id
+       HAVING COUNT(*) >= ?
+     ) m
+     JOIN questions q ON q.id = m.question_id
+     WHERE q.cluster_id IS NOT NULL AND q.cluster_id <> ''`,
+    [userId, threshold]
+  );
+  const wanted = new Set(names);
+  let count = 0;
+  for (const r of rows) {
+    const cid = String(r.cid);
+    const primary = cid.includes('/') ? cid.split('/')[0] : cid;
+    if (wanted.has(primary)) count += 1;
+  }
+  return count;
+}
+
+/**
+ * 资格验证：两项条件同时满足才能参加对战。
+ *   1. 做对题数   —— 累计 is_correct=1 的作答条数 >= qualification_correct_count
+ *   2. 已掌握题数 —— 指定一级类目范围内的已掌握题数 >= qualification_mastered_count
+ * 任一阈值为 NULL / 0 即该条件不启用。
  * @param {object} pool 数据库连接池
  * @param {string} userId 学生ID
- * @param {object|null} config 对战配置（含 qualification_correct_count，可为 null）
- * @returns {{ok: boolean, correct?: number, required?: number}}
+ * @param {object|null} config 对战配置（可为 null，视为不限制）
+ * @returns {{ok: boolean, correct?: number, required?: number, mastered?: number, masteredRequired?: number}}
  */
 async function checkQualification(pool, userId, config) {
   const required = config && config.qualification_correct_count
     ? Number(config.qualification_correct_count)
     : 0;
-  if (required <= 0) return { ok: true };
+  const masteredRequired = config && config.qualification_mastered_count
+    ? Number(config.qualification_mastered_count)
+    : 0;
+  if (required <= 0 && masteredRequired <= 0) return { ok: true };
+
   const [rows] = await pool.query(
     'SELECT COUNT(*) AS cnt FROM student_answers WHERE student_id = ? AND is_correct = 1',
     [userId]
   );
   const correct = rows[0].cnt || 0;
-  return correct >= required
-    ? { ok: true }
-    : { ok: false, correct, required };
+
+  let mastered = 0;
+  if (masteredRequired > 0) {
+    const threshold = await getMasterThreshold(pool);
+    mastered = await getMasteredCountInClusters(
+      pool, userId, threshold, parseMasteredClusters(config.qualification_mastered_clusters)
+    );
+  }
+
+  const correctOk = required <= 0 || correct >= required;
+  const masteredOk = masteredRequired <= 0 || mastered >= masteredRequired;
+  if (correctOk && masteredOk) return { ok: true };
+
+  // 回执带上两项的实际值，前端据此提示缺口
+  const reason = !correctOk && !masteredOk ? 'both' : (!correctOk ? 'correct' : 'mastered');
+  return {
+    ok: false,
+    reason,
+    correct, required,
+    mastered, masteredRequired,
+  };
 }
 
 /**
  * 解析对战配置的资格要求（按 config_id 或默认激活配置）
  */
 async function loadQualificationConfig(pool, configId) {
+  const fields = 'qualification_correct_count, qualification_mastered_count, qualification_mastered_clusters';
   if (configId) {
     const [rows] = await pool.query(
-      'SELECT qualification_correct_count FROM pk_battle_configs WHERE id = ? AND is_active = 1',
+      `SELECT ${fields} FROM pk_battle_configs WHERE id = ? AND is_active = 1`,
       [configId]
     );
     return rows[0] || null;
   }
   const [rows] = await pool.query(
-    'SELECT qualification_correct_count FROM pk_battle_configs WHERE is_active = 1 ORDER BY created_at DESC LIMIT 1'
+    `SELECT ${fields} FROM pk_battle_configs WHERE is_active = 1 ORDER BY created_at DESC LIMIT 1`
   );
   return rows[0] || null;
+}
+
+/**
+ * 把 pk_battle_configs 行组装成 battleEngine 需要的 config 结构
+ *
+ * ⚠️ 必须整行透传奖励字段（points_multiplier / *_bonus_rate / consolation_* / first_battle_*），
+ * 否则结算时 rewardCfg 全部落到默认值 —— 表现为「教师在界面上设了奖励但完全不生效」。
+ * 同时负责 questionCount / tagFilters 等字段的命名转换与 JSON 解析。
+ */
+function buildBattleConfig(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    duration_seconds: row.duration_seconds,
+    questionCount: row.question_count,
+    question_count: row.question_count,
+    tagFilters: parseJsonField(row.tag_filters),
+    clusterFilters: parseJsonField(row.cluster_filters),
+    difficultyMin: row.difficulty_min,
+    difficultyMax: row.difficulty_max,
+    // ===== 奖励配置 =====
+    points_multiplier: row.points_multiplier,
+    win_bonus_rate: row.win_bonus_rate,
+    draw_bonus_rate: row.draw_bonus_rate,
+    consolation_points: row.consolation_points,
+    consolation_gap: row.consolation_gap,
+    first_battle_points: row.first_battle_points,
+    daily_battles_target: row.daily_battles_target,
+    daily_battles_points: row.daily_battles_points,
+  };
 }
 
 /**
@@ -182,13 +311,20 @@ function init(httpServer, pool) {
           await roomManager.leaveRoom(pool, { roomId: room_id, userId });
         }
 
-        // 资格验证：所选配置要求做对指定题数才能参加
+        // 资格验证：所选配置要求「做对题数」与「已掌握题数」同时达标才能参加
         const qualConfig = await loadQualificationConfig(pool, data.config_id);
         const qual = await checkQualification(pool, userId, qualConfig);
         if (!qual.ok) {
+          const parts = [];
+          if (qual.reason === 'correct' || qual.reason === 'both') {
+            parts.push(`做对 ${qual.required} 道题（当前 ${qual.correct} 道）`);
+          }
+          if (qual.reason === 'mastered' || qual.reason === 'both') {
+            parts.push(`掌握 ${qual.masteredRequired} 道题（当前 ${qual.mastered} 道）`);
+          }
           return socket.emit('pk:room_error', {
             code: 'qualification',
-            message: `需要先做对 ${qual.required} 道题才能参加对战（当前 ${qual.correct} 道）`,
+            message: `需要先${parts.join('，且')}才能参加对战`,
           });
         }
 
@@ -267,6 +403,15 @@ function init(httpServer, pool) {
               cluster_filters: null,
               difficulty_min: null,
               difficulty_max: null,
+              // 与旧行为一致的奖励默认值（倍率1 / 赢方×1.5 / 无参与奖励）
+              points_multiplier: 1,
+              win_bonus_rate: 0.5,
+              draw_bonus_rate: 0,
+              consolation_points: 0,
+              consolation_gap: 2,
+              first_battle_points: 0,
+              daily_battles_target: 0,
+              daily_battles_points: 0,
             };
           }
 
@@ -301,14 +446,7 @@ function init(httpServer, pool) {
           // 开战
           await battleEngine.startBattle(io, pool, {
             roomId,
-            config: {
-              duration_seconds: config.duration_seconds,
-              questionCount: config.question_count,
-              tagFilters: parseJsonField(config.tag_filters),
-              clusterFilters: parseJsonField(config.cluster_filters),
-              difficultyMin: config.difficulty_min,
-              difficultyMax: config.difficulty_max,
-            },
+            config: buildBattleConfig(config),
             playerIds: [userId, opponent.userId],
           });
         } else {
@@ -520,25 +658,28 @@ function init(httpServer, pool) {
         }
         if (!config) {
           config = {
+            id: null,
             duration_seconds: 180,
             question_count: 20,
             tag_filters: null,
             cluster_filters: null,
             difficulty_min: null,
             difficulty_max: null,
+            // 与旧行为一致的奖励默认值（倍率1 / 赢方×1.5 / 无参与奖励）
+            points_multiplier: 1,
+            win_bonus_rate: 0.5,
+            draw_bonus_rate: 0,
+            consolation_points: 0,
+            consolation_gap: 2,
+            first_battle_points: 0,
+            daily_battles_target: 0,
+            daily_battles_points: 0,
           };
         }
 
         await battleEngine.startBattle(io, pool, {
           roomId,
-          config: {
-            duration_seconds: config.duration_seconds,
-            questionCount: config.question_count,
-            tagFilters: parseJsonField(config.tag_filters),
-            clusterFilters: parseJsonField(config.cluster_filters),
-            difficultyMin: config.difficulty_min,
-            difficultyMax: config.difficulty_max,
-          },
+          config: buildBattleConfig(config),
           playerIds: canStart.players.map((p) => p.user_id),
         });
       } catch (err) {

@@ -119,17 +119,47 @@ function judgeByScore(a, b) {
 
 /**
  * 计算系统通用积分发放
+ *
+ * 计算链：做对题数 × 每题基础分 × 活动倍率 × 胜负加成
+ * - 倍率（points_multiplier）：教师为活动设置的积分倍率，默认 1
+ * - 胜负加成：赢方 win_bonus_rate（默认 0.5 ⇒ ×1.5）、平局 draw_bonus_rate（默认 0）、
+ *             输方固定 ×1（保证输了做对题也有积分）
+ *
+ * 兼容旧签名：第三参传数字时视为 basePoints，传入配置对象时才启用倍率/加成。
+ *
  * @param {number} correct       做对题数
  * @param {boolean} isWinner     是否赢方
- * @param {number} basePoints    每题基础分（system_config.points_correct_answer，默认10）
+ * @param {number|object} opts   每题基础分（数字）或 { basePoints, multiplier, winBonusRate, drawBonusRate, isDraw }
  * @returns {number}
  */
-function calcSystemPoints(correct, isWinner, basePoints = 10) {
-  const base = correct * basePoints;
-  if (isWinner) {
-    return Math.floor(base * 1.5); // 赢方 +50%
+function calcSystemPoints(correct, isWinner, opts = 10) {
+  let basePoints = 10;
+  let multiplier = 1;
+  let winBonusRate = 0.5;
+  let drawBonusRate = 0;
+  let isDraw = false;
+
+  if (typeof opts === 'number' || opts == null) {
+    basePoints = Number(opts);
+    if (!Number.isFinite(basePoints)) basePoints = 10;
+  } else if (typeof opts === 'object') {
+    const bp = Number(opts.basePoints);
+    basePoints = Number.isFinite(bp) ? bp : 10;
+    const m = Number(opts.multiplier);
+    multiplier = Number.isFinite(m) && m > 0 ? m : 1;
+    const w = Number(opts.winBonusRate);
+    winBonusRate = Number.isFinite(w) && w >= 0 ? w : 0.5;
+    const d = Number(opts.drawBonusRate);
+    drawBonusRate = Number.isFinite(d) && d >= 0 ? d : 0;
+    isDraw = !!opts.isDraw;
   }
-  return base;
+
+  const base = Math.max(0, correct) * basePoints * multiplier;
+  let rate = 1;
+  if (isDraw) rate = 1 + drawBonusRate;
+  else if (isWinner) rate = 1 + winBonusRate;
+
+  return Math.max(0, Math.floor(base * rate));
 }
 
 module.exports = {

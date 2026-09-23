@@ -189,6 +189,14 @@ function checkAnswer(question, studentAnswer) {
 }
 
 /**
+ * 数值兜底：非有限数时返回默认值
+ */
+function numOr(v, fallback) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+/**
  * 开战（从 preparing → battling）
  * @param {object} io socket.io 实例
  * @param {object} pool
@@ -229,17 +237,31 @@ async function startBattle(io, pool, { roomId, config, playerIds }) {
   const startedAt = new Date();
   const endsAt = new Date(startedAt.getTime() + config.duration_seconds * 1000);
 
-  // 写库
+  // 写库（同时把活动快照写进玩家行：历史统计不再依赖 JOIN，且不受配置改动污染）
   await pool.query(
     `UPDATE pk_rooms SET status = 'battling', question_ids = ?, started_at = ?, ends_at = ?
      WHERE id = ?`,
     [JSON.stringify(questionIds), startedAt, endsAt, roomId]
   );
 
-  // 缓存对战状态
+  await pool.query(
+    `UPDATE pk_room_players
+     SET config_id = ?, config_name = ?, question_count = ?, duration_seconds = ?
+     WHERE room_id = ?`,
+    [
+      config.id || null,
+      config.name || null,
+      config.question_count != null ? config.question_count : questionIds.length,
+      config.duration_seconds != null ? config.duration_seconds : null,
+      roomId,
+    ]
+  );
+
+  // 缓存对战状态（含活动配置，结算时用于奖励计算，避免再查库且保证与开局一致）
   const battleState = {
     questionIds,
     endsAt: endsAt.getTime(),
+    config: config || {},
     players: new Map(
       playerIds.map((uid) => [
         uid,
@@ -561,6 +583,17 @@ async function finishBattle(io, pool, roomId, trigger, extra = {}) {
   battles.delete(roomId);
   clearTickTimer(roomId);
 
+  // 房间信息（房间码用于积分流水备注；config_id 兜底）
+  const [roomRows] = await pool.query(
+    'SELECT room_code, config_id FROM pk_rooms WHERE id = ?',
+    [roomId]
+  );
+  const roomCode = roomRows.length > 0 ? roomRows[0].room_code : null;
+  const roomConfigId = roomRows.length > 0 ? roomRows[0].config_id : null;
+
+  // 本局活动配置（开局时缓存在内存状态里，保证结算口径与开局一致）
+  const config = state.config || {};
+
   // 获取玩家信息
   const [playersRows] = await pool.query(
     `SELECT p.*, pr.username, pr.real_name, pr.pk_rank_tier, pr.pk_rank_stars, pr.pk_points,
@@ -618,6 +651,8 @@ async function finishBattle(io, pool, roomId, trigger, extra = {}) {
   let winnerNewRank = null, loserNewRank = null;
   let winnerPkDelta = 0, loserPkDelta = 0;
   let winnerSystemPts = 0, loserSystemPts = 0;
+  // 惜败鼓励分（分别记录，用于落库与流水拆分）
+  let consolationWinner = 0, consolationLoser = 0;
 
   // 获取基础分配置
   const [cfgRows] = await pool.query(
@@ -633,6 +668,18 @@ async function finishBattle(io, pool, roomId, trigger, extra = {}) {
     if (parsed && parsed.value != null) basePoints = Number(parsed.value);
   }
 
+  // 活动奖励配置（优先取开局时缓存的活动配置；缺省时用与旧行为一致的默认值）
+  const rewardCfg = {
+    multiplier: numOr(config.points_multiplier, 1),
+    winBonusRate: numOr(config.win_bonus_rate, 0.5),
+    drawBonusRate: numOr(config.draw_bonus_rate, 0),
+    consolationPoints: Math.max(0, Math.floor(numOr(config.consolation_points, 0))),
+    consolationGap: Math.max(0, Math.floor(numOr(config.consolation_gap, 2))),
+    firstBattlePoints: Math.max(0, Math.floor(numOr(config.first_battle_points, 0))),
+    dailyBattlesTarget: Math.max(0, Math.floor(numOr(config.daily_battles_target, 0))),
+    dailyBattlesPoints: Math.max(0, Math.floor(numOr(config.daily_battles_points, 0))),
+  };
+
   if (!isDraw) {
     const winner = playerA.user_id === winnerId ? playerA : playerB;
     const loser = playerA.user_id === winnerId ? playerB : playerA;
@@ -645,12 +692,39 @@ async function finishBattle(io, pool, roomId, trigger, extra = {}) {
     winnerPkDelta = rankResult.winnerPkDelta;
     loserPkDelta = rankResult.loserPkDelta;
 
-    winnerSystemPts = calcSystemPoints(winner.correct, true, basePoints);
-    loserSystemPts = calcSystemPoints(loser.correct, false, basePoints);
+    winnerSystemPts = calcSystemPoints(winner.correct, true, {
+      basePoints,
+      multiplier: rewardCfg.multiplier,
+      winBonusRate: rewardCfg.winBonusRate,
+    });
+    loserSystemPts = calcSystemPoints(loser.correct, false, {
+      basePoints,
+      multiplier: rewardCfg.multiplier,
+    });
+
+    // 惜败鼓励：分差不超过阈值时给输方补偿（只看净得分差，与做题数无关）
+    if (rewardCfg.consolationPoints > 0) {
+      const gap = Math.abs(winner.score - loser.score);
+      if (gap <= rewardCfg.consolationGap) {
+        consolationWinner = 0;
+        consolationLoser = rewardCfg.consolationPoints;
+        loserSystemPts += consolationLoser;
+      }
+    }
   } else {
-    // 平局：双方都按做对题数发，无奖励
-    winnerSystemPts = calcSystemPoints(playerA.correct, false, basePoints);
-    loserSystemPts = calcSystemPoints(playerB.correct, false, basePoints);
+    // 平局：双方都按做对题数发，可加平局加成
+    winnerSystemPts = calcSystemPoints(playerA.correct, false, {
+      basePoints,
+      multiplier: rewardCfg.multiplier,
+      drawBonusRate: rewardCfg.drawBonusRate,
+      isDraw: true,
+    });
+    loserSystemPts = calcSystemPoints(playerB.correct, false, {
+      basePoints,
+      multiplier: rewardCfg.multiplier,
+      drawBonusRate: rewardCfg.drawBonusRate,
+      isDraw: true,
+    });
   }
 
   // 更新 profiles + pk_room_players（用事务）
@@ -665,12 +739,14 @@ async function finishBattle(io, pool, roomId, trigger, extra = {}) {
       const pkDelta = isWinner ? winnerPkDelta : loserPkDelta;
       let sysPts = isWinner ? winnerSystemPts : loserSystemPts;
       if (isNaN(sysPts) || sysPts == null) sysPts = 0;
+      const consol = isWinner ? consolationWinner : consolationLoser;
       return conn.query(
         `UPDATE pk_room_players SET
           final_score = ?, final_correct = ?, final_wrong = ?, final_duration_ms = ?,
-          result = ?, rank_points_change = ?, system_points_earned = ?
+          result = ?, rank_points_change = ?, system_points_earned = ?,
+          consolation_points = ?, bonus_points = ?
          WHERE room_id = ? AND user_id = ?`,
-        [p.score, p.correct, p.wrong, p.durationMs, result, pkDelta, sysPts, roomId, p.user_id]
+        [p.score, p.correct, p.wrong, p.durationMs, result, pkDelta, sysPts, consol, 0, roomId, p.user_id]
       );
     };
 
@@ -768,29 +844,95 @@ async function finishBattle(io, pool, roomId, trigger, extra = {}) {
       );
     }
 
-    // 写 point_transactions（表结构：student_id / amount / reason / source_type / source_id）
-    const writeTransaction = (userId, amount, isWinner) => {
+    // 写 point_transactions（表结构：student_id / amount / source_type / source_id / reason / created_at）
+    // source_type 用 'pk_battle' 区分来源，使「PK 发了多少积分」可查（迁移 086 补的枚举值）
+    const writeTransaction = (userId, amount, outcome) => {
       if (amount <= 0) return Promise.resolve();
-      const roomCode = 'quick'; // TODO: 实际从 pk_rooms 取 room_code
-      const result = isWinner ? 'win' : (isDraw ? 'draw' : 'lose');
       return conn.query(
         `INSERT INTO point_transactions (student_id, amount, source_type, source_id, reason, created_at)
-         VALUES (?, ?, 'system', ?, ?, NOW())`,
+         VALUES (?, ?, 'pk_battle', ?, ?, NOW())`,
         [
           userId,
           amount,
           roomId,
-          `PK对战：${roomCode} ${result}`,
+          `PK对战：${roomCode || 'quick'} ${outcome}`,
         ]
       );
     };
 
     if (!isDraw) {
-      await writeTransaction(winnerId, winnerSystemPts, true);
-      await writeTransaction(loserId, loserSystemPts, false);
+      await writeTransaction(winnerId, winnerSystemPts, 'win');
+      await writeTransaction(loserId, loserSystemPts, 'lose');
     } else {
-      await writeTransaction(playerA.user_id, winnerSystemPts, false);
-      await writeTransaction(playerB.user_id, loserSystemPts, false);
+      await writeTransaction(playerA.user_id, winnerSystemPts, 'draw');
+      await writeTransaction(playerB.user_id, loserSystemPts, 'draw');
+    }
+
+    // ===== 参与类奖励（每日限一次，走 pk_daily_rewards 唯一索引 + INSERT IGNORE 幂等）=====
+    // 1) 每日首战奖励  2) 单日完成 N 场奖励
+    // 设计要点：奖励「参与」而非「胜负」，让中下游学生也有正反馈。
+    const grantParticipationRewards = async (userId) => {
+      const granted = { first_battle: 0, daily_battles: 0 };
+
+      const tryGrant = async (rewardType, points) => {
+        if (points <= 0) return 0;
+        const rid = `pkr_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+        const [ins] = await conn.query(
+          `INSERT IGNORE INTO pk_daily_rewards (id, user_id, reward_date, reward_type, points, room_id)
+           VALUES (?, ?, CURDATE(), ?, ?, ?)`,
+          [rid, userId, rewardType, points, roomId]
+        );
+        // affectedRows = 0 ⇒ 今天已发过，跳过（幂等）
+        if (!ins || ins.affectedRows === 0) return 0;
+
+        await conn.query(
+          `UPDATE profiles SET current_points = current_points + ?, total_points_earned = total_points_earned + ?
+           WHERE id = ?`,
+          [points, points, userId]
+        );
+        await conn.query(
+          `INSERT INTO point_transactions (student_id, amount, source_type, source_id, reason, created_at)
+           VALUES (?, ?, 'pk_battle', ?, ?, NOW())`,
+          [userId, points, roomId, `PK对战：${roomCode || 'quick'} ${rewardType === 'first_battle' ? '每日首战奖励' : `单日${rewardCfg.dailyBattlesTarget}场奖励`}`]
+        );
+        return points;
+      };
+
+      granted.first_battle = await tryGrant('first_battle', rewardCfg.firstBattlePoints);
+
+      if (rewardCfg.dailyBattlesTarget > 0 && rewardCfg.dailyBattlesPoints > 0) {
+        const [cntRows] = await conn.query(
+          'SELECT pk_battles_today FROM profiles WHERE id = ?',
+          [userId]
+        );
+        // 注意：上面刚 +1，所以此处已含本场
+        const battlesToday = cntRows.length > 0 ? Number(cntRows[0].pk_battles_today) : 0;
+        if (battlesToday >= rewardCfg.dailyBattlesTarget) {
+          granted.daily_battles = await tryGrant('daily_battles', rewardCfg.dailyBattlesPoints);
+        }
+      }
+
+      return granted;
+    };
+
+    const rewardByUser = {};
+    if (!isDraw) {
+      rewardByUser[winnerId] = await grantParticipationRewards(winnerId);
+      rewardByUser[loserId] = await grantParticipationRewards(loserId);
+    } else {
+      rewardByUser[playerA.user_id] = await grantParticipationRewards(playerA.user_id);
+      rewardByUser[playerB.user_id] = await grantParticipationRewards(playerB.user_id);
+    }
+
+    // 把参与类奖励回写到 pk_room_players.bonus_points（统计面板要展示）
+    for (const [uid, g] of Object.entries(rewardByUser)) {
+      const bonus = (g.first_battle || 0) + (g.daily_battles || 0);
+      if (bonus > 0) {
+        await conn.query(
+          'UPDATE pk_room_players SET bonus_points = ? WHERE room_id = ? AND user_id = ?',
+          [bonus, roomId, uid]
+        );
+      }
     }
 
     // 更新房间状态

@@ -4,6 +4,7 @@ import { API_CONFIG } from '../../api/config';
 import { sanitizeHtml } from '../../utils/htmlUtils';
 import { useDesktopStore } from '../../store/desktopStore';
 import { useAuth } from '../../hooks/useAuth';
+import { getAuthToken } from '../../utils/authToken';
 
 // ============ 类型定义 ============
 
@@ -104,7 +105,7 @@ const formatDuration = (seconds?: number): string => {
 // ============ API 辅助函数 ============
 
 const getHeaders = (): HeadersInit => {
-  const token = localStorage.getItem('xgpy_token');
+  const token = getAuthToken();
   return {
     'Authorization': 'Bearer ' + (token || ''),
     'Content-Type': 'application/json',

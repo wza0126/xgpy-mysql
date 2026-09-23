@@ -12,6 +12,7 @@ tmp-release/
 
 # 浏览器自动化残留（各验证脚本的 user-data-dir：.tmp-chrome-progress / -anchor / -practice-ui / -shot …）
 .tmp-chrome-*/
+.tmp-e2e-*/
 
 # 环境配置与密钥（含数据库密码，绝不上传）
 .env

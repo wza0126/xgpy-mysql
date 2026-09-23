@@ -5,6 +5,7 @@ import { Test, Question } from '../../types';
 import { useAuth } from '../../hooks/useAuth';
 import { ExamManager } from './ExamManager';
 import { ClusterFilter, buildClusterTree, type ClusterTree } from '../common/ClusterFilter';
+import { CHAPTER_NAMES } from '../../data/chapterTaxonomy';
 
 const parseTags = (tags: any): string[] => {
   if (!tags) return [];
@@ -43,6 +44,8 @@ export const TestManager: React.FC = () => {
     pass_grant_app_center: false,
     allow_equipment_drop: false,
     qualification_correct_count: 0,
+    qualification_mastered_count: 0,
+    qualification_mastered_clusters: [] as string[],
     daily_test_limit: 0,
   });
   const [allTags, setAllTags] = useState<string[]>([]);
@@ -54,9 +57,13 @@ export const TestManager: React.FC = () => {
   const [activeSubTab, setActiveSubTab] = useState<'tests' | 'exams'>('tests');
   const { profile } = useAuth();
 
+  /** 各一级类目「可练习题量」：供「已掌握题数」资格设置时参考上限（口径 = 练习可用题） */
+  const [practicableCounts, setPracticableCounts] = useState<{ total: number; by_primary: Record<string, number> }>({ total: 0, by_primary: {} });
+
   useEffect(() => {
     if (profile) {
       fetchData();
+      fetchPracticableCounts();
       fetchAllTags();
     }
   }, [profile]);
@@ -72,6 +79,15 @@ export const TestManager: React.FC = () => {
       setAllTags(Array.from(tagSet).sort());
       // 顺带构建 AI 聚类树（只用可用于考试的题目）
       setClusterTree(buildClusterTree((questions as any[]).map((q) => q.cluster_id)));
+    }
+  };
+
+  const fetchPracticableCounts = async () => {
+    try {
+      const { data } = await backendClient.get('/api/teacher/qualification/counts');
+      if (data) setPracticableCounts(data as any);
+    } catch (e) {
+      console.error('拉取类目题量失败:', e);
     }
   };
 
@@ -102,6 +118,16 @@ export const TestManager: React.FC = () => {
     data.cluster_filters = formData.cluster_filters.length > 0
       ? JSON.stringify(formData.cluster_filters)
       : null;
+
+    // 已掌握类目范围：空数组表示「全部范围」，写 null（避免存成 "[]" 被误判为选了空范围）
+    data.qualification_mastered_clusters = formData.qualification_mastered_clusters.length > 0
+      ? JSON.stringify(formData.qualification_mastered_clusters)
+      : null;
+    // 未启用已掌握资格时不保留范围，避免残留脏数据
+    if (!formData.qualification_mastered_count) {
+      data.qualification_mastered_count = null;
+      data.qualification_mastered_clusters = null;
+    }
 
     if (!data.qualification_correct_count) {
       delete data.qualification_correct_count;
@@ -158,6 +184,8 @@ export const TestManager: React.FC = () => {
       pass_grant_app_center: false,
       allow_equipment_drop: false,
       qualification_correct_count: 0,
+      qualification_mastered_count: 0,
+      qualification_mastered_clusters: [],
       daily_test_limit: 0,
     });
   };
@@ -233,10 +261,19 @@ export const TestManager: React.FC = () => {
       pass_grant_app_center: testData.pass_grant_app_center === true || testData.pass_grant_app_center === 1,
       allow_equipment_drop: testData.allow_equipment_drop === true || testData.allow_equipment_drop === 1,
       qualification_correct_count: testData.qualification_correct_count || 0,
+      qualification_mastered_count: testData.qualification_mastered_count || 0,
+      qualification_mastered_clusters: parseTags(testData.qualification_mastered_clusters),
       daily_test_limit: parseInt(testData.daily_test_limit, 10) || 0,
     });
     setShowModal(true);
   };
+
+  // 当前「已掌握题数」统计范围内可练习题量（用于提示上限；不选 = 全部范围）
+  const selPracticable = formData.qualification_mastered_clusters.length === 0
+    ? practicableCounts.total
+    : formData.qualification_mastered_clusters.reduce(
+        (s, n) => s + (practicableCounts.by_primary[n] || 0), 0
+      );
 
   if (loading) {
     return (
@@ -564,21 +601,99 @@ export const TestManager: React.FC = () => {
                   <p className="text-xs text-gray-400 mt-1">填 0 或留空表示不限制次数</p>
                 </div>
 
-                <div className="p-4 bg-blue-50 rounded-xl">
-                  <label className="block text-sm font-medium text-blue-800 mb-1">测试资格验证（可选）</label>
-                  <p className="text-xs text-gray-500 mb-2">设置学生参加此测试所需的最低做对题目数量</p>
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm text-gray-600 whitespace-nowrap">需要做对</span>
-                    <input
-                      type="number"
-                      value={formData.qualification_correct_count}
-                      onChange={(e) => setFormData({ ...formData, qualification_correct_count: parseInt(e.target.value) || 0 })}
-                      className="w-24 p-2 border border-gray-300 rounded-lg text-center"
-                      min={0}
-                    />
-                    <span className="text-sm text-gray-600 whitespace-nowrap">道题才能参加</span>
+                <div className="p-4 bg-blue-50 rounded-xl space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-blue-800 mb-1">测试资格验证（可选）</label>
+                    <p className="text-xs text-gray-500">下面的资格条件需<b>同时满足</b>才能参加该测试；留空或填 0 表示该条件不启用</p>
                   </div>
-                  <p className="text-xs text-gray-400 mt-1">留空或填0表示不限制</p>
+
+                  {/* 条件一：做对题数 */}
+                  <div className="bg-white/70 rounded-lg p-3">
+                    <p className="text-xs font-medium text-blue-700 mb-2">条件一 · 累计做对题数</p>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-gray-600 whitespace-nowrap">需要做对</span>
+                      <input
+                        type="number"
+                        value={formData.qualification_correct_count}
+                        onChange={(e) => setFormData({ ...formData, qualification_correct_count: parseInt(e.target.value) || 0 })}
+                        className="w-24 p-2 border border-gray-300 rounded-lg text-center"
+                        min={0}
+                      />
+                      <span className="text-sm text-gray-600 whitespace-nowrap">道题</span>
+                    </div>
+                    <p className="text-xs text-gray-400 mt-1">统计学生全部练习/测试的累计做对题数</p>
+                  </div>
+
+                  {/* 条件二：已掌握题数（可按一级类目收窄范围） */}
+                  <div className="bg-white/70 rounded-lg p-3">
+                    <p className="text-xs font-medium text-blue-700 mb-2">条件二 · 已掌握题数</p>
+                    <div className="flex items-center gap-2 mb-2 flex-wrap">
+                      <span className="text-sm text-gray-600 whitespace-nowrap">已掌握达到</span>
+                      <input
+                        type="number"
+                        value={formData.qualification_mastered_count}
+                        onChange={(e) => setFormData({ ...formData, qualification_mastered_count: parseInt(e.target.value) || 0 })}
+                        className="w-24 p-2 border border-gray-300 rounded-lg text-center"
+                        min={0}
+                      />
+                      <span className="text-sm text-gray-600 whitespace-nowrap">道题</span>
+                      <span className="text-xs text-gray-500 whitespace-nowrap">
+                        （当前范围共 <b className="text-blue-600">{selPracticable}</b> 道可练习题）
+                      </span>
+                    </div>
+                    {Number(formData.qualification_mastered_count) > selPracticable && (
+                      <p className="text-xs text-red-500 mb-1">
+                        <i className="fa-solid fa-triangle-exclamation mr-1"></i>
+                        已超过该范围可练习题量（{selPracticable}），学生将无法达到
+                      </p>
+                    )}
+                    <div>
+                      <p className="text-xs text-gray-600 mb-1">
+                        统计范围（不选 = 全部范围，共 {practicableCounts.total} 道可练习题）
+                      </p>
+                      <div className="max-h-[132px] overflow-y-auto border border-gray-200 rounded-lg bg-white p-2 flex flex-wrap gap-2">
+                        {CHAPTER_NAMES.map((name) => {
+                          const on = formData.qualification_mastered_clusters.includes(name);
+                          const cnt = practicableCounts.by_primary[name] || 0;
+                          return (
+                            <button
+                              key={name}
+                              type="button"
+                              onClick={() => setFormData((prev) => ({
+                                ...prev,
+                                qualification_mastered_clusters: on
+                                  ? prev.qualification_mastered_clusters.filter((n) => n !== name)
+                                  : [...prev.qualification_mastered_clusters, name],
+                              }))}
+                              title={`${name}：${cnt} 道可练习题`}
+                              className={`px-2.5 py-1 rounded-full text-xs border transition-colors ${
+                                on
+                                  ? 'bg-blue-500 text-white border-blue-500'
+                                  : 'bg-white text-gray-600 border-gray-300 hover:border-blue-400'
+                              }`}
+                            >
+                              {name}
+                              <span className={`ml-1 ${on ? 'text-white/80' : 'text-gray-400'}`}>{cnt}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div className="flex items-center justify-between mt-1">
+                        <p className="text-xs text-gray-400">
+                          选中一级类目后，统计该章<b>全部小节</b>内达掌握标准的题数
+                        </p>
+                        {formData.qualification_mastered_clusters.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => setFormData({ ...formData, qualification_mastered_clusters: [] })}
+                            className="text-xs text-blue-600 hover:underline shrink-0 ml-2"
+                          >
+                            清空（改回全部范围）
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 </div>
 
                 <div className="p-4 bg-purple-50 rounded-xl">

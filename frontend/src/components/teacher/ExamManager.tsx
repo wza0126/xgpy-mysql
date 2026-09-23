@@ -6,6 +6,7 @@ import { formatDateTime } from '../../utils/dateUtils';
 import * as XLSX from 'xlsx';
 import { sanitizeHtml, htmlToPlainText } from '../../utils/htmlUtils';
 import { PKBattleConfigTab } from './PKBattleConfigTab';
+import { PKStatsTab } from './PKStatsTab';
 
 type ExamTest = {
   id: string;
@@ -173,7 +174,7 @@ export const ExamManager: React.FC = () => {
   const [searchText, setSearchText] = useState('');
   const [filterType, setFilterType] = useState('');
   const [filterTags, setFilterTags] = useState<string[]>([]);
-  const [activeTab, setActiveTab] = useState<'exams' | 'pk_configs'>('exams');
+  const [activeTab, setActiveTab] = useState<'exams' | 'pk_configs' | 'pk_stats'>('exams');
 
   useEffect(() => {
     fetchData();
@@ -603,6 +604,16 @@ export const ExamManager: React.FC = () => {
         >
           <i className="fa-solid fa-trophy mr-2"></i>对战配置
         </button>
+        <button
+          onClick={() => setActiveTab('pk_stats')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'pk_stats'
+              ? 'border-purple-500 text-purple-600'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <i className="fa-solid fa-chart-simple mr-2"></i>对战数据
+        </button>
       </div>
 
       {activeTab === 'exams' && (
@@ -819,6 +830,8 @@ export const ExamManager: React.FC = () => {
       {activeTab === 'pk_configs' && (
         <PKBattleConfigTab clusterTree={clusterTree} allTags={allTags} />
       )}
+
+      {activeTab === 'pk_stats' && <PKStatsTab />}
 
       <AnimatePresence>
         {showModal && (

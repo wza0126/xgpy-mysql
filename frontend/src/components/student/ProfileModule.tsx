@@ -5,6 +5,7 @@ import { ExchangeRecord, TestRecord, StudentPet, Pet, PET_STAGE_NAMES, getCumula
 import { useAuth } from '../../hooks/useAuth';
 import { useGameSystem } from '../../hooks/useGameSystem';
 import { API_CONFIG } from '../../api/config';
+import { getAuthToken } from '../../utils/authToken';
 import { SkinManager } from './SkinManager';
 
 const API_BASE = API_CONFIG.apiUrl;
@@ -46,7 +47,7 @@ export const ProfileModule: React.FC = () => {
   const fetchBgPermission = async () => {
     if (!profile) return;
     try {
-      const token = localStorage.getItem('xgpy_token');
+      const token = getAuthToken();
       const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
       const response = await fetch(`${API_BASE}/api/student/custom-background`, { headers });
       const result = await response.json();
@@ -69,7 +70,7 @@ export const ProfileModule: React.FC = () => {
     setSettingBackground(true);
     setBgResult(null);
     try {
-      const token = localStorage.getItem('xgpy_token');
+      const token = getAuthToken();
       const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
       const response = await fetch(`${API_BASE}/api/student/custom-background`, {
         method: 'POST',
@@ -96,7 +97,7 @@ export const ProfileModule: React.FC = () => {
     if (!profile) return;
     if (!confirm('确定要恢复默认背景吗？')) return;
     try {
-      const token = localStorage.getItem('xgpy_token');
+      const token = getAuthToken();
       const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
       const response = await fetch(`${API_BASE}/api/student/custom-background/reset`, {
         method: 'POST',
@@ -121,7 +122,7 @@ export const ProfileModule: React.FC = () => {
     const [{ data: exchangeData }, testResult, { data: petData }, { data: configData }] = await Promise.all([
       backendClient.from('exchange_records').select('*, prize:prizes(*)').eq('student_id', profile.id).order('exchanged_at', { ascending: false }),
       fetch(`${API_BASE}/api/student/test-history`, {
-        headers: { Authorization: `Bearer ${localStorage.getItem('xgpy_token')}` }
+        headers: { Authorization: `Bearer ${getAuthToken()}` }
       }).then(r => r.json()),
       backendClient.from('student_pets').select('*, pet:pets(*)').eq('student_id', profile.id).single(),
       backendClient.from('pet_config').select('*').maybeSingle(),

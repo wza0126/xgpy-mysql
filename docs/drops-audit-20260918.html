@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>装备掉落 / 测试积分 漏洞审计报告</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: #f6f7f9; color: #1f2937; line-height: 1.7;
+    padding: 32px 20px 64px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  header {
+    background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+    color: #fff; border-radius: 16px; padding: 32px 36px; margin-bottom: 28px;
+    box-shadow: 0 8px 24px rgba(79,70,229,.18);
+  }
+  header h1 { font-size: 26px; font-weight: 700; letter-spacing: .5px; }
+  header .sub { margin-top: 8px; font-size: 14px; opacity: .9; }
+  header .meta { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 10px; }
+  header .meta span {
+    background: rgba(255,255,255,.18); border-radius: 999px;
+    padding: 4px 14px; font-size: 12.5px;
+  }
+
+  h2 {
+    font-size: 19px; font-weight: 700; color: #111827;
+    margin: 36px 0 16px; padding-left: 12px;
+    border-left: 4px solid #6366f1;
+  }
+  h3 { font-size: 16px; font-weight: 700; color: #1f2937; margin: 22px 0 10px; }
+
+  .card {
+    background: #fff; border: 1px solid #e5e7eb; border-radius: 14px;
+    padding: 22px 24px; margin-bottom: 16px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.04);
+  }
+  .card.warn { border-left: 5px solid #ef4444; }
+  .card.mid  { border-left: 5px solid #f59e0b; }
+  .card.ok   { border-left: 5px solid #10b981; }
+
+  .tag {
+    display: inline-block; font-size: 11.5px; font-weight: 700;
+    padding: 2px 10px; border-radius: 999px; margin-right: 8px;
+    vertical-align: 2px;
+  }
+  .tag.red   { background: #fee2e2; color: #b91c1c; }
+  .tag.amber { background: #fef3c7; color: #b45309; }
+  .tag.green { background: #d1fae5; color: #047857; }
+  .tag.gray  { background: #f3f4f6; color: #4b5563; }
+
+  code {
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 5px;
+    padding: 1px 6px; font-size: 12.8px; color: #be123c;
+  }
+  pre {
+    background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 10px;
+    padding: 14px 16px; overflow-x: auto; margin: 12px 0;
+    font-family: "SFMono-Regular", Consolas, monospace; font-size: 12.8px;
+    color: #374151; line-height: 1.6;
+  }
+  pre code { background: none; border: none; padding: 0; color: inherit; }
+
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13.5px; }
+  th {
+    background: #f9fafb; text-align: left; font-weight: 700; color: #4b5563;
+    padding: 10px 12px; border-bottom: 2px solid #e5e7eb; white-space: nowrap;
+  }
+  td { padding: 9px 12px; border-bottom: 1px solid #f3f4f6; }
+  tbody tr:hover { background: #fafbff; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: Consolas, monospace; }
+  .hl { background: #fff7ed; }
+  .hl td { font-weight: 600; }
+
+  .kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 16px 0; }
+  .kv .box {
+    background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .kv .box .k { font-size: 12.5px; color: #6b7280; }
+  .kv .box .v { font-size: 22px; font-weight: 700; color: #111827; margin-top: 2px; }
+  .kv .box .v.small { font-size: 15px; }
+  .kv .box .v.red { color: #dc2626; }
+
+  ul { padding-left: 22px; }
+  li { margin: 6px 0; }
+  .muted { color: #6b7280; font-size: 13px; }
+  .path { font-family: Consolas, monospace; font-size: 12.5px; color: #4f46e5; }
+
+  .flag { display: inline-block; font-weight: 700; color: #b91c1c; }
+  footer { margin-top: 44px; text-align: center; color: #9ca3af; font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>装备掉落 / 测试积分 漏洞审计报告</h1>
+  <div class="sub">数据源：学校生产库导出 <code style="background:rgba(255,255,255,.2);border:none;color:#fff">xgpy.sql</code>（26,248 条答题记录 / 417 条装备行）</div>
+  <div class="meta">
+    <span>审计日期 2026-09-18</span>
+    <span>样本日 2026-09-17</span>
+    <span>结论：掉率无异常，机制有 5 处漏洞</span>
+  </div>
+</header>
+
+<!-- ============ 结论摘要 ============ -->
+<h2>结论摘要</h2>
+
+<div class="kv">
+  <div class="box"><div class="k">单次答题理论掉落率</div><div class="v">3.85%</div><div class="muted">7 件启用装备掉率之和 → 约 26 次掉 1 件</div></div>
+  <div class="box"><div class="k">9-17 实际掉落事件（反推）</div><div class="v">≈487 件</div><div class="muted">理论值 487.0 件，<b>完全吻合</b></div></div>
+  <div class="box"><div class="k">9-17 同题重复提交</div><div class="v red">4,890 次</div><div class="muted">占当天提交量 38.7%</div></div>
+  <div class="box"><div class="k">单题最高重复提交</div><div class="v red">317 次</div><div class="muted">顾诗语 25010540，一天刷到 4629 分</div></div>
+</div>
+
+<div class="card ok">
+  <h3><span class="tag green">已核对</span>掉率本身没有问题</h3>
+  <p>你按配置估算的「20 多题掉 1 件」是准确的。用全库数据反推：9-17 当天 12,650 次提交 × 3.85% = <b>487.0 件</b>，而实际产生的掉落事件与理论值完全一致。装备掉落逻辑里 <code>Math.random() * 100 &lt; drop_rate</code> 的写法也是对的，没有额外倍率。</p>
+</div>
+
+<div class="card warn">
+  <h3><span class="tag red">核心问题</span>「题」和「提交」被脱钩了</h3>
+  <p>你的估算基于「做 1 题 = 掷 1 次骰」。但后端对练习（<code>practice</code>）来源<b>完全不做重复提交校验</b>——同一道题可以提交任意多次，<b>每一次都会重新掷一遍装备掉落，并且重复加分</b>。</p>
+  <p>所以那个「做了 10 题掉了 3 个装备」的学生，真实情况很可能是：<b>他只做了约 10 道不同的题，但提交了 70～80 次</b>（反复重做同一题）。教师端看到的是「题数」，日志里记的是「提交次数」，两者已经不是一个量了。</p>
+</div>
+
+<!-- ============ 证据 ============ -->
+<h2>一、数据证据</h2>
+
+<h3>1. 单题被反复提交（9-17 当天 Top 10）</h3>
+<table>
+  <thead><tr><th>学生</th><th>学号</th><th class="num">提交次数</th><th class="num">不同题数</th><th class="num">重复提交</th><th class="num">单题最高</th><th class="num">当前积分</th></tr></thead>
+  <tbody>
+    <tr class="hl"><td>顾诗语</td><td>25010540</td><td class="num">369</td><td class="num">32</td><td class="num">337</td><td class="num">317</td><td class="num">4,629</td></tr>
+    <tr><td>钱语婷</td><td>25010432</td><td class="num">235</td><td class="num">97</td><td class="num">138</td><td class="num">6</td><td class="num">1,298</td></tr>
+    <tr><td>沈昊</td><td>25010445</td><td class="num">215</td><td class="num">80</td><td class="num">135</td><td class="num">7</td><td class="num">43</td></tr>
+    <tr><td>谢梦婷</td><td>25010412</td><td class="num">199</td><td class="num">86</td><td class="num">113</td><td class="num">6</td><td class="num">946</td></tr>
+    <tr><td>张紫怡</td><td>25010552</td><td class="num">178</td><td class="num">71</td><td class="num">107</td><td class="num">5</td><td class="num">1,504</td></tr>
+    <tr><td>周虎城</td><td>25010507</td><td class="num">191</td><td class="num">87</td><td class="num">104</td><td class="num">7</td><td class="num">850</td></tr>
+    <tr><td>张瑞翔</td><td>25010436</td><td class="num">165</td><td class="num">62</td><td class="num">103</td><td class="num">4</td><td class="num">684</td></tr>
+    <tr><td>汪晓茹</td><td>25010425</td><td class="num">202</td><td class="num">103</td><td class="num">99</td><td class="num">6</td><td class="num">238</td></tr>
+    <tr><td>黄世博</td><td>25010508</td><td class="num">161</td><td class="num">62</td><td class="num">99</td><td class="num">5</td><td class="num">590</td></tr>
+    <tr><td>马豪杰</td><td>25010433</td><td class="num">190</td><td class="num">93</td><td class="num">97</td><td class="num">4</td><td class="num">383</td></tr>
+  </tbody>
+</table>
+
+<h3>2. 顾诗语的原始记录（同一道题，317 条）</h3>
+<pre><code>('local_1789629633610_ov8og9ik0','local_1788740436407_unjnxg2f6','local_1781585440988_0y9wf2g1p','C',1,10,'practice',NULL,NULL,'2026-09-17 07:20:33'),
+('local_1789629636397_m3ivezwac','local_1788740436407_unjnxg2f6','local_1781585440988_0y9wf2g1p','C',1,10,'practice',NULL,NULL,'2026-09-17 07:20:36'),
+('local_1789629639461_b0utteb6u','local_1788740436407_unjnxg2f6','local_1781585440988_0y9wf2g1p','C',1,10,'practice',NULL,NULL,'2026-09-17 07:20:39'),
+('local_1789629642870_k4lekmhg0','local_1788740436407_unjnxg2f6','local_1781585440988_0y9wf2g1p','C',1,10,'practice',NULL,NULL,'2026-09-17 07:20:42'),
+('local_1789629646092_3staodt15','local_1788740436407_unjnxg2f6','local_1781585440988_0y9wf2g1p','C',1,10,'practice',NULL,NULL,'2026-09-17 07:20:46'),
+ ... 共 317 条，答案恒为 'C'，每 3 秒一条，07:15 → 07:46</code></pre>
+  <p class="muted">同一道题、同一个答案「C」、间隔 3～4 秒、连续提交 317 次。这已经不是「重做练习」的正常节奏。当天她的积分流水 730 条、净增 <b>+4,866 分</b>，其中绝大部分来自这一道题。</p>
+
+<h3>3. 每日重复提交比例</h3>
+<table>
+  <thead><tr><th>日期</th><th class="num">提交次数</th><th class="num">去重后题数</th><th class="num">重复提交</th><th class="num">重复率</th></tr></thead>
+  <tbody>
+    <tr class="hl"><td>2026-09-17</td><td class="num">12,650</td><td class="num">7,760</td><td class="num">4,890</td><td class="num">38.7%</td></tr>
+    <tr><td>2026-09-16</td><td class="num">3,755</td><td class="num">2,564</td><td class="num">1,191</td><td class="num">31.7%</td></tr>
+    <tr><td>2026-09-15</td><td class="num">4,402</td><td class="num">2,962</td><td class="num">1,440</td><td class="num">32.7%</td></tr>
+    <tr><td>2026-09-11</td><td class="num">956</td><td class="num">593</td><td class="num">363</td><td class="num">38.0%</td></tr>
+    <tr><td>2026-09-09</td><td class="num">1,787</td><td class="num">1,168</td><td class="num">619</td><td class="num">34.6%</td></tr>
+  </tbody>
+</table>
+<p class="muted">重复率长期稳定在 30%～39%，说明这不是个别学生的偶发行为，而是系统默认允许的常态。</p>
+
+<!-- ============ 漏洞清单 ============ -->
+<h2>二、漏洞清单</h2>
+
+<div class="card warn">
+  <h3><span class="tag red">H1 严重</span>练习答题不做重复校验 —— 同题可无限刷分 + 无限刷装备</h3>
+  <ul>
+    <li><b>位置</b>：<span class="path">backend/src/index.js:2341-2359</span>、掉落逻辑 <span class="path">backend/src/index.js:2563-2577</span></li>
+    <li><b>原理</b>：查重逻辑写成了 <code>if (src !== 'practice')</code> —— 只有非 practice 来源才拦重复，练习来源被<b>整段豁免</b>。</li>
+    <li><b>后果</b>：同一道题，每提交一次就 <b>① 加一次积分</b>（答对 10 分 × 战力倍率，暴击再翻倍）、<b>② 重掷一遍 7 件装备的掉落</b>。实际上把「题库」变成了「提款机」。</li>
+    <li><b>证据</b>：9-17 全库 4,890 次重复提交；顾诗语单题 317 次、当天 +4,866 分。</li>
+    <li><b>修复建议（待定口径）</b>：改为「<b>每天同一题限 N 次</b>」计分与掉落 —— 统计该生当天对这道题的已提交次数，超过 N 次后只写答题记录，不再加分、不再掷装备。<span class="muted">N 待定，建议 2～3。</span></li>
+  </ul>
+</div>
+
+<div class="card warn">
+  <h3><span class="tag red">H2 严重</span>「答对/答错」由前端说了算，后端直接采信</h3>
+  <ul>
+    <li><b>位置</b>：<span class="path">backend/src/index.js:2304</span> 取 <code>is_correct</code>、<span class="path">2515</span> 用它决定是否掉装备；前端 <span class="path">frontend/src/components/student/PracticeModule.tsx:403</span> 自己判完再传上来。</li>
+    <li><b>原理</b>：后端没有拿 <code>questions</code> 表的正确答案重新判一遍，完全相信请求体里的 <code>is_correct</code>。</li>
+    <li><b>后果</b>：配合 H1，只要一直传 <code>is_correct: true</code>，就能「题题答对」，稳定触发加分与掉落。</li>
+    <li><b>修复建议</b>：练习提交也改为服务端判分（<code>submit-test</code> 里已有现成的判分函数，可以复用）。</li>
+  </ul>
+</div>
+
+<div class="card warn">
+  <h3><span class="tag red">H3 严重</span>存在一个独立的「刷装备接口」</h3>
+  <ul>
+    <li><b>位置</b>：<span class="path">backend/src/index.js:3179-3235</span> <code>POST /api/business/test-equipment-drop</code></li>
+    <li><b>原理</b>：这个接口只需要登录态，<b><code>student_id</code> 自己填、<code>is_passed</code> 也自己填</b>，全程不校验「这名学生是否真的提交过这份测试、是否真的及格」。7 件装备各按 10 倍掉率掷骰。</li>
+    <li><b>后果</b>：单次调用有 <b>38.5%</b> 概率掉装备（约 2.6 次调用掉 1 件）。学生在浏览器控制台反复调用即可刷满装备。前端在「降级路径」里也会调它（<span class="path">TestModule.tsx:1203</span>），所以这个口子是敞开的。</li>
+    <li><b>修复建议</b>：加「该 test_id 在本机确实存在及格记录」的校验并做幂等（同一 test_record 只能触发一次）；或者前端不再需要它时直接下线该接口。</li>
+  </ul>
+</div>
+
+<div class="card mid">
+  <h3><span class="tag amber">H4 中等</span>测试可以反复提交，每次都重新发积分 + 重新掷 10 倍掉落</h3>
+  <ul>
+    <li><b>位置</b>：<span class="path">backend/src/index.js:2859-3176</span>（<code>submit-test</code> 全程未查历史记录）；<code>test_records</code> 表只有主键、<b>没有 (test_id, student_id) 唯一约束</b>（<span class="path">xgpy.sql:122132-122144</span>）。前端测试列表也永远显示「开始测试」，没有「已完成」状态。</li>
+    <li><b>证据</b>：9-16 一名学生把同一份测试提交了 4 次（90 / 90 / 95 / 90 分），累计拿走 <b>730 分</b>。全库共 10 组重复提交，额外多发积分合计 <b>2,273 分</b>。</li>
+    <li><b>修复建议（待定口径）</b>：保留重考能力，但<b>为每份测试增加「学生提交次数」上限</b>：达到上限后再提交只提示「本测试提交次数已用完」，不再发积分、不再掷装备。同时给 <code>test_records</code> 补 <code>(test_id, student_id, 第N次)</code> 或计数字段，便于服务端判定。<span class="muted">上限待定，建议 1～3 次。</span></li>
+  </ul>
+</div>
+
+<div class="card mid">
+  <h3><span class="tag amber">H5 中等</span><code>student_id</code> 取自请求体，未做归属校验（测试 / 考试两个接口）</h3>
+  <ul>
+    <li><b>位置</b>：<span class="path">backend/src/index.js:2865-2870</span>（<code>submit-test</code>）、<span class="path">backend/src/index.js:3247-3252</span>（<code>submit-exam</code>）</li>
+    <li><b>说明</b>：上一轮给 <code>submit-answer</code> 补的归属校验（<span class="path">index.js:2316-2325</span>，已生效）这两个接口还没有。</li>
+    <li><b>后果</b>：可以拿着别人的 ID 提交测试，把分数和装备刷到别人头上，破坏成绩数据可信度。</li>
+    <li><b>修复建议</b>：与 <code>submit-answer</code> 保持一致 —— 学生只能提交自己的记录。</li>
+  </ul>
+</div>
+
+<!-- ============ 未发现问题的部分 ============ -->
+<h2>三、已核对、没有问题的部分</h2>
+<div class="card ok">
+  <ul>
+    <li><b>掉落概率公式正确</b>：3.85% / 次，9-17 反推 487 件 = 理论 487.0 件，无隐藏倍率。</li>
+    <li><b>暴击率有上限兜底</b>：装备暴击加成即使无限叠加，<code>crit_rate</code> 最终被 <code>Math.min(..., crit_max_rate=30%)</code> 压住，不会被刷穿。</li>
+    <li><b>PK 对战是服务端权威的</b>：答案由 <code>battleEngine.js</code> 在服务端比对，<code>pk_match_answers</code> 有 <code>(room_id, user_id, question_id)</code> 唯一键，重复提交会被数据库挡掉；结算用内存态 <code>battles.delete(roomId)</code> 防重入，平局不扣段位。</li>
+    <li><b>测试认证码、及格开通权限</b>：都有「当日只能领一次」的校验。</li>
+  </ul>
+</div>
+
+<!-- ============ 修复建议 ============ -->
+<h2>四、修复优先级建议</h2>
+
+<div class="card mid">
+  <h3><span class="tag amber">待定口径</span>你倾向的修复方向</h3>
+  <ul>
+    <li><b>重复练习</b>：<b>每天同一题限 N 次</b>计分与掉落，超过 N 次后只记成绩、不再加分、不再掷装备。<span class="muted">（N 还没定，需要你给一个数；建议 2～3 次，既保留「多练一遍」的空间，又让刷题收益趋于 0）</span></li>
+    <li><b>测试重考</b>：<b>允许重考，但每份测试限制提交次数</b>。<span class="muted">（次数还没定，需要你给一个数；建议 1～3 次）</span></li>
+  </ul>
+  <p class="muted" style="margin-top:10px">按你的要求，本轮<b>未修改任何业务代码</b>，只出报告。</p>
+</div>
+
+<table>
+  <thead><tr><th>优先级</th><th>动作</th><th>改动量</th><th>效果</th></tr></thead>
+  <tbody>
+    <tr><td><span class="tag red">P0</span></td><td>练习掉落 + 积分改为「每天同一题限 N 次」（H1）</td><td>小</td><td>立刻堵住「刷题提款机」，掉落次数重新与题数对齐</td></tr>
+    <tr><td><span class="tag red">P0</span></td><td>下架或加固 <code>test-equipment-drop</code> 接口（H3）</td><td>小</td><td>堵住最直接的刷装备入口</td></tr>
+    <tr><td><span class="tag amber">P1</span></td><td>练习提交改服务端判分（H2）</td><td>中</td><td>从根上让「答对」不可伪造</td></tr>
+    <tr><td><span class="tag amber">P1</span></td><td>测试限制提交次数（H4）+ 归属校验（H5）</td><td>中</td><td>恢复积分榜可信度</td></tr>
+    <tr><td><span class="tag gray">P2</span></td><td>清理 9-17 以来的异常积分（顾诗语等）</td><td>小</td><td>可按「重复提交次数 × 10」回滚超额部分</td></tr>
+  </tbody>
+</table>
+
+<h2>五、附带发现：数据卫生</h2>
+<div class="card">
+  <ul>
+    <li>存在名为 <code>a</code>（用户名 <code>a</code>）的档案，积分 3,133、装备 106 件，明显是测试账号，却和其他学生一起参与积分榜与掉落统计。</li>
+    <li>另有 <code>student_id</code> 为 sha256 哈希的历史脏数据行（如 <code>bcb15f8…902a</code>），可能是早期版本的遗留。</li>
+    <li>建议：把测试账号从排行榜与统计口径里排除（<code>role</code> 或标记字段），避免影响班级排名。</li>
+  </ul>
+</div>
+
+<footer>
+  由本地 <code>xgpy.sql</code> 离线解析生成 · 分析脚本保留在 <code>.workbuddy/tools/</code>
+</footer>
+
+</div>
+</body>
+</html>

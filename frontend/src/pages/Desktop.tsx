@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import { useSiteConfig } from '../hooks/useSiteConfig';
+import { getAuthToken } from '../utils/authToken';
 import { useDesktopStore, desktopIcons } from '../store/desktopStore';
 import { useNotificationStore } from '../store/notificationStore';
 import { DesktopIcon } from '../components/common/DesktopIcon';
@@ -456,7 +457,7 @@ export const Desktop: React.FC = () => {
       try {
         // 先检查学生是否有自定义背景（仅学生且已登录时才请求）
         if (effectiveProfile?.role === 'student' && effectiveProfile?.id) {
-          const token = localStorage.getItem('xgpy_token');
+          const token = getAuthToken();
           if (token) {
             const headers: HeadersInit = { Authorization: `Bearer ${token}` };
 
@@ -504,7 +505,7 @@ export const Desktop: React.FC = () => {
         return;
       }
       try {
-        const token = localStorage.getItem('xgpy_token');
+        const token = getAuthToken();
         const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
         const response = await fetch(`${API_CONFIG.apiUrl}/api/student/my-skins`, { headers });
         const result = await response.json();

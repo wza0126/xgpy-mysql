@@ -7,6 +7,7 @@ import { PKLobby } from './PKLobby';
 import { PKRoom } from './PKRoom';
 import { PKBattleArena } from './PKBattleArena';
 import { PKResult } from './PKResult';
+import { getAuthToken } from '../../../utils/authToken';
 
 type View = 'lobby' | 'room' | 'arena' | 'result';
 
@@ -94,7 +95,7 @@ export const PKBattle: React.FC = () => {
 
   // 连接 socket
   useEffect(() => {
-    const token = localStorage.getItem('xgpy_token');
+    const token = getAuthToken();
     if (token) connect(token);
     // 挂载时检查是否有进行中的对局/房间
     const stored = localStorage.getItem(STORAGE_KEY);
@@ -329,7 +330,7 @@ export const PKBattle: React.FC = () => {
   };
 
   const handleManualReconnect = () => {
-    const token = localStorage.getItem('xgpy_token');
+    const token = getAuthToken();
     if (token) connect(token);
   };
 

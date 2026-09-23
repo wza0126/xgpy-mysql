@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from 'react';
 import { API_CONFIG } from '../api/config';
 import { backendClient } from '../api/backendClient';
+import { getAuthToken } from '../utils/authToken';
 
 export interface BuffInfo {
   id: string;
@@ -65,7 +66,7 @@ export function useGameSystem() {
   const fetchBuffs = useCallback(async () => {
     try {
       setLoading(true);
-      const token = localStorage.getItem('xgpy_token');
+      const token = getAuthToken();
       const response = await fetch(`${API_CONFIG.apiUrl}/api/student/buffs`, {
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -91,7 +92,7 @@ export function useGameSystem() {
   const fetchHonors = useCallback(async () => {
     try {
       setLoading(true);
-      const token = localStorage.getItem('xgpy_token');
+      const token = getAuthToken();
       const response = await fetch(`${API_CONFIG.apiUrl}/api/student/honors`, {
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -117,7 +118,7 @@ export function useGameSystem() {
   const fetchGameStats = useCallback(async () => {
     try {
       setLoading(true);
-      const token = localStorage.getItem('xgpy_token');
+      const token = getAuthToken();
       const response = await fetch(`${API_CONFIG.apiUrl}/api/student/stats`, {
         headers: {
           'Authorization': `Bearer ${token}`,

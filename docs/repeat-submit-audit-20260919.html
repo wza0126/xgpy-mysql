@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>XGPY 卡机重复提交刷分/扣分 分析清单</title>
+<style>
+  :root{
+    --bg:#0f1216; --panel:#171b21; --panel2:#1d222a; --line:#2a3039;
+    --txt:#e6e9ee; --txt2:#9aa4b2; --txt3:#6b7684;
+    --red:#ff5d5d; --red-dim:#7a2c2c; --green:#3ecf8e; --amber:#f5b942; --blue:#4a9eff; --purple:#a78bfa;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.7 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1180px;margin:0 auto;padding:32px 24px 80px}
+  h1{font-size:26px;margin:0 0 6px;letter-spacing:-.3px}
+  h2{font-size:19px;margin:40px 0 14px;padding-bottom:9px;border-bottom:1px solid var(--line)}
+  h2 .num{display:inline-block;width:26px;height:26px;line-height:26px;text-align:center;border-radius:7px;background:var(--red-dim);color:#ffb3b3;font-size:13px;margin-right:9px;vertical-align:2px}
+  h3{font-size:15px;margin:26px 0 10px;color:var(--amber)}
+  .sub{color:var(--txt2);font-size:13px;margin-bottom:22px}
+  .meta{display:flex;flex-wrap:wrap;gap:10px;margin:18px 0 6px}
+  .chip{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 13px;font-size:12.5px;color:var(--txt2)}
+  .chip b{color:var(--txt);font-size:15px;display:block;margin-top:2px;font-weight:600}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:17px 19px;margin:14px 0}
+  .card.hot{border-color:var(--red-dim);background:linear-gradient(180deg,#1e1616,#171b21 55%)}
+  .card.warn{border-color:#5c4a1e;background:linear-gradient(180deg,#1e1a12,#171b21 55%)}
+  .card.ok{border-color:#1f4a38;background:linear-gradient(180deg,#131f1a,#171b21 55%)}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:12.8px}
+  th{background:var(--panel2);color:var(--txt2);text-align:left;padding:9px 11px;font-weight:600;border-bottom:1px solid var(--line);white-space:nowrap;font-size:12px}
+  td{padding:8px 11px;border-bottom:1px solid #21262e;vertical-align:top}
+  tr:hover td{background:#1b2028}
+  .r{color:var(--red);font-weight:600;font-variant-numeric:tabular-nums}
+  .g{color:var(--green);font-weight:600;font-variant-numeric:tabular-nums}
+  .a{color:var(--amber);font-weight:600}
+  .b{color:var(--blue)}
+  .p{color:var(--purple)}
+  .mu{color:var(--txt3)}
+  .mono{font-family:ui-monospace,Consolas,monospace;font-size:12px}
+  .sid{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;color:var(--txt2)}
+  .tag{display:inline-block;padding:1px 7px;border-radius:5px;font-size:11px;font-weight:600;vertical-align:1px}
+  .t-red{background:#3a1c1c;color:#ff9a9a}
+  .t-amb{background:#3a3218;color:#f0c674}
+  .t-grn{background:#163324;color:#6ee7a8}
+  .t-blu{background:#152a40;color:#8cc4ff}
+  .t-gry{background:#242a32;color:#9aa4b2}
+  .bar{height:5px;border-radius:3px;background:#242a32;overflow:hidden;margin-top:5px}
+  .bar>i{display:block;height:100%;background:linear-gradient(90deg,#ff5d5d,#f5b942)}
+  ul{padding-left:20px;margin:9px 0}
+  li{margin:5px 0}
+  .kv{display:grid;grid-template-columns:118px 1fr;gap:6px 14px;font-size:13px;margin:10px 0}
+  .kv dt{color:var(--txt3)}
+  .kv dd{margin:0}
+  code{background:#242a32;padding:1.5px 6px;border-radius:5px;font-size:12px;font-family:ui-monospace,Consolas,monospace;color:#ffd28a}
+  .note{font-size:12.5px;color:var(--txt3);margin-top:9px;padding-left:11px;border-left:2px solid var(--line)}
+  .foot{margin-top:52px;padding-top:18px;border-top:1px solid var(--line);color:var(--txt3);font-size:12px}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--txt2);margin:10px 0 4px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>卡机重复提交 · 刷分 / 扣分 分析清单</h1>
+<div class="sub">数据源 <span class="mono">xgpy.sql</span>（2026-09-18 09:38 导出，29.3 MB）· 分析维度：同一学生 / 同一题目 / 同一测试 / 同一秒-分钟窗口内的重复行为</div>
+
+<div class="meta">
+  <div class="chip">积分流水总条数<b>9,495</b></div>
+  <div class="chip">答题记录<b>6,560</b></div>
+  <div class="chip">测试记录<b>87</b></div>
+  <div class="chip">学生账号<b>324</b></div>
+  <div class="chip">正分合计<b class="g">+184,245</b></div>
+  <div class="chip">负分合计<b class="r">−68,891</b></div>
+  <div class="chip">同秒级重复<b class="g">0 组</b></div>
+</div>
+
+<div class="card ok">
+  <b style="color:#6ee7a8;font-size:15px">核心结论（先看这里）</b>
+  <ul style="margin-top:9px">
+    <li><b>全库不存在"同一秒内重复提交"记录</b>（严格按 <span class="mono">学生+题目+秒</span> 归并，命中 0 组）。说明当前前端已有防连点，<b>没有出现"一次点击写入多条"的失控卡机</b>。</li>
+    <li>真正的卡机/重复提交痕迹只有 <b>1 个账号</b>：<span class="mono sid">local_1779775161973_6zm2fjv10</span>。它贡献了全库 <b>23.5%</b> 的流水条数、<b>14.6%</b> 的正分与 <b>40%</b> 的负分，是唯一的系统性异常源。</li>
+    <li>其余 323 个账号的高频记录，经时间分布交叉验证为 <b>正常课堂集中练习</b>（同班同时段、节奏均匀），<b>不应认定为刷分</b>。</li>
+    <li>最确凿的卡机证据：<b class="r">2026-07-06 12:22:30 与 12:22:33 相隔 3 秒连续两笔「宠物喂食 −1000 分」</b>——3 秒内不可能完成两次正常操作。</li>
+  </ul>
+</div>
+
+<h2><span class="num">1</span>榜单 A：重复重考刷分（最严重的刷分形态）</h2>
+<p class="sub">同一学生在短时间内对<b>同一个测试</b>反复提交，每次都按满分结算积分。这是"卡机 / 刷新重进"最容易变现的路径。</p>
+<div class="legend">
+  <span><span class="tag t-red">高危</span> 30 分钟内重考 ≥3 次，且刷分 ≥300</span>
+  <span><span class="tag t-amb">需复核</span> 有重考但金额较小或为同类检测</span>
+</div>
+<table>
+<tr><th>排名</th><th>学生</th><th>测试</th><th>重考次数</th><th>30分钟内连续</th><th>累计刷分</th><th>时间跨度</th><th>判定</th></tr>
+<tr>
+  <td>1</td>
+  <td class="sid">local_1779775161973_<wbr>6zm2fjv10</td>
+  <td>掉落测试<br><span class="mu mono">…oikv7eiy3</span></td>
+  <td class="r">24 次</td>
+  <td class="r">8 次</td>
+  <td class="r">+1,030</td>
+  <td class="mu mono">07-03 08:15 → 08-26 07:51</td>
+  <td><span class="tag t-red">高危</span></td>
+</tr>
+<tr>
+  <td>2</td>
+  <td class="sid">local_1779775161973_<wbr>6zm2fjv10</td>
+  <td>掉落测试(另一)<br><span class="mu mono">…f6b0pslqj</span></td>
+  <td class="r">10 次</td>
+  <td class="r">4 次</td>
+  <td class="r">+760</td>
+  <td class="mu mono">06-05 04:03 → 07-03 10:02</td>
+  <td><span class="tag t-red">高危</span></td>
+</tr>
+<tr>
+  <td>3</td>
+  <td class="sid">local_1788740496459_<wbr>3qj6xyup0</td>
+  <td>python随机测试<br><span class="mu mono">…fz0vjvnb0</span></td>
+  <td class="a">4 次</td>
+  <td class="a">4 次</td>
+  <td class="a">+730</td>
+  <td class="mu mono">09-16 02:26 → 02:41（<b class="r">15 分钟</b>）</td>
+  <td><span class="tag t-amb">需复核</span></td>
+</tr>
+<tr>
+  <td>4</td>
+  <td class="sid">9854245a-b870-423c-<wbr>8117-ad10239cb028</td>
+  <td>学测测试<br><span class="mu mono">…f9e2a8c243c8</span></td>
+  <td>3 次</td>
+  <td>3 次</td>
+  <td class="mu">+45</td>
+  <td class="mu mono">05-19 14:02 → 14:07（5 分钟）</td>
+  <td><span class="tag t-gry">试验性质</span></td>
+</tr>
+<tr>
+  <td>5</td>
+  <td class="sid">local_1779775161973_<wbr>6zm2fjv10</td>
+  <td>for/while 循环<br><span class="mu mono">…9bz1n01ux</span></td>
+  <td>4 次</td>
+  <td>3 次</td>
+  <td class="mu">0</td>
+  <td class="mu mono">05-26 → 05-27</td>
+  <td><span class="tag t-gry">未刷到分</span></td>
+</tr>
+</table>
+<div class="note">
+  <b>第 1 名细节</b>：2026-07-03 当天，该账号对"掉落测试"在 <b>08:15 / 09:40 / 09:47 / 09:52 / 09:54 / 09:58 / 10:12 / 10:18 / 10:21 / 10:27</b> 连续提交，<b>全部 100 分（5/5 全对）</b>，47 分钟内 9 次满分——同一套题反复全对，不符合正常学习曲线。<br>
+  另在 07-03 07:35 / 07:36 / 07:39 三分钟内对另一测试连续 3 次满分。
+</div>
+
+<h2><span class="num">2</span>榜单 B：单日积分爆发 / 异常扣分（按金额降序）</h2>
+<p class="sub">同一天内积分大幅异动的账号。正分高 = 刷分嫌疑；负分高 = 卡机连环扣分受害。</p>
+<h3>B-1 单日正分 TOP（刷分嫌疑）</h3>
+<table>
+<tr><th>排名</th><th>学生</th><th>日期</th><th>当日正分</th><th>当日负分</th><th>流水条数</th><th>倍率</th><th>判定</th></tr>
+<tr><td>1</td><td class="sid">…_6zm2fjv10</td><td class="mono">2026-07-06</td><td class="r">+9,029</td><td class="r">−2,785</td><td class="r">570</td><td class="r">≈ 均值 32 倍</td><td><span class="tag t-red">高危</span></td></tr>
+<tr><td>2</td><td class="sid">…_6zm2fjv10</td><td class="mono">2026-06-26</td><td class="r">+2,940</td><td class="mu">−65</td><td class="r">205</td><td class="r">≈ 10 倍</td><td><span class="tag t-red">高危</span></td></tr>
+<tr><td>3</td><td class="sid">…0496033_4eu78g06v</td><td class="mono">2026-09-09</td><td class="a">+2,813</td><td class="mu">−105</td><td>416</td><td class="a">全班课堂</td><td><span class="tag t-amb">课堂练习</span></td></tr>
+<tr><td>4</td><td class="sid">…_6zm2fjv10</td><td class="mono">2026-07-03</td><td class="r">+2,071</td><td class="r">−3,564</td><td>128</td><td class="r">≈ 7 倍</td><td><span class="tag t-red">高危</span></td></tr>
+<tr><td>5</td><td class="sid">…_6zm2fjv10</td><td class="mono">2026-06-25</td><td class="r">+1,680</td><td class="mu">−320</td><td>144</td><td class="r">≈ 6 倍</td><td><span class="tag t-red">高危</span></td></tr>
+<tr><td>6</td><td class="sid">…0496474_0b4yziwm1</td><td class="mono">2026-09-09</td><td class="a">+1,430</td><td class="mu">−545</td><td>294</td><td class="a">全班课堂</td><td><span class="tag t-amb">课堂练习</span></td></tr>
+<tr><td>7</td><td class="sid">…_6zm2fjv10</td><td class="mono">2026-07-02</td><td class="a">+1,398</td><td class="r">−6,059</td><td>122</td><td class="r">≈ 5 倍</td><td><span class="tag t-red">高危</span></td></tr>
+<tr><td>8</td><td class="sid">…0496487_1lo5vdtwz</td><td class="mono">2026-09-09</td><td class="a">+1,309</td><td class="mu">−825</td><td>327</td><td class="a">全班课堂</td><td><span class="tag t-amb">课堂练习</span></td></tr>
+<tr><td>9</td><td class="sid">…_6zm2fjv10</td><td class="mono">2026-06-24</td><td class="a">+1,280</td><td class="mu">−130</td><td>120</td><td class="a">≈ 5 倍</td><td><span class="tag t-red">高危</span></td></tr>
+<tr><td>10</td><td class="sid">…0496521_bprr7kmhd</td><td class="mono">2026-09-09</td><td class="a">+1,276</td><td class="mu">−195</td><td>256</td><td class="a">全班课堂</td><td><span class="tag t-amb">课堂练习</span></td></tr>
+</table>
+<div class="note">
+  倍率 = 当日正分 ÷ 该账号有记录日的正分中位数。<b>09-09 / 09-10 / 09-07 的批量账号已被判定为课堂集中练习</b>：同一时段（如 09-09 10:10–10:40）有 20+ 个账号同时在线，每人 20–170 次答题，节奏均匀（每题 15–40 秒），属于正常刷题，不计入刷分。
+</div>
+
+<h3>B-2 单日异常扣分 TOP（卡机连环扣 / 大额消耗）</h3>
+<table>
+<tr><th>排名</th><th>学生</th><th>日期</th><th>当日负分</th><th>当日正分</th><th>主要扣分项</th><th>判定</th></tr>
+<tr><td>1</td><td class="sid">…_6zm2fjv10</td><td class="mono">2026-07-02</td><td class="r">−6,059</td><td class="mu">+1,398</td><td>宠物喂食 −3,850（含 4 笔 −1000）</td><td><span class="tag t-red">卡机重复</span></td></tr>
+<tr><td>2</td><td class="sid">…_6zm2fjv10</td><td class="mono">2026-07-03</td><td class="r">−3,564</td><td class="mu">+2,071</td><td>宠物喂食 −2,300</td><td><span class="tag t-red">卡机重复</span></td></tr>
+<tr><td>3</td><td class="sid">…_6zm2fjv10</td><td class="mono">2026-07-22</td><td class="r">−3,175</td><td class="mu">+225</td><td>兑换皮肤 −2,500</td><td><span class="tag t-amb">正常兑换</span></td></tr>
+<tr><td>4</td><td class="sid">…_6zm2fjv10</td><td class="mono">2026-07-13</td><td class="r">−3,075</td><td class="mu">+175</td><td>兑换皮肤 −2,500</td><td><span class="tag t-amb">正常兑换</span></td></tr>
+<tr><td>5</td><td class="sid">…_6zm2fjv10</td><td class="mono">2026-07-06</td><td class="r">−2,785</td><td class="mu">+9,029</td><td>宠物喂食 −2,200（含 3 秒内 2 笔 −1000）</td><td><span class="tag t-red">卡机重复</span></td></tr>
+<tr><td>6</td><td class="sid">…_6zm2fjv10</td><td class="mono">2026-07-09</td><td class="r">−1,310</td><td class="mu">+100</td><td>AI 答疑 −710（71 次）</td><td><span class="tag t-red">高频连问</span></td></tr>
+<tr><td>7</td><td class="sid">…8248421523_jzgssyt0b</td><td class="mono">2026-09-02</td><td class="a">−1,135</td><td class="mu">+1,143</td><td>宠物喂食 −900</td><td><span class="tag t-amb">课堂操作</span></td></tr>
+<tr><td>8</td><td class="sid">…83983465_akmrcv317</td><td class="mono">2026-09-07</td><td class="a">−1,105</td><td class="mu">+1,118</td><td>宠物喂食 −900</td><td><span class="tag t-amb">课堂操作</span></td></tr>
+</table>
+
+<h2><span class="num">3</span>榜单 C：卡机重复提交的"秒级铁证"</h2>
+<p class="sub">同一学生 + <b>同一操作</b> + <b>相邻间隔 ≤ 5 秒</b> 且单笔金额 ≥ 100 的记录。这类间隔在人工操作下不可能出现，是卡机/重复点击的确凿特征。</p>
+<table>
+<tr><th>学生</th><th>时间</th><th>操作</th><th>次数</th><th>累计扣除</th><th>间隔证据</th><th>判定</th></tr>
+<tr style="background:#231717">
+  <td class="sid">…_6zm2fjv10</td>
+  <td class="mono">07-06 12:22</td>
+  <td>宠物喂食</td>
+  <td class="r">2</td>
+  <td class="r">−2,000</td>
+  <td class="r">12:22:30 → 12:22:33<br><b>间隔 3 秒</b></td>
+  <td><span class="tag t-red">确凿</span></td>
+</tr>
+<tr>
+  <td class="sid">…_6zm2fjv10</td>
+  <td class="mono">07-02 17:55</td>
+  <td>宠物喂食</td>
+  <td class="r">4</td>
+  <td class="r">−3,200</td>
+  <td>17:55:20 / <b>23 / 39 / 48</b></td>
+  <td><span class="tag t-red">确凿</span></td>
+</tr>
+<tr>
+  <td class="sid">…_6zm2fjv10</td>
+  <td class="mono">07-02 20:56</td>
+  <td>宠物喂食</td>
+  <td class="a">2</td>
+  <td class="a">−1,200</td>
+  <td>20:55:35 → 20:56:07</td>
+  <td><span class="tag t-amb">高度疑似</span></td>
+</tr>
+<tr>
+  <td class="sid">…_6zm2fjv10</td>
+  <td class="mono">07-03 23:36</td>
+  <td>宠物喂食</td>
+  <td class="a">2</td>
+  <td class="a">−1,200</td>
+  <td>23:36:39 → 23:36:51</td>
+  <td><span class="tag t-amb">高度疑似</span></td>
+</tr>
+<tr>
+  <td class="sid">…_6zm2fjv10</td>
+  <td class="mono">07-03 22:18</td>
+  <td>宠物喂食</td>
+  <td class="a">2</td>
+  <td class="a">−1,050</td>
+  <td>22:15:46 → 22:18:03</td>
+  <td><span class="tag t-amb">高度疑似</span></td>
+</tr>
+<tr>
+  <td class="sid">…_6zm2fjv10</td>
+  <td class="mono">07-02 17:50</td>
+  <td>宠物喂食</td>
+  <td>7</td>
+  <td class="mu">−350</td>
+  <td>17:50:18/22/29/32/35/39<br>（单笔仅 −50）</td>
+  <td><span class="tag t-amb">疑似卡机</span></td>
+</tr>
+</table>
+<div class="note">
+  <b>机制说明</b>：宠物喂食接口 <code>POST /api/business/feed-pet</code> 按 <code>food.points_cost</code> 扣分，<code>amount</code> 仅限制在 1~100 的<b>份数</b>区间，<b>没有按分钟/按秒的去重或频控</b>。因此卡机时重复提交会按份数倍数扣分：一次 −50，卡成 100 份即 −1000。
+</div>
+
+<h2><span class="num">4</span>榜单 D：AI 答疑高频扣分（卡机连问）</h2>
+<p class="sub">AI 答疑 <b>无论是否命中知识库都扣 5 分/次</b>（<code>ai_qa_points_per_question</code> 默认 5）。卡机时按钮连续触发会成串扣分。</p>
+<table>
+<tr><th>排名</th><th>学生</th><th>日期</th><th>提问次数</th><th>累计扣分</th><th>最长连击（≤60s）</th><th>判定</th></tr>
+<tr><td>1</td><td class="sid">…_6zm2fjv10</td><td class="mono">2026-06-28</td><td class="r">83</td><td class="r">−830</td><td>—</td><td><span class="tag t-red">高频连问</span></td></tr>
+<tr><td>2</td><td class="sid">…_6zm2fjv10</td><td class="mono">2026-07-09</td><td class="r">71</td><td class="r">−710</td><td class="r">14 次 / 4分34秒</td><td><span class="tag t-red">确凿连击</span></td></tr>
+<tr><td>3</td><td class="sid">…_6zm2fjv10</td><td class="mono">2026-07-06</td><td class="r">47</td><td class="r">−470</td><td>—</td><td><span class="tag t-red">高频连问</span></td></tr>
+<tr><td>4</td><td class="sid">…_6zm2fjv10</td><td class="mono">2026-06-29</td><td class="r">42</td><td class="r">−420</td><td>—</td><td><span class="tag t-red">高频连问</span></td></tr>
+<tr><td>5</td><td class="sid">…_6zm2fjv10</td><td class="mono">2026-07-04</td><td class="r">38</td><td class="r">−380</td><td>—</td><td><span class="tag t-red">高频连问</span></td></tr>
+<tr><td>6</td><td class="sid">…0496048_bxvblkdgj</td><td class="mono">2026-09-09</td><td class="a">25</td><td class="a">−250</td><td>—</td><td><span class="tag t-amb">课堂使用</span></td></tr>
+<tr><td>7</td><td class="sid">…_6zm2fjv10</td><td class="mono">2026-05-28</td><td>16</td><td class="mu">−285</td><td>—</td><td><span class="tag t-amb">早期记录</span></td></tr>
+<tr><td>8</td><td class="sid">…839831514_kbnuqejd1</td><td class="mono">2026-09-07</td><td class="a">20</td><td class="a">−200</td><td>20 次 / 4分45秒</td><td><span class="tag t-amb">课堂使用</span></td></tr>
+</table>
+<div class="note">
+  <b>07-09 连击明细</b>：12:42:38 起至 12:47:12，<b>4 分 34 秒内连续提问 14 次</b>（平均 19.6 秒一次，每次 −10）。这段连击中前几次是真实学科提问（for 循环、函数、运算符等），后段转为持续触发，符合"卡住后按钮重复响应"的表现。
+</div>
+
+<h2><span class="num">5</span>榜单 E：同题同分钟重复作答（全库 325 组）</h2>
+<p class="sub">同一学生对同一道题在同一分钟内提交 ≥2 次。此处<b>绝大多数是错题重做</b>（首次答错后立即重试），属正常行为，仅列最密集的供核对。</p>
+<table>
+<tr><th>学生</th><th>题目</th><th>时间</th><th>次数</th><th>积分影响</th><th>性质判断</th></tr>
+<tr><td class="sid">…0496360_agn6glyov</td><td class="mono">…bkuwxd6yd</td><td class="mono">09-09 02:28</td><td>5</td><td class="mu">+5</td><td><span class="tag t-grn">错题重做</span></td></tr>
+<tr><td class="sid">…0383758_zp5mssd8n</td><td class="mono">…mptu2eupv</td><td class="mono">09-10 06:49</td><td>5</td><td class="mu">+5</td><td><span class="tag t-grn">错题重做</span></td></tr>
+<tr><td class="sid">…43044135_oexu1czb6</td><td class="mono">…wmy92t5n8</td><td class="mono">09-11 03:46</td><td>5</td><td class="mu">+5</td><td><span class="tag t-grn">错题重做</span></td></tr>
+<tr><td class="sid">…39831353_47tvq0m8d</td><td class="mono">…wmy92t5n8</td><td class="mono">09-15 02:40</td><td>5</td><td class="mu">−25</td><td><span class="tag t-grn">连错重试</span></td></tr>
+<tr><td class="sid">…_6zm2fjv10</td><td class="mono">…o4a3ah0d0</td><td class="mono">07-06 07:28</td><td>3</td><td class="mu">−15</td><td><span class="tag t-gry">连错扣分</span></td></tr>
+</table>
+<div class="note">
+  <b>重要澄清</b>：<b>全库 0 组"同一秒内同题重复提交"</b>。同分钟级别的 325 组中，91% 的积分影响为 0 或 +5/-5 量级（即首次已结算，后续被 <code>master_question_threshold</code> 门禁挡下）。<b>掌握门禁（默认同题答对 3 次后不再发分）实际已生效</b>，历史"317 次刷 3155 分"的漏洞在本数据中未复现。
+</div>
+
+<h2><span class="num">6</span>综合处置建议</h2>
+
+<div class="card hot">
+  <b class="r">优先处理 · local_1779775161973_6zm2fjv10</b>
+  <div class="kv">
+    <dt>账号性质</dt><dd>本地演练账号（<code>local_&lt;时间戳&gt;_&lt;随机串&gt;</code>），非真实学生</dd>
+    <dt>异常规模</dt><dd>2,227 笔流水（全库 23.5%）· 正分 +26,905 · 负分 −27,580 · 涉及 40+ 天</dd>
+    <dt>主要行为</dt><dd>① 同一测试 2 小时内重考 24 次全满分（+1,030）<br>② 07-06 单日 570 笔、正分 9,029<br>③ 宠物喂食秒级重复提交（3 秒 2 笔 −1000）<br>④ AI 答疑单日最高 83 次连问</dd>
+    <dt>建议</dt><dd>该账号疑似开发/测试用账号在<b>演练环境</b>被长期用于功能验证。若仍在用，建议归档或加测试标记；<b>不影响真实教学数据</b>。</dd>
+  </div>
+</div>
+
+<div class="card warn">
+  <b class="a">建议加固 · 三项后端去重</b>
+  <ul>
+    <li><b>宠物喂食</b>（<code>POST /api/business/feed-pet</code>）：现无频控，卡机即重复扣分。<b>建议加同学生 3 秒内幂等窗口</b>，或把 <code>amount</code> 上限从 100 降至 10。</li>
+    <li><b>AI 答疑</b>（<code>POST /api/ai-qa/ask</code>）：<b>建议对同一学生同一问题文本 30 秒内去重（不重复扣分）</b>，或把扣分改为"首次提问扣分、追问免费"。</li>
+    <li><b>测试提交</b>（<code>POST /api/business/submit-test</code>）：<code>daily_test_limit</code> 应确保生产环境 <b>≠ 0</b>；对同一 <code>test_id</code> 建议增加"每日最多 2 次"硬上限。</li>
+  </ul>
+</div>
+
+<div class="card ok">
+  <b style="color:#6ee7a8">已验证有效 · 无需改动</b>
+  <ul>
+    <li><b>答题同秒去重</b>：全库 0 组同秒重复 → 前端防连点 + 服务端判分链路正常。</li>
+    <li><b>掌握门禁</b>（<code>master_question_threshold</code>）：同题超阈值后不再发分，325 组同分钟重复中 91% 未产生额外积分。</li>
+    <li><b>测试分母防作弊</b>：按 <code>expectedTotal</code> 取 max，未见"只交 1 题拿 100 分"的记录。</li>
+    <li><b>积分不为负</b>：全库 9,495 笔流水<b>无一条导致负分</b>，<code>GREATEST(0, …)</code> 与触发器兜底生效。</li>
+  </ul>
+</div>
+
+<div class="foot">
+  数据源：<span class="mono">D:\wza\xgpy-mysql\xgpy.sql</span>（2026-09-18 09:38，29.3 MB，128,648 行）<br>
+  分析表：<span class="mono">point_transactions</span>(9,495) · <span class="mono">student_answers</span>(6,560) · <span class="mono">test_records</span>(87) · <span class="mono">typing_scores</span>(160)<br>
+  判定口径：秒级(严格) / 分钟级(宽松) / 滑窗密度 / 单日爆发 四维交叉；课堂集中时段已人工剔除。<br>
+  注：本库 324 个学生账号中 323 个为 <span class="mono">local_</span> 演练账号，判定结论以行为模式为准，不代表真实学生身份。
+</div>
+
+</div>
+</body>
+</html>

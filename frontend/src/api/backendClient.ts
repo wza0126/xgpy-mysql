@@ -1,30 +1,11 @@
 // @ts-nocheck
 import { API_CONFIG } from './config';
+// 鉴权 token 的唯一实现（iframe 代理模式用 proxy_token，否则用本机登录 token）。
+// ⚠️ 凡是绕过 backendClient 直接用 fetch 的组件，也必须 import 这里的 getAuthToken，
+//    不要自己读 localStorage —— 否则教师远程查看学生桌面时带的是教师 token，数据全空。
+import { getAuthToken, isProxyMode, isInIframe } from '../utils/authToken';
 
 const API_BASE = API_CONFIG.apiUrl;
-
-function getAuthToken() {
-  // 只有在 iframe 中且 proxy_mode 为 true 时才使用 proxy_token
-  // 不能只检查 isProxyMode()，因为同源 iframe 的 sessionStorage 是共享的，
-  // 主页面会看到 iframe 设置的 proxy_mode=true，从而误用 proxy_token
-  if (isInIframe() && isProxyMode()) {
-    const proxyToken = sessionStorage.getItem('proxy_token');
-    if (proxyToken) return proxyToken;
-  }
-  return localStorage.getItem('xgpy_token');
-}
-
-function isProxyMode() {
-  return sessionStorage.getItem('proxy_mode') === 'true';
-}
-
-function isInIframe() {
-  try {
-    return window !== window.top;
-  } catch {
-    return true;
-  }
-}
 
 async function fetchApi(endpoint, options = {}) {
   const token = getAuthToken();

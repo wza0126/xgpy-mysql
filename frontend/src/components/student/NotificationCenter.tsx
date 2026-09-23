@@ -4,6 +4,7 @@ import { useNotificationStore, Notification } from '../../store/notificationStor
 import { useAuth } from '../../hooks/useAuth';
 import { backendClient } from '../../api/backendClient';
 import { formatRelativeTime, formatDate } from '../../utils/dateUtils';
+import { getAuthToken } from '../../utils/authToken';
 
 export const NotificationCenter: React.FC = () => {
   const { 
@@ -97,7 +98,7 @@ export const NotificationCenter: React.FC = () => {
     if ((notification as any).notification_type === 'digital_message') {
       // 自动标记已读
       try {
-        const token = localStorage.getItem('xgpy_token');
+        const token = getAuthToken();
         if (token) {
           await backendClient.post('/api/student/digital-messages/read', { id: (notification as any).id });
         }

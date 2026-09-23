@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import { API_CONFIG } from '../../api/config';
 import { WINDOW_SKINS, TIER_LABELS, TIER_BG_COLORS, TIER_BORDER_COLORS, WindowSkinConfig, DEFAULT_SKIN } from '../../config/windowSkins';
 import { useSkinStore } from '../../store/skinStore';
+import { getAuthToken } from '../../utils/authToken';
 
 interface OwnedSkin {
   skin_id: string;
@@ -22,7 +23,7 @@ export const SkinManager: React.FC = () => {
 
   const fetchMySkins = async () => {
     try {
-      const token = localStorage.getItem('xgpy_token');
+      const token = getAuthToken();
       const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
       const response = await fetch(`${API_CONFIG.apiUrl}/api/student/my-skins`, { headers });
       const result = await response.json();
@@ -39,7 +40,7 @@ export const SkinManager: React.FC = () => {
     setLoading(true);
     setMessage(null);
     try {
-      const token = localStorage.getItem('xgpy_token');
+      const token = getAuthToken();
       const response = await fetch(`${API_CONFIG.apiUrl}/api/student/active-skin`, {
         method: 'POST',
         headers: {

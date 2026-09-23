@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
+import { CHAPTER_NAMES } from '../../data/chapterTaxonomy';
 
 // 聚类树：一级类目 → 二级类目集合（与 ExamManager 同款定义）
 type ClusterTree = Record<string, Set<string>>;
@@ -34,6 +35,13 @@ const parseJsonArray = (v: any): string[] => {
 
 const toBool = (v: any) => v === true || v === 1 || v === '1';
 
+// 数值兜底：空串/非法值返回 fallback（表单里 number 输入框未填时是 ''）
+const numOr = (v: any, fallback: number): number => {
+  if (v === '' || v === null || v === undefined) return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+};
+
 interface PKBattleConfig {
   id: string;
   teacher_id: string;
@@ -48,6 +56,17 @@ interface PKBattleConfig {
   is_active: number | boolean;
   daily_limit: number | null;
   qualification_correct_count: number | null;
+  qualification_mastered_count: number | null;
+  qualification_mastered_clusters: string[] | string | null;
+  // ===== 奖励配置（迁移 086）=====
+  points_multiplier: number | string | null;
+  win_bonus_rate: number | string | null;
+  draw_bonus_rate: number | string | null;
+  consolation_points: number | null;
+  consolation_gap: number | null;
+  first_battle_points: number | null;
+  daily_battles_target: number | null;
+  daily_battles_points: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -73,15 +92,39 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
     is_active: true,
     daily_limit: '' as string | number,
     qualification_correct_count: '' as string | number,
+    qualification_mastered_count: '' as string | number,
+    qualification_mastered_clusters: [] as string[],
+    // ===== 奖励配置 =====
+    points_multiplier: 1 as string | number,
+    win_bonus_rate: 0.5 as string | number,
+    draw_bonus_rate: 0 as string | number,
+    consolation_points: '' as string | number,
+    consolation_gap: 2 as string | number,
+    first_battle_points: '' as string | number,
+    daily_battles_target: '' as string | number,
+    daily_battles_points: '' as string | number,
   });
   // 表单内筛选 state（独立于 ExamManager 的题目选择器筛选）
   const [filterTags, setFilterTags] = useState<string[]>([]);
   const [filterClusterPrimary, setFilterClusterPrimary] = useState<string[]>([]);
   const [filterClusterSecondary, setFilterClusterSecondary] = useState<string[]>([]);
 
+  /** 各一级类目「可练习题量」：供「已掌握题数」资格设置时参考上限（口径 = 练习可用题） */
+  const [practicableCounts, setPracticableCounts] = useState<{ total: number; by_primary: Record<string, number> }>({ total: 0, by_primary: {} });
+
   useEffect(() => {
     fetchConfigs();
+    fetchPracticableCounts();
   }, []);
+
+  const fetchPracticableCounts = async () => {
+    try {
+      const { data } = await backendClient.get('/api/teacher/qualification/counts');
+      if (data) setPracticableCounts(data as any);
+    } catch (e) {
+      console.error('拉取类目题量失败:', e);
+    }
+  };
 
   const fetchConfigs = async () => {
     setLoading(true);
@@ -109,6 +152,16 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
       is_active: true,
       daily_limit: '',
       qualification_correct_count: '',
+      qualification_mastered_count: '',
+      qualification_mastered_clusters: [],
+      points_multiplier: 1,
+      win_bonus_rate: 0.5,
+      draw_bonus_rate: 0,
+      consolation_points: '',
+      consolation_gap: 2,
+      first_battle_points: '',
+      daily_battles_target: '',
+      daily_battles_points: '',
     });
     setFilterTags([]);
     setFilterClusterPrimary([]);
@@ -132,6 +185,16 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
       is_active: toBool(cfg.is_active),
       daily_limit: cfg.daily_limit ?? '',
       qualification_correct_count: cfg.qualification_correct_count ?? '',
+      qualification_mastered_count: cfg.qualification_mastered_count ?? '',
+      qualification_mastered_clusters: parseJsonArray(cfg.qualification_mastered_clusters),
+      points_multiplier: cfg.points_multiplier != null ? Number(cfg.points_multiplier) : 1,
+      win_bonus_rate: cfg.win_bonus_rate != null ? Number(cfg.win_bonus_rate) : 0.5,
+      draw_bonus_rate: cfg.draw_bonus_rate != null ? Number(cfg.draw_bonus_rate) : 0,
+      consolation_points: cfg.consolation_points ?? '',
+      consolation_gap: cfg.consolation_gap ?? 2,
+      first_battle_points: cfg.first_battle_points ?? '',
+      daily_battles_target: cfg.daily_battles_target ?? '',
+      daily_battles_points: cfg.daily_battles_points ?? '',
     });
     setFilterTags(parseJsonArray(cfg.tag_filters));
     // 还原聚类选中状态：fullKey 列表 → 一级 + 二级
@@ -213,6 +276,24 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
         formData.qualification_correct_count === ''
           ? null
           : Number(formData.qualification_correct_count),
+      qualification_mastered_count:
+        formData.qualification_mastered_count === ''
+          ? null
+          : Number(formData.qualification_mastered_count),
+      // 空数组 = 全部范围（后端按 null 处理，避免存成 "[]" 被误判为"选了空范围"）
+      qualification_mastered_clusters:
+        formData.qualification_mastered_clusters.length > 0
+          ? formData.qualification_mastered_clusters
+          : null,
+      // ===== 奖励配置 =====
+      points_multiplier: numOr(formData.points_multiplier, 1),
+      win_bonus_rate: numOr(formData.win_bonus_rate, 0.5),
+      draw_bonus_rate: numOr(formData.draw_bonus_rate, 0),
+      consolation_points: formData.consolation_points === '' ? 0 : Number(formData.consolation_points),
+      consolation_gap: numOr(formData.consolation_gap, 2),
+      first_battle_points: formData.first_battle_points === '' ? 0 : Number(formData.first_battle_points),
+      daily_battles_target: formData.daily_battles_target === '' ? 0 : Number(formData.daily_battles_target),
+      daily_battles_points: formData.daily_battles_points === '' ? 0 : Number(formData.daily_battles_points),
     };
     try {
       if (editingId) {
@@ -280,6 +361,13 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
       alert('切换失败: ' + ((e as Error).message || String(e)));
     }
   };
+
+  // 当前「已掌握题数」统计范围内可练习题量（用于提示上限；不选 = 全部范围）
+  const selPracticable = formData.qualification_mastered_clusters.length === 0
+    ? practicableCounts.total
+    : formData.qualification_mastered_clusters.reduce(
+        (s, n) => s + (practicableCounts.by_primary[n] || 0), 0
+      );
 
   if (loading) {
     return (
@@ -376,6 +464,16 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
                       需做对 {cfg.qualification_correct_count} 题
                     </span>
                   )}
+                  {cfg.qualification_mastered_count != null && cfg.qualification_mastered_count > 0 && (
+                    <span>
+                      <i className="fa-solid fa-graduation-cap mr-1"></i>
+                      需掌握 {cfg.qualification_mastered_count} 题
+                      {(() => {
+                        const sc = parseJsonArray(cfg.qualification_mastered_clusters);
+                        return sc.length > 0 ? `（${sc.join('/')}）` : '（全部范围）';
+                      })()}
+                    </span>
+                  )}
                   {tags.length > 0 && (
                     <span>
                       <i className="fa-solid fa-tags mr-1"></i>
@@ -386,6 +484,32 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
                     <span>
                       <i className="fa-solid fa-layer-group mr-1"></i>
                       聚类 {clusters.length} 个
+                    </span>
+                  )}
+                  {/* 奖励摘要：只显示「偏离默认」的项，避免卡片噪音 */}
+                  {Number(cfg.points_multiplier) > 1 && (
+                    <span className="text-amber-600 font-medium">
+                      <i className="fa-solid fa-fire mr-1"></i>
+                      积分 {Number(cfg.points_multiplier)} 倍
+                    </span>
+                  )}
+                  {cfg.consolation_points != null && cfg.consolation_points > 0 && (
+                    <span className="text-amber-600">
+                      <i className="fa-solid fa-hand-holding-heart mr-1"></i>
+                      惜败 +{cfg.consolation_points}
+                    </span>
+                  )}
+                  {cfg.first_battle_points != null && cfg.first_battle_points > 0 && (
+                    <span className="text-amber-600">
+                      <i className="fa-solid fa-gift mr-1"></i>
+                      首战 +{cfg.first_battle_points}
+                    </span>
+                  )}
+                  {cfg.daily_battles_target != null && cfg.daily_battles_target > 0
+                    && cfg.daily_battles_points != null && cfg.daily_battles_points > 0 && (
+                    <span className="text-amber-600">
+                      <i className="fa-solid fa-calendar-check mr-1"></i>
+                      满 {cfg.daily_battles_target} 场 +{cfg.daily_battles_points}
                     </span>
                   )}
                 </div>
@@ -495,24 +619,104 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
                   </div>
                 </div>
 
-                {/* 资格验证 */}
-                <div className="p-4 bg-blue-50 rounded-xl">
-                  <label className="block text-sm font-medium text-blue-800 mb-1">对战资格验证（可选）</label>
-                  <p className="text-xs text-gray-500 mb-2">设置学生参加此对战所需的最低做对题目数量</p>
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm text-gray-600 whitespace-nowrap">需要做对</span>
-                    <input
-                      type="number"
-                      value={formData.qualification_correct_count}
-                      onChange={(e) =>
-                        setFormData({ ...formData, qualification_correct_count: e.target.value })
-                      }
-                      className="w-24 p-2 border border-gray-300 rounded-lg text-center"
-                      min={0}
-                    />
-                    <span className="text-sm text-gray-600 whitespace-nowrap">道题才能参加</span>
+                {/* 资格验证（两项条件需同时满足） */}
+                <div className="p-4 bg-blue-50 rounded-xl space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-blue-800 mb-1">对战资格验证（可选）</label>
+                    <p className="text-xs text-gray-500">下面的资格条件需<b>同时满足</b>才能参加对战；留空或填 0 表示该条件不启用</p>
                   </div>
-                  <p className="text-xs text-gray-400 mt-1">留空或填0表示不限制</p>
+
+                  {/* 条件一：做对题数 */}
+                  <div className="bg-white/70 rounded-lg p-3">
+                    <p className="text-xs font-medium text-blue-700 mb-2">条件一 · 累计做对题数</p>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-gray-600 whitespace-nowrap">需要做对</span>
+                      <input
+                        type="number"
+                        value={formData.qualification_correct_count}
+                        onChange={(e) =>
+                          setFormData({ ...formData, qualification_correct_count: e.target.value })
+                        }
+                        className="w-24 p-2 border border-gray-300 rounded-lg text-center"
+                        min={0}
+                      />
+                      <span className="text-sm text-gray-600 whitespace-nowrap">道题</span>
+                    </div>
+                    <p className="text-xs text-gray-400 mt-1">统计学生全部练习/测试的累计做对题数</p>
+                  </div>
+
+                  {/* 条件二：已掌握题数（可按一级类目收窄范围） */}
+                  <div className="bg-white/70 rounded-lg p-3">
+                    <p className="text-xs font-medium text-blue-700 mb-2">条件二 · 已掌握题数</p>
+                    <div className="flex items-center gap-2 mb-2 flex-wrap">
+                      <span className="text-sm text-gray-600 whitespace-nowrap">已掌握达到</span>
+                      <input
+                        type="number"
+                        value={formData.qualification_mastered_count}
+                        onChange={(e) =>
+                          setFormData({ ...formData, qualification_mastered_count: e.target.value })
+                        }
+                        className="w-24 p-2 border border-gray-300 rounded-lg text-center"
+                        min={0}
+                      />
+                      <span className="text-sm text-gray-600 whitespace-nowrap">道题</span>
+                      <span className="text-xs text-gray-500 whitespace-nowrap">
+                        （当前范围共 <b className="text-blue-600">{selPracticable}</b> 道可练习题）
+                      </span>
+                    </div>
+                    {Number(formData.qualification_mastered_count) > selPracticable && (
+                      <p className="text-xs text-red-500 mb-1">
+                        <i className="fa-solid fa-triangle-exclamation mr-1"></i>
+                        已超过该范围可练习题量（{selPracticable}），学生将无法达到
+                      </p>
+                    )}
+                    <div>
+                      <p className="text-xs text-gray-600 mb-1">
+                        统计范围（不选 = 全部范围，共 {practicableCounts.total} 道可练习题）
+                      </p>
+                      <div className="max-h-[132px] overflow-y-auto border border-gray-200 rounded-lg bg-white p-2 flex flex-wrap gap-2">
+                        {CHAPTER_NAMES.map((name) => {
+                          const on = formData.qualification_mastered_clusters.includes(name);
+                          const cnt = practicableCounts.by_primary[name] || 0;
+                          return (
+                            <button
+                              key={name}
+                              type="button"
+                              onClick={() => setFormData((prev) => ({
+                                ...prev,
+                                qualification_mastered_clusters: on
+                                  ? prev.qualification_mastered_clusters.filter((n) => n !== name)
+                                  : [...prev.qualification_mastered_clusters, name],
+                              }))}
+                              title={`${name}：${cnt} 道可练习题`}
+                              className={`px-2.5 py-1 rounded-full text-xs border transition-colors ${
+                                on
+                                  ? 'bg-blue-500 text-white border-blue-500'
+                                  : 'bg-white text-gray-600 border-gray-300 hover:border-blue-400'
+                              }`}
+                            >
+                              {name}
+                              <span className={`ml-1 ${on ? 'text-white/80' : 'text-gray-400'}`}>{cnt}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div className="flex items-center justify-between mt-1">
+                        <p className="text-xs text-gray-400">
+                          选中一级类目后，统计该章<b>全部小节</b>内达掌握标准的题数
+                        </p>
+                        {formData.qualification_mastered_clusters.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => setFormData({ ...formData, qualification_mastered_clusters: [] })}
+                            className="text-xs text-blue-600 hover:underline shrink-0 ml-2"
+                          >
+                            清空（改回全部范围）
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 </div>
 
                 {/* 难度范围 */}
@@ -540,6 +744,171 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
                       placeholder="1-5"
                       className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none"
                     />
+                  </div>
+                </div>
+
+                {/* 奖励设置 */}
+                <div className="p-4 bg-amber-50 rounded-xl space-y-4 border border-amber-200">
+                  <div>
+                    <label className="block text-sm font-medium text-amber-800 mb-1">
+                      <i className="fa-solid fa-gift mr-1"></i>奖励设置
+                    </label>
+                    <p className="text-xs text-gray-600">
+                      单场积分 = <b>做对题数 × 每题基础分</b> × 积分倍率 × 胜负加成。
+                      积分实时累计到学生账户，可在「数据统计」里看发放总额。
+                    </p>
+                  </div>
+
+                  {/* 积分倍率 + 胜负加成 */}
+                  <div className="grid grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-sm text-gray-700 mb-1">积分倍率</label>
+                      <input
+                        type="number"
+                        step="0.1"
+                        min={0.1}
+                        max={10}
+                        value={formData.points_multiplier}
+                        onChange={(e) => setFormData({ ...formData, points_multiplier: e.target.value })}
+                        className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-amber-500 outline-none"
+                      />
+                      <p className="text-xs text-gray-400 mt-1">
+                        {numOr(formData.points_multiplier, 1) === 1
+                          ? '1 = 不加倍'
+                          : `${numOr(formData.points_multiplier, 1)} 倍（主题活动用）`}
+                      </p>
+                    </div>
+                    <div>
+                      <label className="block text-sm text-gray-700 mb-1">赢方加成</label>
+                      <input
+                        type="number"
+                        step="0.1"
+                        min={0}
+                        max={5}
+                        value={formData.win_bonus_rate}
+                        onChange={(e) => setFormData({ ...formData, win_bonus_rate: e.target.value })}
+                        className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-amber-500 outline-none"
+                      />
+                      <p className="text-xs text-gray-400 mt-1">
+                        ×{(1 + numOr(formData.win_bonus_rate, 0.5)).toFixed(1)}
+                      </p>
+                    </div>
+                    <div>
+                      <label className="block text-sm text-gray-700 mb-1">平局加成</label>
+                      <input
+                        type="number"
+                        step="0.1"
+                        min={0}
+                        max={5}
+                        value={formData.draw_bonus_rate}
+                        onChange={(e) => setFormData({ ...formData, draw_bonus_rate: e.target.value })}
+                        className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-amber-500 outline-none"
+                      />
+                      <p className="text-xs text-gray-400 mt-1">
+                        ×{(1 + numOr(formData.draw_bonus_rate, 0)).toFixed(1)}
+                      </p>
+                    </div>
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    输方始终按 ×1 计（做对题就有积分），保证连输的学生也愿意继续参与。
+                  </p>
+
+                  {/* 惜败鼓励 */}
+                  <div className="pt-3 border-t border-amber-200">
+                    <p className="text-sm text-gray-700 mb-2">
+                      <b>惜败鼓励</b>
+                      <span className="text-xs text-gray-500 ml-2">分差很小时给输方额外积分，缓解挫败感</span>
+                    </p>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs text-gray-600 mb-1">分差不超过（净得分）</label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={formData.consolation_gap}
+                          onChange={(e) => setFormData({ ...formData, consolation_gap: e.target.value })}
+                          className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-amber-500 outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-600 mb-1">额外奖励积分（0=不启用）</label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={formData.consolation_points}
+                          onChange={(e) => setFormData({ ...formData, consolation_points: e.target.value })}
+                          placeholder="0"
+                          className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-amber-500 outline-none"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 参与类奖励 */}
+                  <div className="pt-3 border-t border-amber-200">
+                    <p className="text-sm text-gray-700 mb-2">
+                      <b>参与奖励</b>
+                      <span className="text-xs text-gray-500 ml-2">每日限一次，奖励「参与」而非「胜负」</span>
+                    </p>
+                    <div className="grid grid-cols-3 gap-3">
+                      <div>
+                        <label className="block text-xs text-gray-600 mb-1">每日首战奖励</label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={formData.first_battle_points}
+                          onChange={(e) => setFormData({ ...formData, first_battle_points: e.target.value })}
+                          placeholder="0"
+                          className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-amber-500 outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-600 mb-1">单日完成场次</label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={formData.daily_battles_target}
+                          onChange={(e) => setFormData({ ...formData, daily_battles_target: e.target.value })}
+                          placeholder="0"
+                          className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-amber-500 outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-600 mb-1">达标奖励积分</label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={formData.daily_battles_points}
+                          onChange={(e) => setFormData({ ...formData, daily_battles_points: e.target.value })}
+                          placeholder="0"
+                          className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-amber-500 outline-none"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 奖励预览 */}
+                  <div className="p-3 bg-white rounded-lg border border-amber-200">
+                    <p className="text-xs text-gray-500 mb-1">奖励预览（以做对 10 题为例，每题基础分按系统默认计）</p>
+                    <p className="text-xs text-gray-700">
+                      赢方：10 题 × 倍率 {numOr(formData.points_multiplier, 1)} ×
+                      {(1 + numOr(formData.win_bonus_rate, 0.5)).toFixed(1)}
+                      {numOr(formData.consolation_points, 0) > 0 && (
+                        <span>
+                          ；输方分差 ≤ {numOr(formData.consolation_gap, 2)} 时额外 +
+                          {numOr(formData.consolation_points, 0)}
+                        </span>
+                      )}
+                      {numOr(formData.first_battle_points, 0) > 0 && (
+                        <span>；每日首战 +{numOr(formData.first_battle_points, 0)}</span>
+                      )}
+                      {numOr(formData.daily_battles_target, 0) > 0 && numOr(formData.daily_battles_points, 0) > 0 && (
+                        <span>
+                          ；单日满 {numOr(formData.daily_battles_target, 0)} 场 +
+                          {numOr(formData.daily_battles_points, 0)}
+                        </span>
+                      )}
+                    </p>
                   </div>
                 </div>
 

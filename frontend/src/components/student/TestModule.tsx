@@ -149,7 +149,8 @@ export const TestModule: React.FC = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const { profile, refreshProfile } = useAuth();
   const { updatePoints } = usePoints();
-  const [studentCorrectCount, setStudentCorrectCount] = useState(0);
+  /** 测试资格明细：test_id -> { passed, correct:{...}, mastered:{...} }（服务端裁定，口径唯一） */
+  const [qualificationMap, setQualificationMap] = useState<Record<string, any>>({});
   const { emitEvent } = useGameEventStore();
   
   // 考试相关状态（需要在 useEffect 之前定义）
@@ -167,7 +168,7 @@ export const TestModule: React.FC = () => {
       fetchTests();
       fetchTestHistory();
       fetchExams();
-      fetchStudentCorrectCount();
+      fetchQualification();
     }
   }, [profile]);
 
@@ -275,15 +276,21 @@ export const TestModule: React.FC = () => {
     setLoading(false);
   };
 
-  const fetchStudentCorrectCount = async () => {
+  /**
+   * 拉取所有可见测试的资格明细（做对题数 + 已掌握题数两项）。
+   * 判定口径完全由服务端 checkQualification 裁定，前端只负责展示进度与禁用按钮。
+   */
+  const fetchQualification = async () => {
     if (!profile) return;
-    const { data } = await backendClient
-      .from('student_answers')
-      .select('is_correct')
-      .eq('student_id', profile.id);
-    if (data) {
-      const correct = data.filter((a: any) => a.is_correct).length;
-      setStudentCorrectCount(correct);
+    try {
+      const { data } = await backendClient.from('tests').select('id');
+      const ids = (data || []).map((t: any) => t.id).filter(Boolean);
+      if (ids.length === 0) return;
+      const res = await backendClient.post('/api/student/qualification/tests', { test_ids: ids });
+      const map = res?.data || {};
+      setQualificationMap(map);
+    } catch (e) {
+      console.error('拉取测试资格失败:', e);
     }
   };
 
@@ -951,6 +958,20 @@ export const TestModule: React.FC = () => {
   const getDailyLimit = (test: any): number => parseInt(test?.daily_test_limit, 10) || 0;
 
   const startTest = async (test: Test) => {
+    // 资格验证（做对题数 + 已掌握题数，两项需同时满足；服务端为准，这里只是提前提示）
+    const qualCheck = qualificationMap[test.id];
+    if (qualCheck && (qualCheck.correct?.enabled || qualCheck.mastered?.enabled) && !qualCheck.passed) {
+      const parts: string[] = [];
+      if (qualCheck.correct?.enabled && !qualCheck.correct.passed) {
+        parts.push(`做对 ${qualCheck.correct.required} 道题（当前 ${qualCheck.correct.current} 道）`);
+      }
+      if (qualCheck.mastered?.enabled && !qualCheck.mastered.passed) {
+        parts.push(`掌握 ${qualCheck.mastered.required} 道题（当前 ${qualCheck.mastered.current} 道）`);
+      }
+      alert(`资格不足：需要先${parts.join('，且')}才能参加该测试`);
+      return;
+    }
+
     // 每日测试次数限制（教师端可设置，0 = 不限制）
     const limit = getDailyLimit(test);
     if (limit > 0) {
@@ -1965,8 +1986,10 @@ export const TestModule: React.FC = () => {
             const dailyLimit = getDailyLimit(test);
             const todayUsed = getTodayAttempts(test.id);
             const dailyExhausted = dailyLimit > 0 && todayUsed >= dailyLimit;
-            const qualificationLack = (test as any).qualification_correct_count > 0
-              && studentCorrectCount < (test as any).qualification_correct_count;
+            // 资格：两项条件（做对题数 + 已掌握题数）由服务端裁定，需同时满足
+            const qual = qualificationMap[test.id];
+            const qualEnabled = !!qual && (qual.correct?.enabled || qual.mastered?.enabled);
+            const qualificationLack = qualEnabled && !qual.passed;
             const blocked = dailyExhausted || qualificationLack;
             return (
             <motion.div
@@ -1991,17 +2014,31 @@ export const TestModule: React.FC = () => {
                   </p>
                 )}
               </div>
-              {(test as any).qualification_correct_count > 0 && (
-                <div className="mb-3">
-                  <div className="flex items-center gap-1 text-sm">
-                    <i className={`fa-solid fa-lock ${studentCorrectCount >= (test as any).qualification_correct_count ? 'text-green-500' : 'text-amber-500'}`}></i>
-                    <span className={studentCorrectCount >= (test as any).qualification_correct_count ? 'text-green-600' : 'text-amber-600'}>
-                      需要做对 {(test as any).qualification_correct_count} 道题
-                      {studentCorrectCount >= (test as any).qualification_correct_count
-                        ? ' ✓ 已达标'
-                        : `（当前 ${studentCorrectCount} 道）`}
-                    </span>
-                  </div>
+              {qualEnabled && (
+                <div className="mb-3 space-y-1">
+                  {qual.correct?.enabled && (
+                    <div className="flex items-center gap-1 text-sm">
+                      <i className={`fa-solid fa-lock ${qual.correct.passed ? 'text-green-500' : 'text-amber-500'}`}></i>
+                      <span className={qual.correct.passed ? 'text-green-600' : 'text-amber-600'}>
+                        需做对 {qual.correct.required} 道题
+                        {qual.correct.passed
+                          ? ' ✓ 已达标'
+                          : `（当前 ${qual.correct.current} 道）`}
+                      </span>
+                    </div>
+                  )}
+                  {qual.mastered?.enabled && (
+                    <div className="flex items-center gap-1 text-sm">
+                      <i className={`fa-solid fa-graduation-cap ${qual.mastered.passed ? 'text-green-500' : 'text-amber-500'}`}></i>
+                      <span className={qual.mastered.passed ? 'text-green-600' : 'text-amber-600'}>
+                        需掌握 {qual.mastered.required} 道题
+                        {qual.mastered.clusters?.length > 0 ? `（${qual.mastered.clusters.join('/')}）` : '（全部范围）'}
+                        {qual.mastered.passed
+                          ? ' ✓ 已达标'
+                          : `（当前 ${qual.mastered.current} 道）`}
+                      </span>
+                    </div>
+                  )}
                 </div>
               )}
               <button

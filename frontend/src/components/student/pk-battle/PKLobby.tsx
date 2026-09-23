@@ -34,6 +34,8 @@ interface ActiveConfig {
   question_count: number;
   daily_limit: number | null;
   qualification_correct_count: number | null;
+  qualification_mastered_count: number | null;
+  qualification_mastered_clusters: string[] | string | null;
 }
 
 export const PKLobby: React.FC<{
@@ -60,6 +62,8 @@ export const PKLobby: React.FC<{
   const [selectedConfigId, setSelectedConfigId] = useState<string | undefined>(undefined);
   const [roomCode, setRoomCode] = useState('');
   const [loading, setLoading] = useState(true);
+  /** 资格明细：config_id -> { passed, correct:{...}, mastered:{...} }（服务端裁定，口径唯一） */
+  const [qualificationMap, setQualificationMap] = useState<Record<string, any>>({});
 
   useEffect(() => {
     fetchData();
@@ -78,6 +82,20 @@ export const PKLobby: React.FC<{
       const cfgs = cfgRes.data as ActiveConfig[];
       setActiveConfigs(cfgs);
       if (cfgs.length > 0) setSelectedConfigId(cfgs[0].id);
+      // 拉取各配置的资格明细（两项条件由服务端裁定）
+      const entries = await Promise.all(
+        cfgs.map(async (c) => {
+          try {
+            const r = await backendClient.get(`/api/student/qualification/pk/${c.id}`);
+            return [c.id, r?.data || null] as const;
+          } catch {
+            return [c.id, null] as const;
+          }
+        })
+      );
+      const map: Record<string, any> = {};
+      entries.forEach(([id, detail]) => { if (detail) map[id] = detail; });
+      setQualificationMap(map);
     }
     setLoading(false);
   };
@@ -103,10 +121,14 @@ export const PKLobby: React.FC<{
 
   const selectedConfig = activeConfigs.find((c) => c.id === selectedConfigId);
 
-  // 资格验证：所选活动要求累计做对指定题数（参考测试资格验证）
+  // 资格验证：做对题数与已掌握题数两项需同时满足（服务端裁定，口径唯一）
+  const qual = selectedConfig ? qualificationMap[selectedConfig.id] : null;
   const qualRequired = selectedConfig?.qualification_correct_count || 0;
   const myCorrect = pkProfile?.correct_count || 0;
-  const qualPassed = qualRequired <= 0 || myCorrect >= qualRequired;
+  // 兜底：资格明细尚未返回时，用旧的做对题数规则先做一次初步判断，避免出现"可点但必失败"
+  const qualPassed = qual
+    ? qual.passed
+    : (qualRequired <= 0 || myCorrect >= qualRequired);
 
   // 今日次数已满
   const dailyLimit = selectedConfig?.daily_limit || activeConfigs[0]?.daily_limit || 20;
@@ -250,6 +272,11 @@ export const PKLobby: React.FC<{
                         <i className="fa-solid fa-shield-halved mr-1"></i>需做对{cfg.qualification_correct_count}题
                       </span>
                     )}
+                    {!!cfg.qualification_mastered_count && cfg.qualification_mastered_count > 0 && (
+                      <span className="text-blue-600">
+                        <i className="fa-solid fa-graduation-cap mr-1"></i>需掌握{cfg.qualification_mastered_count}题
+                      </span>
+                    )}
                   </div>
                 </button>
               );
@@ -296,12 +323,34 @@ export const PKLobby: React.FC<{
         </button>
       </div>
 
-      {/* 资格不足提示 */}
-      {!qualPassed && qualRequired > 0 && (
-        <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-700">
-          <i className="fa-solid fa-shield-halved mr-2"></i>
-          该对战要求累计做对 <b>{qualRequired}</b> 道题才能参加
-          （当前已做对 <b>{myCorrect}</b> 道），去练习模块继续加油！
+      {/* 资格不足提示（两项条件分别列出未达标项） */}
+      {!qualPassed && (qual?.correct?.enabled || qual?.mastered?.enabled || qualRequired > 0) && (
+        <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-700 space-y-1">
+          <p className="font-medium">
+            <i className="fa-solid fa-shield-halved mr-2"></i>
+            参加该对战需同时满足以下资格：
+          </p>
+          {qual ? (
+            <>
+              {qual.correct?.enabled && (
+                <p className="pl-6">
+                  · 累计做对 <b>{qual.correct.required}</b> 道题（当前 <b>{qual.correct.current}</b> 道）
+                  {qual.correct.passed ? ' ✓' : ''}
+                </p>
+              )}
+              {qual.mastered?.enabled && (
+                <p className="pl-6">
+                  · 掌握 <b>{qual.mastered.required}</b> 道题
+                  {qual.mastered.clusters?.length > 0 ? `（范围：${qual.mastered.clusters.join('/')}）` : '（全部范围）'}
+                  （当前 <b>{qual.mastered.current}</b> 道）
+                  {qual.mastered.passed ? ' ✓' : ''}
+                </p>
+              )}
+            </>
+          ) : (
+            <p className="pl-6">· 累计做对 <b>{qualRequired}</b> 道题（当前 <b>{myCorrect}</b> 道）</p>
+          )}
+          <p className="pl-6 text-amber-600">去练习模块继续加油！</p>
         </div>
       )}
 

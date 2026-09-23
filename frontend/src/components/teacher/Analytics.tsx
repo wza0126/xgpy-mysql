@@ -7,6 +7,7 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContaine
 import { API_CONFIG } from '../../api/config';
 import { sanitizeHtml } from '../../utils/htmlUtils';
 import { studentLabel } from '../../utils/studentLabel';
+import { DetailSortKey, sortStudentRows, masteryRate, sortMasteryRows } from '../../utils/tableSort';
 import { LicenseGuard } from '../common/LicenseGuard';
 
 interface StudentWithStats extends Profile {
@@ -16,11 +17,14 @@ interface StudentWithStats extends Profile {
   accuracy?: number;
   has_pet?: boolean;
   pet_level?: number;
+  /** 已掌握题数（与「章节掌握进度」同源同口径：同一道题答对 threshold 次记为掌握） */
+  total_mastered?: number;
 }
 
 /**
  * 表格里的学生显示名：账号在前、姓名在后，合成一个字段（如「20230101 张三」）。
  * 实现见 utils/studentLabel.ts（同名同姓靠账号区分；缺账号/姓名自动退化）。
+ * 两张表的排序逻辑见 utils/tableSort.ts（纯函数，可独立验证）。
  */
 
 
@@ -28,6 +32,8 @@ export const Analytics: React.FC = () => {
   const [classes, setClasses] = useState<Class[]>([]);
   const [students, setStudents] = useState<StudentWithStats[]>([]);
   const [selectedClass, setSelectedClass] = useState<string>('');
+  // 「学生详细数据」表排序状态：点表头切换字段 / 再点切升降序
+  const [detailSort, setDetailSort] = useState<{ key: DetailSortKey; asc: boolean }>({ key: 'label', asc: true });
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState({
     totalStudents: 0,
@@ -102,9 +108,26 @@ export const Analytics: React.FC = () => {
             accuracy: total > 0 ? Math.round((correct / total) * 100) : 0,
             has_pet: !!petData,
             pet_level: petData?.growth_level || 0,
+            total_mastered: 0,
           };
         })
       );
+
+      // 「总掌握」与下方「章节掌握进度」同源：直接复用同一个后端接口，
+      // 避免在前端重复实现「同一道题练习答对 threshold 次记为掌握」的口径
+      try {
+        const mastery = await analyticsFetch<ChapterMasteryData>(
+          `/api/teacher/analytics/chapter-mastery/${selectedClass}`
+        );
+        const masteryMap = new Map<string, number>(
+          (mastery.students || []).map((s) => [s.id, s.total_mastered || 0])
+        );
+        for (const s of studentsWithStats) {
+          s.total_mastered = masteryMap.get(s.id) || 0;
+        }
+      } catch (e) {
+        console.error('获取学生总掌握数据失败:', e);
+      }
 
       setStudents(studentsWithStats);
 
@@ -278,39 +301,80 @@ export const Analytics: React.FC = () => {
       </div>
 
       <div className="mt-6 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-        <h3 className="text-lg font-bold text-gray-800 p-6 border-b border-gray-200">学生详细数据</h3>
-        <table className="w-full">
-          <thead className="bg-gray-50">
-            <tr>
-              <th className="px-6 py-3 text-left text-sm font-medium text-gray-600">账号 姓名</th>
-              <th className="px-6 py-3 text-center text-sm font-medium text-gray-600">当前积分</th>
-              <th className="px-6 py-3 text-center text-sm font-medium text-gray-600">最高积分</th>
-              <th className="px-6 py-3 text-center text-sm font-medium text-gray-600">做题量</th>
-              <th className="px-6 py-3 text-center text-sm font-medium text-gray-600">正确率</th>
-              <th className="px-6 py-3 text-center text-sm font-medium text-gray-600">萌宠</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-200">
-            {students.map((student) => (
-              <tr key={student.id} className="hover:bg-gray-50">
-                <td className="px-6 py-3 font-medium text-gray-800">{studentLabel(student)}</td>
-                <td className="px-6 py-3 text-center text-yellow-600 font-medium">{student.current_points || 0}</td>
-                <td className="px-6 py-3 text-center text-purple-600">{student.max_points || 0}</td>
-                <td className="px-6 py-3 text-center text-gray-600">{student.total_answers || 0}</td>
-                <td className="px-6 py-3 text-center text-gray-600">{student.accuracy || 0}%</td>
-                <td className="px-6 py-3 text-center">
-                  {student.has_pet ? (
-                    <span className="px-2 py-1 bg-pink-100 text-pink-600 rounded-full text-xs">
-                      Lv.{student.pet_level}
+        <div className="flex items-baseline justify-between flex-wrap gap-2 p-6 border-b border-gray-200">
+          <h3 className="text-lg font-bold text-gray-800">学生详细数据</h3>
+          <p className="text-xs text-gray-400">点击表头按该字段排序，再点一次切换升降序；表格固定显示约 15 行，超出可滚动</p>
+        </div>
+        {/* 表头 44px(h-11) + 每行 48px(h-12)：44 + 15×48 ≈ 764 → 取 768 固定显示约 15 行 */}
+        <div className="overflow-auto" style={{ maxHeight: '768px' }}>
+          <table className="w-full">
+            <thead className="bg-gray-50 sticky top-0 z-10">
+              <tr>
+                {([
+                  { key: 'label', label: '账号 姓名', align: 'left' },
+                  { key: 'current_points', label: '当前积分', align: 'center' },
+                  { key: 'max_points', label: '最高积分', align: 'center' },
+                  { key: 'total_answers', label: '做题量', align: 'center' },
+                  { key: 'accuracy', label: '正确率', align: 'center' },
+                  { key: 'total_mastered', label: '总掌握', align: 'center' },
+                  { key: 'pet_level', label: '萌宠', align: 'center' },
+                ] as { key: DetailSortKey; label: string; align: 'left' | 'center' }[]).map((col) => (
+                  <th
+                    key={col.key}
+                    onClick={() =>
+                      setDetailSort((s) =>
+                        s.key === col.key
+                          ? { key: col.key, asc: !s.asc }
+                          : { key: col.key, asc: col.key === 'label' }
+                      )
+                    }
+                    title={`按「${col.label}」排序`}
+                    className={`h-11 px-6 text-sm font-medium text-gray-600 cursor-pointer select-none hover:text-blue-600 whitespace-nowrap ${
+                      col.align === 'left' ? 'text-left' : 'text-center'
+                    }`}
+                  >
+                    <span className="inline-flex items-center gap-1.5">
+                      {col.label}
+                      {detailSort.key === col.key ? (
+                        <i className={`fa-solid fa-caret-${detailSort.asc ? 'up' : 'down'} text-blue-500`}></i>
+                      ) : (
+                        <i className="fa-solid fa-sort text-gray-300"></i>
+                      )}
                     </span>
-                  ) : (
-                    <span className="text-gray-400">-</span>
-                  )}
-                </td>
+                  </th>
+                ))}
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody className="divide-y divide-gray-200">
+              {sortStudentRows(students, detailSort).map((student) => (
+                <tr key={student.id} className="hover:bg-gray-50">
+                  <td className="h-12 px-6 font-medium text-gray-800 whitespace-nowrap">{studentLabel(student)}</td>
+                  <td className="h-12 px-6 text-center text-yellow-600 font-medium">{student.current_points || 0}</td>
+                  <td className="h-12 px-6 text-center text-purple-600">{student.max_points || 0}</td>
+                  <td className="h-12 px-6 text-center text-gray-600">{student.total_answers || 0}</td>
+                  <td className="h-12 px-6 text-center text-gray-600">{student.accuracy || 0}%</td>
+                  <td className="h-12 px-6 text-center font-semibold text-indigo-600" title="同一道题练习答对若干次记为掌握，与下方「章节掌握进度」同口径">
+                    {student.total_mastered || 0}
+                  </td>
+                  <td className="h-12 px-6 text-center">
+                    {student.has_pet ? (
+                      <span className="px-2 py-1 bg-pink-100 text-pink-600 rounded-full text-xs">
+                        Lv.{student.pet_level}
+                      </span>
+                    ) : (
+                      <span className="text-gray-400">-</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+              {students.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="h-12 px-6 text-center text-gray-400">该班级暂无学生数据</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div className="mt-6">
@@ -905,20 +969,26 @@ const StudentTrendSection: React.FC<{ classId: string; students: StudentWithStat
     }
   }, [students]);
 
+  // 切换班级时，props 里的 students 仍是**上一个班级**的列表（新班级数据还在请求中），
+  // 此时 classId 已变、studentId 未变 → 直接请求必然 404（学生不属于该班级）。
+  // 用学生行自带的 class_id 判定「列表是否已切换到当前班级」，未切换就先不发请求。
+  const studentsForThisClass = students.length > 0 && students[0].class_id === classId;
+  const validStudentId = studentsForThisClass && students.some((s) => s.id === studentId) ? studentId : '';
+
   useEffect(() => {
-    if (!classId || !studentId) {
+    if (!classId || !validStudentId) {
       setData([]);
       return;
     }
     setLoading(true);
-    analyticsFetch<TrendPoint[]>(`/api/teacher/analytics/student-trend/${classId}/${studentId}?weeks=8`)
+    analyticsFetch<TrendPoint[]>(`/api/teacher/analytics/student-trend/${classId}/${validStudentId}?weeks=8`)
       .then(setData)
       .catch((e) => {
         console.error('获取学情曲线失败:', e);
         setData([]);
       })
       .finally(() => setLoading(false));
-  }, [classId, studentId]);
+  }, [classId, validStudentId]);
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
@@ -1091,16 +1161,16 @@ const ChapterMasterySection: React.FC<{ classId: string }> = ({ classId }) => {
   const allStudents = data?.students || [];
   const threshold = data?.master_threshold ?? 3;
 
-  const students = React.useMemo(() => {
-    const list = onlyStarted ? allStudents.filter((s) => s.total_mastered > 0) : allStudents.slice();
-    if (sortBy === 'mastered') list.sort((a, b) => b.total_mastered - a.total_mastered);
-    else if (sortBy === 'rate') list.sort((a, b) => (b.total_mastered / Math.max(1, totalQuestions(b))) - (a.total_mastered / Math.max(1, totalQuestions(a))));
-    else list.sort((a, b) => (a.real_name || a.username).localeCompare(b.real_name || b.username, 'zh-Hans-CN'));
-    return list;
-  }, [allStudents, onlyStarted, sortBy, chapters]);
+  /** 全部章节题目总量（掌握率的分母，与学习模块分母同口径） */
+  const totalQuestions = React.useMemo(
+    () => chapters.reduce((sum, c) => sum + c.question_count, 0),
+    [chapters]
+  );
 
-  const totalQuestions = (s: ChapterMasteryStudent) =>
-    chapters.reduce((sum, c) => sum + c.question_count, 0);
+  const students = React.useMemo(
+    () => sortMasteryRows(allStudents, sortBy, totalQuestions, onlyStarted),
+    [allStudents, onlyStarted, sortBy, totalQuestions]
+  );
 
   // 单元格底色：按该章掌握数 / 该章题量分档
   const cellClass = (n: number, total: number) => {
@@ -1117,7 +1187,7 @@ const ChapterMasterySection: React.FC<{ classId: string }> = ({ classId }) => {
         <div>
           <h3 className={sectionTitleCls}>章节掌握进度</h3>
           <p className={sectionSubCls}>
-            每名学生在各章「已掌握」的题目数（同一道题练习答对 {threshold} 次记为掌握，与刷题模块口径一致）
+            每名学生在各章「已掌握」的题目数（同一道题练习答对 {threshold} 次记为掌握，与刷题模块口径一致）；点击表头或右侧下拉均可排序
           </p>
         </div>
         {data && allStudents.length > 0 && (
@@ -1127,7 +1197,7 @@ const ChapterMasterySection: React.FC<{ classId: string }> = ({ classId }) => {
               onChange={(e) => setSortBy(e.target.value as 'name' | 'mastered' | 'rate')}
               className="p-2 border border-gray-300 rounded-lg text-sm"
             >
-              <option value="name">按姓名排序</option>
+              <option value="name">按账号 姓名排序</option>
               <option value="mastered">按掌握总数排序</option>
               <option value="rate">按掌握率排序</option>
             </select>
@@ -1164,11 +1234,29 @@ const ChapterMasterySection: React.FC<{ classId: string }> = ({ classId }) => {
             <table className="w-full border-collapse">
               <thead className="bg-gray-50 sticky top-0 z-10">
                 <tr>
-                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-600 sticky left-0 bg-gray-50 min-w-[160px] border-b border-gray-200">
+                  <th
+                    onClick={() => setSortBy('name')}
+                    title="按前面的账号排序（同名同姓也能区分）"
+                    className="px-3 py-2 text-left text-xs font-medium text-gray-600 sticky left-0 bg-gray-50 min-w-[160px] border-b border-gray-200 cursor-pointer select-none hover:text-blue-600"
+                  >
                     账号 姓名
+                    {sortBy === 'name' && <i className="fa-solid fa-caret-down text-blue-500 ml-1"></i>}
                   </th>
-                  <th className="px-3 py-2 text-center text-xs font-medium text-gray-600 border-b border-l border-gray-200 min-w-[70px]">
+                  <th
+                    onClick={() => setSortBy('mastered')}
+                    title="按掌握总数排序"
+                    className="px-3 py-2 text-center text-xs font-medium text-gray-600 border-b border-l border-gray-200 min-w-[84px] whitespace-nowrap cursor-pointer select-none hover:text-blue-600"
+                  >
                     掌握总数
+                    {sortBy === 'mastered' && <i className="fa-solid fa-caret-down text-blue-500 ml-1"></i>}
+                  </th>
+                  <th
+                    onClick={() => setSortBy('rate')}
+                    title="按掌握率排序（已掌握题数 ÷ 章节总题量）"
+                    className="px-3 py-2 text-center text-xs font-medium text-gray-600 border-b border-l border-gray-200 min-w-[84px] whitespace-nowrap cursor-pointer select-none hover:text-blue-600"
+                  >
+                    掌握率
+                    {sortBy === 'rate' && <i className="fa-solid fa-caret-down text-blue-500 ml-1"></i>}
                   </th>
                   {chapters.map((c) => (
                     <th
@@ -1191,6 +1279,9 @@ const ChapterMasterySection: React.FC<{ classId: string }> = ({ classId }) => {
                     <td className="px-3 py-2 text-center text-sm font-bold text-indigo-600 border-l border-gray-100">
                       {s.total_mastered}
                     </td>
+                    <td className="px-3 py-2 text-center text-sm text-gray-600 border-l border-gray-100">
+                      {masteryRate(s, totalQuestions)}%
+                    </td>
                     {chapters.map((c) => {
                       const n = s.by_chapter[c.cluster_id] || 0;
                       return (
@@ -1209,7 +1300,7 @@ const ChapterMasterySection: React.FC<{ classId: string }> = ({ classId }) => {
             </table>
           </div>
           <p className="text-xs text-gray-400 mt-2">
-            共 {students.length} 名学生 · 数值为「已掌握题数」；颜色越绿表示该章掌握比例越高
+            共 {students.length} 名学生 · 数值为「已掌握题数」；掌握率 = 已掌握题数 ÷ 章节总题量（{totalQuestions} 题）；颜色越绿表示该章掌握比例越高
           </p>
         </>
       )}
