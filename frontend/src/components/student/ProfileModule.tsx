@@ -540,7 +540,7 @@ export const ProfileModule: React.FC = () => {
               荣誉图鉴
             </h3>
             {gameSystem.honorStats ? (
-              <div className="grid grid-cols-4 md:grid-cols-5 gap-3">
+              <div className="grid grid-cols-4 md:grid-cols-5 lg:grid-cols-8 gap-3">
                 <div className="text-center p-3 bg-yellow-50 rounded-lg border border-yellow-200 group relative cursor-help">
                   <div className="text-2xl mb-1">🏆</div>
                   <p className="text-lg font-bold text-yellow-700">{gameSystem.honorStats.perfect_10_times}</p>
@@ -583,6 +583,34 @@ export const ProfileModule: React.FC = () => {
                   <p className="text-xs text-gray-600">运指如飞</p>
                   <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 bg-gray-800 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10 pointer-events-none shadow-lg">
                     键盘星域单人模式速度达标
+                    <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-800"></div>
+                  </div>
+                </div>
+                {/* ===== PK 专属荣誉（迁移 087）===== */}
+                <div className="text-center p-3 bg-orange-50 rounded-lg border border-orange-200 group relative cursor-help">
+                  <div className="text-2xl mb-1">🔥</div>
+                  <p className="text-lg font-bold text-orange-700">{gameSystem.honorStats.pk_streak_3_times ?? 0}</p>
+                  <p className="text-xs text-gray-600">连胜达人</p>
+                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 bg-gray-800 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10 pointer-events-none shadow-lg">
+                    PK 对战累计达成 3 连胜（每满 3 场计一次）
+                    <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-800"></div>
+                  </div>
+                </div>
+                <div className="text-center p-3 bg-cyan-50 rounded-lg border border-cyan-200 group relative cursor-help">
+                  <div className="text-2xl mb-1">💎</div>
+                  <p className="text-lg font-bold text-cyan-700">{gameSystem.honorStats.pk_flawless_times ?? 0}</p>
+                  <p className="text-xs text-gray-600">零失误</p>
+                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 bg-gray-800 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10 pointer-events-none shadow-lg">
+                    PK 单局全部答对且至少作答 1 题
+                    <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-800"></div>
+                  </div>
+                </div>
+                <div className="text-center p-3 bg-violet-50 rounded-lg border border-violet-200 group relative cursor-help">
+                  <div className="text-2xl mb-1">🚀</div>
+                  <p className="text-lg font-bold text-violet-700">{gameSystem.honorStats.pk_comeback_times ?? 0}</p>
+                  <p className="text-xs text-gray-600">愈战愈勇</p>
+                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 bg-gray-800 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10 pointer-events-none shadow-lg">
+                    PK 对战中场落后，最终反超获胜
                     <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-800"></div>
                   </div>
                 </div>

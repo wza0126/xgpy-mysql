@@ -185,7 +185,12 @@ export const SimilarPracticeWindow: React.FC<SimilarPracticeWindowProps> = ({ in
       }
     } catch (e) {
       console.error('提交同类题答案失败', e);
-      alert('提交失败，请检查网络后重试');
+      // 会话失效（被同一账号新登录顶掉 / 登录超时）需引导重新登录，勿说成网络问题
+      if ((e as any)?.isAuthError || (e as any)?.status === 401) {
+        alert('登录状态已失效，请退出后重新登录再继续练习');
+      } else {
+        alert('提交失败，请检查网络后重试');
+      }
     } finally {
       setSubmitting(false);
     }

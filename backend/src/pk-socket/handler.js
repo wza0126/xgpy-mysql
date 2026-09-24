@@ -194,6 +194,9 @@ function buildBattleConfig(row) {
     first_battle_points: row.first_battle_points,
     daily_battles_target: row.daily_battles_target,
     daily_battles_points: row.daily_battles_points,
+    // ===== 装备掉落配置（迁移 087）=====
+    equipment_drop_enabled: row.equipment_drop_enabled,
+    equipment_drop_multiplier: row.equipment_drop_multiplier,
   };
 }
 

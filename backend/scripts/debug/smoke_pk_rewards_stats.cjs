@@ -431,9 +431,14 @@ async function main() {
     '/api/pk/stats/by-student', '/api/pk/stats/points-summary']) {
     ok(`后端注册了 ${ep}`, indexSrc.includes(`app.get('${ep}'`));
   }
+  // 口径：所有 /api/pk/stats/* 的 GET 都必须挂 authenticate + requireTeacher
+  // （P1/P2 新增 rank-distribution / rank-trend / wrong-questions 后从 4 处扩到 7 处，
+  //   故这里比较「总数」与「带鉴权数」相等，而非硬编码 4）
+  const allStatsGets = (indexSrc.match(/app\.get\('\/api\/pk\/stats\/[a-z-]+'/g) || []).length;
+  const guardedStatsGets = (indexSrc.match(/app\.get\('\/api\/pk\/stats\/[a-z-]+', authenticate, requireTeacher/g) || []).length;
   ok('PK 统计接口全部要求教师身份',
-    (indexSrc.match(/app\.get\('\/api\/pk\/stats\/[a-z-]+', authenticate, requireTeacher/g) || []).length === 4,
-    `实际 ${(indexSrc.match(/app\.get\('\/api\/pk\/stats\/[a-z-]+', authenticate, requireTeacher/g) || []).length} 处`);
+    allStatsGets >= 4 && allStatsGets === guardedStatsGets,
+    `总计 ${allStatsGets} 处，其中带鉴权 ${guardedStatsGets} 处`);
   ok('后端有 normalizePkRewardFields 归一化（含钳制）',
     /function normalizePkRewardFields/.test(indexSrc));
   ok('POST 配置透传奖励字段', /points_multiplier, win_bonus_rate, draw_bonus_rate/.test(indexSrc));

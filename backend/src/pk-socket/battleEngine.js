@@ -3,6 +3,7 @@
 
 const crypto = require('crypto');
 const { calcRankChange, calcSystemPoints, judgeByScore } = require('./rankCalc');
+const { calcNewWinStreak, judgePkHonors, rollEquipmentDrops } = require('./pkHonors');
 const roomManager = require('./roomManager');
 
 /**
@@ -265,7 +266,12 @@ async function startBattle(io, pool, { roomId, config, playerIds }) {
     players: new Map(
       playerIds.map((uid) => [
         uid,
-        { score: 0, correct: 0, wrong: 0, durationMs: 0, answered: new Set() },
+        {
+          score: 0, correct: 0, wrong: 0, durationMs: 0, answered: new Set(),
+          // 荣誉「愈战愈勇」用：前半程是否落后过（在赛程过半那一刻判定一次，
+          // 之后锁定，避免后期反超再落后再反超导致口径摇摆）
+          behindAtHalf: false, halfChecked: false,
+        },
       ])
     ),
   };
@@ -395,6 +401,22 @@ async function submitAnswer(io, pool, { roomId, userId, questionId, answer, cost
     ([uid]) => uid !== userId
   );
   const oppScore = otherEntries.length > 0 ? otherEntries[0][1].score : 0;
+
+  // 荣誉「愈战愈勇」判定点：整个房间的作答进度过半时，记录下双方当时是否落后。
+  // 判定一次即锁定（halfChecked），保证口径稳定 —— 否则「先落后→反超→再落后」
+  // 会随作答顺序得到不同结论。
+  if (!state.halfChecked && otherEntries.length > 0) {
+    const totalAnswered = Array.from(state.players.values())
+      .reduce((s, p) => s + p.answered.size, 0);
+    const totalQuestions = state.questionIds.length * state.players.size;
+    if (totalQuestions > 0 && totalAnswered >= totalQuestions / 2) {
+      state.halfChecked = true;
+      const oppPlayer = otherEntries[0][1];
+      // 落后 = 自己分数严格低于对手（同分不算落后）
+      player.behindAtHalf = player.score < oppPlayer.score;
+      oppPlayer.behindAtHalf = oppPlayer.score < player.score;
+    }
+  }
 
   // 回提交者
   io.to(roomId).emit('pk:answer_result', {
@@ -595,8 +617,11 @@ async function finishBattle(io, pool, roomId, trigger, extra = {}) {
   const config = state.config || {};
 
   // 获取玩家信息
+  // pk_win_streak 必须取：连胜达人荣誉靠「旧连胜 → 新连胜」的状态跃迁判定，
+  // 缺了它就只能拿 pk_total_wins 猜，跨对局连续性无法还原。
   const [playersRows] = await pool.query(
     `SELECT p.*, pr.username, pr.real_name, pr.pk_rank_tier, pr.pk_rank_stars, pr.pk_points,
+     pr.pk_win_streak,
      c.pk_battle_enabled, pr.class_id
      FROM pk_room_players p
      JOIN profiles pr ON p.user_id = pr.id
@@ -619,9 +644,17 @@ async function finishBattle(io, pool, roomId, trigger, extra = {}) {
   const aState = state.players.get(a.user_id) || { score: 0, correct: 0, wrong: 0, durationMs: 0 };
   const bState = state.players.get(b.user_id) || { score: 0, correct: 0, wrong: 0, durationMs: 0 };
 
-  // 合并到 playersRows
-  const playerA = { ...a, score: aState.score, correct: aState.correct, wrong: aState.wrong, durationMs: aState.durationMs };
-  const playerB = { ...b, score: bState.score, correct: bState.correct, wrong: bState.wrong, durationMs: bState.durationMs };
+  // 合并到 playersRows（behindAtHalf 来自内存状态，荣誉「愈战愈勇」依赖它）
+  const playerA = {
+    ...a, score: aState.score, correct: aState.correct, wrong: aState.wrong,
+    durationMs: aState.durationMs, behindAtHalf: !!aState.behindAtHalf,
+    pk_win_streak: Number(a.pk_win_streak) || 0,
+  };
+  const playerB = {
+    ...b, score: bState.score, correct: bState.correct, wrong: bState.wrong,
+    durationMs: bState.durationMs, behindAtHalf: !!bState.behindAtHalf,
+    pk_win_streak: Number(b.pk_win_streak) || 0,
+  };
 
   // 判定胜负
   let winnerId = null;
@@ -653,6 +686,9 @@ async function finishBattle(io, pool, roomId, trigger, extra = {}) {
   let winnerSystemPts = 0, loserSystemPts = 0;
   // 惜败鼓励分（分别记录，用于落库与流水拆分）
   let consolationWinner = 0, consolationLoser = 0;
+  // 结算回执载荷（事务成功后才赋值，失败保持空 —— 避免学生看到"获得装备"却查不到）
+  let droppedEquipmentsFinal = {};
+  let honorsFinal = {};
 
   // 获取基础分配置
   const [cfgRows] = await pool.query(
@@ -679,6 +715,42 @@ async function finishBattle(io, pool, roomId, trigger, extra = {}) {
     dailyBattlesTarget: Math.max(0, Math.floor(numOr(config.daily_battles_target, 0))),
     dailyBattlesPoints: Math.max(0, Math.floor(numOr(config.daily_battles_points, 0))),
   };
+
+  // PK 装备掉落配置（迁移 087）。默认关闭 ⇒ 完全维持旧行为，不引入意外掉落。
+  // 掉率系数钳制到 [0, 5]：练习侧测试/考试是 ×10，PK 不应超过那个量级太多，
+  // 否则「刷 PK 拿装备」会压过练习模块的教学价值。
+  const dropCfg = {
+    enabled: Number(config.equipment_drop_enabled) === 1 || config.equipment_drop_enabled === true,
+    multiplier: Math.min(5, Math.max(0, numOr(config.equipment_drop_multiplier, 1))),
+  };
+
+  // ===== PK 专属荣誉：结算前先算好（纯函数，便于验证）=====
+  // 每人的「新连胜场次」与「本局触发哪些荣誉」都在这里定下来，
+  // 事务内只负责落库，避免把判定逻辑散进 SQL 拼接。
+  const honorByUser = {};
+  const newStreakByUser = {};
+  {
+    const resolveFor = (player, result) => {
+      const oldStreak = player.pk_win_streak;
+      const newStreak = calcNewWinStreak(oldStreak, result);
+      newStreakByUser[player.user_id] = newStreak;
+      honorByUser[player.user_id] = judgePkHonors({
+        result,
+        oldWinStreak: oldStreak,
+        newWinStreak: newStreak,
+        correct: player.correct,
+        wrong: player.wrong,
+        behindAtHalf: player.behindAtHalf,
+      });
+    };
+    if (!isDraw) {
+      resolveFor(playerA.user_id === winnerId ? playerA : playerB, 'win');
+      resolveFor(playerA.user_id === winnerId ? playerB : playerA, 'lose');
+    } else {
+      resolveFor(playerA, 'draw');
+      resolveFor(playerB, 'draw');
+    }
+  }
 
   if (!isDraw) {
     const winner = playerA.user_id === winnerId ? playerA : playerB;
@@ -793,6 +865,12 @@ async function finishBattle(io, pool, roomId, trigger, extra = {}) {
 
     // 注意：平局时段位不变，上面用 0 占位是错的，需要分开处理
     // 重写：平局不更新段位字段
+    //
+    // pk_win_streak 与 3 个 PK 荣誉计数列在此一并落库（迁移 087）。
+    // 荣誉计数用「本局是否触发」决定 +1 还是 +0，判定已在事务外算好（honorByUser）。
+    const honorInc = (userId, honorType) =>
+      (honorByUser[userId] || []).some((h) => h.type === honorType) ? 1 : 0;
+
     if (!isDraw) {
       const winner = playersRows.find((p) => p.user_id === winnerId);
       const loser = playersRows.find((p) => p.user_id !== winnerId);
@@ -803,10 +881,21 @@ async function finishBattle(io, pool, roomId, trigger, extra = {}) {
           current_points = current_points + ?,
           total_points_earned = total_points_earned + ?,
           pk_total_wins = pk_total_wins + 1,
+          pk_win_streak = ?,
+          pk_streak_3_times = pk_streak_3_times + ?,
+          pk_flawless_times = pk_flawless_times + ?,
+          pk_comeback_times = pk_comeback_times + ?,
           pk_battles_today = pk_battles_today + 1,
           pk_battles_date = CURDATE()
          WHERE id = ?`,
-        [winnerNewRank.tier, winnerNewRank.stars, winnerPkDelta, winnerSystemPts, winnerSystemPts, winner.user_id]
+        [
+          winnerNewRank.tier, winnerNewRank.stars, winnerPkDelta, winnerSystemPts, winnerSystemPts,
+          newStreakByUser[winner.user_id] ?? 0,
+          honorInc(winner.user_id, 'pk_streak_3'),
+          honorInc(winner.user_id, 'pk_flawless'),
+          honorInc(winner.user_id, 'pk_comeback'),
+          winner.user_id,
+        ]
       );
       await conn.query(
         `UPDATE profiles SET
@@ -815,10 +904,22 @@ async function finishBattle(io, pool, roomId, trigger, extra = {}) {
           current_points = current_points + ?,
           total_points_earned = total_points_earned + ?,
           pk_total_losses = pk_total_losses + 1,
+          pk_win_streak = ?,
+          pk_streak_3_times = pk_streak_3_times + ?,
+          pk_flawless_times = pk_flawless_times + ?,
+          pk_comeback_times = pk_comeback_times + ?,
           pk_battles_today = pk_battles_today + 1,
           pk_battles_date = CURDATE()
          WHERE id = ?`,
-        [loserNewRank.tier, loserNewRank.stars, loserPkDelta, loserSystemPts, loserSystemPts, loser.user_id]
+        [
+          loserNewRank.tier, loserNewRank.stars, loserPkDelta, loserSystemPts, loserSystemPts,
+          // 输方连胜清零；「零失误」仍可能达成（做对全部题但净得分低仍可能输）
+          newStreakByUser[loser.user_id] ?? 0,
+          honorInc(loser.user_id, 'pk_streak_3'),
+          honorInc(loser.user_id, 'pk_flawless'),
+          honorInc(loser.user_id, 'pk_comeback'),
+          loser.user_id,
+        ]
       );
     } else {
       // 平局：段位不变，仅更新积分和战绩
@@ -827,20 +928,34 @@ async function finishBattle(io, pool, roomId, trigger, extra = {}) {
           current_points = current_points + ?,
           total_points_earned = total_points_earned + ?,
           pk_total_draws = pk_total_draws + 1,
+          pk_win_streak = ?,
+          pk_flawless_times = pk_flawless_times + ?,
           pk_battles_today = pk_battles_today + 1,
           pk_battles_date = CURDATE()
          WHERE id = ?`,
-        [winnerSystemPts, winnerSystemPts, playerA.user_id]
+        [
+          winnerSystemPts, winnerSystemPts,
+          newStreakByUser[playerA.user_id] ?? 0,
+          honorInc(playerA.user_id, 'pk_flawless'),
+          playerA.user_id,
+        ]
       );
       await conn.query(
         `UPDATE profiles SET
           current_points = current_points + ?,
           total_points_earned = total_points_earned + ?,
           pk_total_draws = pk_total_draws + 1,
+          pk_win_streak = ?,
+          pk_flawless_times = pk_flawless_times + ?,
           pk_battles_today = pk_battles_today + 1,
           pk_battles_date = CURDATE()
          WHERE id = ?`,
-        [loserSystemPts, loserSystemPts, playerB.user_id]
+        [
+          loserSystemPts, loserSystemPts,
+          newStreakByUser[playerB.user_id] ?? 0,
+          honorInc(playerB.user_id, 'pk_flawless'),
+          playerB.user_id,
+        ]
       );
     }
 
@@ -935,10 +1050,63 @@ async function finishBattle(io, pool, roomId, trigger, extra = {}) {
       }
     }
 
+    // ===== 段位变化历史（迁移 087）：只记「变化点」，平局/未变化不记 =====
+    // 趋势图只关心段位怎么走的，若每局都写一行会让表随对局数线性膨胀。
+    const writeRankHistory = async (player, newRank, result) => {
+      if (!newRank) return;
+      const fromTier = Number(player.pk_rank_tier) || 0;
+      const fromStars = Number(player.pk_rank_stars) || 0;
+      if (fromTier === newRank.tier && fromStars === newRank.stars) return;
+      await conn.query(
+        `INSERT INTO pk_rank_history
+         (user_id, class_id, room_id, from_tier, from_stars, to_tier, to_stars, result)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [player.user_id, player.class_id || null, roomId,
+          fromTier, fromStars, newRank.tier, newRank.stars, result]
+      );
+    };
+    if (!isDraw) {
+      await writeRankHistory(playerA.user_id === winnerId ? playerA : playerB, winnerNewRank, 'win');
+      await writeRankHistory(playerA.user_id === winnerId ? playerB : playerA, loserNewRank, 'lose');
+    }
+    // 平局段位不变 → 不写历史
+
+    // ===== PK 装备掉落（迁移 087，默认关闭）=====
+    // 与练习侧口径一致：每件装备独立掷骰，判据 Math.random()*100 < 实际掉率。
+    // 只在答对 ≥1 题时触发（一题没答对却掉装备，会让掉落变成「挂机奖励」）。
+    const droppedByUser = {};
+    if (dropCfg.enabled && dropCfg.multiplier > 0) {
+      try {
+        const [activeEquipments] = await conn.query(
+          'SELECT id, name, icon, drop_rate, crit_bonus FROM equipments WHERE is_active = true'
+        );
+        for (const p of [playerA, playerB]) {
+          if (p.correct <= 0) { droppedByUser[p.user_id] = []; continue; }
+          const dropped = rollEquipmentDrops(activeEquipments, dropCfg.multiplier);
+          for (const eq of dropped) {
+            await conn.query(
+              `INSERT INTO student_equipments (id, student_id, equipment_id, quantity)
+               VALUES (?, ?, ?, 1)
+               ON DUPLICATE KEY UPDATE quantity = quantity + 1`,
+              [`se_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`, p.user_id, eq.id]
+            );
+          }
+          droppedByUser[p.user_id] = dropped;
+        }
+      } catch (err) {
+        // 掉落失败不能连累结算（积分/段位已经算好了）
+        console.error('[PK] 装备掉落失败（不改动结算结果）:', err.message);
+      }
+    }
+
     // 更新房间状态
     await conn.query("UPDATE pk_rooms SET status = 'finished' WHERE id = ?", [roomId]);
 
     await conn.commit();
+
+    // 结算成功后才对外广播掉落/荣誉 —— 若事务回滚，学生不会看到 "获得了装备" 却查不到
+    droppedEquipmentsFinal = droppedByUser;
+    honorsFinal = honorByUser;
   } catch (err) {
     await conn.rollback();
     console.error('PK 结算失败:', err);
@@ -982,7 +1150,13 @@ async function finishBattle(io, pool, roomId, trigger, extra = {}) {
   }
 
   // 通知前端拉结算
-  io.to(roomId).emit('pk:battle_end', { room_id: roomId });
+  // 附带本局掉落与荣誉（按用户分组），前端据此就地弹出「获得装备 / 达成荣誉」动效，
+  // 无需再发一次请求 —— 结算页加载有延迟，等问题答完再弹会错过最佳反馈时机。
+  io.to(roomId).emit('pk:battle_end', {
+    room_id: roomId,
+    dropped_equipments: droppedEquipmentsFinal,
+    new_honors: honorsFinal,
+  });
 }
 
 /**

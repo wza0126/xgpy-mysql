@@ -56,7 +56,13 @@ async function fetchApi(endpoint, options = {}) {
       window.location.hash = '#/';
       window.location.reload();
     }
-    throw new Error('Session expired - please login again');
+    // ⚠️ 必须带上 status 标记：否则调用方 catch 到的只是个普通 Error，
+    // 无法与「真实网络故障」区分，只能一律提示"请检查网络"，
+    // 把「会话被顶掉」误导成网络问题（学生实际只需重新登录）。
+    const sessionErr = new Error('登录状态已失效，请退出后重新登录') as Error & { status?: number; isAuthError?: boolean };
+    sessionErr.status = 401;
+    sessionErr.isAuthError = true;
+    throw sessionErr;
   }
   
   if (!response.ok) {

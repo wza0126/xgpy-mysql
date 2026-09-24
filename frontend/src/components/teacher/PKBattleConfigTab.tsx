@@ -67,6 +67,9 @@ interface PKBattleConfig {
   first_battle_points: number | null;
   daily_battles_target: number | null;
   daily_battles_points: number | null;
+  // ===== 装备掉落配置（迁移 087）=====
+  equipment_drop_enabled: number | boolean | null;
+  equipment_drop_multiplier: number | string | null;
   created_at: string;
   updated_at: string;
 }
@@ -103,6 +106,9 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
     first_battle_points: '' as string | number,
     daily_battles_target: '' as string | number,
     daily_battles_points: '' as string | number,
+    // ===== 装备掉落配置（迁移 087）=====
+    equipment_drop_enabled: false,
+    equipment_drop_multiplier: 1 as string | number,
   });
   // 表单内筛选 state（独立于 ExamManager 的题目选择器筛选）
   const [filterTags, setFilterTags] = useState<string[]>([]);
@@ -162,6 +168,8 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
       first_battle_points: '',
       daily_battles_target: '',
       daily_battles_points: '',
+      equipment_drop_enabled: false,
+      equipment_drop_multiplier: 1,
     });
     setFilterTags([]);
     setFilterClusterPrimary([]);
@@ -195,6 +203,9 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
       first_battle_points: cfg.first_battle_points ?? '',
       daily_battles_target: cfg.daily_battles_target ?? '',
       daily_battles_points: cfg.daily_battles_points ?? '',
+      equipment_drop_enabled: toBool(cfg.equipment_drop_enabled),
+      equipment_drop_multiplier: cfg.equipment_drop_multiplier != null
+        ? Number(cfg.equipment_drop_multiplier) : 1,
     });
     setFilterTags(parseJsonArray(cfg.tag_filters));
     // 还原聚类选中状态：fullKey 列表 → 一级 + 二级
@@ -294,6 +305,9 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
       first_battle_points: formData.first_battle_points === '' ? 0 : Number(formData.first_battle_points),
       daily_battles_target: formData.daily_battles_target === '' ? 0 : Number(formData.daily_battles_target),
       daily_battles_points: formData.daily_battles_points === '' ? 0 : Number(formData.daily_battles_points),
+      // ===== 装备掉落配置 =====
+      equipment_drop_enabled: formData.equipment_drop_enabled,
+      equipment_drop_multiplier: numOr(formData.equipment_drop_multiplier, 1),
     };
     try {
       if (editingId) {
@@ -910,6 +924,46 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
                       )}
                     </p>
                   </div>
+                </div>
+
+                {/* ===== 装备掉落（迁移 087）===== */}
+                <div className="p-3 bg-amber-50 rounded-lg border border-amber-200 space-y-3">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={formData.equipment_drop_enabled}
+                      onChange={(e) => setFormData({ ...formData, equipment_drop_enabled: e.target.checked })}
+                      className="w-5 h-5 rounded border-gray-300 text-amber-600 focus:ring-amber-500"
+                    />
+                    <span className="text-sm text-gray-700">
+                      <b>启用 PK 装备掉落</b>
+                      <span className="text-xs text-gray-500 ml-2">
+                        默认关闭；开启后答对的题会按掉率掉落装备
+                      </span>
+                    </span>
+                  </label>
+                  {formData.equipment_drop_enabled && (
+                    <>
+                      <div>
+                        <label className="block text-xs text-gray-600 mb-1">
+                          掉率系数（实际掉率 = 装备自身掉率 × 系数）
+                        </label>
+                        <input
+                          type="number"
+                          step="0.1"
+                          min={0}
+                          max={5}
+                          value={formData.equipment_drop_multiplier}
+                          onChange={(e) => setFormData({ ...formData, equipment_drop_multiplier: e.target.value })}
+                          className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-amber-500 outline-none"
+                        />
+                        <p className="text-xs text-gray-500 mt-1">
+                          1.0 = 与练习完全一致；上限 5（避免「刷 PK 拿装备」压过练习）。
+                          只在做对 ≥1 题时触发，防止挂机也掉装备。
+                        </p>
+                      </div>
+                    </>
+                  )}
                 </div>
 
                 {/* 启用开关 */}

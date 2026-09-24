@@ -746,7 +746,12 @@ export const TestModule: React.FC = () => {
       fetchExams();
     } catch (error) {
       console.error('考试提交失败:', error);
-      alert('提交失败，请重试');
+      // 会话失效（被同一账号新登录顶掉 / 登录超时）需引导重新登录，勿说成网络问题
+      if ((error as any)?.isAuthError || (error as any)?.status === 401) {
+        alert('登录状态已失效，请退出后重新登录再提交');
+      } else {
+        alert('提交失败，请重试');
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -1121,6 +1126,15 @@ export const TestModule: React.FC = () => {
       
       fetchTestHistory();
     } catch (apiError: any) {
+      // 会话失效优先判断：401 会落进下面的 4xx 分支，若不单独拦下就会把
+      // backendClient 的英文原文（Session expired - please login again）直接弹给学生。
+      if (apiError?.isAuthError || apiError?.status === 401) {
+        console.warn('[handleSubmitTest] 登录状态已失效');
+        alert('登录状态已失效，请退出后重新登录再提交');
+        fetchTestHistory();
+        return;
+      }
+
       // 服务端业务规则拒绝（HTTP 4xx，如「今日测试次数已用完」「测试不存在」「考试已结束」）
       // 必须直接提示并结束，绝不能走下面的前端降级逻辑 ——
       // 否则前端会自己判分、自己发积分、自己插入测试记录，把服务端的次数限制整条绕过。

@@ -443,7 +443,12 @@ export const WrongQuestions: React.FC = () => {
       // 本地判分只会写出一条「前端说对、服务端不知情」的脏记录。提示重试即可，
       // finally 会解锁本题，学生直接再点提交。
       console.error('提交答案接口调用失败:', apiError);
-      alert('提交失败，请检查网络后重试');
+      // 会话失效（被同一账号新登录顶掉 / 登录超时）需引导重新登录，勿说成网络问题
+      if (apiError?.isAuthError || apiError?.status === 401) {
+        alert('登录状态已失效，请退出后重新登录再继续');
+      } else {
+        alert('提交失败，请检查网络后重试');
+      }
       return;
     } finally {
       submittingRef.current = false;

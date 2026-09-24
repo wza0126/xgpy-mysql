@@ -36,6 +36,11 @@ export interface HonorStats {
   wrong_3_times: number;
   studious_times: number;
   typing_fast_times: number;
+  // ===== PK 专属荣誉（迁移 087）=====
+  pk_streak_3_times?: number;
+  pk_flawless_times?: number;
+  pk_comeback_times?: number;
+  pk_win_streak?: number;
 }
 
 export interface SubmitResult {

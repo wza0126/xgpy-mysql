@@ -563,7 +563,13 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
         // 本地判分只会写出一条「前端说对、服务端不知情」的脏记录。明确提示重试，
         // finally 会解锁本题，学生直接再点提交即可。
         console.error('提交答案接口调用失败:', apiError);
-        alert('提交失败，请检查网络后重试');
+        // 会话失效（如被同一账号的新登录顶掉 / 登录超时）与真实网络故障要分开提示：
+        // 前者让学生「退出重新登录」即可恢复，说成"检查网络"会把排查方向带偏。
+        if (apiError?.isAuthError || apiError?.status === 401) {
+          alert('登录状态已失效，请退出后重新登录再继续练习');
+        } else {
+          alert('提交失败，请检查网络后重试');
+        }
         return;
       }
 

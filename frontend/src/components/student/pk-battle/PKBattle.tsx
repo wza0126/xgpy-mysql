@@ -7,6 +7,8 @@ import { PKLobby } from './PKLobby';
 import { PKRoom } from './PKRoom';
 import { PKBattleArena } from './PKBattleArena';
 import { PKResult } from './PKResult';
+import type { PKResultDrop, PKResultHonor } from './PKResult';
+import { useGameEventStore } from '../../../store/gameEventStore';
 import { getAuthToken } from '../../../utils/authToken';
 
 type View = 'lobby' | 'room' | 'arena' | 'result';
@@ -92,6 +94,9 @@ export const PKBattle: React.FC = () => {
   const [players, setPlayers] = useState<BattlePlayer[]>([]);
   const [answerFeedback, setAnswerFeedback] = useState<{ qid: string; correct: boolean } | null>(null);
   const [resultRoomId, setResultRoomId] = useState<string | null>(null);
+  // 本局掉落与荣誉（来自 pk:battle_end 载荷，迁移 087）
+  const [resultDrops, setResultDrops] = useState<PKResultDrop[]>([]);
+  const [resultHonors, setResultHonors] = useState<PKResultHonor[]>([]);
 
   // 连接 socket
   useEffect(() => {
@@ -203,6 +208,9 @@ export const PKBattle: React.FC = () => {
       if (Array.isArray(data.players)) setPlayers(data.players);
       setResumeData(null);
       setAnswerFeedback(null); // 清掉上一局遗留的判分反馈，避免新局开局误弹提示
+      // 清掉上一局的掉落/荣誉，否则新局尚未结束时若跳进结算页会显示旧数据
+      setResultDrops([]);
+      setResultHonors([]);
       setView('arena');
     });
 
@@ -218,7 +226,31 @@ export const PKBattle: React.FC = () => {
     });
 
     // 对战结束
+    // 载荷里带了本局掉落与荣誉（迁移 087，按 user_id 分组）：
+    // 结算页要等 GET /api/pk/history 返回才渲染，截图式反馈会滞后，
+    // 所以先把属于「我」的那份存下来，结算页顶部直接展示。
     const offEnd = on('pk:battle_end', (data: any) => {
+      const myId = profile?.id;
+      const allDrops = data?.dropped_equipments || {};
+      const allHonors = data?.new_honors || {};
+      setResultDrops(myId ? (allDrops[myId] || []) : []);
+      setResultHonors(myId ? (allHonors[myId] || []) : []);
+
+      // 荣誉/装备同时触发时给一个即时反馈（落在结算页渲染之前）
+      const honors = myId ? (allHonors[myId] || []) : [];
+      if (honors.length > 0) {
+        const first = honors[0];
+        useGameEventStore.getState().emitEvent(
+          first.type as any,
+          { equipments: myId ? (allDrops[myId] || []) : [] }
+        );
+      } else {
+        const drops = myId ? (allDrops[myId] || []) : [];
+        if (drops.length > 0) {
+          useGameEventStore.getState().emitEvent('equipment_drop', { equipments: drops });
+        }
+      }
+
       setResultRoomId(data.room_id);
       persistRoom(null);
       setView('result');
@@ -437,7 +469,12 @@ export const PKBattle: React.FC = () => {
             exit={{ opacity: 0 }}
             className="h-full"
           >
-            <PKResult roomId={resultRoomId} onBackToLobby={handleBackToLobby} />
+            <PKResult
+              roomId={resultRoomId}
+              onBackToLobby={handleBackToLobby}
+              droppedEquipments={resultDrops}
+              newHonors={resultHonors}
+            />
           </motion.div>
         )}
       </AnimatePresence>

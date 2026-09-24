@@ -17,6 +17,13 @@ const getHonorIcon = (type: string): string => {
       return '😈';
     case 'studious':
       return '📚';
+    // ===== PK 专属荣誉（迁移 087）=====
+    case 'pk_streak_3':
+      return '🔥';
+    case 'pk_flawless':
+      return '💎';
+    case 'pk_comeback':
+      return '🚀';
     default:
       return '🎉';
   }
@@ -32,6 +39,13 @@ const getHonorGradient = (type: string): string => {
       return 'from-red-500 to-rose-600';
     case 'studious':
       return 'from-blue-500 to-cyan-600';
+    // ===== PK 专属荣誉 =====
+    case 'pk_streak_3':
+      return 'from-orange-500 to-red-600';
+    case 'pk_flawless':
+      return 'from-cyan-500 to-blue-600';
+    case 'pk_comeback':
+      return 'from-violet-500 to-purple-600';
     default:
       return 'from-blue-500 to-purple-600';
   }

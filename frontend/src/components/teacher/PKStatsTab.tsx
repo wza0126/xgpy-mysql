@@ -1,17 +1,21 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell,
+  LineChart, Line, Legend,
 } from 'recharts';
 import { backendClient } from '../../api/backendClient';
 import { getAuthToken } from '../../utils/authToken';
 
 /**
- * PK 数据统计面板（P0）
+ * PK 数据统计面板（P0 + P1/P2）
  *
- * 三个维度：
+ * 五个区块：
  * 1) 总览卡 —— 活动搞没搞起来（参与率 / 场次 / 正确率 / 每题耗时 / 积分发放）
  * 2) 按活动 —— 哪个配置真被用了（含「从未被参与」的活动，便于及时下线）
- * 3) 按学生 —— 谁是活跃者、谁需要干预（场次 / 胜率 / 正确率 / 连败 / 最近对战）
+ * 3) 段位分布 —— 当前段位快照（谁在高段、班里有没有断层）
+ * 4) 段位趋势 —— 按日升降级次数（数据源 pk_rank_history，只记变化点）
+ * 5) 正确率柱状图 + 学生对战明细
+ * 6) PK 高频错题榜 —— 只聚合 pk_match_answers，与学情分析的错题排行口径不同
  *
  * 口径全部由后端 /api/pk/stats/* 裁定，前端不做二次统计（避免两处口径不一致）。
  */
@@ -72,6 +76,37 @@ interface StudentStat {
 
 const RANK_NAMES = ['小学生', '初中生', '高中生', '本科生', '研究生'];
 
+/** 段位分布（快照，后端 rank-distribution） */
+interface RankDistribution {
+  total: number;
+  tiers: Array<{ tier: number; name: string; icon: string; count: number; ratio: number }>;
+}
+
+/** 段位趋势（按日，后端 rank-trend） */
+interface RankTrendPoint {
+  date: string;
+  tier_up: number;
+  tier_down: number;
+  star_up: number;
+  star_down: number;
+  changes: number;
+  students: number;
+}
+
+/** PK 高频错题榜（后端 stats/wrong-questions） */
+interface WrongQuestionRow {
+  question_id: string;
+  content: string;
+  type: string | null;
+  difficulty: number | null;
+  cluster_id: string | null;
+  wrong_cnt: number;
+  answer_cnt: number;
+  student_cnt: number;
+  wrong_student_cnt: number;
+  wrong_rate: number | null;
+}
+
 const fmtDuration = (ms: number | null | undefined): string => {
   if (ms == null) return '—';
   if (ms < 1000) return `${ms} 毫秒`;
@@ -118,6 +153,15 @@ export const PKStatsTab: React.FC = () => {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [byConfig, setByConfig] = useState<ConfigStat[]>([]);
   const [byStudent, setByStudent] = useState<StudentStat[]>([]);
+  // P1/P2 新增
+  const [rankDist, setRankDist] = useState<RankDistribution | null>(null);
+  const [rankTrend, setRankTrend] = useState<RankTrendPoint[]>([]);
+  const [wrongRank, setWrongRank] = useState<WrongQuestionRow[]>([]);
+  const [wrongTotal, setWrongTotal] = useState(0);
+  const [wrongLoading, setWrongLoading] = useState(false);
+  const [wrongPage, setWrongPage] = useState(0);
+  const [trendDays, setTrendDays] = useState(30);
+  const WRONG_PAGE_SIZE = 20;
   // 排序：按学生表的列
   const [sortKey, setSortKey] = useState<keyof StudentStat>('rooms_played');
   const [sortAsc, setSortAsc] = useState(false);
@@ -128,6 +172,20 @@ export const PKStatsTab: React.FC = () => {
 
   useEffect(() => {
     if (classId) fetchStats();
+  }, [classId]);
+
+  // 趋势天数变化 / 错题榜翻页单独拉取，避免整页 loading 闪烁
+  useEffect(() => {
+    if (classId) fetchRankTrend();
+  }, [classId, trendDays]);
+
+  useEffect(() => {
+    if (classId) fetchWrongQuestions();
+  }, [classId, wrongPage]);
+
+  // 切班时重置翻页，否则会带着上一班的 offset 请求新班数据
+  useEffect(() => {
+    setWrongPage(0);
   }, [classId]);
 
   const fetchClasses = async () => {
@@ -148,18 +206,47 @@ export const PKStatsTab: React.FC = () => {
   const fetchStats = async () => {
     setLoading(true);
     try {
-      const [o, c, s] = await Promise.all([
+      const [o, c, s, rd] = await Promise.all([
         backendClient.get(`/api/pk/stats/overview?class_id=${encodeURIComponent(classId)}`),
         backendClient.get(`/api/pk/stats/by-config?class_id=${encodeURIComponent(classId)}`),
         backendClient.get(`/api/pk/stats/by-student?class_id=${encodeURIComponent(classId)}`),
+        backendClient.get(`/api/pk/stats/rank-distribution?class_id=${encodeURIComponent(classId)}`),
       ]);
       setOverview((o.data || null) as Overview | null);
       setByConfig((c.data || []) as ConfigStat[]);
       setByStudent((s.data || []) as StudentStat[]);
+      setRankDist((rd.data || null) as RankDistribution | null);
     } catch (e) {
       console.error('拉取 PK 统计失败:', e);
     }
     setLoading(false);
+  };
+
+  const fetchRankTrend = async () => {
+    try {
+      const r = await backendClient.get(
+        `/api/pk/stats/rank-trend?class_id=${encodeURIComponent(classId)}&days=${trendDays}`
+      );
+      setRankTrend(((r.data as any)?.series || []) as RankTrendPoint[]);
+    } catch (e) {
+      console.error('拉取段位趋势失败:', e);
+    }
+  };
+
+  const fetchWrongQuestions = async () => {
+    setWrongLoading(true);
+    try {
+      const r = await backendClient.get(
+        `/api/pk/stats/wrong-questions?class_id=${encodeURIComponent(classId)}` +
+        `&limit=${WRONG_PAGE_SIZE}&offset=${wrongPage * WRONG_PAGE_SIZE}`
+      );
+      const d = (r.data || {}) as any;
+      setWrongRank((d.rows || []) as WrongQuestionRow[]);
+      setWrongTotal(Number(d.total) || 0);
+    } catch (e) {
+      console.error('拉取 PK 高频错题榜失败:', e);
+    }
+    setWrongLoading(false);
   };
 
   const handleSort = (key: keyof StudentStat) => {
@@ -197,6 +284,35 @@ export const PKStatsTab: React.FC = () => {
         .slice(0, 12)
         .map((s) => ({ name: s.real_name || s.username, rate: s.correct_rate as number })),
     [byStudent]
+  );
+
+  /** 段位分布柱状图：带 emoji 的显示名，权重按人数 */
+  const rankDistChart = useMemo(
+    () =>
+      (rankDist?.tiers || []).map((t) => ({
+        name: `${t.icon} ${t.name}`,
+        count: t.count,
+        ratio: t.ratio,
+      })),
+    [rankDist]
+  );
+
+  /** 段位趋势：只保留有变化的日期，否则 30 天全零会让折线看起来像坏掉了 */
+  const rankTrendChart = useMemo(
+    () =>
+      rankTrend.map((p) => ({
+        // 只显示 MM-DD，图表 X 轴更紧凑
+        name: p.date.slice(5),
+        '段位升': p.tier_up,
+        '段位降': p.tier_down,
+        '升星': p.star_up,
+        '掉星': p.star_down,
+      })),
+    [rankTrend]
+  );
+  const trendHasData = useMemo(
+    () => rankTrend.some((p) => p.changes > 0),
+    [rankTrend]
   );
 
   const Th: React.FC<{ k: keyof StudentStat; children: React.ReactNode; align?: 'left' | 'right' }> = ({
@@ -360,6 +476,167 @@ export const PKStatsTab: React.FC = () => {
                 </tbody>
               </table>
             </div>
+          </div>
+
+          {/* ===== 段位分布 + 段位趋势 ===== */}
+          <div className="grid gap-4 lg:grid-cols-2">
+            {/* 段位分布（当前快照） */}
+            <div className="bg-white rounded-xl border border-gray-200 p-4">
+              <h4 className="font-bold text-gray-800 mb-1">
+                <i className="fa-solid fa-ranking-star mr-2 text-purple-500"></i>段位分布（当前）
+              </h4>
+              <p className="text-xs text-gray-500 mb-3">
+                全班 {rankDist?.total ?? 0} 名学生按段位快照；用于判断班级整体进度是否断层
+              </p>
+              {rankDistChart.some((d) => d.count > 0) ? (
+                <ResponsiveContainer width="100%" height={240}>
+                  <BarChart data={rankDistChart} margin={{ top: 8, right: 16, bottom: 8, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                    <XAxis dataKey="name" tick={{ fontSize: 12 }} />
+                    <YAxis allowDecimals={false} tick={{ fontSize: 12 }} />
+                    <Tooltip
+                      formatter={(v: any, _n: any, p: any) => [
+                        `${v} 人（${p?.payload?.ratio ?? 0}%）`, '人数',
+                      ]}
+                    />
+                    <Bar dataKey="count" radius={[4, 4, 0, 0]}>
+                      {rankDistChart.map((d, i) => (
+                        <Cell
+                          key={i}
+                          fill={['#60a5fa', '#22d3ee', '#22c55e', '#a855f7', '#f59e0b'][i] || '#60a5fa'}
+                        />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="py-12 text-center text-gray-400 text-sm">该班级暂无学生</div>
+              )}
+            </div>
+
+            {/* 段位趋势（按日） */}
+            <div className="bg-white rounded-xl border border-gray-200 p-4">
+              <div className="flex items-start justify-between mb-1">
+                <h4 className="font-bold text-gray-800">
+                  <i className="fa-solid fa-chart-line mr-2 text-purple-500"></i>段位变化趋势
+                </h4>
+                <select
+                  value={trendDays}
+                  onChange={(e) => setTrendDays(Number(e.target.value))}
+                  className="p-1 border border-gray-300 rounded-lg text-xs focus:ring-2 focus:ring-purple-500 outline-none"
+                >
+                  <option value={7}>近 7 天</option>
+                  <option value={30}>近 30 天</option>
+                  <option value={90}>近 90 天</option>
+                </select>
+              </div>
+              <p className="text-xs text-gray-500 mb-3">
+                只记录「段位/星数发生变化」的时点；平局与未变化不计
+              </p>
+              {trendHasData ? (
+                <ResponsiveContainer width="100%" height={240}>
+                  <LineChart data={rankTrendChart} margin={{ top: 8, right: 16, bottom: 8, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                    <XAxis dataKey="name" tick={{ fontSize: 11 }} minTickGap={16} />
+                    <YAxis allowDecimals={false} tick={{ fontSize: 12 }} />
+                    <Tooltip />
+                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    <Line type="monotone" dataKey="段位升" stroke="#22c55e" strokeWidth={2} dot={false} />
+                    <Line type="monotone" dataKey="段位降" stroke="#ef4444" strokeWidth={2} dot={false} />
+                    <Line type="monotone" dataKey="升星" stroke="#86efac" strokeWidth={1} dot={false} />
+                    <Line type="monotone" dataKey="掉星" stroke="#fca5a5" strokeWidth={1} dot={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="py-12 text-center text-gray-400 text-sm">
+                  该时段内没有段位变化记录
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* ===== PK 高频错题榜 ===== */}
+          <div className="bg-white rounded-xl border border-gray-200 p-4">
+            <h4 className="font-bold text-gray-800 mb-1">
+              <i className="fa-solid fa-triangle-exclamation mr-2 text-orange-500"></i>PK 高频错题榜
+            </h4>
+            <p className="text-xs text-gray-500 mb-3">
+              只统计 PK 对战中的作答（口径与「学情分析 · 错题排行」不同，后者含练习/测试/考试）；
+              赛前针对这些题复习收益最高
+            </p>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-3 py-2 text-left text-xs font-medium text-gray-600 w-12">#</th>
+                    <th className="px-3 py-2 text-left text-xs font-medium text-gray-600">题干</th>
+                    <th className="px-3 py-2 text-right text-xs font-medium text-gray-600">答错人次</th>
+                    <th className="px-3 py-2 text-right text-xs font-medium text-gray-600">答错学生</th>
+                    <th className="px-3 py-2 text-right text-xs font-medium text-gray-600">答错率</th>
+                    <th className="px-3 py-2 text-left text-xs font-medium text-gray-600">知识点</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {wrongRank.map((r, i) => (
+                    <tr key={r.question_id} className="border-t border-gray-100 hover:bg-gray-50">
+                      <td className="px-3 py-2 text-gray-400">{wrongPage * WRONG_PAGE_SIZE + i + 1}</td>
+                      <td className="px-3 py-2 text-gray-800 max-w-md">
+                        <div className="truncate" title={r.content}>{r.content}</div>
+                      </td>
+                      <td className="px-3 py-2 text-right font-medium text-red-600">{r.wrong_cnt}</td>
+                      <td className="px-3 py-2 text-right text-gray-600">
+                        {r.wrong_student_cnt} / {r.student_cnt}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        {r.wrong_rate == null ? '—' : (
+                          <span className={
+                            r.wrong_rate >= 60 ? 'text-red-600 font-medium'
+                              : r.wrong_rate >= 30 ? 'text-orange-500' : 'text-gray-600'
+                          }>
+                            {r.wrong_rate}%
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-xs text-gray-500">
+                        {r.cluster_id || '—'}
+                      </td>
+                    </tr>
+                  ))}
+                  {wrongRank.length === 0 && (
+                    <tr>
+                      <td colSpan={6} className="px-3 py-8 text-center text-gray-400">
+                        {wrongLoading ? '加载中…' : '该班级暂无 PK 错题记录'}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* 分页 */}
+            {wrongTotal > WRONG_PAGE_SIZE && (
+              <div className="flex items-center justify-between mt-3 pt-3 border-t border-gray-100">
+                <span className="text-xs text-gray-500">
+                  共 {wrongTotal} 道题有错记录 · 第 {wrongPage + 1} / {Math.ceil(wrongTotal / WRONG_PAGE_SIZE)} 页
+                </span>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setWrongPage((p) => Math.max(0, p - 1))}
+                    disabled={wrongPage === 0 || wrongLoading}
+                    className="px-3 py-1 text-sm border border-gray-300 rounded-lg disabled:opacity-40 hover:bg-gray-50"
+                  >
+                    上一页
+                  </button>
+                  <button
+                    onClick={() => setWrongPage((p) => p + 1)}
+                    disabled={(wrongPage + 1) * WRONG_PAGE_SIZE >= wrongTotal || wrongLoading}
+                    className="px-3 py-1 text-sm border border-gray-300 rounded-lg disabled:opacity-40 hover:bg-gray-50"
+                  >
+                    下一页
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* ===== 正确率分布 ===== */}

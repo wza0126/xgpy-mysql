@@ -29,16 +29,47 @@ interface ReviewAnswer {
   correct_answer: string;
 }
 
+/** 本局段位变化（迁移 087；平局或段位未变时该玩家没有对应行） */
+interface RankChange {
+  user_id: string;
+  from_tier: number;
+  from_stars: number;
+  to_tier: number;
+  to_stars: number;
+  result: 'win' | 'lose' | 'draw';
+}
+
 interface ReviewData {
   room: any;
   players: ReviewPlayer[];
   answers: ReviewAnswer[];
+  rank_changes?: RankChange[];
+}
+
+/** 本局掉落的装备（由 socket 的 pk:battle_end 载荷传入） */
+export interface PKResultDrop {
+  id: string;
+  name: string;
+  icon: string;
+  crit_bonus: number;
+}
+
+/** 本局达成的新荣誉 */
+export interface PKResultHonor {
+  type: string;
+  name: string;
+  icon?: string;
+  description?: string;
 }
 
 export const PKResult: React.FC<{
   roomId: string;
   onBackToLobby: () => void;
-}> = ({ roomId, onBackToLobby }) => {
+  /** 本局掉落（来自 socket 载荷），结算页顶部先展示，避免学生漏看 */
+  droppedEquipments?: PKResultDrop[];
+  /** 本局新达成的荣誉 */
+  newHonors?: PKResultHonor[];
+}> = ({ roomId, onBackToLobby, droppedEquipments = [], newHonors = [] }) => {
   const { profile, refreshProfile } = useAuth();
   const [data, setData] = useState<ReviewData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -125,6 +156,13 @@ export const PKResult: React.FC<{
     (a) => a.user_id === me.user_id && !a.is_correct
   ).length;
 
+  // 本局我的段位变化（平局或未变化时没有记录）
+  const myRankChange = (data.rank_changes || []).find((r) => r.user_id === me.user_id);
+  const myFromRank = myRankChange ? getRankInfo(myRankChange.from_tier, myRankChange.from_stars) : null;
+  const myToRank = myRankChange ? getRankInfo(myRankChange.to_tier, myRankChange.to_stars) : null;
+  const tierUp = myRankChange ? myRankChange.to_tier > myRankChange.from_tier : false;
+  const tierDown = myRankChange ? myRankChange.to_tier < myRankChange.from_tier : false;
+
   // 收集题目（去重）
   const questionMap = new Map<string, ReviewAnswer>();
   data.answers.forEach((a) => {
@@ -135,6 +173,53 @@ export const PKResult: React.FC<{
 
   return (
     <div className="p-6 max-w-4xl mx-auto">
+      {/* 本局获得的装备与荣誉（来自 socket 载荷）—— 放在最上方，
+          避免被下方复盘表格推到屏幕外而漏看 */}
+      {(droppedEquipments.length > 0 || newHonors.length > 0) && (
+        <motion.div
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="mb-4 grid gap-3 md:grid-cols-2"
+        >
+          {droppedEquipments.length > 0 && (
+            <div className="rounded-xl border-2 border-amber-300 bg-gradient-to-r from-amber-50 to-yellow-50 p-4">
+              <p className="text-sm font-bold text-amber-700 mb-2">🎁 本局获得装备</p>
+              <div className="flex flex-wrap gap-2">
+                {droppedEquipments.map((eq) => (
+                  <span
+                    key={eq.id}
+                    className="flex items-center gap-1 px-3 py-1 bg-white rounded-lg border border-amber-200 text-sm"
+                  >
+                    <span className="text-lg">{eq.icon || '⚔️'}</span>
+                    <span className="font-medium text-gray-800">{eq.name}</span>
+                    {eq.crit_bonus > 0 && (
+                      <span className="text-xs text-amber-600">+{eq.crit_bonus}% 暴击</span>
+                    )}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          {newHonors.length > 0 && (
+            <div className="rounded-xl border-2 border-purple-300 bg-gradient-to-r from-purple-50 to-fuchsia-50 p-4">
+              <p className="text-sm font-bold text-purple-700 mb-2">🏅 本局达成荣誉</p>
+              <div className="flex flex-wrap gap-2">
+                {newHonors.map((h) => (
+                  <span
+                    key={h.type}
+                    className="flex items-center gap-1 px-3 py-1 bg-white rounded-lg border border-purple-200 text-sm"
+                    title={h.description || ''}
+                  >
+                    <span className="text-lg">{h.icon || '🎉'}</span>
+                    <span className="font-medium text-gray-800">{h.name}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </motion.div>
+      )}
+
       {/* 结果横幅 */}
       <motion.div
         initial={{ opacity: 0, scale: 0.9 }}
@@ -158,6 +243,19 @@ export const PKResult: React.FC<{
             <p className="text-xl font-bold">+{me.system_points_earned}</p>
           </div>
         </div>
+
+        {/* 段位升降级（迁移 087）：只在真的变了时展示，避免"段位变化：无"的噪音 */}
+        {myRankChange && myFromRank && myToRank && (
+          <div className="mt-4 inline-flex items-center gap-3 px-5 py-2 bg-white/25 rounded-full text-white font-bold">
+            <span>{myFromRank.icon} {myFromRank.name} {renderStars(myRankChange.from_tier, myRankChange.from_stars)}</span>
+            <span className="text-lg">→</span>
+            <span className={tierUp ? 'text-green-100' : tierDown ? 'text-red-100' : ''}>
+              {myToRank.icon} {myToRank.name} {renderStars(myRankChange.to_tier, myRankChange.to_stars)}
+            </span>
+            {tierUp && <span className="px-2 py-0.5 bg-white/30 rounded-full text-xs">晋级！</span>}
+            {tierDown && <span className="px-2 py-0.5 bg-black/20 rounded-full text-xs">掉段</span>}
+          </div>
+        )}
       </motion.div>
 
       {/* 数据对比卡 */}

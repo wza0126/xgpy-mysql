@@ -8893,7 +8893,9 @@ app.get('/api/student/honors', authenticate, async (req, res) => {
   try {
     const userId = req.user.userId || req.user.id;
     const [rows] = await pool.query(
-      'SELECT perfect_10_times, triple_crit_times, wrong_3_times, studious_times, typing_fast_times FROM profiles WHERE id = ?',
+      `SELECT perfect_10_times, triple_crit_times, wrong_3_times, studious_times, typing_fast_times,
+              pk_streak_3_times, pk_flawless_times, pk_comeback_times, pk_win_streak
+       FROM profiles WHERE id = ?`,
       [userId]
     );
 
@@ -8908,12 +8910,21 @@ app.get('/api/student/honors', authenticate, async (req, res) => {
         wrong_3_times: rows[0].wrong_3_times || 0,
         studious_times: rows[0].studious_times || 0,
         typing_fast_times: rows[0].typing_fast_times || 0,
+        // ===== PK 专属荣誉（迁移 087）=====
+        pk_streak_3_times: rows[0].pk_streak_3_times || 0,
+        pk_flawless_times: rows[0].pk_flawless_times || 0,
+        pk_comeback_times: rows[0].pk_comeback_times || 0,
+        pk_win_streak: rows[0].pk_win_streak || 0,
         honors: [
-          { type: 'perfect_10', name: '十全十美', times: rows[0].perfect_10_times || 0, description: '练习连对10题' },
-          { type: 'triple_crit', name: '三连暴击', times: rows[0].triple_crit_times || 0, description: '连续暴击3次' },
-          { type: 'wrong_3', name: '屡败屡战', times: rows[0].wrong_3_times || 0, description: '练习时连错3题' },
-          { type: 'studious', name: '勤学好问', times: rows[0].studious_times || 0, description: '当天 AI 答疑成功提问满 10 次（每天一次）' },
-          { type: 'typing_fast', name: '运指如飞', times: rows[0].typing_fast_times || 0, description: '键盘星域单人模式速度达标' }
+          { type: 'perfect_10', name: '十全十美', times: rows[0].perfect_10_times || 0, description: '练习连对10题', category: 'practice' },
+          { type: 'triple_crit', name: '三连暴击', times: rows[0].triple_crit_times || 0, description: '连续暴击3次', category: 'practice' },
+          { type: 'wrong_3', name: '屡败屡战', times: rows[0].wrong_3_times || 0, description: '练习时连错3题', category: 'practice' },
+          { type: 'studious', name: '勤学好问', times: rows[0].studious_times || 0, description: '当天 AI 答疑成功提问满 10 次（每天一次）', category: 'study' },
+          { type: 'typing_fast', name: '运指如飞', times: rows[0].typing_fast_times || 0, description: '键盘星域单人模式速度达标', category: 'typing' },
+          // PK 荣誉与练习侧荣誉同表下发，前端用 category 分组展示
+          { type: 'pk_streak_3', name: '连胜达人', icon: '🔥', times: rows[0].pk_streak_3_times || 0, description: 'PK 对战累计达成 3 连胜（每满 3 场计一次）', category: 'pk' },
+          { type: 'pk_flawless', name: '零失误', icon: '💎', times: rows[0].pk_flawless_times || 0, description: 'PK 单局全部答对且至少作答 1 题', category: 'pk' },
+          { type: 'pk_comeback', name: '愈战愈勇', icon: '🚀', times: rows[0].pk_comeback_times || 0, description: 'PK 对战中场落后，最终反超获胜', category: 'pk' },
         ]
       },
       error: null
@@ -14924,6 +14935,21 @@ function normalizePkRewardFields(raw = {}) {
   };
 }
 
+/**
+ * PK 装备掉落配置归一化（迁移 087）
+ *
+ * ⚠️ 掉率系数上限 5：练习侧测试/考试是 ×10，PK 若允许更高会让「刷 PK 拿装备」
+ * 压过练习模块的教学价值。默认 enabled=0（保持旧行为，PK 原先没有掉落）。
+ */
+function normalizePkDropFields(raw = {}) {
+  const enabled = raw.equipment_drop_enabled === true
+    || raw.equipment_drop_enabled === 1
+    || raw.equipment_drop_enabled === '1';
+  const n = Number(raw.equipment_drop_multiplier);
+  const multiplier = Number.isFinite(n) ? Math.min(5, Math.max(0, Math.round(n * 100) / 100)) : 1;
+  return { equipment_drop_enabled: enabled ? 1 : 0, equipment_drop_multiplier: multiplier };
+}
+
 // 教师端：对战配置 CRUD
 app.get('/api/pk/battle-configs', authenticate, requireTeacher, async (req, res) => {
   try {
@@ -14946,7 +14972,8 @@ app.post('/api/pk/battle-configs', authenticate, requireTeacher, async (req, res
       qualification_mastered_clusters,
       points_multiplier, win_bonus_rate, draw_bonus_rate,
       consolation_points, consolation_gap, first_battle_points,
-      daily_battles_target, daily_battles_points } = req.body;
+      daily_battles_target, daily_battles_points,
+      equipment_drop_enabled, equipment_drop_multiplier } = req.body;
     const id = 'pbc_' + crypto.randomBytes(8).toString('hex');
     // 已掌握类目范围：空数组/NULL 均写 null（表示全部范围，不限类目）
     const masteredClusters = Array.isArray(qualification_mastered_clusters)
@@ -14957,6 +14984,7 @@ app.post('/api/pk/battle-configs', authenticate, requireTeacher, async (req, res
       consolation_points, consolation_gap, first_battle_points,
       daily_battles_target, daily_battles_points,
     });
+    const drops = normalizePkDropFields({ equipment_drop_enabled, equipment_drop_multiplier });
     await pool.query(
       `INSERT INTO pk_battle_configs
        (id, teacher_id, name, mode, duration_seconds, question_count,
@@ -14964,8 +14992,9 @@ app.post('/api/pk/battle-configs', authenticate, requireTeacher, async (req, res
         qualification_correct_count, qualification_mastered_count, qualification_mastered_clusters,
         points_multiplier, win_bonus_rate, draw_bonus_rate,
         consolation_points, consolation_gap, first_battle_points,
-        daily_battles_target, daily_battles_points)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        daily_battles_target, daily_battles_points,
+        equipment_drop_enabled, equipment_drop_multiplier)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, req.user.userId, name, mode || 'timed',
        duration_seconds || 180, question_count || 20,
        tag_filters ? JSON.stringify(tag_filters) : null,
@@ -14976,7 +15005,8 @@ app.post('/api/pk/battle-configs', authenticate, requireTeacher, async (req, res
        qualification_mastered_count || null, masteredClusters,
        reward.points_multiplier, reward.win_bonus_rate, reward.draw_bonus_rate,
        reward.consolation_points, reward.consolation_gap, reward.first_battle_points,
-       reward.daily_battles_target, reward.daily_battles_points]
+       reward.daily_battles_target, reward.daily_battles_points,
+       drops.equipment_drop_enabled, drops.equipment_drop_multiplier]
     );
     res.json({ data: { id }, error: null });
   } catch (err) {
@@ -14993,7 +15023,8 @@ app.put('/api/pk/battle-configs/:id', authenticate, requireTeacher, async (req, 
       qualification_mastered_clusters,
       points_multiplier, win_bonus_rate, draw_bonus_rate,
       consolation_points, consolation_gap, first_battle_points,
-      daily_battles_target, daily_battles_points } = req.body;
+      daily_battles_target, daily_battles_points,
+      equipment_drop_enabled, equipment_drop_multiplier } = req.body;
     const masteredClusters = Array.isArray(qualification_mastered_clusters)
       && qualification_mastered_clusters.length > 0
       ? JSON.stringify(qualification_mastered_clusters) : null;
@@ -15002,6 +15033,7 @@ app.put('/api/pk/battle-configs/:id', authenticate, requireTeacher, async (req, 
       consolation_points, consolation_gap, first_battle_points,
       daily_battles_target, daily_battles_points,
     });
+    const drops = normalizePkDropFields({ equipment_drop_enabled, equipment_drop_multiplier });
     await pool.query(
       `UPDATE pk_battle_configs SET
         name = ?, mode = ?, duration_seconds = ?, question_count = ?,
@@ -15010,7 +15042,8 @@ app.put('/api/pk/battle-configs/:id', authenticate, requireTeacher, async (req, 
         qualification_mastered_count = ?, qualification_mastered_clusters = ?,
         points_multiplier = ?, win_bonus_rate = ?, draw_bonus_rate = ?,
         consolation_points = ?, consolation_gap = ?, first_battle_points = ?,
-        daily_battles_target = ?, daily_battles_points = ?
+        daily_battles_target = ?, daily_battles_points = ?,
+        equipment_drop_enabled = ?, equipment_drop_multiplier = ?
        WHERE id = ? AND teacher_id = ?`,
       [name, mode || 'timed', duration_seconds || 180, question_count || 20,
        tag_filters ? JSON.stringify(tag_filters) : null,
@@ -15022,6 +15055,7 @@ app.put('/api/pk/battle-configs/:id', authenticate, requireTeacher, async (req, 
        reward.points_multiplier, reward.win_bonus_rate, reward.draw_bonus_rate,
        reward.consolation_points, reward.consolation_gap, reward.first_battle_points,
        reward.daily_battles_target, reward.daily_battles_points,
+       drops.equipment_drop_enabled, drops.equipment_drop_multiplier,
        req.params.id, req.user.userId]
     );
     res.json({ data: { id: req.params.id }, error: null });
@@ -15189,6 +15223,13 @@ app.get('/api/pk/history/:room_id', authenticate, requireStudent, async (req, re
       [roomId]
     );
 
+    // 本局段位变化（迁移 087；平局或段位未变时该玩家没有记录）
+    const [rankChangeRows] = await pool.query(
+      `SELECT user_id, from_tier, from_stars, to_tier, to_stars, result
+       FROM pk_rank_history WHERE room_id = ?`,
+      [roomId]
+    );
+
     res.json({
       data: {
         room: roomRows[0],
@@ -15203,8 +15244,13 @@ app.get('/api/pk/history/:room_id', authenticate, requireStudent, async (req, re
           final_duration_ms: p.final_duration_ms,
           rank_points_change: p.rank_points_change,
           system_points_earned: p.system_points_earned,
+          // 参与类奖励（迁移 086）
+          bonus_points: p.bonus_points,
+          consolation_points: p.consolation_points,
         })),
         answers,
+        // 本局段位变化（迁移 087）—— 结算页展示「小学生★★★ → 初中生★」需要它
+        rank_changes: rankChangeRows,
       },
       error: null,
     });
@@ -15518,6 +15564,184 @@ app.get('/api/pk/stats/points-summary', authenticate, requireTeacher, async (req
   } catch (err) {
     console.error('PK 积分摘要失败:', err);
     res.status(500).json({ data: null, error: '查询失败' });
+  }
+});
+
+// 5) 教师端：段位分布（当前快照，按班级）
+// 用 profiles 实时值而非历史表 —— 「现在谁在什么段位」必须是当前态，
+// 历史表只用于看趋势（下一个接口）。
+app.get('/api/pk/stats/rank-distribution', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { class_id } = req.query;
+    if (!class_id) return res.status(400).json({ data: null, error: '缺少 class_id' });
+
+    // 段位常量与 rankCalc.RANK_TIERS 同源（避免前端/后端两处名字不一致）
+    const { RANK_TIERS } = require('./pk-socket/rankCalc');
+
+    const [rows] = await pool.query(
+      `SELECT pk_rank_tier AS tier, COUNT(*) AS cnt
+       FROM profiles
+       WHERE class_id = ? AND role = 'student'
+       GROUP BY pk_rank_tier`,
+      [class_id]
+    );
+    const countMap = {};
+    rows.forEach((r) => { countMap[Number(r.tier) || 0] = Number(r.cnt) || 0; });
+
+    const total = Object.values(countMap).reduce((a, b) => a + b, 0);
+    const data = RANK_TIERS.map((t) => {
+      const cnt = countMap[t.tier] || 0;
+      return {
+        tier: t.tier,
+        name: t.name,
+        icon: t.icon,
+        count: cnt,
+        // 占比保留 1 位小数；无学生时给 0 而不是 null，前端画柱状图更省事
+        ratio: total > 0 ? Math.round((cnt / total) * 1000) / 10 : 0,
+      };
+    });
+
+    res.json({ data: { total, tiers: data }, error: null });
+  } catch (err) {
+    console.error('PK 段位分布失败:', err);
+    res.status(500).json({ data: null, error: '统计失败' });
+  }
+});
+
+// 6) 教师端：段位变化趋势（按日聚合升降级次数）
+// 数据源 pk_rank_history（迁移 087），只记「段位/星数发生变化」的时点。
+app.get('/api/pk/stats/rank-trend', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { class_id, days } = req.query;
+    if (!class_id) return res.status(400).json({ data: null, error: '缺少 class_id' });
+    const n = Math.min(90, Math.max(1, parseInt(days, 10) || 30));
+
+    const [rows] = await pool.query(
+      `SELECT DATE(created_at) AS d,
+              -- 升级：段位升 or 同段星数增；降级反之。同段星数增减也算「变化」但不进升降栏
+              SUM(CASE WHEN to_tier > from_tier THEN 1 ELSE 0 END) AS tier_up,
+              SUM(CASE WHEN to_tier < from_tier THEN 1 ELSE 0 END) AS tier_down,
+              SUM(CASE WHEN to_tier = from_tier AND to_stars > from_stars THEN 1 ELSE 0 END) AS star_up,
+              SUM(CASE WHEN to_tier = from_tier AND to_stars < from_stars THEN 1 ELSE 0 END) AS star_down,
+              COUNT(*) AS changes,
+              COUNT(DISTINCT user_id) AS students
+       FROM pk_rank_history
+       WHERE class_id = ?
+         AND created_at >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+       GROUP BY DATE(created_at)
+       ORDER BY d ASC`,
+      [class_id, n]
+    );
+
+    // 补齐空日期：前端画折线图时缺日期会出现断点，视觉上像"数据丢了"
+    const map = {};
+    rows.forEach((r) => {
+      const key = r.d instanceof Date
+        ? `${r.d.getFullYear()}-${String(r.d.getMonth() + 1).padStart(2, '0')}-${String(r.d.getDate()).padStart(2, '0')}`
+        : String(r.d).slice(0, 10);
+      map[key] = {
+        date: key,
+        tier_up: Number(r.tier_up) || 0,
+        tier_down: Number(r.tier_down) || 0,
+        star_up: Number(r.star_up) || 0,
+        star_down: Number(r.star_down) || 0,
+        changes: Number(r.changes) || 0,
+        students: Number(r.students) || 0,
+      };
+    });
+    const series = [];
+    for (let i = n - 1; i >= 0; i--) {
+      const dt = new Date();
+      dt.setDate(dt.getDate() - i);
+      const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+      series.push(map[key] || {
+        date: key, tier_up: 0, tier_down: 0, star_up: 0, star_down: 0, changes: 0, students: 0,
+      });
+    }
+
+    res.json({ data: { days: n, series }, error: null });
+  } catch (err) {
+    console.error('PK 段位趋势失败:', err);
+    res.status(500).json({ data: null, error: '统计失败' });
+  }
+});
+
+// 7) 教师端：PK 对战高频错题榜
+// 与学情分析里的「错题排行」口径不同：那边聚合 student_answers（练习/测试/考试），
+// 这边只聚合 pk_match_answers —— 回答「哪些题在 PK 里最常被答错」，
+// 供教师在赛前针对性复习。两套口径各自独立，不要合并。
+app.get('/api/pk/stats/wrong-questions', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { class_id, limit, offset } = req.query;
+    if (!class_id) return res.status(400).json({ data: null, error: '缺少 class_id' });
+    const lim = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+    const off = Math.max(0, parseInt(offset, 10) || 0);
+
+    // 每题：答错人次（去重学生）/ 作答人次 / 答错率
+    // ⚠️ total 必须与列表的 HAVING 同口径（只算「答错过」的题），
+    // 否则分页总页数会比实际能翻出来的多，出现"翻到最后一页是空表"。
+    const [countRows] = await pool.query(
+      `SELECT COUNT(*) AS total FROM (
+         SELECT a.question_id
+         FROM pk_match_answers a
+         JOIN profiles pr ON a.user_id = pr.id
+         WHERE pr.class_id = ?
+           AND a.room_id IN (SELECT r.id FROM pk_rooms r WHERE r.status = 'finished')
+         GROUP BY a.question_id
+         HAVING SUM(a.is_correct = 0) > 0
+       ) t`,
+      [class_id]
+    );
+
+    const [rows] = await pool.query(
+      `SELECT
+         a.question_id,
+         MAX(q.content) AS content,
+         MAX(q.type) AS type,
+         MAX(q.cluster_id) AS cluster_id,
+         MAX(q.sub_topic) AS sub_topic,
+         SUM(a.is_correct = 0) AS wrong_cnt,
+         COUNT(*) AS answer_cnt,
+         COUNT(DISTINCT a.user_id) AS student_cnt,
+         COUNT(DISTINCT CASE WHEN a.is_correct = 0 THEN a.user_id END) AS wrong_student_cnt
+       FROM pk_match_answers a
+       JOIN profiles pr ON a.user_id = pr.id
+       LEFT JOIN questions q ON q.id = a.question_id
+       WHERE pr.class_id = ?
+         AND a.room_id IN (SELECT r.id FROM pk_rooms r WHERE r.status = 'finished')
+       GROUP BY a.question_id
+       HAVING SUM(a.is_correct = 0) > 0
+       ORDER BY SUM(a.is_correct = 0) DESC, COUNT(*) DESC
+       LIMIT ? OFFSET ?`,
+      [class_id, lim, off]
+    );
+
+    const data = rows.map((r) => {
+      const answerCnt = Number(r.answer_cnt) || 0;
+      const wrongCnt = Number(r.wrong_cnt) || 0;
+      return {
+        question_id: r.question_id,
+        content: r.content || '(题目已删除)',
+        type: r.type,
+        difficulty: null, // questions 表无 difficulty 列，保留字段位以便前端统一渲染
+        cluster_id: r.cluster_id,
+        sub_topic: r.sub_topic,
+        wrong_cnt: wrongCnt,
+        answer_cnt: answerCnt,
+        student_cnt: Number(r.student_cnt) || 0,
+        wrong_student_cnt: Number(r.wrong_student_cnt) || 0,
+        // 答错率 = 答错人次 ÷ 总作答人次
+        wrong_rate: answerCnt > 0 ? Math.round((wrongCnt / answerCnt) * 1000) / 10 : null,
+      };
+    });
+
+    res.json({
+      data: { total: Number(countRows[0]?.total) || 0, limit: lim, offset: off, rows: data },
+      error: null,
+    });
+  } catch (err) {
+    console.error('PK 高频错题榜失败:', err);
+    res.status(500).json({ data: null, error: '统计失败' });
   }
 });
 // ===== PK 对战 REST API END =====
