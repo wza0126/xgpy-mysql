@@ -647,7 +647,9 @@ export const PrizeManager: React.FC = () => {
                       className="w-full p-3 border border-gray-300 rounded-lg"
                     >
                       <option value="">请选择皮肤...</option>
-                      {WINDOW_SKINS.map((skin) => (
+                      {/* 只列积分兑换类皮肤：段位专属皮肤靠打 PK 升段获得，
+                          若允许教师作为奖品发放会绕过段位门槛，破坏「实力证明」的定位 */}
+                      {WINDOW_SKINS.filter((skin) => skin.unlockSource !== 'rank').map((skin) => (
                         <option key={skin.id} value={skin.id}>
                           {skin.previewEmoji} {skin.name} [{TIER_LABELS[skin.tier]}] 暴击+{skin.critBonus}% (建议{skin.pointsCost}积分)
                         </option>

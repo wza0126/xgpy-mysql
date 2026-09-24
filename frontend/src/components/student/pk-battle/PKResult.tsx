@@ -54,12 +54,21 @@ export interface PKResultDrop {
   crit_bonus: number;
 }
 
-/** 本局达成的新荣誉 */
+/** 本局达成的荣誉 */
 export interface PKResultHonor {
   type: string;
   name: string;
   icon?: string;
   description?: string;
+}
+
+/**
+ * 本局参与类奖励明细（来自 socket 载荷 bonuses）
+ * 注意：0 表示「今天已经发过」，不是「获得 0 分」，展示时必须过滤掉 0
+ */
+export interface PKResultBonus {
+  first_battle?: number;
+  daily_battles?: number;
 }
 
 export const PKResult: React.FC<{
@@ -69,7 +78,18 @@ export const PKResult: React.FC<{
   droppedEquipments?: PKResultDrop[];
   /** 本局新达成的荣誉 */
   newHonors?: PKResultHonor[];
-}> = ({ roomId, onBackToLobby, droppedEquipments = [], newHonors = [] }) => {
+  /** 本局参与类奖励明细（首战 / 单日满场） */
+  bonuses?: PKResultBonus | null;
+  /** 单日满场奖励所需场次（用于文案「单日满 N 场」） */
+  dailyTarget?: number;
+}> = ({
+  roomId,
+  onBackToLobby,
+  droppedEquipments = [],
+  newHonors = [],
+  bonuses = null,
+  dailyTarget = 0,
+}) => {
   const { profile, refreshProfile } = useAuth();
   const [data, setData] = useState<ReviewData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -163,6 +183,11 @@ export const PKResult: React.FC<{
   const tierUp = myRankChange ? myRankChange.to_tier > myRankChange.from_tier : false;
   const tierDown = myRankChange ? myRankChange.to_tier < myRankChange.from_tier : false;
 
+  // 参与类奖励明细（首战 / 单日满场）：0 表示「今日已发过」，必须过滤，否则会误报"获得 0 分"
+  const firstBattlePts = Number(bonuses?.first_battle) || 0;
+  const dailyBattlesPts = Number(bonuses?.daily_battles) || 0;
+  const bonusTotal = firstBattlePts + dailyBattlesPts;
+
   // 收集题目（去重）
   const questionMap = new Map<string, ReviewAnswer>();
   data.answers.forEach((a) => {
@@ -175,12 +200,39 @@ export const PKResult: React.FC<{
     <div className="p-6 max-w-4xl mx-auto">
       {/* 本局获得的装备与荣誉（来自 socket 载荷）—— 放在最上方，
           避免被下方复盘表格推到屏幕外而漏看 */}
-      {(droppedEquipments.length > 0 || newHonors.length > 0) && (
+      {(droppedEquipments.length > 0 || newHonors.length > 0 || bonusTotal > 0) && (
         <motion.div
           initial={{ opacity: 0, y: -10 }}
           animate={{ opacity: 1, y: 0 }}
           className="mb-4 grid gap-3 md:grid-cols-2"
         >
+          {/* 参与类奖励（首战 / 单日满场）—— 原先只落库不回执，学生"分了积分却不知道" */}
+          {bonusTotal > 0 && (
+            <div className="rounded-xl border-2 border-emerald-300 bg-gradient-to-r from-emerald-50 to-teal-50 p-4">
+              <p className="text-sm font-bold text-emerald-700 mb-2">💰 本局额外奖励</p>
+              <div className="flex flex-wrap gap-2">
+                {firstBattlePts > 0 && (
+                  <span className="flex items-center gap-1 px-3 py-1 bg-white rounded-lg border border-emerald-200 text-sm">
+                    <span className="text-lg">🌅</span>
+                    <span className="font-medium text-gray-800">每日首战</span>
+                    <span className="font-bold text-emerald-600">+{firstBattlePts}</span>
+                  </span>
+                )}
+                {dailyBattlesPts > 0 && (
+                  <span className="flex items-center gap-1 px-3 py-1 bg-white rounded-lg border border-emerald-200 text-sm">
+                    <span className="text-lg">🔥</span>
+                    <span className="font-medium text-gray-800">
+                      {dailyTarget > 0 ? `单日满 ${dailyTarget} 场` : '单日满场'}
+                    </span>
+                    <span className="font-bold text-emerald-600">+{dailyBattlesPts}</span>
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-emerald-600 mt-2">
+                共 +{bonusTotal} 积分，已计入「我的积分」（参与类奖励每日限一次）
+              </p>
+            </div>
+          )}
           {droppedEquipments.length > 0 && (
             <div className="rounded-xl border-2 border-amber-300 bg-gradient-to-r from-amber-50 to-yellow-50 p-4">
               <p className="text-sm font-bold text-amber-700 mb-2">🎁 本局获得装备</p>

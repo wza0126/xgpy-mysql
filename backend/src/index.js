@@ -17,6 +17,61 @@ const pythonSandbox = new PythonSandbox({ maxExecutionTime: 3000 });
 const pythonGrader = new PythonGrader();
 const { getSystemConfig } = require('./public-config');
 
+// ==================== 窗口皮肤元数据 ====================
+// ⚠️ 必须声明在使用它的路由之前（const 无变量提升，靠后会 TDZ 报错）。
+// 本文件有多处（兑换校验 / 皮肤激活 / /api/skins）都依赖它，故提到文件前部。
+// 与前端 config/windowSkins.ts 保持同步——改一边必须改另一边。
+const WINDOW_SKINS_META = [
+  { id: 'skin_minimal_white', name: '极简白', description: '简约纯净，返璞归真', tier: 'common', critBonus: 1, pointsCost: 100, unlockSource: 'points' },
+  { id: 'skin_forest_green', name: '森林绿', description: '清新自然，绿意盎然', tier: 'common', critBonus: 1, pointsCost: 150, unlockSource: 'points' },
+  { id: 'skin_ocean_blue', name: '海洋蓝', description: '深海湛蓝，心旷神怡', tier: 'common', critBonus: 2, pointsCost: 250, unlockSource: 'points' },
+  { id: 'skin_aurora_purple', name: '紫霞幻彩', description: '紫霞流转，梦幻绮丽', tier: 'rare', critBonus: 3, pointsCost: 800, unlockSource: 'points' },
+  { id: 'skin_sunset_gold', name: '日落橙金', description: '落日熔金，温暖绚烂', tier: 'rare', critBonus: 3, pointsCost: 800, unlockSource: 'points' },
+  { id: 'skin_royal_gold', name: '流光金黑', description: '帝王尊享，金碧辉煌', tier: 'legendary', critBonus: 5, pointsCost: 2500, unlockSource: 'points' },
+  { id: 'skin_galaxy_star', name: '星河璀璨', description: '银河倒泻，星海璀璨', tier: 'legendary', critBonus: 5, pointsCost: 2500, unlockSource: 'points' },
+  // ===== 段位专属（PK 段位解锁，永久拥有，不可用积分兑换）=====
+  { id: 'skin_rank_primary', name: '启明书包', description: '小学生段位专属 —— 晨光初启，书包装满好奇心', tier: 'common', critBonus: 3, pointsCost: 0, unlockSource: 'rank', requiredRankTier: 0, rankName: '小学生' },
+  { id: 'skin_rank_junior', name: '青竹书卷', description: '初中生段位专属 —— 青竹拔节，书卷渐厚', tier: 'rare', critBonus: 7, pointsCost: 0, unlockSource: 'rank', requiredRankTier: 1, rankName: '初中生' },
+  { id: 'skin_rank_senior', name: '墨韵青锋', description: '高中生段位专属 —— 墨香凝锋，挑灯夜读', tier: 'rare', critBonus: 8, pointsCost: 0, unlockSource: 'rank', requiredRankTier: 2, rankName: '高中生' },
+  { id: 'skin_rank_undergrad', name: '紫宸星槎', description: '本科生段位专属 —— 星槎渡海，紫宸问道', tier: 'legendary', critBonus: 9, pointsCost: 0, unlockSource: 'rank', requiredRankTier: 3, rankName: '本科生' },
+  { id: 'skin_rank_researcher', name: '太初鸿蒙', description: '研究生段位专属 —— 鸿蒙未判，万象归一（PK 最高荣耀）', tier: 'legendary', critBonus: 10, pointsCost: 0, unlockSource: 'rank', requiredRankTier: 4, rankName: '研究生' },
+];
+
+/**
+ * 段位层级 → 段位专属皮肤 ID
+ * 与前端 RANK_SKIN_BY_TIER、pk-socket/battleEngine.js 的同名映射**三处必须同步**。
+ */
+const RANK_TIER_SKIN_MAP = {
+  0: 'skin_rank_primary',     // 小学生
+  1: 'skin_rank_junior',      // 初中生
+  2: 'skin_rank_senior',      // 高中生
+  3: 'skin_rank_undergrad',   // 本科生
+  4: 'skin_rank_researcher',  // 研究生
+};
+
+/**
+ * 授予「已达到 tier 段位应得的全部段位皮肤」（幂等）
+ * 段位单调递增：到了高中生，小学生/初中生的皮肤也应一并补发
+ * （例如中途开启此功能，学生已是高中生，低段皮肤不该缺失）。
+ * @returns {Promise<string[]>} 本次真正新授予的皮肤 ID 列表
+ */
+async function grantRankSkins(conn, userId, tier) {
+  const t = Math.max(0, Math.min(4, Math.floor(Number(tier) || 0)));
+  const granted = [];
+  for (let i = 0; i <= t; i++) {
+    const skinId = RANK_TIER_SKIN_MAP[i];
+    if (!skinId) continue;
+    const [ins] = await conn.query(
+      `INSERT IGNORE INTO student_skins (id, student_id, skin_id, unlock_source)
+       VALUES (?, ?, ?, 'rank')`,
+      [`ss_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`, userId, skinId]
+    );
+    // affectedRows === 0 ⇒ 已拥有，跳过（INSERT IGNORE + 唯一键天然幂等）
+    if (ins && ins.affectedRows > 0) granted.push(skinId);
+  }
+  return granted;
+}
+
 // 版本信息由 scripts/gen-version.js 在启动/构建时自动生成
 let appVersion = { version: '0.0.0', commit: 'unknown', buildTime: '' };
 try {
@@ -2399,6 +2454,17 @@ app.post('/api/business/exchange-prize', authenticate, async (req, res) => {
         return res.status(400).json({
           data: null,
           error: '该皮肤奖品未关联皮肤，请联系老师检查配置'
+        });
+      }
+
+      // 段位专属皮肤不可通过积分兑换（否则绕过段位门槛，破坏"实力证明"的定位）。
+      // 前端奖品下拉已过滤，这里再拦一道 —— 直接构造请求也无法绕过。
+      const rankSkinMeta = WINDOW_SKINS_META.find(s => s.id === prize.skin_id);
+      if (rankSkinMeta && rankSkinMeta.unlockSource === 'rank') {
+        await connection.rollback();
+        return res.status(403).json({
+          data: null,
+          error: `「${rankSkinMeta.name}」是段位专属皮肤，达到「${rankSkinMeta.rankName}」段位后自动获得，无法用积分兑换`
         });
       }
 
@@ -8894,7 +8960,8 @@ app.get('/api/student/honors', authenticate, async (req, res) => {
     const userId = req.user.userId || req.user.id;
     const [rows] = await pool.query(
       `SELECT perfect_10_times, triple_crit_times, wrong_3_times, studious_times, typing_fast_times,
-              pk_streak_3_times, pk_flawless_times, pk_comeback_times, pk_win_streak
+              pk_streak_3_times, pk_flawless_times, pk_comeback_times, pk_win_streak,
+              pk_total_wins, pk_total_losses, pk_total_draws, pk_battles_today
        FROM profiles WHERE id = ?`,
       [userId]
     );
@@ -8902,6 +8969,11 @@ app.get('/api/student/honors', authenticate, async (req, res) => {
     if (rows.length === 0) {
       return res.status(404).json({ data: null, error: '学生不存在' });
     }
+
+    // 不存在「总场次」冗余列，用 胜+负+平 现算（三个分量各自维护，避免第四处口径漂移）
+    const pkWins = rows[0].pk_total_wins || 0;
+    const pkLosses = rows[0].pk_total_losses || 0;
+    const pkDraws = rows[0].pk_total_draws || 0;
 
     res.json({
       data: {
@@ -8915,6 +8987,12 @@ app.get('/api/student/honors', authenticate, async (req, res) => {
         pk_flawless_times: rows[0].pk_flawless_times || 0,
         pk_comeback_times: rows[0].pk_comeback_times || 0,
         pk_win_streak: rows[0].pk_win_streak || 0,
+        // ===== PK 战绩摘要（PK 大厅「我的荣誉」页签用）=====
+        pk_total_wins: pkWins,
+        pk_total_losses: pkLosses,
+        pk_total_draws: pkDraws,
+        pk_total_battles: pkWins + pkLosses + pkDraws,
+        pk_battles_today: rows[0].pk_battles_today || 0,
         honors: [
           { type: 'perfect_10', name: '十全十美', times: rows[0].perfect_10_times || 0, description: '练习连对10题', category: 'practice' },
           { type: 'triple_crit', name: '三连暴击', times: rows[0].triple_crit_times || 0, description: '连续暴击3次', category: 'practice' },
@@ -9730,17 +9808,8 @@ app.post('/api/student/custom-background/reset', authenticate, async (req, res) 
 });
 
 // ==================== 窗口皮肤系统 API ====================
-
-// 皮肤元数据镜像（后端使用，与前端 windowSkins.ts 保持同步）
-const WINDOW_SKINS_META = [
-  { id: 'skin_minimal_white', name: '极简白', description: '简约纯净，返璞归真', tier: 'common', critBonus: 1, pointsCost: 100 },
-  { id: 'skin_forest_green', name: '森林绿', description: '清新自然，绿意盎然', tier: 'common', critBonus: 1, pointsCost: 150 },
-  { id: 'skin_ocean_blue', name: '海洋蓝', description: '深海湛蓝，心旷神怡', tier: 'common', critBonus: 2, pointsCost: 250 },
-  { id: 'skin_aurora_purple', name: '紫霞幻彩', description: '紫霞流转，梦幻绮丽', tier: 'rare', critBonus: 3, pointsCost: 800 },
-  { id: 'skin_sunset_gold', name: '日落橙金', description: '落日熔金，温暖绚烂', tier: 'rare', critBonus: 3, pointsCost: 800 },
-  { id: 'skin_royal_gold', name: '流光金黑', description: '帝王尊享，金碧辉煌', tier: 'legendary', critBonus: 5, pointsCost: 2500 },
-  { id: 'skin_galaxy_star', name: '星河璀璨', description: '银河倒泻，星海璀璨', tier: 'legendary', critBonus: 5, pointsCost: 2500 },
-];
+// 注：WINDOW_SKINS_META / RANK_TIER_SKIN_MAP / grantRankSkins 定义在文件前部
+// （兑换校验等更早的路由也要用，const 无变量提升）。
 
 // 获取所有可用皮肤元数据
 app.get('/api/skins', authenticate, async (req, res) => {
@@ -15121,6 +15190,21 @@ app.get('/api/pk/profile', authenticate, requireStudent, async (req, res) => {
       [req.user.userId]
     );
 
+    // 段位皮肤懒补偿：本功能上线前已达高段位的学生，其低段位皮肤从未发放。
+    // 借「打开 PK 界面」这个必然动作补齐（幂等，走 INSERT IGNORE），
+    // 否则这些学生要等到再次升段才会拿到本该拥有的皮肤。
+    try {
+      const conn = await pool.getConnection();
+      try {
+        await grantRankSkins(conn, req.user.userId, p.pk_rank_tier);
+      } finally {
+        conn.release();
+      }
+    } catch (err) {
+      // 补偿失败不影响档案查询（下一局结算会再次尝试）
+      console.error('段位皮肤补偿失败:', err.message);
+    }
+
     res.json({
       data: {
         tier: p.pk_rank_tier,
@@ -15161,24 +15245,46 @@ app.get('/api/pk/history', authenticate, requireStudent, async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const pageSize = parseInt(req.query.pageSize) || 10;
     const offset = (page - 1) * pageSize;
+    const myId = req.user.userId;
+
+    // 一次带出对手信息与段位变化，避免前端逐条再发请求（N+1）。
+    // opp 用相关子查询取「同房间另一个人」——PK 固定 1v1，取 LIMIT 1 即可。
     const [rows] = await pool.query(
       `SELECT r.id, r.room_code, r.status, r.created_at,
        p.result, p.final_score, p.final_correct, p.final_wrong, p.final_duration_ms,
-       p.rank_points_change, p.system_points_earned
+       p.rank_points_change, p.system_points_earned,
+       p.bonus_points, p.consolation_points,
+       p.config_name, p.question_count,
+       opp_p.real_name AS opp_real_name, opp_p.username AS opp_username,
+       opp.final_score AS opp_final_score, opp.result AS opp_result,
+       rh.from_tier, rh.from_stars, rh.to_tier, rh.to_stars
        FROM pk_room_players p
        JOIN pk_rooms r ON p.room_id = r.id
+       LEFT JOIN pk_room_players opp
+         ON opp.room_id = p.room_id AND opp.user_id <> p.user_id
+       LEFT JOIN profiles opp_p ON opp.user_id = opp_p.id
+       LEFT JOIN pk_rank_history rh
+         ON rh.room_id = p.room_id AND rh.user_id = p.user_id
        WHERE p.user_id = ? AND r.status = 'finished'
        ORDER BY r.created_at DESC LIMIT ? OFFSET ?`,
-      [req.user.userId, pageSize, offset]
+      [myId, pageSize, offset]
     );
     const [countRows] = await pool.query(
       `SELECT COUNT(*) as total FROM pk_room_players p
        JOIN pk_rooms r ON p.room_id = r.id
        WHERE p.user_id = ? AND r.status = 'finished'`,
-      [req.user.userId]
+      [myId]
     );
+
+    const list = rows.map((r) => ({
+      ...r,
+      // 段位是否发生变化（前端据此决定要不要画「晋级/掉段」标记）
+      tier_changed: r.from_tier != null
+        && (Number(r.from_tier) !== Number(r.to_tier) || Number(r.from_stars) !== Number(r.to_stars)),
+    }));
+
     res.json({
-      data: { list: rows, total: countRows[0].total, page, pageSize },
+      data: { list, total: countRows[0].total, page, pageSize },
       error: null,
     });
   } catch (err) {
@@ -15700,6 +15806,9 @@ app.get('/api/pk/stats/wrong-questions', authenticate, requireTeacher, async (re
          MAX(q.type) AS type,
          MAX(q.cluster_id) AS cluster_id,
          MAX(q.sub_topic) AS sub_topic,
+         MAX(q.options) AS options,
+         MAX(q.answers) AS answers,
+         MAX(q.explanation) AS explanation,
          SUM(a.is_correct = 0) AS wrong_cnt,
          COUNT(*) AS answer_cnt,
          COUNT(DISTINCT a.user_id) AS student_cnt,
@@ -15716,6 +15825,18 @@ app.get('/api/pk/stats/wrong-questions', authenticate, requireTeacher, async (re
       [class_id, lim, off]
     );
 
+    // options 在库里是 JSON 字符串（可能为 TEXT/JSON 列），解析失败时原样返回字符串，
+    // 交由前端兜底渲染 —— 不能因单题脏数据让整张表 500。
+    const safeJson = (v) => {
+      if (v == null) return null;
+      if (typeof v === 'object') return v;
+      try {
+        return JSON.parse(v);
+      } catch {
+        return v;
+      }
+    };
+
     const data = rows.map((r) => {
       const answerCnt = Number(r.answer_cnt) || 0;
       const wrongCnt = Number(r.wrong_cnt) || 0;
@@ -15726,6 +15847,11 @@ app.get('/api/pk/stats/wrong-questions', authenticate, requireTeacher, async (re
         difficulty: null, // questions 表无 difficulty 列，保留字段位以便前端统一渲染
         cluster_id: r.cluster_id,
         sub_topic: r.sub_topic,
+        // 供教师双击题目时就地讲解：选项 / 正确答案 / 解析
+        // （接口已 requireTeacher，下发答案安全；学生端走 stripQuestionRowsForRequester 剥离）
+        options: safeJson(r.options),
+        answers: safeJson(r.answers),
+        explanation: r.explanation || null,
         wrong_cnt: wrongCnt,
         answer_cnt: answerCnt,
         student_cnt: Number(r.student_cnt) || 0,

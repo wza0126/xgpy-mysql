@@ -7,6 +7,19 @@ const { calcNewWinStreak, judgePkHonors, rollEquipmentDrops } = require('./pkHon
 const roomManager = require('./roomManager');
 
 /**
+ * 段位层级 → 段位专属皮肤 ID
+ * 与前端 config/windowSkins.ts 的 RANK_SKIN_BY_TIER、index.js 的同名映射**三处必须同步**。
+ * 段位是单调的：升到高段位时低段位皮肤一并补发（见 finishBattle）。
+ */
+const RANK_TIER_SKIN_MAP = {
+  0: 'skin_rank_primary',     // 小学生
+  1: 'skin_rank_junior',      // 初中生
+  2: 'skin_rank_senior',      // 高中生
+  3: 'skin_rank_undergrad',   // 本科生
+  4: 'skin_rank_researcher',  // 研究生
+};
+
+/**
  * 内存中的对战进行中状态
  * key: roomId, value: { questionIds, endsAt, players: Map<userId, {score, correct, wrong, socketId}> }
  */
@@ -689,6 +702,10 @@ async function finishBattle(io, pool, roomId, trigger, extra = {}) {
   // 结算回执载荷（事务成功后才赋值，失败保持空 —— 避免学生看到"获得装备"却查不到）
   let droppedEquipmentsFinal = {};
   let honorsFinal = {};
+  // 参与类奖励明细（首战 / 单日满场）—— 原先只落库不回执，导致"分了积分学生却不知道"
+  let rewardsFinal = {};
+  // 参与奖励计算结果的暂存（try 块内赋值，commit 后转正到 rewardsFinal）
+  let rewardByUser = {};
 
   // 获取基础分配置
   const [cfgRows] = await pool.query(
@@ -1030,7 +1047,7 @@ async function finishBattle(io, pool, roomId, trigger, extra = {}) {
       return granted;
     };
 
-    const rewardByUser = {};
+    rewardByUser = {};
     if (!isDraw) {
       rewardByUser[winnerId] = await grantParticipationRewards(winnerId);
       rewardByUser[loserId] = await grantParticipationRewards(loserId);
@@ -1071,6 +1088,28 @@ async function finishBattle(io, pool, roomId, trigger, extra = {}) {
     }
     // 平局段位不变 → 不写历史
 
+    // ===== 段位专属皮肤授予（永久拥有，掉段不回收）=====
+    // 段位单调：到了高段位，低段位的皮肤也一并补发（覆盖"中途开启此功能"的历史学生）。
+    // 走 INSERT IGNORE + (student_id, skin_id) 唯一键，天然幂等，重复授予无副作用。
+    // 放在同一事务内：段位与皮肤同时生效，不会出现"升了段却没皮肤"。
+    try {
+      for (const p of [playerA, playerB]) {
+        const curTier = Math.max(0, Math.min(4, Number(p.pk_rank_tier) || 0));
+        for (let i = 0; i <= curTier; i++) {
+          const skinId = RANK_TIER_SKIN_MAP[i];
+          if (!skinId) continue;
+          await conn.query(
+            `INSERT IGNORE INTO student_skins (id, student_id, skin_id, unlock_source)
+             VALUES (?, ?, ?, 'rank')`,
+            [`ss_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`, p.user_id, skinId]
+          );
+        }
+      }
+    } catch (err) {
+      // 皮肤授予失败不能连累结算（段位/积分已经算好），下一局会再次尝试补发
+      console.error('[PK] 段位皮肤授予失败（不影响段位与积分）:', err.message);
+    }
+
     // ===== PK 装备掉落（迁移 087，默认关闭）=====
     // 与练习侧口径一致：每件装备独立掷骰，判据 Math.random()*100 < 实际掉率。
     // 只在答对 ≥1 题时触发（一题没答对却掉装备，会让掉落变成「挂机奖励」）。
@@ -1107,6 +1146,8 @@ async function finishBattle(io, pool, roomId, trigger, extra = {}) {
     // 结算成功后才对外广播掉落/荣誉 —— 若事务回滚，学生不会看到 "获得了装备" 却查不到
     droppedEquipmentsFinal = droppedByUser;
     honorsFinal = honorByUser;
+    // 参与类奖励同理：只保留真正发出去的（tryGrant 返回 0 表示今日已发过）
+    rewardsFinal = rewardByUser;
   } catch (err) {
     await conn.rollback();
     console.error('PK 结算失败:', err);
@@ -1156,6 +1197,11 @@ async function finishBattle(io, pool, roomId, trigger, extra = {}) {
     room_id: roomId,
     dropped_equipments: droppedEquipmentsFinal,
     new_honors: honorsFinal,
+    // 参与类奖励明细（按 user_id 分组）—— 前端据此就地提示"每日首战 +N 积分"。
+    // 学生端据此即时获得正反馈，否则积分到手却无从知晓（激励作用形同虚设）。
+    bonuses: rewardsFinal,
+    // 满场奖励所需场次，供前端拼接「单日满 N 场」文案；0 表示未启用
+    daily_battles_target: rewardCfg.dailyBattlesTarget,
   });
 }
 

@@ -7,7 +7,7 @@ import { PKLobby } from './PKLobby';
 import { PKRoom } from './PKRoom';
 import { PKBattleArena } from './PKBattleArena';
 import { PKResult } from './PKResult';
-import type { PKResultDrop, PKResultHonor } from './PKResult';
+import type { PKResultDrop, PKResultHonor, PKResultBonus } from './PKResult';
 import { useGameEventStore } from '../../../store/gameEventStore';
 import { getAuthToken } from '../../../utils/authToken';
 
@@ -97,6 +97,9 @@ export const PKBattle: React.FC = () => {
   // 本局掉落与荣誉（来自 pk:battle_end 载荷，迁移 087）
   const [resultDrops, setResultDrops] = useState<PKResultDrop[]>([]);
   const [resultHonors, setResultHonors] = useState<PKResultHonor[]>([]);
+  // 参与类奖励明细（首战 / 单日满场）与满场所需场次（文案用）
+  const [resultBonuses, setResultBonuses] = useState<PKResultBonus | null>(null);
+  const [resultDailyTarget, setResultDailyTarget] = useState(0);
 
   // 连接 socket
   useEffect(() => {
@@ -208,9 +211,11 @@ export const PKBattle: React.FC = () => {
       if (Array.isArray(data.players)) setPlayers(data.players);
       setResumeData(null);
       setAnswerFeedback(null); // 清掉上一局遗留的判分反馈，避免新局开局误弹提示
-      // 清掉上一局的掉落/荣誉，否则新局尚未结束时若跳进结算页会显示旧数据
+      // 清掉上一局的掉落/荣誉/奖励，否则新局尚未结束时若跳进结算页会显示旧数据
       setResultDrops([]);
       setResultHonors([]);
+      setResultBonuses(null);
+      setResultDailyTarget(0);
       setView('arena');
     });
 
@@ -233,8 +238,15 @@ export const PKBattle: React.FC = () => {
       const myId = profile?.id;
       const allDrops = data?.dropped_equipments || {};
       const allHonors = data?.new_honors || {};
+      const allBonuses = data?.bonuses || {};
       setResultDrops(myId ? (allDrops[myId] || []) : []);
       setResultHonors(myId ? (allHonors[myId] || []) : []);
+      // 参与类奖励（首战/单日满场）：后端只回传「本次真正发出」的，0 表示今日已发过
+      const myBonus = myId ? (allBonuses[myId] || null) : null;
+      setResultBonuses(myBonus && ((myBonus.first_battle || 0) + (myBonus.daily_battles || 0)) > 0
+        ? myBonus
+        : null);
+      setResultDailyTarget(Number(data?.daily_battles_target) || 0);
 
       // 荣誉/装备同时触发时给一个即时反馈（落在结算页渲染之前）
       const honors = myId ? (allHonors[myId] || []) : [];
@@ -474,6 +486,8 @@ export const PKBattle: React.FC = () => {
               onBackToLobby={handleBackToLobby}
               droppedEquipments={resultDrops}
               newHonors={resultHonors}
+              bonuses={resultBonuses}
+              dailyTarget={resultDailyTarget}
             />
           </motion.div>
         )}

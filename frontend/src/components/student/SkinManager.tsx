@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { API_CONFIG } from '../../api/config';
-import { WINDOW_SKINS, TIER_LABELS, TIER_BG_COLORS, TIER_BORDER_COLORS, WindowSkinConfig, DEFAULT_SKIN } from '../../config/windowSkins';
+import { WINDOW_SKINS, TIER_LABELS, TIER_BG_COLORS, TIER_BORDER_COLORS, WindowSkinConfig, DEFAULT_SKIN, RANK_SKINS } from '../../config/windowSkins';
 import { useSkinStore } from '../../store/skinStore';
 import { getAuthToken } from '../../utils/authToken';
 
@@ -15,10 +15,13 @@ export const SkinManager: React.FC = () => {
   const [activeSkinId, setActiveSkinId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
+  /** 当前 PK 段位层级（用于展示段位皮肤的解锁进度） */
+  const [pkTier, setPkTier] = useState<number>(0);
   const { setActiveSkin: setStoreSkin } = useSkinStore();
 
   useEffect(() => {
     fetchMySkins();
+    fetchPkTier();
   }, []);
 
   const fetchMySkins = async () => {
@@ -33,6 +36,20 @@ export const SkinManager: React.FC = () => {
       }
     } catch (error) {
       console.error('获取皮肤列表失败:', error);
+    }
+  };
+
+  // 段位皮肤解锁状态由「当前段位」决定；后端在升段时已自动补发皮肤，
+  // 这里再拉一次段位是为了给「未解锁」的皮肤显示进度提示。
+  const fetchPkTier = async () => {
+    try {
+      const token = getAuthToken();
+      const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
+      const response = await fetch(`${API_CONFIG.apiUrl}/api/pk/profile`, { headers });
+      const result = await response.json();
+      if (result.data) setPkTier(Number(result.data.tier) || 0);
+    } catch {
+      // 段位拉取失败不影响皮肤管理主流程
     }
   };
 
@@ -68,7 +85,12 @@ export const SkinManager: React.FC = () => {
   };
 
   const ownedSkinIds = ownedSkins.map((s) => s.skin_id);
-  const ownedSkinsList = WINDOW_SKINS.filter((s) => ownedSkinIds.includes(s.id));
+  const ownedSkinsList = WINDOW_SKINS.filter(
+    (s) => ownedSkinIds.includes(s.id) && s.unlockSource !== 'rank'
+  );
+  // 段位专属皮肤单独分组：未解锁的也要展示（让学生看到"再升一级能拿到什么"）
+  const rankSkinsList = RANK_SKINS;
+  const myTier = Number(pkTier) || 0;
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
@@ -102,11 +124,11 @@ export const SkinManager: React.FC = () => {
         </div>
       )}
 
-      {/* 已拥有的皮肤 */}
+      {/* 已拥有的皮肤（积分兑换类） */}
       {ownedSkinsList.length === 0 ? (
-        <div className="text-center py-8">
+        <div className="text-center py-6">
           <i className="fa-solid fa-box-open text-4xl text-gray-300 mb-3"></i>
-          <p className="text-gray-500 mb-2">您还没有任何皮肤</p>
+          <p className="text-gray-500 mb-2">您还没有可兑换的皮肤</p>
           <p className="text-sm text-gray-400">
             <i className="fa-solid fa-gift mr-1"></i>
             前往「兑换中心」兑换皮肤奖品
@@ -134,6 +156,44 @@ export const SkinManager: React.FC = () => {
           ))}
         </div>
       )}
+
+      {/* 段位专属皮肤：达到段位永久解锁，掉段不回收 */}
+      <div className="mt-6">
+        <div className="flex items-center gap-2 mb-1">
+          <i className="fa-solid fa-crown text-amber-500"></i>
+          <h4 className="font-bold text-gray-800">段位专属皮肤</h4>
+          <span className="text-xs text-gray-400">
+            当前段位：
+            <span className="text-purple-600 font-medium">
+              {['小学生', '初中生', '高中生', '本科生', '研究生'][myTier] || '小学生'}
+            </span>
+          </span>
+        </div>
+        <p className="text-xs text-gray-500 mb-3">
+          达到对应 PK 段位即<span className="text-amber-600 font-medium">永久解锁</span>，无需积分、掉段也不回收。
+          每套皮肤附带更高的暴击率加成，是实力的证明。
+        </p>
+        <div className="grid grid-cols-2 gap-3">
+          {rankSkinsList.map((skin) => {
+            const requiredTier = skin.requiredRankTier ?? 0;
+            const owned = ownedSkinIds.includes(skin.id);
+            return (
+              <SkinCard
+                key={skin.id}
+                skin={skin}
+                isActive={activeSkinId === skin.id}
+                isOwned={owned}
+                onActivate={() => handleActivateSkin(skin.id)}
+                loading={loading}
+                // 未解锁时额外提示所需段位，明确"再升几级能拿到"
+                lockedHint={`需达到「${skin.rankName || ''}」段位${
+                  requiredTier > myTier ? `（还差 ${requiredTier - myTier} 级）` : ''
+                }`}
+              />
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 };
@@ -145,9 +205,18 @@ interface SkinCardProps {
   isOwned: boolean;
   onActivate: () => void;
   loading: boolean;
+  /** 未拥有时的解锁提示（段位皮肤用：「需达到『高中生』段位（还差 1 级）」） */
+  lockedHint?: string;
 }
 
-const SkinCard: React.FC<SkinCardProps> = ({ skin, isActive, isOwned, onActivate, loading }) => {
+const SkinCard: React.FC<SkinCardProps> = ({
+  skin,
+  isActive,
+  isOwned,
+  onActivate,
+  loading,
+  lockedHint,
+}) => {
   return (
     <motion.div
       whileHover={isOwned ? { scale: 1.02 } : {}}
@@ -159,6 +228,12 @@ const SkinCard: React.FC<SkinCardProps> = ({ skin, isActive, isOwned, onActivate
           : 'border-gray-200 opacity-50'
       }`}
     >
+      {/* 段位徽标：一眼看出这是段位专属皮肤 */}
+      {skin.unlockSource === 'rank' && (
+        <span className="absolute top-1 left-1 z-10 px-1.5 py-0.5 bg-black/50 text-white text-[10px] rounded">
+          {isOwned ? '👑 已解锁' : `🔒 ${skin.rankName || ''}`}
+        </span>
+      )}
       {/* 预览区：模拟窗口标题栏 */}
       <div className={`relative h-16 ${skin.titleBarClass} flex items-center justify-between px-3 overflow-hidden`}>
         <span className={`${skin.titleTextClass} text-xs font-medium truncate`}>
@@ -204,8 +279,18 @@ const SkinCard: React.FC<SkinCardProps> = ({ skin, isActive, isOwned, onActivate
             >
               激活
             </button>
+          ) : lockedHint ? (
+            <span className="text-[10px] text-gray-400">
+              <i className="fa-solid fa-lock mr-0.5"></i>未解锁
+            </span>
           ) : null}
         </div>
+        {/* 未解锁的段位皮肤：明确告知怎么拿到，形成升级动力 */}
+        {!isOwned && lockedHint && (
+          <p className="text-[10px] text-amber-600 mt-1.5 text-center bg-amber-50 rounded py-0.5">
+            {lockedHint}
+          </p>
+        )}
       </div>
     </motion.div>
   );

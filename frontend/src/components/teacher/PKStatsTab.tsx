@@ -100,12 +100,57 @@ interface WrongQuestionRow {
   type: string | null;
   difficulty: number | null;
   cluster_id: string | null;
+  /** 供双击讲解：选项 / 正确答案 / 解析（接口为教师身份，可安全下发） */
+  options: unknown;
+  answers: unknown;
+  explanation: string | null;
   wrong_cnt: number;
   answer_cnt: number;
   student_cnt: number;
   wrong_student_cnt: number;
   wrong_rate: number | null;
 }
+
+/** 把后端下发的选项（数组 / JSON 字符串 / 对象）统一成 [{key,text}] */
+const normalizeOptions = (raw: unknown): { key: string; text: string }[] => {
+  if (!raw) return [];
+  let arr: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      arr = JSON.parse(raw);
+    } catch {
+      return [{ key: '', text: raw }];
+    }
+  }
+  if (Array.isArray(arr)) {
+    return arr.map((item, i) => {
+      // 支持 ['A选项文字', ...] 与 [{label,text}] 两种历史格式
+      if (typeof item === 'string') return { key: String.fromCharCode(65 + i), text: item };
+      const o = (item || {}) as Record<string, unknown>;
+      const key = String(o.label ?? o.key ?? o.option ?? String.fromCharCode(65 + i));
+      const text = String(o.text ?? o.content ?? o.value ?? '');
+      return { key, text };
+    });
+  }
+  return [];
+};
+
+/** 正确答案统一成字符串数组（兼容字符串 / 数组 / JSON） */
+const normalizeAnswers = (raw: unknown): string[] => {
+  if (raw == null) return [];
+  let v: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      v = parsed;
+    } catch {
+      // 普通字符串：可能是 "A" 或 "A,B" 或 "AB"
+      return String(raw).split(/[,，\s]+/).filter(Boolean);
+    }
+  }
+  if (Array.isArray(v)) return v.map(String);
+  return [String(v)];
+};
 
 const fmtDuration = (ms: number | null | undefined): string => {
   if (ms == null) return '—';
@@ -160,6 +205,8 @@ export const PKStatsTab: React.FC = () => {
   const [wrongTotal, setWrongTotal] = useState(0);
   const [wrongLoading, setWrongLoading] = useState(false);
   const [wrongPage, setWrongPage] = useState(0);
+  /** 双击题干打开的题目详情（选项/答案/解析），用于课堂讲解 */
+  const [detailQuestion, setDetailQuestion] = useState<WrongQuestionRow | null>(null);
   const [trendDays, setTrendDays] = useState(30);
   const WRONG_PAGE_SIZE = 20;
   // 排序：按学生表的列
@@ -563,6 +610,9 @@ export const PKStatsTab: React.FC = () => {
             <p className="text-xs text-gray-500 mb-3">
               只统计 PK 对战中的作答（口径与「学情分析 · 错题排行」不同，后者含练习/测试/考试）；
               赛前针对这些题复习收益最高
+              <span className="ml-2 text-purple-600 font-medium">
+                <i className="fa-solid fa-hand-pointer mr-1"></i>双击题干可查看选项、答案与解析
+              </span>
             </p>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -578,7 +628,12 @@ export const PKStatsTab: React.FC = () => {
                 </thead>
                 <tbody>
                   {wrongRank.map((r, i) => (
-                    <tr key={r.question_id} className="border-t border-gray-100 hover:bg-gray-50">
+                    <tr
+                      key={r.question_id}
+                      className="border-t border-gray-100 hover:bg-purple-50 cursor-pointer"
+                      onDoubleClick={() => setDetailQuestion(r)}
+                      title="双击查看选项、答案与解析"
+                    >
                       <td className="px-3 py-2 text-gray-400">{wrongPage * WRONG_PAGE_SIZE + i + 1}</td>
                       <td className="px-3 py-2 text-gray-800 max-w-md">
                         <div className="truncate" title={r.content}>{r.content}</div>
@@ -749,6 +804,112 @@ export const PKStatsTab: React.FC = () => {
             </div>
           </div>
         </>
+      )}
+
+      {/* ===== 题目详情弹窗（双击题干打开，便于课堂讲解） ===== */}
+      {detailQuestion && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setDetailQuestion(null)}
+        >
+          <div
+            className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[80vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="sticky top-0 bg-white border-b border-gray-200 px-6 py-4 flex items-start justify-between rounded-t-xl">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="px-2 py-0.5 bg-orange-100 text-orange-600 text-xs rounded font-medium">
+                    {detailQuestion.type === 'choice' ? '选择题'
+                      : detailQuestion.type === 'judge' ? '判断题'
+                        : detailQuestion.type === 'fill' ? '填空题'
+                          : detailQuestion.type || '题目'}
+                  </span>
+                  {detailQuestion.cluster_id && (
+                    <span className="px-2 py-0.5 bg-gray-100 text-gray-600 text-xs rounded">
+                      {detailQuestion.cluster_id}
+                    </span>
+                  )}
+                  <span className="text-xs text-red-600 font-medium">
+                    答错 {detailQuestion.wrong_cnt} 人次
+                    {detailQuestion.wrong_rate != null && ` · 答错率 ${detailQuestion.wrong_rate}%`}
+                  </span>
+                </div>
+                <p className="text-gray-800 font-medium whitespace-pre-wrap break-words">
+                  {detailQuestion.content}
+                </p>
+              </div>
+              <button
+                onClick={() => setDetailQuestion(null)}
+                className="ml-4 text-gray-400 hover:text-gray-700 flex-shrink-0"
+                title="关闭"
+              >
+                <i className="fa-solid fa-xmark text-xl"></i>
+              </button>
+            </div>
+
+            <div className="px-6 py-4">
+              {(() => {
+                const opts = normalizeOptions(detailQuestion.options);
+                const answers = normalizeAnswers(detailQuestion.answers);
+                const isCorrectKey = (k: string) => answers.includes(k);
+                return (
+                  <>
+                    {opts.length > 0 ? (
+                      <ul className="space-y-2 mb-4">
+                        {opts.map((o) => {
+                          const hit = isCorrectKey(o.key);
+                          return (
+                            <li
+                              key={o.key}
+                              className={`flex items-start gap-3 px-3 py-2 rounded-lg border ${
+                                hit
+                                  ? 'border-green-300 bg-green-50'
+                                  : 'border-gray-200 bg-gray-50'
+                              }`}
+                            >
+                              <span className={`font-bold flex-shrink-0 ${hit ? 'text-green-600' : 'text-gray-500'}`}>
+                                {o.key}.
+                              </span>
+                              <span className="text-gray-800 whitespace-pre-wrap break-words flex-1">{o.text}</span>
+                              {hit && (
+                                <span className="flex-shrink-0 text-green-600 text-xs font-bold">
+                                  <i className="fa-solid fa-check mr-1"></i>正确
+                                </span>
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    ) : (
+                      <div className="mb-4 px-3 py-2 rounded-lg border border-gray-200 bg-gray-50 text-sm text-gray-500">
+                        （本题无选项，或选项数据缺失）
+                      </div>
+                    )}
+
+                    <div className="mb-4 px-3 py-2 rounded-lg bg-green-50 border border-green-200">
+                      <p className="text-xs font-bold text-green-700 mb-1">
+                        <i className="fa-solid fa-circle-check mr-1"></i>正确答案
+                      </p>
+                      <p className="text-sm font-medium text-green-800">
+                        {answers.length > 0 ? answers.join('、') : '（答案缺失）'}
+                      </p>
+                    </div>
+
+                    <div className="px-3 py-2 rounded-lg bg-blue-50 border border-blue-200">
+                      <p className="text-xs font-bold text-blue-700 mb-1">
+                        <i className="fa-solid fa-lightbulb mr-1"></i>解析
+                      </p>
+                      <p className="text-sm text-gray-800 whitespace-pre-wrap break-words">
+                        {detailQuestion.explanation || '（本题暂无解析）'}
+                      </p>
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

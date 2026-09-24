@@ -1,9 +1,67 @@
-// PK 对战列表页：段位卡 + 模式选择 + 匹配/创建/加入 + 排行榜
+// PK 对战列表页：段位卡 + 模式选择 + 匹配/创建/加入 + 排行榜/荣誉/对战历史
 import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { backendClient } from '../../../api/backendClient';
 import { useAuth } from '../../../hooks/useAuth';
 import { getRankInfo, renderStars, getRankColorClass } from './utils/pkHelpers';
+
+const HISTORY_PAGE_SIZE = 10;
+
+/** PK 专属荣誉（与后端 pk-socket/pkHonors.js 的 PK_HONORS 一一对应） */
+const PK_HONOR_LIST = [
+  { type: 'pk_streak_3', name: '连胜达人', icon: '🔥', field: 'pk_streak_3_times', desc: '累计达成 3 连胜（每满 3 场计一次）' },
+  { type: 'pk_flawless', name: '零失误', icon: '💎', field: 'pk_flawless_times', desc: '单局全部答对且至少作答 1 题' },
+  { type: 'pk_comeback', name: '愈战愈勇', icon: '🚀', field: 'pk_comeback_times', desc: '中场落后但最终反超获胜' },
+] as const;
+
+/** 荣誉与战绩摘要（/api/student/honors 的子集） */
+interface HonorStatsLite {
+  total: number;
+  wins: number;
+  winStreak: number;
+  pk_streak_3_times: number;
+  pk_flawless_times: number;
+  pk_comeback_times: number;
+}
+
+/** 对战历史单条（/api/pk/history） */
+interface HistoryRow {
+  id: string;
+  room_code: string;
+  created_at: string;
+  result: 'win' | 'lose' | 'draw';
+  final_score: number;
+  final_correct: number;
+  final_wrong: number;
+  rank_points_change: number;
+  system_points_earned: number;
+  bonus_points: number;
+  config_name: string | null;
+  opp_real_name: string | null;
+  opp_username: string | null;
+  opp_final_score: number | null;
+  from_tier: number | null;
+  from_stars: number | null;
+  to_tier: number | null;
+  to_stars: number | null;
+}
+
+/** 对战时间：今天显示时刻，其余显示月-日 时:分 */
+const fmtBattleTime = (raw: string): string => {
+  if (!raw) return '';
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return '';
+  const now = new Date();
+  const sameDay = d.getFullYear() === now.getFullYear()
+    && d.getMonth() === now.getMonth()
+    && d.getDate() === now.getDate();
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  if (sameDay) return `今天 ${hh}:${mm}`;
+  const M = String(d.getMonth() + 1).padStart(2, '0');
+  const D = String(d.getDate()).padStart(2, '0');
+  return `${M}-${D} ${hh}:${mm}`;
+};
 
 interface PKProfile {
   tier: number;
@@ -65,9 +123,59 @@ export const PKLobby: React.FC<{
   /** 资格明细：config_id -> { passed, correct:{...}, mastered:{...} }（服务端裁定，口径唯一） */
   const [qualificationMap, setQualificationMap] = useState<Record<string, any>>({});
 
+  // ===== 数据面板页签：排行榜 / 我的荣誉 / 对战历史 =====
+  const [panelTab, setPanelTab] = useState<'rank' | 'honor' | 'history'>('rank');
+  /** 我的荣誉与战绩（来自 /api/student/honors） */
+  const [honorStats, setHonorStats] = useState<HonorStatsLite>({
+    total: 0, wins: 0, winStreak: 0,
+    pk_streak_3_times: 0, pk_flawless_times: 0, pk_comeback_times: 0,
+  });
+  const [historyList, setHistoryList] = useState<HistoryRow[]>([]);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [historyPage, setHistoryPage] = useState(0);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
   useEffect(() => {
     fetchData();
   }, []);
+
+  // 切到「对战历史」页签或翻页时按需拉取（首屏不为不可见面板发请求）
+  useEffect(() => {
+    if (panelTab === 'history') fetchHistory(historyPage);
+  }, [panelTab, historyPage]);
+
+  // 荣誉数据随页签切换拉取一次，保证刚打完一局回来能看到最新次数
+  useEffect(() => {
+    if (panelTab === 'honor') fetchHonors();
+  }, [panelTab]);
+
+  const fetchHonors = async () => {
+    const { data } = await backendClient.get('/api/student/honors');
+    if (data) {
+      const d = data as any;
+      setHonorStats({
+        total: Number(d.pk_total_battles) || 0,
+        wins: Number(d.pk_total_wins) || 0,
+        winStreak: Number(d.pk_win_streak) || 0,
+        pk_streak_3_times: Number(d.pk_streak_3_times) || 0,
+        pk_flawless_times: Number(d.pk_flawless_times) || 0,
+        pk_comeback_times: Number(d.pk_comeback_times) || 0,
+      });
+    }
+  };
+
+  const fetchHistory = async (page: number) => {
+    setHistoryLoading(true);
+    const { data } = await backendClient.get(
+      `/api/pk/history?page=${page + 1}&pageSize=${HISTORY_PAGE_SIZE}`
+    );
+    if (data) {
+      const d = data as any;
+      setHistoryList((d.list || []) as HistoryRow[]);
+      setHistoryTotal(Number(d.total) || 0);
+    }
+    setHistoryLoading(false);
+  };
 
   const fetchData = async () => {
     setLoading(true);
@@ -376,48 +484,234 @@ export const PKLobby: React.FC<{
         </button>
       </div>
 
-      {/* 排行榜 */}
-      <div className="bg-white rounded-xl shadow border border-gray-200 p-4">
-        <h3 className="font-bold text-gray-800 mb-3">
-          🏆 PK 积分排行榜
-        </h3>
-        {leaderboard.length === 0 ? (
-          <p className="text-center text-gray-400 py-4">暂无数据</p>
-        ) : (
-          <div className="space-y-2 max-h-64 overflow-y-auto">
-            {leaderboard.map((entry, i) => {
-              const info = getRankInfo(entry.pk_rank_tier, entry.pk_rank_stars);
-              const isMe = entry.id === profile?.id;
-              return (
-                <div
-                  key={entry.id}
-                  className={`flex items-center gap-3 p-2 rounded-lg ${
-                    isMe ? 'bg-purple-100 border border-purple-300' : 'bg-gray-50'
-                  }`}
-                >
-                  <span className={`font-bold w-8 ${i < 3 ? 'text-yellow-500' : 'text-gray-400'}`}>
-                    {i + 1}
-                  </span>
-                  <span className="text-xl">{info.icon}</span>
-                  <div className="flex-1 min-w-0">
-                    <p className="font-medium truncate">
-                      {entry.real_name || '—'}
-                      {entry.username && (
-                        <span className="ml-2 text-xs text-gray-400 font-normal">
-                          {entry.username}
+      {/* ===== 数据面板：排行榜 / 我的荣誉 / 对战历史 ===== */}
+      <div className="bg-white rounded-xl shadow border border-gray-200">
+        <div className="flex border-b border-gray-200">
+          {([
+            { key: 'rank', label: '🏆 积分排行榜' },
+            { key: 'honor', label: '🏅 我的荣誉' },
+            { key: 'history', label: '📜 对战历史' },
+          ] as const).map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setPanelTab(t.key)}
+              className={`px-5 py-3 text-sm font-medium border-b-2 -mb-px transition-colors ${
+                panelTab === t.key
+                  ? 'border-purple-500 text-purple-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="p-4">
+          {/* ---- 排行榜 ---- */}
+          {panelTab === 'rank' && (
+            <>
+              {leaderboard.length === 0 ? (
+                <p className="text-center text-gray-400 py-4">暂无数据</p>
+              ) : (
+                <div className="space-y-2 max-h-64 overflow-y-auto">
+                  {leaderboard.map((entry, i) => {
+                    const info = getRankInfo(entry.pk_rank_tier, entry.pk_rank_stars);
+                    const isMe = entry.id === profile?.id;
+                    return (
+                      <div
+                        key={entry.id}
+                        className={`flex items-center gap-3 p-2 rounded-lg ${
+                          isMe ? 'bg-purple-100 border border-purple-300' : 'bg-gray-50'
+                        }`}
+                      >
+                        <span className={`font-bold w-8 ${i < 3 ? 'text-yellow-500' : 'text-gray-400'}`}>
+                          {i + 1}
                         </span>
-                      )}
-                    </p>
-                    <p className="text-xs text-gray-500">
-                      {info.name} {renderStars(entry.pk_rank_tier, entry.pk_rank_stars)}
-                    </p>
-                  </div>
-                  <span className="font-bold text-purple-600">{entry.pk_points}</span>
+                        <span className="text-xl">{info.icon}</span>
+                        <div className="flex-1 min-w-0">
+                          <p className="font-medium truncate">
+                            {entry.real_name || '—'}
+                            {entry.username && (
+                              <span className="ml-2 text-xs text-gray-400 font-normal">
+                                {entry.username}
+                              </span>
+                            )}
+                          </p>
+                          <p className="text-xs text-gray-500">
+                            {info.name} {renderStars(entry.pk_rank_tier, entry.pk_rank_stars)}
+                          </p>
+                        </div>
+                        <span className="font-bold text-purple-600">{entry.pk_points}</span>
+                      </div>
+                    );
+                  })}
                 </div>
-              );
-            })}
-          </div>
-        )}
+              )}
+            </>
+          )}
+
+          {/* ---- 我的荣誉 ---- */}
+          {panelTab === 'honor' && (
+            <div>
+              {/* 战绩概览：胜场/胜率/连胜/已获得荣誉数 */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                {[
+                  { label: 'PK 总场次', value: honorStats.total, icon: '⚔️', color: 'text-blue-600' },
+                  { label: '胜场', value: honorStats.wins, icon: '🏆', color: 'text-amber-600' },
+                  {
+                    label: '胜率',
+                    value: honorStats.total > 0 ? `${Math.round((honorStats.wins / honorStats.total) * 100)}%` : '—',
+                    icon: '📊', color: 'text-purple-600',
+                  },
+                  { label: '当前连胜', value: honorStats.winStreak, icon: '🔥', color: 'text-red-600' },
+                ].map((s) => (
+                  <div key={s.label} className="rounded-lg bg-gray-50 border border-gray-200 p-3 text-center">
+                    <p className="text-lg">{s.icon}</p>
+                    <p className={`text-xl font-bold ${s.color}`}>{s.value}</p>
+                    <p className="text-xs text-gray-500 mt-1">{s.label}</p>
+                  </div>
+                ))}
+              </div>
+
+              {/* PK 专属荣誉（3 项）：达成次数 > 0 即点亮 */}
+              <p className="text-xs font-bold text-gray-600 mb-2">PK 专属荣誉</p>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {PK_HONOR_LIST.map((h) => {
+                  const times = honorStats[h.field] || 0;
+                  const owned = times > 0;
+                  return (
+                    <div
+                      key={h.type}
+                      className={`rounded-lg border-2 p-3 ${
+                        owned ? 'border-purple-300 bg-purple-50' : 'border-gray-200 bg-gray-50 opacity-60'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-2xl">{h.icon}</span>
+                        <span className="font-bold text-gray-800">{h.name}</span>
+                        {owned && (
+                          <span className="ml-auto text-xs font-bold text-purple-600">
+                            ×{times}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-gray-500">{h.desc}</p>
+                      {!owned && (
+                        <p className="text-xs text-gray-400 mt-1">
+                          <i className="fa-solid fa-lock mr-1"></i>未达成
+                        </p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* ---- 对战历史 ---- */}
+          {panelTab === 'history' && (
+            <div>
+              {historyLoading ? (
+                <p className="text-center text-gray-400 py-6">
+                  <i className="fa-solid fa-circle-notch fa-spin mr-2"></i>加载中…
+                </p>
+              ) : historyList.length === 0 ? (
+                <p className="text-center text-gray-400 py-6">还没有对战记录，快去打一局吧！</p>
+              ) : (
+                <>
+                  <div className="space-y-2">
+                    {historyList.map((h) => {
+                      const win = h.result === 'win';
+                      const draw = h.result === 'draw';
+                      // 段位变化只存在于「真的变了」的局，此时 from/to 一并非空
+                      const toRank = h.to_tier != null
+                        ? getRankInfo(Number(h.to_tier), Number(h.to_stars) || 0) : null;
+                      const fromRank = h.from_tier != null
+                        ? getRankInfo(Number(h.from_tier), Number(h.from_stars) || 0) : null;
+                      const tierUp = !!fromRank && !!toRank && Number(h.to_tier) > Number(h.from_tier);
+                      const tierDown = !!fromRank && !!toRank && Number(h.to_tier) < Number(h.from_tier);
+                      return (
+                        <div
+                          key={h.id}
+                          className={`flex items-center gap-3 p-2.5 rounded-lg border ${
+                            win ? 'border-green-200 bg-green-50'
+                              : draw ? 'border-gray-200 bg-gray-50' : 'border-red-200 bg-red-50'
+                          }`}
+                        >
+                          <span className={`w-10 text-center font-bold text-sm ${
+                            win ? 'text-green-600' : draw ? 'text-gray-500' : 'text-red-500'
+                          }`}>
+                            {win ? '胜' : draw ? '平' : '负'}
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium text-gray-800 truncate">
+                              vs {h.opp_real_name || '对手已注销'}
+                              {h.opp_username && (
+                                <span className="ml-2 text-xs text-gray-400 font-normal">
+                                  {h.opp_username}
+                                </span>
+                              )}
+                            </p>
+                            <p className="text-xs text-gray-500">
+                              比分 {h.final_score} : {h.opp_final_score ?? '—'}
+                              {' · '}
+                              做对 {h.final_correct}/{h.final_correct + h.final_wrong}
+                              {h.config_name && ` · ${h.config_name}`}
+                              {' · '}{fmtBattleTime(h.created_at)}
+                            </p>
+                          </div>
+                          <div className="text-right flex-shrink-0">
+                            <p className={`text-xs font-medium ${
+                              h.rank_points_change > 0 ? 'text-green-600'
+                                : h.rank_points_change < 0 ? 'text-red-500' : 'text-gray-400'
+                            }`}>
+                              {h.rank_points_change > 0 ? '+' : ''}{h.rank_points_change} PK
+                            </p>
+                            {(Number(h.system_points_earned) || 0) + (Number(h.bonus_points) || 0) > 0 && (
+                              <p className="text-xs text-amber-600">
+                                +{(Number(h.system_points_earned) || 0) + (Number(h.bonus_points) || 0)} 积分
+                              </p>
+                            )}
+                            {toRank && (
+                              <p className="text-xs text-gray-500">
+                                {toRank.icon} {toRank.name}
+                                {tierUp && <span className="ml-1 text-green-600 font-bold">↑</span>}
+                                {tierDown && <span className="ml-1 text-red-500 font-bold">↓</span>}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* 分页 */}
+                  {historyTotal > HISTORY_PAGE_SIZE && (
+                    <div className="flex items-center justify-center gap-3 mt-4">
+                      <button
+                        onClick={() => setHistoryPage((p) => Math.max(0, p - 1))}
+                        disabled={historyPage === 0}
+                        className="px-3 py-1.5 text-sm rounded-lg border border-gray-300 disabled:opacity-40 hover:bg-gray-50"
+                      >
+                        上一页
+                      </button>
+                      <span className="text-xs text-gray-500">
+                        {historyPage + 1} / {Math.max(1, Math.ceil(historyTotal / HISTORY_PAGE_SIZE))}
+                      </span>
+                      <button
+                        onClick={() => setHistoryPage((p) => p + 1)}
+                        disabled={(historyPage + 1) * HISTORY_PAGE_SIZE >= historyTotal}
+                        className="px-3 py-1.5 text-sm rounded-lg border border-gray-300 disabled:opacity-40 hover:bg-gray-50"
+                      >
+                        下一页
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
