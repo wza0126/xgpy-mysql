@@ -2,6 +2,12 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
 import { CHAPTER_NAMES } from '../../data/chapterTaxonomy';
+import { useAuth } from '../../hooks/useAuth';
+
+interface ClassInfo {
+  id: string;
+  name: string;
+}
 
 // 聚类树：一级类目 → 二级类目集合（与 ExamManager 同款定义）
 type ClusterTree = Record<string, Set<string>>;
@@ -70,6 +76,8 @@ interface PKBattleConfig {
   // ===== 装备掉落配置（迁移 087）=====
   equipment_drop_enabled: number | boolean | null;
   equipment_drop_multiplier: number | string | null;
+  /** 可见班级ID（迁移 089）；空数组 = 不限班级，全部班级可用 */
+  visible_class_ids?: string[];
   created_at: string;
   updated_at: string;
 }
@@ -80,7 +88,9 @@ interface Props {
 }
 
 export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => {
+  const { profile } = useAuth();
   const [configs, setConfigs] = useState<PKBattleConfig[]>([]);
+  const [classes, setClasses] = useState<ClassInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -109,6 +119,8 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
     // ===== 装备掉落配置（迁移 087）=====
     equipment_drop_enabled: false,
     equipment_drop_multiplier: 1 as string | number,
+    // ===== 可见班级（迁移 089）；空数组 = 不限班级 = 全部班级可用 =====
+    visible_class_ids: [] as string[],
   });
   // 表单内筛选 state（独立于 ExamManager 的题目选择器筛选）
   const [filterTags, setFilterTags] = useState<string[]>([]);
@@ -122,6 +134,23 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
     fetchConfigs();
     fetchPracticableCounts();
   }, []);
+
+  // 班级列表：只取自己带的班（与 ClassManager 同口径），用于「活动投放班级」
+  useEffect(() => {
+    if (!profile) return;
+    (async () => {
+      try {
+        const { data } = await backendClient
+          .from('classes')
+          .select('id, name')
+          .eq('teacher_id', profile.id)
+          .order('name', { ascending: true });
+        if (data) setClasses(data as ClassInfo[]);
+      } catch (e) {
+        console.error('拉取班级列表失败:', e);
+      }
+    })();
+  }, [profile]);
 
   const fetchPracticableCounts = async () => {
     try {
@@ -170,6 +199,7 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
       daily_battles_points: '',
       equipment_drop_enabled: false,
       equipment_drop_multiplier: 1,
+      visible_class_ids: [],
     });
     setFilterTags([]);
     setFilterClusterPrimary([]);
@@ -206,6 +236,7 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
       equipment_drop_enabled: toBool(cfg.equipment_drop_enabled),
       equipment_drop_multiplier: cfg.equipment_drop_multiplier != null
         ? Number(cfg.equipment_drop_multiplier) : 1,
+      visible_class_ids: Array.isArray(cfg.visible_class_ids) ? cfg.visible_class_ids : [],
     });
     setFilterTags(parseJsonArray(cfg.tag_filters));
     // 还原聚类选中状态：fullKey 列表 → 一级 + 二级
@@ -245,6 +276,16 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
 
   const toggleTag = (tag: string) => {
     setFilterTags((prev) => (prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]));
+  };
+
+  // 班级可见性：勾选 = 该班可用此活动；一个都不勾 = 不限班级（全部班级可用）
+  const toggleVisibleClass = (classId: string) => {
+    setFormData((prev) => ({
+      ...prev,
+      visible_class_ids: prev.visible_class_ids.includes(classId)
+        ? prev.visible_class_ids.filter((c) => c !== classId)
+        : [...prev.visible_class_ids, classId],
+    }));
   };
 
   // 计算 cluster_filters：完整 cluster_id fullKey 列表（与后端 battleEngine 的 cluster_id IN(...) 精确匹配一致）
@@ -308,6 +349,8 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
       // ===== 装备掉落配置 =====
       equipment_drop_enabled: formData.equipment_drop_enabled,
       equipment_drop_multiplier: numOr(formData.equipment_drop_multiplier, 1),
+      // ===== 可见班级：空数组 = 不限班级（后端按「清空限制」处理）=====
+      visible_class_ids: formData.visible_class_ids,
     };
     try {
       if (editingId) {
@@ -349,6 +392,8 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
   };
 
   // 启用/禁用切换：需带上全部字段（后端 PUT 为全量更新）
+  // 注意 visible_class_ids 也要带上：后端只在「显式传数组」时才覆写可见性，
+  // 漏传虽不会清掉已有班级（后端按 null 保留），但显式带上语义更清晰、无歧义。
   const handleToggleActive = async (cfg: PKBattleConfig) => {
     const tags = parseJsonArray(cfg.tag_filters);
     const clusters = parseJsonArray(cfg.cluster_filters);
@@ -365,6 +410,7 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
         is_active: !toBool(cfg.is_active),
         daily_limit: cfg.daily_limit,
         qualification_correct_count: cfg.qualification_correct_count,
+        visible_class_ids: Array.isArray(cfg.visible_class_ids) ? cfg.visible_class_ids : [],
       });
       if (error) {
         alert('切换失败: ' + (error.message || JSON.stringify(error)));
@@ -500,6 +546,27 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
                       聚类 {clusters.length} 个
                     </span>
                   )}
+                  {/* 投放班级：空 = 全部班级；否则列出班级名（找不到名字说明班级已删除，退回显示ID） */}
+                  {(() => {
+                    const ids = Array.isArray(cfg.visible_class_ids) ? cfg.visible_class_ids : [];
+                    if (ids.length === 0) {
+                      return (
+                        <span className="text-emerald-600">
+                          <i className="fa-solid fa-users mr-1"></i>
+                          全部班级可用
+                        </span>
+                      );
+                    }
+                    const names = ids.map(
+                      (id) => classes.find((c) => c.id === id)?.name || id
+                    );
+                    return (
+                      <span className="text-indigo-600" title={names.join('、')}>
+                        <i className="fa-solid fa-users mr-1"></i>
+                        投放 {names.length} 个班：{names.join('、')}
+                      </span>
+                    );
+                  })()}
                   {/* 奖励摘要：只显示「偏离默认」的项，避免卡片噪音 */}
                   {Number(cfg.points_multiplier) > 1 && (
                     <span className="text-amber-600 font-medium">
@@ -579,6 +646,64 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
                     placeholder="如：期中复习PK"
                     className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
                   />
+                </div>
+
+                {/* 投放班级（迁移 089）：决定哪些班的学生能看到并使用该活动 */}
+                <div className="p-4 bg-emerald-50 rounded-xl border border-emerald-200">
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-sm font-medium text-emerald-800">
+                      <i className="fa-solid fa-users mr-1"></i>投放班级
+                    </label>
+                    {formData.visible_class_ids.length === 0 ? (
+                      <span className="text-xs px-2 py-0.5 bg-emerald-500 text-white rounded-full">
+                        全部班级可用
+                      </span>
+                    ) : (
+                      <span className="text-xs px-2 py-0.5 bg-indigo-500 text-white rounded-full">
+                        已选 {formData.visible_class_ids.length} 个班
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-gray-600 mb-2">
+                    只有选中的班级学生才能在 PK 界面看到并使用本活动；
+                    <b>一个都不选 = 不限班级</b>（本人名下所有班级均可用）。
+                    带多个年级时，可给不同年级建不同活动，各自只投放给对应班级。
+                  </p>
+                  {classes.length === 0 ? (
+                    <p className="text-xs text-gray-400 py-2">
+                      暂无可投放的班级（请先在「班级管理」中创建班级）
+                    </p>
+                  ) : (
+                    <div className="flex flex-wrap gap-2">
+                      {classes.map((cls) => {
+                        const on = formData.visible_class_ids.includes(cls.id);
+                        return (
+                          <button
+                            key={cls.id}
+                            type="button"
+                            onClick={() => toggleVisibleClass(cls.id)}
+                            className={`px-3 py-1.5 rounded-full text-sm border transition-colors ${
+                              on
+                                ? 'bg-emerald-500 text-white border-emerald-500'
+                                : 'bg-white text-gray-600 border-gray-300 hover:border-emerald-400'
+                            }`}
+                          >
+                            <i className={`fa-solid ${on ? 'fa-check' : 'fa-circle-plus'} mr-1 text-xs`}></i>
+                            {cls.name}
+                          </button>
+                        );
+                      })}
+                      {formData.visible_class_ids.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setFormData({ ...formData, visible_class_ids: [] })}
+                          className="px-3 py-1.5 text-sm text-emerald-700 hover:underline"
+                        >
+                          清空（改为全部班级）
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* 模式 + 时长 */}

@@ -30,12 +30,23 @@ const WINDOW_SKINS_META = [
   { id: 'skin_royal_gold', name: '流光金黑', description: '帝王尊享，金碧辉煌', tier: 'legendary', critBonus: 5, pointsCost: 2500, unlockSource: 'points' },
   { id: 'skin_galaxy_star', name: '星河璀璨', description: '银河倒泻，星海璀璨', tier: 'legendary', critBonus: 5, pointsCost: 2500, unlockSource: 'points' },
   // ===== 段位专属（PK 段位解锁，永久拥有，不可用积分兑换）=====
-  { id: 'skin_rank_primary', name: '启明书包', description: '小学生段位专属 —— 晨光初启，书包装满好奇心', tier: 'common', critBonus: 3, pointsCost: 0, unlockSource: 'rank', requiredRankTier: 0, rankName: '小学生' },
-  { id: 'skin_rank_junior', name: '青竹书卷', description: '初中生段位专属 —— 青竹拔节，书卷渐厚', tier: 'rare', critBonus: 7, pointsCost: 0, unlockSource: 'rank', requiredRankTier: 1, rankName: '初中生' },
-  { id: 'skin_rank_senior', name: '墨韵青锋', description: '高中生段位专属 —— 墨香凝锋，挑灯夜读', tier: 'rare', critBonus: 8, pointsCost: 0, unlockSource: 'rank', requiredRankTier: 2, rankName: '高中生' },
-  { id: 'skin_rank_undergrad', name: '紫宸星槎', description: '本科生段位专属 —— 星槎渡海，紫宸问道', tier: 'legendary', critBonus: 9, pointsCost: 0, unlockSource: 'rank', requiredRankTier: 3, rankName: '本科生' },
+  { id: 'skin_rank_primary', name: '启明书包', description: '小学生段位专属 —— 晨光初启，书包装满好奇心', tier: 'common', critBonus: 1, pointsCost: 0, unlockSource: 'rank', requiredRankTier: 0, rankName: '小学生' },
+  { id: 'skin_rank_junior', name: '青竹书卷', description: '初中生段位专属 —— 青竹拔节，书卷渐厚', tier: 'rare', critBonus: 3, pointsCost: 0, unlockSource: 'rank', requiredRankTier: 1, rankName: '初中生' },
+  { id: 'skin_rank_senior', name: '墨韵青锋', description: '高中生段位专属 —— 墨香凝锋，挑灯夜读', tier: 'rare', critBonus: 6, pointsCost: 0, unlockSource: 'rank', requiredRankTier: 2, rankName: '高中生' },
+  { id: 'skin_rank_undergrad', name: '紫宸星槎', description: '本科生段位专属 —— 星槎渡海，紫宸问道', tier: 'legendary', critBonus: 8, pointsCost: 0, unlockSource: 'rank', requiredRankTier: 3, rankName: '本科生' },
   { id: 'skin_rank_researcher', name: '太初鸿蒙', description: '研究生段位专属 —— 鸿蒙未判，万象归一（PK 最高荣耀）', tier: 'legendary', critBonus: 10, pointsCost: 0, unlockSource: 'rank', requiredRankTier: 4, rankName: '研究生' },
 ];
+
+/**
+ * 皮肤 ID → 暴击率加成（%）。**唯一来源**，由 WINDOW_SKINS_META 派生。
+ * ⛔ 历史上答题结算与 /api/student/stats 各写死过一份「只含 7 套积分皮肤」的字面量表，
+ *    导致 5 套段位皮肤激活后 crit 加成为 0（战力卡片不显示、实际判定也不加成）。
+ *    今后新增皮肤只要进 WINDOW_SKINS_META 即自动生效，**不要再写第二份**。
+ */
+const SKIN_CRIT_BONUS_MAP = WINDOW_SKINS_META.reduce((map, s) => {
+  map[s.id] = Number(s.critBonus) || 0;
+  return map;
+}, {});
 
 /**
  * 段位层级 → 段位专属皮肤 ID
@@ -2939,22 +2950,13 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
       );
       const equipmentCritSum = parseFloat(eqRows[0]?.total_eq_crit) || 0;
 
-      // 皮肤暴击加成
-      const SKIN_CRIT_BONUS = {
-        'skin_minimal_white': 1,
-        'skin_forest_green': 1,
-        'skin_ocean_blue': 2,
-        'skin_aurora_purple': 3,
-        'skin_sunset_gold': 3,
-        'skin_royal_gold': 5,
-        'skin_galaxy_star': 5,
-      };
+      // 皮肤暴击加成（唯一来源 SKIN_CRIT_BONUS_MAP，含段位专属皮肤）
       const [skinRowsSubmit] = await connection.query(
         'SELECT active_skin_id FROM profiles WHERE id = ?',
         [student_id]
       );
       const activeSkinIdSubmit = skinRowsSubmit[0]?.active_skin_id || null;
-      const skinCritBonus = activeSkinIdSubmit ? (SKIN_CRIT_BONUS[activeSkinIdSubmit] || 0) : 0;
+      const skinCritBonus = activeSkinIdSubmit ? (SKIN_CRIT_BONUS_MAP[activeSkinIdSubmit] || 0) : 0;
 
       // 暴击率 = Min(crit_base_rate + floor(total_correct/100) + extra_crit + buff总和 + 装备加成 + 皮肤加成, crit_max_rate)，下限5%
       crit_rate = critBaseRate + Math.floor(oldTotalCorrect / 100) + extraCrit + buffSum + equipmentCritSum + skinCritBonus;
@@ -4582,6 +4584,7 @@ app.post('/api/import', authenticate, requireTeachingRole, async (req, res) => {
         'prizes', 'internet_codes', 'exchange_records', 'system_config',
         'prize_class_visibility', 'code_snippets', 'user_roles', 'pet_config',
         'apps', 'app_visibility', 'student_app_usage', 'app_usage_logs', 'app_reviews',
+        'pk_battle_configs', 'pk_battle_config_class_visibility',
         'login_history', 'login_sessions', 'notifications',
         'notification_recipients', 'point_transactions',
         'ai_qa_history', 'python_magic_progress', 'backup_records',
@@ -9334,22 +9337,13 @@ app.get('/api/student/stats', authenticate, async (req, res) => {
     );
     const equipmentCritSum = parseFloat(eqRows[0]?.total_eq_crit) || 0;
 
-    // 皮肤暴击加成（激活的皮肤永久加成）
-    const SKIN_CRIT_BONUS = {
-      'skin_minimal_white': 1,
-      'skin_forest_green': 1,
-      'skin_ocean_blue': 2,
-      'skin_aurora_purple': 3,
-      'skin_sunset_gold': 3,
-      'skin_royal_gold': 5,
-      'skin_galaxy_star': 5,
-    };
+    // 皮肤暴击加成（激活的皮肤永久加成；唯一来源 SKIN_CRIT_BONUS_MAP，含段位专属皮肤）
     const [skinRows] = await pool.query(
       'SELECT active_skin_id FROM profiles WHERE id = ?',
       [userId]
     );
     const activeSkinId = skinRows[0]?.active_skin_id || null;
-    const skinCritBonus = activeSkinId ? (SKIN_CRIT_BONUS[activeSkinId] || 0) : 0;
+    const skinCritBonus = activeSkinId ? (SKIN_CRIT_BONUS_MAP[activeSkinId] || 0) : 0;
 
     // 学生装备列表
     const [equipmentList] = await pool.query(
@@ -15019,6 +15013,86 @@ function normalizePkDropFields(raw = {}) {
   return { equipment_drop_enabled: enabled ? 1 : 0, equipment_drop_multiplier: multiplier };
 }
 
+/**
+ * 归一化「班级可见性」入参 → 去重后的班级ID数组
+ *
+ * 语义（与迁移 089 的注释一致）：
+ *   - null / undefined        → 表示「未提交该字段」，调用方按「不改动」处理
+ *   - []                      → 一个班都不选 = 全部班级可见（等同未限制）
+ *   - ['c1','c2']             → 仅这两个班可见
+ *
+ * 注意：刻意**不校验空数组为「全不可见」**。教师端 UI 已用「不勾 = 不限制」表达，
+ * 若把 [] 当「谁都看不到」，一次误操作就会让活动凭空消失且无从排查。
+ */
+function normalizeVisibilityClassIds(raw) {
+  if (raw === null || raw === undefined) return null;
+  if (!Array.isArray(raw)) return null;
+  const seen = new Set();
+  const out = [];
+  for (const v of raw) {
+    if (v === null || v === undefined) continue;
+    const s = String(v).trim();
+    if (!s || seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
+/**
+ * 取某活动当前可见的班级ID列表（is_visible=1）。
+ * 返回 [] 表示「不限班级」（表内无可见行）。
+ */
+async function getVisibleClassIds(conn, configId) {
+  const [rows] = await conn.query(
+    'SELECT class_id FROM pk_battle_config_class_visibility WHERE config_id = ? AND is_visible = 1',
+    [configId]
+  );
+  return rows.map((r) => String(r.class_id));
+}
+
+/**
+ * 覆写某活动的班级可见性（幂等）。
+ *
+ * 写法：先 DELETE 该配置全部行，再按 classIds 逐行 INSERT。
+ * 用「删+插」而不是「逐行 upsert」是为了避免 is_visible=0 的历史行累积成垃圾；
+ * 但**删+插必须同时覆盖「班级列表变化」与「可见性变化」两种情况**，
+ * 所以只把 is_visible=1 的班写进去 —— 未被选中的班级留空行即代表不可见。
+ *
+ * ⚠️ 空数组 = 清空所有限制（不限班级），不是「全不可见」，见 normalizeVisibilityClassIds。
+ */
+async function setVisibleClassIds(conn, configId, classIds) {
+  await conn.query('DELETE FROM pk_battle_config_class_visibility WHERE config_id = ?', [configId]);
+  for (const classId of classIds) {
+    await conn.query(
+      `INSERT INTO pk_battle_config_class_visibility (id, config_id, class_id, is_visible)
+       VALUES (?, ?, ?, 1)`,
+      ['pbccv_' + crypto.randomBytes(8).toString('hex'), configId, classId]
+    );
+  }
+}
+
+/**
+ * 批量取多个活动的可见班级ID → { configId: [classId, ...] }
+ * 教师端列表接口用它一次性带出，避免 N+1 查询。
+ */
+async function getVisibleClassIdsMap(conn, configIds) {
+  const out = {};
+  if (!Array.isArray(configIds) || configIds.length === 0) return out;
+  const placeholders = configIds.map(() => '?').join(', ');
+  const [rows] = await conn.query(
+    `SELECT config_id, class_id FROM pk_battle_config_class_visibility
+     WHERE config_id IN (${placeholders}) AND is_visible = 1`,
+    configIds
+  );
+  for (const r of rows) {
+    const cid = String(r.config_id);
+    if (!out[cid]) out[cid] = [];
+    out[cid].push(String(r.class_id));
+  }
+  return out;
+}
+
 // 教师端：对战配置 CRUD
 app.get('/api/pk/battle-configs', authenticate, requireTeacher, async (req, res) => {
   try {
@@ -15026,7 +15100,10 @@ app.get('/api/pk/battle-configs', authenticate, requireTeacher, async (req, res)
       'SELECT * FROM pk_battle_configs WHERE teacher_id = ? ORDER BY created_at DESC',
       [req.user.userId]
     );
-    res.json({ data: rows, error: null });
+    // 带出每个活动的可见班级ID。空数组 = 不限班级（前端据此显示「全部班级」）。
+    const visMap = await getVisibleClassIdsMap(pool, rows.map((r) => r.id));
+    const data = rows.map((r) => ({ ...r, visible_class_ids: visMap[r.id] || [] }));
+    res.json({ data, error: null });
   } catch (err) {
     console.error('查对战配置失败:', err);
     res.status(500).json({ data: null, error: '查询失败' });
@@ -15042,7 +15119,8 @@ app.post('/api/pk/battle-configs', authenticate, requireTeacher, async (req, res
       points_multiplier, win_bonus_rate, draw_bonus_rate,
       consolation_points, consolation_gap, first_battle_points,
       daily_battles_target, daily_battles_points,
-      equipment_drop_enabled, equipment_drop_multiplier } = req.body;
+      equipment_drop_enabled, equipment_drop_multiplier,
+      visible_class_ids } = req.body;
     const id = 'pbc_' + crypto.randomBytes(8).toString('hex');
     // 已掌握类目范围：空数组/NULL 均写 null（表示全部范围，不限类目）
     const masteredClusters = Array.isArray(qualification_mastered_clusters)
@@ -15054,29 +15132,42 @@ app.post('/api/pk/battle-configs', authenticate, requireTeacher, async (req, res
       daily_battles_target, daily_battles_points,
     });
     const drops = normalizePkDropFields({ equipment_drop_enabled, equipment_drop_multiplier });
-    await pool.query(
-      `INSERT INTO pk_battle_configs
-       (id, teacher_id, name, mode, duration_seconds, question_count,
-        tag_filters, cluster_filters, difficulty_min, difficulty_max, is_active, daily_limit,
-        qualification_correct_count, qualification_mastered_count, qualification_mastered_clusters,
-        points_multiplier, win_bonus_rate, draw_bonus_rate,
-        consolation_points, consolation_gap, first_battle_points,
-        daily_battles_target, daily_battles_points,
-        equipment_drop_enabled, equipment_drop_multiplier)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, req.user.userId, name, mode || 'timed',
-       duration_seconds || 180, question_count || 20,
-       tag_filters ? JSON.stringify(tag_filters) : null,
-       cluster_filters ? JSON.stringify(cluster_filters) : null,
-       difficulty_min || null, difficulty_max || null,
-       is_active === false ? 0 : 1, daily_limit || null,
-       qualification_correct_count || null,
-       qualification_mastered_count || null, masteredClusters,
-       reward.points_multiplier, reward.win_bonus_rate, reward.draw_bonus_rate,
-       reward.consolation_points, reward.consolation_gap, reward.first_battle_points,
-       reward.daily_battles_target, reward.daily_battles_points,
-       drops.equipment_drop_enabled, drops.equipment_drop_multiplier]
-    );
+    // 班级可见性：null → 不限班级（新建时不写行）；[] → 同样不限；['c1'] → 仅 c1
+    const visClassIds = normalizeVisibilityClassIds(visible_class_ids) || [];
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      await conn.query(
+        `INSERT INTO pk_battle_configs
+         (id, teacher_id, name, mode, duration_seconds, question_count,
+          tag_filters, cluster_filters, difficulty_min, difficulty_max, is_active, daily_limit,
+          qualification_correct_count, qualification_mastered_count, qualification_mastered_clusters,
+          points_multiplier, win_bonus_rate, draw_bonus_rate,
+          consolation_points, consolation_gap, first_battle_points,
+          daily_battles_target, daily_battles_points,
+          equipment_drop_enabled, equipment_drop_multiplier)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, req.user.userId, name, mode || 'timed',
+         duration_seconds || 180, question_count || 20,
+         tag_filters ? JSON.stringify(tag_filters) : null,
+         cluster_filters ? JSON.stringify(cluster_filters) : null,
+         difficulty_min || null, difficulty_max || null,
+         is_active === false ? 0 : 1, daily_limit || null,
+         qualification_correct_count || null,
+         qualification_mastered_count || null, masteredClusters,
+         reward.points_multiplier, reward.win_bonus_rate, reward.draw_bonus_rate,
+         reward.consolation_points, reward.consolation_gap, reward.first_battle_points,
+         reward.daily_battles_target, reward.daily_battles_points,
+         drops.equipment_drop_enabled, drops.equipment_drop_multiplier]
+      );
+      if (visClassIds.length > 0) await setVisibleClassIds(conn, id, visClassIds);
+      await conn.commit();
+    } catch (e) {
+      try { await conn.rollback(); } catch (_) {}
+      throw e;
+    } finally {
+      conn.release();
+    }
     res.json({ data: { id }, error: null });
   } catch (err) {
     console.error('创建对战配置失败:', err);
@@ -15093,7 +15184,8 @@ app.put('/api/pk/battle-configs/:id', authenticate, requireTeacher, async (req, 
       points_multiplier, win_bonus_rate, draw_bonus_rate,
       consolation_points, consolation_gap, first_battle_points,
       daily_battles_target, daily_battles_points,
-      equipment_drop_enabled, equipment_drop_multiplier } = req.body;
+      equipment_drop_enabled, equipment_drop_multiplier,
+      visible_class_ids } = req.body;
     const masteredClusters = Array.isArray(qualification_mastered_clusters)
       && qualification_mastered_clusters.length > 0
       ? JSON.stringify(qualification_mastered_clusters) : null;
@@ -15103,30 +15195,53 @@ app.put('/api/pk/battle-configs/:id', authenticate, requireTeacher, async (req, 
       daily_battles_target, daily_battles_points,
     });
     const drops = normalizePkDropFields({ equipment_drop_enabled, equipment_drop_multiplier });
-    await pool.query(
-      `UPDATE pk_battle_configs SET
-        name = ?, mode = ?, duration_seconds = ?, question_count = ?,
-        tag_filters = ?, cluster_filters = ?, difficulty_min = ?, difficulty_max = ?,
-        is_active = ?, daily_limit = ?, qualification_correct_count = ?,
-        qualification_mastered_count = ?, qualification_mastered_clusters = ?,
-        points_multiplier = ?, win_bonus_rate = ?, draw_bonus_rate = ?,
-        consolation_points = ?, consolation_gap = ?, first_battle_points = ?,
-        daily_battles_target = ?, daily_battles_points = ?,
-        equipment_drop_enabled = ?, equipment_drop_multiplier = ?
-       WHERE id = ? AND teacher_id = ?`,
-      [name, mode || 'timed', duration_seconds || 180, question_count || 20,
-       tag_filters ? JSON.stringify(tag_filters) : null,
-       cluster_filters ? JSON.stringify(cluster_filters) : null,
-       difficulty_min || null, difficulty_max || null,
-       is_active === false ? 0 : 1, daily_limit || null,
-       qualification_correct_count || null,
-       qualification_mastered_count || null, masteredClusters,
-       reward.points_multiplier, reward.win_bonus_rate, reward.draw_bonus_rate,
-       reward.consolation_points, reward.consolation_gap, reward.first_battle_points,
-       reward.daily_battles_target, reward.daily_battles_points,
-       drops.equipment_drop_enabled, drops.equipment_drop_multiplier,
-       req.params.id, req.user.userId]
-    );
+    // 班级可见性：null = 请求未携带该字段 → 保持原样（老调用方如「启用/禁用切换」不受影响）
+    const visClassIds = normalizeVisibilityClassIds(visible_class_ids);
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      // 先确认归属：否则任何人都能改别人的配置的班级可见性
+      const [own] = await conn.query(
+        'SELECT id FROM pk_battle_configs WHERE id = ? AND teacher_id = ?',
+        [req.params.id, req.user.userId]
+      );
+      if (own.length === 0) {
+        await conn.rollback();
+        return res.status(404).json({ data: null, error: '配置不存在或无权限' });
+      }
+      await conn.query(
+        `UPDATE pk_battle_configs SET
+          name = ?, mode = ?, duration_seconds = ?, question_count = ?,
+          tag_filters = ?, cluster_filters = ?, difficulty_min = ?, difficulty_max = ?,
+          is_active = ?, daily_limit = ?, qualification_correct_count = ?,
+          qualification_mastered_count = ?, qualification_mastered_clusters = ?,
+          points_multiplier = ?, win_bonus_rate = ?, draw_bonus_rate = ?,
+          consolation_points = ?, consolation_gap = ?, first_battle_points = ?,
+          daily_battles_target = ?, daily_battles_points = ?,
+          equipment_drop_enabled = ?, equipment_drop_multiplier = ?
+         WHERE id = ? AND teacher_id = ?`,
+        [name, mode || 'timed', duration_seconds || 180, question_count || 20,
+         tag_filters ? JSON.stringify(tag_filters) : null,
+         cluster_filters ? JSON.stringify(cluster_filters) : null,
+         difficulty_min || null, difficulty_max || null,
+         is_active === false ? 0 : 1, daily_limit || null,
+         qualification_correct_count || null,
+         qualification_mastered_count || null, masteredClusters,
+         reward.points_multiplier, reward.win_bonus_rate, reward.draw_bonus_rate,
+         reward.consolation_points, reward.consolation_gap, reward.first_battle_points,
+         reward.daily_battles_target, reward.daily_battles_points,
+         drops.equipment_drop_enabled, drops.equipment_drop_multiplier,
+         req.params.id, req.user.userId]
+      );
+      // 只有显式传了数组才覆写（含 [] → 清空 = 不限班级）
+      if (visClassIds !== null) await setVisibleClassIds(conn, req.params.id, visClassIds);
+      await conn.commit();
+    } catch (e) {
+      try { await conn.rollback(); } catch (_) {}
+      throw e;
+    } finally {
+      conn.release();
+    }
     res.json({ data: { id: req.params.id }, error: null });
   } catch (err) {
     console.error('更新对战配置失败:', err);
@@ -15135,26 +15250,74 @@ app.put('/api/pk/battle-configs/:id', authenticate, requireTeacher, async (req, 
 });
 
 app.delete('/api/pk/battle-configs/:id', authenticate, requireTeacher, async (req, res) => {
+  const conn = await pool.getConnection();
   try {
-    await pool.query(
+    await conn.beginTransaction();
+    const [own] = await conn.query(
+      'SELECT id FROM pk_battle_configs WHERE id = ? AND teacher_id = ?',
+      [req.params.id, req.user.userId]
+    );
+    if (own.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ data: null, error: '配置不存在或无权限' });
+    }
+    // 可见性行随配置一起删，避免留下悬空记录（否则同 ID 复用时行为诡异）
+    await conn.query(
+      'DELETE FROM pk_battle_config_class_visibility WHERE config_id = ?',
+      [req.params.id]
+    );
+    await conn.query(
       'DELETE FROM pk_battle_configs WHERE id = ? AND teacher_id = ?',
       [req.params.id, req.user.userId]
     );
+    await conn.commit();
     res.json({ data: { id: req.params.id }, error: null });
   } catch (err) {
+    try { await conn.rollback(); } catch (_) {}
     console.error('删除对战配置失败:', err);
     res.status(500).json({ data: null, error: '删除失败' });
+  } finally {
+    conn.release();
   }
 });
 
 // 学生端：查可用配置
+//
+// 「可用」= is_active=1 **且** 该活动对本班开放（迁移 089）。
+// 班级判定口径（与 pk_battle_config_class_visibility 语义严格对应）：
+//   1) 学生无班级（class_id 为空）→ 只见「未做班级限制」的活动；
+//      历史行为是能看见全部活动，这里刻意收紧：没班级就不该乱入别人班的 PK。
+//   2) 活动在可见性表内**无任何行** → 未做限制，全班可见（兼容存量配置）。
+//   3) 活动在可见性表内有行     → 只有 is_visible=1 且 class_id = 本班才可见。
+// 用 EXISTS 子查询而非 JOIN，避免一个活动命中多行时出现重复结果。
 app.get('/api/pk/battle-configs/active', authenticate, requireStudent, async (req, res) => {
   try {
-    const [rows] = await pool.query(
-      'SELECT id, name, mode, duration_seconds, question_count, daily_limit, qualification_correct_count, qualification_mastered_count, qualification_mastered_clusters FROM pk_battle_configs WHERE is_active = 1 ORDER BY created_at DESC'
+    const [profRows] = await pool.query(
+      'SELECT class_id FROM profiles WHERE id = ? LIMIT 1',
+      [req.user.userId]
     );
+    const myClassId = profRows.length > 0 ? String(profRows[0].class_id || '') : '';
+
+    const baseCols = `c.id, c.name, c.mode, c.duration_seconds, c.question_count, c.daily_limit,
+       c.qualification_correct_count, c.qualification_mastered_count, c.qualification_mastered_clusters`;
+    const sql = `
+      SELECT ${baseCols}
+      FROM pk_battle_configs c
+      WHERE c.is_active = 1
+        AND (
+          NOT EXISTS (
+            SELECT 1 FROM pk_battle_config_class_visibility v WHERE v.config_id = c.id
+          )
+          OR EXISTS (
+            SELECT 1 FROM pk_battle_config_class_visibility v
+            WHERE v.config_id = c.id AND v.is_visible = 1 AND v.class_id = ?
+          )
+        )
+      ORDER BY c.created_at DESC`;
+    const [rows] = await pool.query(sql, [myClassId]);
     res.json({ data: rows, error: null });
   } catch (err) {
+    console.error('查可用对战配置失败:', err);
     res.status(500).json({ data: null, error: '查询失败' });
   }
 });
@@ -15319,9 +15482,13 @@ app.get('/api/pk/history/:room_id', authenticate, requireStudent, async (req, re
     );
 
     // 双方作答流水
+    // 复盘专用：本接口只允许**本房间参与者**拉取（上面已校验 myRows），
+    // 属于「本人做过的题一律放行」口径，故可下发选项/答案/解析，
+    // 与 reveal_answers / 错题榜（requireTeacher）同类。
     const [answers] = await pool.query(
       `SELECT a.user_id, a.question_id, a.answer, a.is_correct, a.cost_ms,
-       q.content AS question_text, q.type AS question_type, q.answers AS correct_answer
+       q.content AS question_text, q.type AS question_type, q.answers AS correct_answer,
+       q.options AS options, q.explanation AS explanation
        FROM pk_match_answers a
        JOIN questions q ON a.question_id = q.id
        WHERE a.room_id = ?

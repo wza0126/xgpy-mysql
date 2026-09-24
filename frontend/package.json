@@ -1,6 +1,6 @@
 {
   "name": "python-learning-platform",
-  "version": "2.6.7",
+  "version": "2.6.8",
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 3266",
     "start": "vite --host 0.0.0.0 --port 3266",

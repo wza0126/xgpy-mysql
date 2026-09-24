@@ -169,14 +169,14 @@ export const WINDOW_SKINS: WindowSkinConfig[] = [
 
   // ========== 段位专属（PK 段位解锁，永久拥有）==========
   // 设计意图：让「段位」变成看得见的追求 —— 每上一个台阶，桌面就换一番气象。
-  // 暴击率 3% → 7% → 8% → 9% → 10%，跨度刻意拉大，使高段位的收益肉眼可感。
+  // 暴击率 1% → 3% → 6% → 8% → 10%，随段位阶梯递增。
   // 注意：这些皮肤不参与积分兑换（unlockSource='rank'），只能靠打上去获得。
   {
     id: 'skin_rank_primary',
     name: '启明书包',
     description: '小学生段位专属 —— 晨光初启，书包装满好奇心',
     tier: 'common',
-    critBonus: 3,
+    critBonus: 1,
     pointsCost: 0,
     previewEmoji: '🎒',
     unlockSource: 'rank',
@@ -197,7 +197,7 @@ export const WINDOW_SKINS: WindowSkinConfig[] = [
     name: '青竹书卷',
     description: '初中生段位专属 —— 青竹拔节，书卷渐厚',
     tier: 'rare',
-    critBonus: 7,
+    critBonus: 3,
     pointsCost: 0,
     previewEmoji: '📚',
     unlockSource: 'rank',
@@ -218,7 +218,7 @@ export const WINDOW_SKINS: WindowSkinConfig[] = [
     name: '墨韵青锋',
     description: '高中生段位专属 —— 墨香凝锋，挑灯夜读',
     tier: 'rare',
-    critBonus: 8,
+    critBonus: 6,
     pointsCost: 0,
     previewEmoji: '🏫',
     unlockSource: 'rank',
@@ -239,7 +239,7 @@ export const WINDOW_SKINS: WindowSkinConfig[] = [
     name: '紫宸星槎',
     description: '本科生段位专属 —— 星槎渡海，紫宸问道',
     tier: 'legendary',
-    critBonus: 9,
+    critBonus: 8,
     pointsCost: 0,
     previewEmoji: '🎓',
     unlockSource: 'rank',

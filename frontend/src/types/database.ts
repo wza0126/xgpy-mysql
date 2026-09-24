@@ -28,6 +28,7 @@ type Tables = Record<string, Table> & {
   pet_foods: Table;
   pet_tips: Table;
   pets: Table;
+  pk_battle_config_class_visibility: Table;
   prize_class_visibility: Table;
   prizes: Table;
   profiles: Table;

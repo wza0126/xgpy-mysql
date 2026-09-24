@@ -1,9 +1,14 @@
 // PK 结算复盘页：对比数据 + 逐题复盘 + 错题导入
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import { backendClient } from '../../../api/backendClient';
 import { useAuth } from '../../../hooks/useAuth';
 import { getRankInfo, renderStars, formatDuration } from './utils/pkHelpers';
+import {
+  normalizeOptions,
+  normalizeAnswers,
+  questionTypeLabel,
+} from '../../../utils/questionDisplay';
 
 interface ReviewPlayer {
   user_id: string;
@@ -27,6 +32,10 @@ interface ReviewAnswer {
   question_text: string;
   question_type: string;
   correct_answer: string;
+  /** 选项（包裹对象 {options:[...]} 或数组，渲染前须经 normalizeOptions 拆包） */
+  options?: unknown;
+  /** 解析文本 */
+  explanation?: string | null;
 }
 
 /** 本局段位变化（迁移 087；平局或段位未变时该玩家没有对应行） */
@@ -94,6 +103,8 @@ export const PKResult: React.FC<{
   const [data, setData] = useState<ReviewData | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
+  /** 双击题干打开的题目详情（选项 / 答案 / 解析） */
+  const [detailQuestion, setDetailQuestion] = useState<ReviewAnswer | null>(null);
 
   useEffect(() => {
     fetchReview();
@@ -336,7 +347,10 @@ export const PKResult: React.FC<{
 
       {/* 逐题复盘 */}
       <div className="bg-white rounded-xl shadow border border-gray-200 p-4 mb-6">
-        <h3 className="font-bold mb-3">逐题复盘</h3>
+        <div className="flex items-baseline justify-between mb-3">
+          <h3 className="font-bold">逐题复盘</h3>
+          <span className="text-xs text-gray-400">双击题干可查看选项、答案与解析</span>
+        </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
@@ -352,7 +366,12 @@ export const PKResult: React.FC<{
                 const myAns = data.answers.find((a) => a.question_id === qid && a.user_id === me.user_id);
                 const oppAns = data.answers.find((a) => a.question_id === qid && a.user_id === opp.user_id);
                 return (
-                  <tr key={qid} className="border-b border-gray-100">
+                  <tr
+                    key={qid}
+                    onDoubleClick={() => setDetailQuestion(ans)}
+                    title="双击查看选项、答案与解析"
+                    className="border-b border-gray-100 cursor-pointer hover:bg-purple-50 transition-colors"
+                  >
                     <td className="py-2 px-2">{i + 1}</td>
                     <td className="py-2 px-2 max-w-xs truncate">
                       {ans.question_text?.substring(0, 30)}...
@@ -370,6 +389,110 @@ export const PKResult: React.FC<{
           </table>
         </div>
       </div>
+
+      {/* ===== 题目详情弹窗（双击题干打开，便于逐题讲解） ===== */}
+      {detailQuestion && (() => {
+        const opts = normalizeOptions(detailQuestion.options);
+        const answers = normalizeAnswers(detailQuestion.correct_answer);
+        const isCorrectKey = (k: string) => answers.includes(k);
+        // 我的作答（用于标出"我选了哪个"）
+        const myAnswerText = detailQuestion.answer;
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+            onClick={() => setDetailQuestion(null)}
+          >
+            <div
+              className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[80vh] overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="sticky top-0 bg-white border-b border-gray-200 px-6 py-4 flex items-start justify-between rounded-t-xl">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="px-2 py-0.5 bg-orange-100 text-orange-600 text-xs rounded font-medium">
+                      {questionTypeLabel(detailQuestion.question_type)}
+                    </span>
+                    <span
+                      className={`text-xs font-medium ${
+                        detailQuestion.is_correct ? 'text-green-600' : 'text-red-600'
+                      }`}
+                    >
+                      {detailQuestion.is_correct ? '✓ 我答对了' : '✗ 我答错了'}
+                    </span>
+                  </div>
+                  <p className="text-gray-800 font-medium whitespace-pre-wrap break-words">
+                    {detailQuestion.question_text}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setDetailQuestion(null)}
+                  className="ml-4 text-gray-400 hover:text-gray-700 flex-shrink-0"
+                  title="关闭"
+                >
+                  <i className="fa-solid fa-xmark text-xl"></i>
+                </button>
+              </div>
+
+              <div className="px-6 py-4">
+                {opts.length > 0 ? (
+                  <ul className="space-y-2 mb-4">
+                    {opts.map((o) => {
+                      const hit = isCorrectKey(o.key);
+                      return (
+                        <li
+                          key={o.key}
+                          className={`flex items-start gap-3 px-3 py-2 rounded-lg border ${
+                            hit ? 'border-green-300 bg-green-50' : 'border-gray-200 bg-gray-50'
+                          }`}
+                        >
+                          <span className={`font-bold flex-shrink-0 ${hit ? 'text-green-600' : 'text-gray-500'}`}>
+                            {o.key}.
+                          </span>
+                          <span className="text-gray-800 whitespace-pre-wrap break-words flex-1">{o.text}</span>
+                          {hit && (
+                            <span className="flex-shrink-0 text-green-600 text-xs font-bold">
+                              <i className="fa-solid fa-check mr-1"></i>正确
+                            </span>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : (
+                  <div className="mb-4 px-3 py-2 rounded-lg border border-gray-200 bg-gray-50 text-sm text-gray-500">
+                    （本题无选项，或选项数据缺失）
+                  </div>
+                )}
+
+                <div className="mb-4 px-3 py-2 rounded-lg bg-green-50 border border-green-200">
+                  <p className="text-xs font-bold text-green-700 mb-1">
+                    <i className="fa-solid fa-circle-check mr-1"></i>正确答案
+                  </p>
+                  <p className="text-sm font-medium text-green-800">
+                    {answers.length > 0 ? answers.join('、') : '（答案缺失）'}
+                  </p>
+                </div>
+
+                {myAnswerText && (
+                  <div className="mb-4 px-3 py-2 rounded-lg bg-gray-50 border border-gray-200">
+                    <p className="text-xs font-bold text-gray-600 mb-1">我的作答</p>
+                    <p className="text-sm text-gray-800 whitespace-pre-wrap break-words">{myAnswerText}</p>
+                  </div>
+                )}
+
+                <div className="px-3 py-2 rounded-lg bg-blue-50 border border-blue-200">
+                  <p className="text-xs font-bold text-blue-700 mb-1">
+                    <i className="fa-solid fa-lightbulb mr-1"></i>解析
+                  </p>
+                  <p className="text-sm text-gray-800 whitespace-pre-wrap break-words">
+                    {detailQuestion.explanation || '（本题暂无解析）'}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* 操作按钮 */}
       <div className="flex gap-3">

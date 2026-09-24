@@ -14,7 +14,7 @@
  *      - student_skins 唯一键还在（INSERT IGNORE 幂等的前提）
  *   B. 段位皮肤映射一致性（三处必须同步）
  *      - 后端 index.js / battleEngine.js / 前端 windowSkins.ts 的 tier→skinId 映射逐项相等
- *      - 5 套皮肤的暴击率必须严格等于 3/7/8/9/10
+ *      - 5 套皮肤的暴击率必须严格等于 1/3/6/8/10
  *   C. 接口（真数据 + 真登录）
  *      - /api/pk/profile 触发懒补偿后 my-skins 能拿到段位皮肤
  *      - 段位单调：已达 tier=N 时 0..N 的皮肤全部应得
@@ -100,6 +100,63 @@ function extractTierSkinMap(src) {
   return out;
 }
 
+// ── 前端 PKStatsTab 解析逻辑的**镜像实现**（口径必须与前端一致）──
+// 用于对接口返回的真实 options/answers 做端到端渲染校验。
+function feNormalizeOptions(raw) {
+  if (!raw) return [];
+  let arr = raw;
+  if (typeof arr === 'string') {
+    try { arr = JSON.parse(arr); } catch { return [{ key: '', text: arr }]; }
+  }
+  if (arr && !Array.isArray(arr) && typeof arr === 'object') {
+    const inner = arr.options ?? arr.items ?? arr.data ?? arr.list ?? arr.choices;
+    if (inner !== undefined) arr = inner;
+  }
+  if (typeof arr === 'string') {
+    const s = arr;
+    try { arr = JSON.parse(s); } catch { return [{ key: '', text: s }]; }
+  }
+  if (Array.isArray(arr)) {
+    return arr.map((item, i) => {
+      if (typeof item === 'string') {
+        const stripped = item.replace(/^\s*([A-Za-z])[.、．:：)]\s*/, '');
+        const km = item.match(/^\s*([A-Za-z])[.、．:：)]/);
+        return { key: km ? km[1].toUpperCase() : String.fromCharCode(65 + i), text: stripped };
+      }
+      const o = item || {};
+      const key = String(o.label ?? o.key ?? o.option ?? String.fromCharCode(65 + i));
+      const rawText = String(o.text ?? o.content ?? o.value ?? '');
+      const text = rawText.replace(new RegExp(`^\\s*${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[.、．:：)]\\s*`), '');
+      return { key, text };
+    });
+  }
+  return [];
+}
+
+function feNormalizeAnswers(raw) {
+  if (raw == null) return [];
+  let v = raw;
+  if (typeof v === 'string') {
+    try { v = JSON.parse(v); } catch { return String(raw).split(/[,，\s]+/).filter(Boolean); }
+  }
+  if (v && !Array.isArray(v) && typeof v === 'object') {
+    const inner = v.answers ?? v.answer ?? v.items ?? v.data ?? v.value;
+    if (inner !== undefined) v = inner;
+  }
+  if (typeof v === 'string') return v.split(/[,，\s]+/).filter(Boolean);
+  if (Array.isArray(v)) {
+    return v.map((x) => {
+      if (x == null) return '';
+      if (typeof x === 'object') {
+        const o = x;
+        return String(o.text ?? o.value ?? o.key ?? o.label ?? '');
+      }
+      return String(x);
+    }).filter(Boolean);
+  }
+  return [String(v)];
+}
+
 async function main() {
   // ══ A. 数据库结构与迁移 088 ═══════════════════════════════════════════
   section('A. 数据库结构与迁移（迁移 088）');
@@ -166,13 +223,24 @@ async function main() {
     Object.keys(mapIndex).length === 5 && Object.keys(mapEngine).length === 5 && Object.keys(feTierPairs).length === 5,
     `${Object.keys(mapIndex).length}/${Object.keys(mapEngine).length}/${Object.keys(feTierPairs).length}`);
 
-  // 暴击率必须严格等于 3/7/8/9/10（用户给定数值，不得擅改）
-  const EXPECT_CRIT = { skin_rank_primary: 3, skin_rank_junior: 7, skin_rank_senior: 8, skin_rank_undergrad: 9, skin_rank_researcher: 10 };
+  // 暴击率必须严格等于 1/3/6/8/10（用户给定数值，不得擅改）
+  const EXPECT_CRIT = { skin_rank_primary: 1, skin_rank_junior: 3, skin_rank_senior: 6, skin_rank_undergrad: 8, skin_rank_researcher: 10 };
   for (const [sid, cr] of Object.entries(EXPECT_CRIT)) {
     const block = feSkinSrc.split(sid)[1] || '';
     const seg = block.slice(0, 400);
     const m = seg.match(/critBonus\s*:\s*(\d+)/);
     ok(`${sid} 暴击率 = ${cr}%`, m && Number(m[1]) === cr, `实际 ${m ? m[1] : '未找到'}`);
+  }
+
+  {
+    // ⛔ WINDOW_SKINS_META（后端）是权威定义，前端界面只是副本 ——
+    // 只改一边会导致「卡片显示 X% 但实际结算按 Y%」，必须逐项比对。
+    for (const [sid, cr] of Object.entries(EXPECT_CRIT)) {
+      const line = beIndexSrc.split('\n').find((l) => l.includes(`id: '${sid}'`)) || '';
+      const m = line.match(/critBonus:\s*(\d+)/);
+      ok(`后端 WINDOW_SKINS_META ${sid} 暴击率 = ${cr}%`,
+        m && Number(m[1]) === cr, `实际 ${m ? m[1] : '未找到'}`);
+    }
   }
 
   {
@@ -268,9 +336,79 @@ async function main() {
         ok('options 已被解析成数组或对象（非原始 JSON 串）',
           r0.options === null || typeof r0.options !== 'string',
           `typeof=${typeof r0.options}`);
+        ok('answers 已被解析成数组或对象（非原始 JSON 串）',
+          r0.answers === null || typeof r0.answers !== 'string',
+          `typeof=${typeof r0.answers}`);
+
+        // ⛔ 端到端：按**前端同款口径**解析全量错题，模拟弹窗渲染。
+        // 修 v2.6.7 的 bug：options/answers 是包裹对象，不拆包 → 无选项 + "[object Object]"。
+        const probe = await apiGet(
+          `/api/pk/stats/wrong-questions?class_id=${encodeURIComponent(classId)}&limit=100&offset=0`,
+          teacherToken
+        );
+        const all = probe?.data?.rows || [];
+        let objObj = 0, emptyAns = 0, choiceNoOpts = 0, keyMiss = 0;
+        for (const r of all) {
+          const opts = feNormalizeOptions(r.options);
+          const ans = feNormalizeAnswers(r.answers);
+          const ansStr = ans.join('、');
+          if (ansStr.includes('[object')) objObj++;
+          if (ans.length === 0) emptyAns++;
+          if (r.type === 'choice' && opts.length === 0) choiceNoOpts++;
+          if (r.type === 'choice') {
+            for (const a of ans) if (!opts.some((o) => o.key === a)) keyMiss++;
+          }
+        }
+        ok('全量错题：正确答案无 "[object Object]"', objObj === 0, `共 ${all.length} 题，异常 ${objObj} 题`);
+        ok('全量错题：正确答案不为空', emptyAns === 0, `空答案 ${emptyAns} 题`);
+        ok('全量错题：选择题都有选项', choiceNoOpts === 0, `无选项 ${choiceNoOpts} 题`);
+        ok('全量错题：选择题答案键都能在选项中命中', keyMiss === 0, `未命中 ${keyMiss} 处`);
+        // 填空题（无选项）必须有非空答案 —— 用户反馈的正是这类显示不出来
+        const fills = all.filter((r) => r.type === 'fill_blank' || r.type === 'fill');
+        if (fills.length > 0) {
+          const fillOk = fills.every((r) => feNormalizeAnswers(r.answers).length > 0
+            && !feNormalizeAnswers(r.answers).join('、').includes('[object'));
+          ok('填空题正确答案正常显示（非空且非 [object Object]）',
+            fillOk, `填空题 ${fills.length} 道，示例「${feNormalizeAnswers(fills[0].answers).join('、')}」`);
+        }
       } else {
         ok('错题榜已返回数据（用于验证三字段）', false,
           `rows=${rows.length} total=${wq?.data?.total}`);
+      }
+    }
+  }
+
+  // C5 PK 结算逐题复盘（学生端，接口 /api/pk/history/:room_id）
+  // ⛔ 该接口必须下发 options/explanation，否则结算页双击题干弹窗没有内容
+  if (studentToken) {
+    const hist = await apiGet('/api/pk/history?page=1&pageSize=5', studentToken);
+    const firstRoom = (hist?.data?.list || [])[0]?.id;
+    ok('能取到历史房间 id（复盘必填）', !!firstRoom, `room=${firstRoom}`);
+    if (firstRoom) {
+      const rev = await apiGet(`/api/pk/history/${encodeURIComponent(firstRoom)}`, studentToken);
+      const ans = rev?.data?.answers || [];
+      ok('/api/pk/history/:room_id 返回 answers', Array.isArray(ans) && ans.length > 0, `count=${ans.length}`);
+      if (ans.length > 0) {
+        ok('复盘作答行带 options 字段', 'options' in ans[0]);
+        ok('复盘作答行带 explanation 字段', 'explanation' in ans[0]);
+        ok('复盘作答行保留 correct_answer（原字段未破坏）', 'correct_answer' in ans[0]);
+
+        // 端到端：按前端同款口径（utils/questionDisplay）解析全部复盘作答
+        let objObj2 = 0, emptyAns2 = 0, choiceNoOpts2 = 0, keyMiss2 = 0;
+        for (const a of ans) {
+          const opts = feNormalizeOptions(a.options);
+          const ansl = feNormalizeAnswers(a.correct_answer);
+          if (ansl.join('、').includes('[object')) objObj2++;
+          if (ansl.length === 0) emptyAns2++;
+          if (a.question_type === 'choice' && opts.length === 0) choiceNoOpts2++;
+          if (a.question_type === 'choice') {
+            for (const k of ansl) if (!opts.some((o) => o.key === k)) keyMiss2++;
+          }
+        }
+        ok('复盘：正确答案无 "[object Object]"', objObj2 === 0, `共 ${ans.length} 条，异常 ${objObj2} 条`);
+        ok('复盘：正确答案不为空', emptyAns2 === 0, `空答案 ${emptyAns2} 条`);
+        ok('复盘：选择题都有选项', choiceNoOpts2 === 0, `无选项 ${choiceNoOpts2} 条`);
+        ok('复盘：选择题答案键都能在选项中命中', keyMiss2 === 0, `未命中 ${keyMiss2} 处`);
       }
     }
   }
@@ -358,10 +496,49 @@ async function main() {
 
     const st = readFe('src/components/teacher/PKStatsTab.tsx');
     ok('PKStatsTab 双击题干打开详情', /onDoubleClick/.test(st));
-    ok('PKStatsTab 有 normalizeOptions', /normalizeOptions/.test(st));
-    ok('PKStatsTab 有 normalizeAnswers', /normalizeAnswers/.test(st));
     ok('PKStatsTab 详情弹窗显示解析', st.includes('解析'));
     ok('PKStatsTab 提示双击', st.includes('双击'));
+    // ⛔ 选项/答案归一化实现已抽到公共工具 utils/questionDisplay.ts ——
+    // 教师端错题榜与学生端 PK 结算逐题复盘共用同一份口径，两处副本漂移过一次。
+    // 断言必须落在**公共工具**上，且确认两边都从它 import。
+    const qd = readFe('src/utils/questionDisplay.ts');
+    ok('公共工具 questionDisplay.ts 存在且导出 normalizeOptions',
+      /export const normalizeOptions/.test(qd));
+    ok('公共工具 questionDisplay.ts 导出 normalizeAnswers',
+      /export const normalizeAnswers/.test(qd));
+    ok('公共工具导出 questionTypeLabel（题型中文标签唯一入口）',
+      /export const questionTypeLabel/.test(qd));
+    ok('PKStatsTab 从 questionDisplay 引入归一化（不再本地副本）',
+      /from '\.\.\/\.\.\/utils\/questionDisplay'/.test(st)
+      && /normalizeOptions/.test(st) && /normalizeAnswers/.test(st));
+    ok('PKStatsTab 不再保留本地 normalizeOptions 实现（防副本漂移）',
+      !/const normalizeOptions = /.test(st));
+    // ⛔ 后端 options/answers 存的是**包裹对象**（{options:[...]} / {answers:[...]}），
+    // 前端不拆包会显示"本题无选项" + 正确答案 "[object Object]"（v2.6.7 修的 bug）。
+    ok('normalizeOptions 拆包裹对象（{options:[...]}）',
+      /o\.options\s*\?\?\s*o\.items/.test(qd));
+    ok('normalizeAnswers 拆包裹对象（{answers:[...]}）',
+      /o\.answers\s*\?\?\s*o\.answer/.test(qd));
+    ok('选项剥掉自带前缀（避免 A. A. xxx）',
+      /OPTION_PREFIX_RE/.test(qd) || /replace\(\/\^\\s\*\(\[A-Za-z\]\)/.test(qd));
+    ok('fill_blank 题型有中文标签',
+      /case 'fill':\s*\n\s*case 'fill_blank':/.test(qd) && qd.includes('填空题'));
+
+    // ===== 学生端 PK 结算「逐题复盘」双击看详情（与教师端错题榜同款交互）=====
+    ok('PKResult 引入公共 questionDisplay 工具',
+      /from '\.\.\/\.\.\/\.\.\/utils\/questionDisplay'/.test(rp));
+    ok('PKResult 复盘行绑定 onDoubleClick', /onDoubleClick=\{\(\) => setDetailQuestion/.test(rp));
+    ok('PKResult 有 detailQuestion state（详情弹窗数据源）',
+      /useState<ReviewAnswer \| null>\(null\)/.test(rp));
+    ok('PKResult 详情弹窗显示正确答案', /正确答案/.test(rp));
+    ok('PKResult 详情弹窗显示我的作答', /我的作答/.test(rp));
+    ok('PKResult 详情弹窗显示解析', /解析/.test(rp));
+    ok('PKResult 详情弹窗渲染选项列表（复用 normalizeOptions）',
+      /normalizeOptions\(detailQuestion\.options\)/.test(rp) && /opts\.map/.test(rp));
+    ok('PKResult 提示双击可看详情', rp.includes('双击'));
+    // 后端复盘接口必须下发 options/explanation，否则前端拿不到数据
+    ok('后端复盘接口下发 options 与 explanation',
+      /q\.options AS options, q\.explanation AS explanation/.test(beIndexSrc));
 
     const lb = readFe('src/components/student/pk-battle/PKLobby.tsx');
     ok('PKLobby 三页签（排行榜/荣誉/历史）',

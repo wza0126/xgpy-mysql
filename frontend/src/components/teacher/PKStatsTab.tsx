@@ -5,6 +5,7 @@ import {
 } from 'recharts';
 import { backendClient } from '../../api/backendClient';
 import { getAuthToken } from '../../utils/authToken';
+import { normalizeOptions, normalizeAnswers } from '../../utils/questionDisplay';
 
 /**
  * PK 数据统计面板（P0 + P1/P2）
@@ -111,46 +112,10 @@ interface WrongQuestionRow {
   wrong_rate: number | null;
 }
 
-/** 把后端下发的选项（数组 / JSON 字符串 / 对象）统一成 [{key,text}] */
-const normalizeOptions = (raw: unknown): { key: string; text: string }[] => {
-  if (!raw) return [];
-  let arr: unknown = raw;
-  if (typeof raw === 'string') {
-    try {
-      arr = JSON.parse(raw);
-    } catch {
-      return [{ key: '', text: raw }];
-    }
-  }
-  if (Array.isArray(arr)) {
-    return arr.map((item, i) => {
-      // 支持 ['A选项文字', ...] 与 [{label,text}] 两种历史格式
-      if (typeof item === 'string') return { key: String.fromCharCode(65 + i), text: item };
-      const o = (item || {}) as Record<string, unknown>;
-      const key = String(o.label ?? o.key ?? o.option ?? String.fromCharCode(65 + i));
-      const text = String(o.text ?? o.content ?? o.value ?? '');
-      return { key, text };
-    });
-  }
-  return [];
-};
-
-/** 正确答案统一成字符串数组（兼容字符串 / 数组 / JSON） */
-const normalizeAnswers = (raw: unknown): string[] => {
-  if (raw == null) return [];
-  let v: unknown = raw;
-  if (typeof raw === 'string') {
-    try {
-      const parsed: unknown = JSON.parse(raw);
-      v = parsed;
-    } catch {
-      // 普通字符串：可能是 "A" 或 "A,B" 或 "AB"
-      return String(raw).split(/[,，\s]+/).filter(Boolean);
-    }
-  }
-  if (Array.isArray(v)) return v.map(String);
-  return [String(v)];
-};
+/**
+ * 选项 / 答案的归一化实现已抽到 utils/questionDisplay.ts ——
+ * 与「学生端 PK 结算逐题复盘」共用同一份口径，避免两份副本漂移。
+ */
 
 const fmtDuration = (ms: number | null | undefined): string => {
   if (ms == null) return '—';
@@ -822,7 +787,7 @@ export const PKStatsTab: React.FC = () => {
                   <span className="px-2 py-0.5 bg-orange-100 text-orange-600 text-xs rounded font-medium">
                     {detailQuestion.type === 'choice' ? '选择题'
                       : detailQuestion.type === 'judge' ? '判断题'
-                        : detailQuestion.type === 'fill' ? '填空题'
+                        : (detailQuestion.type === 'fill' || detailQuestion.type === 'fill_blank') ? '填空题'
                           : detailQuestion.type || '题目'}
                   </span>
                   {detailQuestion.cluster_id && (
