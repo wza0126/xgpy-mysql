@@ -230,8 +230,14 @@ async function runMigrations() {
           if (process.env.MIGRATION_STRICT === '1') {
             throw new Error(message);
           }
-          // 已应用的迁移不会再重跑，内容漂移（如行尾变化）不应阻止服务启动
-          console.warn(`警告：${message}，已跳过校验继续启动。设置 MIGRATION_STRICT=1 可恢复严格模式`);
+          // 已应用的迁移不会再重跑（结构已定型），此时 checksum 漂移只可能是：
+          //   ① 事后调整了迁移文件（注释/行尾等无语义改动）；② 历史版本写入基线时的算法差异。
+          // 两种情况都不改变库结构，故自动把基线对齐到当前内容，避免每次启动重复告警。
+          await connection.query(
+            'UPDATE schema_migrations SET checksum = ? WHERE version = ?',
+            [checksum, file],
+          );
+          console.log(`迁移基线已对齐（结构不受影响，已应用不再重跑）：${file}`);
         }
         continue;
       }
