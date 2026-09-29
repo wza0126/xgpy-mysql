@@ -5694,34 +5694,162 @@ app.get('/api/notifications/check-scheduled', authenticate, requireTeachingRole,
   }
 });
 
-// ==================== 学生数字消息（同学间发送，仅数字、最长8位、每日3条） ====================
+// ==================== 学生消息（同学间发送；任意文字、按条扣积分、含风控） ====================
+//
+// v2.7.0 起由「数字消息」升级为「消息」：
+//   * 内容放开为任意字符（字数上限由 student_message_settings.max_length 控制）
+//   * 不再限制每日条数，改为按条扣积分（points_per_message，0=不扣）
+//   * 新增风控：黑名单（单向，收不到对方消息）、禁言、屏蔽关键词
+//
+// ⛔ 风控判定的顺序不能乱（学生看到的提示按此设计）：
+//   班级开关 → 禁言 → 内容非空/字数 → 屏蔽词 → 黑名单 → 每日上限 → 扣积分 → 落库
+//   理由：禁言与屏蔽词属于「发送方自身问题」，先判可减少无用的查库；
+//   黑名单判定需查接收方，放后面；扣积分前必须把所有拒绝条件判完，
+//   否则会出现「已扣积分但消息没发出去」的资金损失。
 
-// 发送数字消息
+/**
+ * 校验并归一化「消息设置」表单。前后端共用一套边界（前端只能靠这些常量做提示，
+ * 真正生效以此处为准）。
+ * @returns {{error?:string}} 出错时带 error；成功时返回归一化后的四个字段
+ */
+function validateMessageSettings(input) {
+  const { enabled, points_per_message, max_length, max_per_day } = input || {};
+  const pointsPerMessage = Number(points_per_message);
+  if (!Number.isInteger(pointsPerMessage) || pointsPerMessage < 0 || pointsPerMessage > 1000) {
+    return { error: '每条消息消耗积分需为 0~1000 之间的整数（0 表示不扣积分）' };
+  }
+  const maxLength = Number(max_length);
+  if (!Number.isInteger(maxLength) || maxLength < 1 || maxLength > 2000) {
+    return { error: '单条消息字数限制需为 1~2000 之间的整数' };
+  }
+  const maxPerDay = Number(max_per_day);
+  if (!Number.isInteger(maxPerDay) || maxPerDay < 0 || maxPerDay > 1000) {
+    return { error: '每日发送上限需为 0~1000 之间的整数（0 表示不限）' };
+  }
+  return {
+    enabled: enabled ? 1 : 0,
+    pointsPerMessage,
+    maxLength,
+    maxPerDay,
+  };
+}
+
+/** 读取学生消息全局设置（单行表，缺失时返回默认值，永不抛错） */
+async function getMessageSettings(conn = pool) {
+  const [rows] = await conn.query(
+    'SELECT enabled, points_per_message, max_length, max_per_day FROM student_message_settings WHERE id = 1'
+  );
+  const row = rows[0] || {};
+  return {
+    enabled: row.enabled === undefined ? true : !!row.enabled,
+    pointsPerMessage: Number(row.points_per_message) || 0,
+    maxLength: Number(row.max_length) || 100,
+    maxPerDay: Number(row.max_per_day) || 0, // 0 = 不限
+  };
+}
+
+/**
+ * 检查学生是否处于禁言中。
+ * @returns {{muted:boolean, until?:string, remainDays?:number, reason?:string}}
+ */
+async function checkMessageMute(studentId, conn = pool) {
+  const [rows] = await conn.query(
+    'SELECT mute_until, reason FROM student_message_mutes WHERE student_id = ? AND mute_until > NOW()',
+    [studentId]
+  );
+  if (!rows.length) return { muted: false };
+  const until = rows[0].mute_until;
+  const remainMs = new Date(until).getTime() - Date.now();
+  // 不足一天也按「1 天」提示，避免出现「还要禁言 0 天」这种让人误解的文案
+  const remainDays = Math.max(1, Math.ceil(remainMs / 86400000));
+  return { muted: true, until, remainDays, reason: rows[0].reason || '' };
+}
+
+/** 检查文本是否命中启用的屏蔽词，返回命中的词（未命中返回 null） */
+async function findBlockedKeyword(text, conn = pool) {
+  const [rows] = await conn.query('SELECT word FROM student_message_keywords WHERE enabled = 1');
+  if (!rows.length) return null;
+  const lower = String(text).toLowerCase();
+  for (const r of rows) {
+    const w = String(r.word || '').trim();
+    if (!w) continue;
+    if (lower.includes(w.toLowerCase())) return w;
+  }
+  return null;
+}
+
+/** 学生发消息时随消息返回的风控状态（前端据此决定按钮可用性与提示） */
+async function buildMessageStatus(userId) {
+  const settings = await getMessageSettings();
+  const mute = await checkMessageMute(userId);
+  const [clsRows] = await pool.query(
+    'SELECT c.dm_enabled FROM profiles p LEFT JOIN classes c ON p.class_id = c.id WHERE p.id = ?',
+    [userId]
+  );
+  const [cntRows] = await pool.query(
+    'SELECT COUNT(*) AS cnt FROM student_messages WHERE sender_id = ? AND DATE(sent_at) = CURDATE()',
+    [userId]
+  );
+  const [ptRows] = await pool.query('SELECT current_points FROM profiles WHERE id = ?', [userId]);
+  return {
+    dm_enabled: !!clsRows[0]?.dm_enabled,
+    settings_enabled: settings.enabled,
+    points_per_message: settings.pointsPerMessage,
+    max_length: settings.maxLength,
+    max_per_day: settings.maxPerDay,
+    sent_today: Number(cntRows[0]?.cnt) || 0,
+    current_points: Number(ptRows[0]?.current_points) || 0,
+    muted: mute.muted,
+    mute_until: mute.until || null,
+    mute_remain_days: mute.remainDays || 0,
+    mute_reason: mute.reason || '',
+  };
+}
+
+// 发送消息
 app.post('/api/student/digital-messages/send', authenticate, async (req, res) => {
+  const connection = await pool.getConnection();
   try {
     const userId = req.user.userId;
     const role = req.user.role;
     if (role !== 'student') {
-      return res.status(403).json({ data: null, error: '仅学生可使用数字消息' });
+      return res.status(403).json({ data: null, error: '仅学生可使用消息功能' });
     }
-    // 检查所在班级是否启用了数字消息功能
-    const [clsRows] = await pool.query(
+    const settings = await getMessageSettings(connection);
+    if (!settings.enabled) {
+      return res.status(403).json({ data: null, error: '消息功能已被老师关闭' });
+    }
+    // 检查所在班级是否启用了消息功能
+    const [clsRows] = await connection.query(
       'SELECT c.dm_enabled FROM profiles p LEFT JOIN classes c ON p.class_id = c.id WHERE p.id = ?',
       [userId]
     );
     if (!clsRows[0]?.dm_enabled) {
-      return res.status(403).json({ data: null, error: '所在班级未开启数字消息功能' });
+      return res.status(403).json({ data: null, error: '所在班级未开启消息功能' });
+    }
+    // 禁言检查（发送方自身问题，优先判定）
+    const mute = await checkMessageMute(userId, connection);
+    if (mute.muted) {
+      return res.status(403).json({
+        data: null,
+        error: `你已被禁言，还需 ${mute.remainDays} 天才能发送消息${mute.reason ? `（原因：${mute.reason}）` : ''}`,
+        mute_remain_days: mute.remainDays,
+      });
     }
     const { receiver_username, content } = req.body || {};
-    // 内容校验：仅数字，1-8 位
     const text = String(content || '').trim();
     if (!text) return res.status(400).json({ data: null, error: '请输入发送内容' });
-    if (!/^\d{1,8}$/.test(text)) {
-      return res.status(400).json({ data: null, error: '内容仅限数字，最长 8 位' });
+    if (text.length > settings.maxLength) {
+      return res.status(400).json({ data: null, error: `消息最长 ${settings.maxLength} 个字，当前 ${text.length} 个字` });
     }
     if (!receiver_username) return res.status(400).json({ data: null, error: '请输入对方账号' });
+    // 屏蔽词检查
+    const hitWord = await findBlockedKeyword(text, connection);
+    if (hitWord) {
+      return res.status(400).json({ data: null, error: `消息含违规词「${hitWord}」，无法发送。请文明沟通` });
+    }
     // 查找接收者（必须是学生）
-    const [recvRows] = await pool.query(
+    const [recvRows] = await connection.query(
       "SELECT id, username, real_name FROM profiles WHERE username = ? AND role = 'student'",
       [String(receiver_username).trim()]
     );
@@ -5732,61 +5860,117 @@ app.post('/api/student/digital-messages/send', authenticate, async (req, res) =>
     if (receiver.id === userId) {
       return res.status(400).json({ data: null, error: '不能给自己发送消息' });
     }
-    // 每日限发 10 条
-    const [cntRows] = await pool.query(
+    // 黑名单检查：接收方把发送方拉黑了。
+    // ⚠️ 刻意返回中性文案，不暴露「你被谁拉黑了」——避免学生换小号骚扰或线下报复。
+    const [blockRows] = await connection.query(
+      'SELECT id FROM student_message_blacklist WHERE owner_id = ? AND target_id = ?',
+      [receiver.id, userId]
+    );
+    if (blockRows.length > 0) {
+      return res.status(403).json({ data: null, error: '对方已设置不接收消息' });
+    }
+    // 每日条数上限（仅当设置里 > 0 才生效；默认 0 = 不限，改由积分约束）
+    const [cntRows] = await connection.query(
       'SELECT COUNT(*) AS cnt FROM student_messages WHERE sender_id = ? AND DATE(sent_at) = CURDATE()',
       [userId]
     );
-    const sentToday = cntRows[0]?.cnt || 0;
-    if (sentToday >= 10) {
-      return res.status(429).json({ data: null, error: `今日已发送 ${sentToday} 条，每人每天最多发送 10 条` });
+    const sentToday = Number(cntRows[0]?.cnt) || 0;
+    if (settings.maxPerDay > 0 && sentToday >= settings.maxPerDay) {
+      return res.status(429).json({
+        data: null,
+        error: `今日已发送 ${sentToday} 条，每人每天最多发送 ${settings.maxPerDay} 条`,
+      });
     }
-    const [senderRows] = await pool.query('SELECT id, username, real_name FROM profiles WHERE id = ?', [userId]);
+    const [senderRows] = await connection.query('SELECT id, username, real_name FROM profiles WHERE id = ?', [userId]);
     const sender = senderRows[0] || { username: '', real_name: '' };
-    await pool.query(
-      `INSERT INTO student_messages (sender_id, sender_username, sender_real_name, receiver_id, receiver_username, receiver_real_name, content)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [userId, sender.username, sender.real_name || sender.username, receiver.id, receiver.username, receiver.real_name || receiver.username, text]
+
+    // 扣积分 + 落库必须同一事务：扣了积分却没写成消息是资金损失，反之是白嫖
+    const cost = settings.pointsPerMessage;
+    await connection.beginTransaction();
+    let balanceAfter = null;
+    if (cost > 0) {
+      // ⛔ 原子扣分：余额判断写进 WHERE，并发下第二个请求 affectedRows=0 会被拒（铁律一）
+      const [result] = await connection.query(
+        `UPDATE profiles
+            SET current_points = GREATEST(0, current_points - ?),
+                max_points = GREATEST(max_points, current_points - ?),
+                updated_at = NOW()
+          WHERE id = ? AND current_points >= ?`,
+        [cost, cost, userId, cost]
+      );
+      if (!result.affectedRows) {
+        await connection.rollback();
+        const [cur] = await connection.query('SELECT current_points FROM profiles WHERE id = ?', [userId]);
+        return res.status(400).json({
+          data: null,
+          error: `积分不足，发一条消息需 ${cost} 积分，你当前有 ${cur[0]?.current_points ?? 0} 积分`,
+          current_points: Number(cur[0]?.current_points) || 0,
+        });
+      }
+      const [after] = await connection.query('SELECT current_points FROM profiles WHERE id = ?', [userId]);
+      balanceAfter = Number(after[0]?.current_points) || 0;
+    }
+
+    await connection.query(
+      `INSERT INTO student_messages
+         (sender_id, sender_username, sender_real_name, receiver_id, receiver_username, receiver_real_name, content, points_cost)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [userId, sender.username, sender.real_name || sender.username, receiver.id, receiver.username,
+       receiver.real_name || receiver.username, text, cost]
     );
-    const remaining = 10 - sentToday;
-    res.json({ data: { ok: true, sent_today: sentToday + 1, remaining: Math.max(remaining, 0) }, error: null });
+    if (cost > 0) {
+      await connection.query(
+        `INSERT INTO point_transactions (student_id, amount, reason, source_type, created_at)
+         VALUES (?, ?, ?, 'system', NOW())`,
+        [userId, -cost, `发送消息给 ${receiver.real_name || receiver.username}`]
+      );
+    }
+    await connection.commit();
+
+    res.json({
+      data: {
+        ok: true,
+        sent_today: sentToday + 1,
+        points_cost: cost,
+        current_points: balanceAfter,
+        message: cost > 0 ? `发送成功，已扣除 ${cost} 积分` : '发送成功',
+      },
+      error: null,
+    });
   } catch (error) {
-    console.error('发送数字消息失败:', error);
+    try { await connection.rollback(); } catch (_) { /* ignore */ }
+    console.error('发送消息失败:', error);
     res.status(500).json({ data: null, error: error.message });
+  } finally {
+    connection.release();
   }
 });
 
-// 获取我收到的数字消息 + 今日已发/剩余条数
+// 获取我收到的消息 + 发送相关状态（积分/禁言/字数/单价等，供前端渲染）
 app.get('/api/student/digital-messages/my', authenticate, async (req, res) => {
   try {
     const userId = req.user.userId;
+    // 已被我拉黑的发送方：消息不展示（拉黑是「收不到」）
     const [messages] = await pool.query(
-      `SELECT id, sender_id, sender_username, sender_real_name, content, sent_at, is_read
-       FROM student_messages
-       WHERE receiver_id = ?
-       ORDER BY sent_at DESC
-       LIMIT 50`,
-      [userId]
+      `SELECT m.id, m.sender_id, m.sender_username, m.sender_real_name, m.content, m.sent_at, m.is_read
+       FROM student_messages m
+       LEFT JOIN student_message_blacklist b ON b.owner_id = ? AND b.target_id = m.sender_id
+       WHERE m.receiver_id = ?
+         AND m.is_deleted = 0
+         AND b.id IS NULL
+       ORDER BY m.sent_at DESC
+       LIMIT 100`,
+      [userId, userId]
     );
-    const [cntRows] = await pool.query(
-      'SELECT COUNT(*) AS cnt FROM student_messages WHERE sender_id = ? AND DATE(sent_at) = CURDATE()',
-      [userId]
-    );
-    const sentToday = cntRows[0]?.cnt || 0;
-    // 查询所在班级是否启用了数字消息功能
-    const [clsRows] = await pool.query(
-      'SELECT c.dm_enabled FROM profiles p LEFT JOIN classes c ON p.class_id = c.id WHERE p.id = ?',
-      [userId]
-    );
-    const dmEnabled = !!clsRows[0]?.dm_enabled;
-    res.json({ data: { messages, sent_today: sentToday, remaining: Math.max(10 - sentToday, 0), dm_enabled: dmEnabled }, error: null });
+    const status = await buildMessageStatus(userId);
+    res.json({ data: { messages, ...status }, error: null });
   } catch (error) {
-    console.error('获取数字消息失败:', error);
+    console.error('获取消息失败:', error);
     res.status(500).json({ data: null, error: error.message });
   }
 });
 
-// 标记收到的数字消息已读
+// 标记收到的消息已读
 app.post('/api/student/digital-messages/read', authenticate, async (req, res) => {
   try {
     const userId = req.user.userId;
@@ -5795,12 +5979,183 @@ app.post('/api/student/digital-messages/read', authenticate, async (req, res) =>
     await pool.query('UPDATE student_messages SET is_read = TRUE WHERE id = ? AND receiver_id = ?', [id, userId]);
     res.json({ data: { ok: true }, error: null });
   } catch (error) {
-    console.error('标记数字消息已读失败:', error);
+    console.error('标记消息已读失败:', error);
     res.status(500).json({ data: null, error: error.message });
   }
 });
 
-// 获取当前学生的同班同学列表（用于数字消息的接收者下拉选择）
+// ==================== 消息黑名单（学生自助） ====================
+
+// 我的黑名单列表
+app.get('/api/student/message-blacklist', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const [rows] = await pool.query(
+      `SELECT id, target_id, target_username, target_real_name, created_at
+       FROM student_message_blacklist
+       WHERE owner_id = ?
+       ORDER BY created_at DESC`,
+      [userId]
+    );
+    res.json({ data: rows, error: null });
+  } catch (error) {
+    console.error('获取黑名单失败:', error);
+    res.status(500).json({ data: [], error: error.message });
+  }
+});
+
+// 加入黑名单（手工输入账号 或 从消息弹窗点选发送方）
+app.post('/api/student/message-blacklist', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    if (req.user.role !== 'student') {
+      return res.status(403).json({ data: null, error: '仅学生可使用' });
+    }
+    // 支持两种入参：target_id（点选消息里的发送方）或 target_username（手工输入账号）
+    const { target_username, target_id } = req.body || {};
+    let target = null;
+    if (target_id) {
+      const [rows] = await pool.query(
+        "SELECT id, username, real_name FROM profiles WHERE id = ? AND role = 'student'",
+        [target_id]
+      );
+      target = rows[0] || null;
+    } else if (target_username) {
+      const [rows] = await pool.query(
+        "SELECT id, username, real_name FROM profiles WHERE username = ? AND role = 'student'",
+        [String(target_username).trim()]
+      );
+      target = rows[0] || null;
+    } else {
+      return res.status(400).json({ data: null, error: '请输入对方账号' });
+    }
+    if (!target) {
+      return res.status(404).json({ data: null, error: '未找到该学生账号，请确认账号是否正确' });
+    }
+    if (target.id === userId) {
+      return res.status(400).json({ data: null, error: '不能把自己加入黑名单' });
+    }
+    // 幂等：重复拉黑不报错
+    await pool.query(
+      `INSERT IGNORE INTO student_message_blacklist (id, owner_id, target_id, target_username, target_real_name)
+       VALUES (?, ?, ?, ?, ?)`,
+      [
+        `smb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        userId, target.id, target.username, target.real_name || target.username,
+      ]
+    );
+    res.json({ data: { ok: true, target_name: target.real_name || target.username }, error: null });
+  } catch (error) {
+    console.error('加入黑名单失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 移出黑名单
+app.delete('/api/student/message-blacklist/:id', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { id } = req.params;
+    const [result] = await pool.query(
+      'DELETE FROM student_message_blacklist WHERE id = ? AND owner_id = ?',
+      [id, userId]
+    );
+    if (!result.affectedRows) {
+      return res.status(404).json({ data: null, error: '记录不存在' });
+    }
+    res.json({ data: { ok: true }, error: null });
+  } catch (error) {
+    console.error('移出黑名单失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// ==================== 消息举报（学生提交） ====================
+
+app.post('/api/student/message-reports', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    if (req.user.role !== 'student') {
+      return res.status(403).json({ data: null, error: '仅学生可使用' });
+    }
+    const { message_id, reason } = req.body || {};
+    if (!message_id) return res.status(400).json({ data: null, error: '缺少消息ID' });
+    const trimmedReason = String(reason || '').trim();
+    if (!trimmedReason) return res.status(400).json({ data: null, error: '请填写举报理由' });
+    if (trimmedReason.length > 500) {
+      return res.status(400).json({ data: null, error: '举报理由最长 500 字' });
+    }
+    // ⛔ 只能举报「发给自己的」消息——否则学生可任意举报他人私聊
+    const [msgRows] = await pool.query(
+      'SELECT id, sender_id, sender_username, sender_real_name, content FROM student_messages WHERE id = ? AND receiver_id = ?',
+      [message_id, userId]
+    );
+    if (!msgRows.length) {
+      return res.status(404).json({ data: null, error: '未找到该消息' });
+    }
+    const msg = msgRows[0];
+    // 同一条消息重复举报无意义，直接幂等返回
+    const [dup] = await pool.query(
+      'SELECT id FROM student_message_reports WHERE message_id = ? AND reporter_id = ?',
+      [message_id, userId]
+    );
+    if (dup.length) {
+      return res.json({ data: { ok: true, duplicated: true }, error: null });
+    }
+    const [meRows] = await pool.query('SELECT username, real_name FROM profiles WHERE id = ?', [userId]);
+    const me = meRows[0] || {};
+    await pool.query(
+      `INSERT INTO student_message_reports
+         (id, message_id, reporter_id, reporter_username, reporter_real_name,
+          reported_id, reported_username, reported_real_name, message_content, reason, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+      [
+        `smr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        msg.id, userId, me.username, me.real_name || me.username,
+        msg.sender_id, msg.sender_username, msg.sender_real_name || msg.sender_username,
+        msg.content, trimmedReason,
+      ]
+    );
+    res.json({ data: { ok: true }, error: null });
+  } catch (error) {
+    console.error('举报消息失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 我提交过的举报（让学生能看到处理进度）
+app.get('/api/student/message-reports/my', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const [rows] = await pool.query(
+      `SELECT id, message_id, reported_real_name, message_content, reason, status, muted_days, handled_at, created_at
+       FROM student_message_reports
+       WHERE reporter_id = ?
+       ORDER BY created_at DESC
+       LIMIT 50`,
+      [userId]
+    );
+    res.json({ data: rows, error: null });
+  } catch (error) {
+    console.error('获取我的举报失败:', error);
+    res.status(500).json({ data: [], error: error.message });
+  }
+});
+
+// 快捷发送模板（学生发送面板一键填入）
+app.get('/api/student/message-quick-replies', authenticate, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      'SELECT id, content FROM student_message_quick_replies WHERE enabled = 1 ORDER BY sort_order ASC, created_at ASC'
+    );
+    res.json({ data: rows, error: null });
+  } catch (error) {
+    console.error('获取快捷短语失败:', error);
+    res.status(500).json({ data: [], error: error.message });
+  }
+});
+
+// 获取当前学生的同班同学列表（用于消息的接收者下拉选择）
 app.get('/api/student/classmates', authenticate, async (req, res) => {
   try {
     const userId = req.user.userId;
@@ -5813,17 +6168,452 @@ app.get('/api/student/classmates', authenticate, async (req, res) => {
     if (!classId) {
       return res.json({ data: [], error: null });
     }
+    // 已被我拉黑的同学不再出现在可选列表里（避免误发）
     const [students] = await pool.query(
-      `SELECT id, username, real_name
-       FROM profiles
-       WHERE class_id = ? AND role = 'student' AND id != ?
-       ORDER BY real_name ASC`,
-      [classId, userId]
+      `SELECT p.id, p.username, p.real_name
+       FROM profiles p
+       LEFT JOIN student_message_blacklist b ON b.owner_id = ? AND b.target_id = p.id
+       WHERE p.class_id = ? AND p.role = 'student' AND p.id != ?
+         AND b.id IS NULL
+       ORDER BY p.real_name ASC`,
+      [userId, classId, userId]
     );
     res.json({ data: students, error: null });
   } catch (error) {
     console.error('获取同班同学失败:', error);
     res.status(500).json({ data: [], error: error.message });
+  }
+});
+
+// ==================== 教师端：消息设置（v2.7.0） ====================
+// 全部挂在 requireTeachingRole 之下。含 7 组能力：
+//   ① 全局设置（开关/单价/字数/每日上限）  ② 全部学生消息流水
+//   ③ 禁言 / 解除禁言                     ④ 举报单查看与处置
+//   ⑤ 屏蔽关键词增删改                    ⑥ 快捷短语增删改
+//   （第 ⑦ 项「班级开关」沿用 ClassManager 的 dm_enabled）
+
+/** 教师可见的学生范围：普通教师只看自己班，超管看全部 */
+async function getTeacherStudentFilter(teacherId, role) {
+  if (role === 'super_admin' || role === 'admin') return { clause: '', params: [] };
+  return { clause: 'WHERE c.teacher_id = ?', params: [teacherId] };
+}
+
+// 读取消息设置
+app.get('/api/teacher/message-settings', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const settings = await getMessageSettings();
+    res.json({ data: settings, error: null });
+  } catch (error) {
+    console.error('获取消息设置失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 更新消息设置
+app.put('/api/teacher/message-settings', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const { enabled, points_per_message, max_length, max_per_day } = req.body || {};
+    const check = validateMessageSettings({ enabled, points_per_message, max_length, max_per_day });
+    if (check.error) return res.status(400).json({ data: null, error: check.error });
+    await pool.query(
+      `UPDATE student_message_settings
+          SET enabled = ?, points_per_message = ?, max_length = ?, max_per_day = ?, updated_by = ?
+        WHERE id = 1`,
+      [check.enabled, check.pointsPerMessage, check.maxLength, check.maxPerDay, req.user.userId]
+    );
+    const settings = await getMessageSettings();
+    res.json({ data: settings, error: null });
+  } catch (error) {
+    console.error('更新消息设置失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 全部学生发送的消息（含被删的，教师视角要能追溯）
+app.get('/api/teacher/student-messages', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const { keyword, sender, limit } = req.query;
+    const lim = Math.min(Math.max(Number(limit) || 200, 1), 1000);
+    const filter = await getTeacherStudentFilter(req.user.userId, req.user.role);
+    const where = [];
+    const params = [];
+    if (filter.clause) {
+      where.push('c.teacher_id = ?');
+      params.push(...filter.params);
+    }
+    if (sender) {
+      where.push('(m.sender_username LIKE ? OR m.sender_real_name LIKE ?)');
+      params.push(`%${sender}%`, `%${sender}%`);
+    }
+    if (keyword) {
+      where.push('m.content LIKE ?');
+      params.push(`%${keyword}%`);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const [rows] = await pool.query(
+      `SELECT m.id, m.sender_id, m.sender_username, m.sender_real_name,
+              m.receiver_id, m.receiver_username, m.receiver_real_name,
+              m.content, m.points_cost, m.is_read, m.is_deleted, m.sent_at,
+              (SELECT COUNT(*) FROM student_message_reports r WHERE r.message_id = m.id) AS report_count
+         FROM student_messages m
+         LEFT JOIN profiles sp ON sp.id = m.sender_id
+         LEFT JOIN classes c ON c.id = sp.class_id
+         ${whereSql}
+         ORDER BY m.sent_at DESC
+         LIMIT ?`,
+      [...params, lim]
+    );
+    res.json({ data: rows, error: null });
+  } catch (error) {
+    console.error('获取学生消息列表失败:', error);
+    res.status(500).json({ data: [], error: error.message });
+  }
+});
+
+// 教师删除某条学生消息（软删，学生端不再展示，教师端仍可追溯）
+app.delete('/api/teacher/student-messages/:id', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [result] = await pool.query(
+      'UPDATE student_messages SET is_deleted = 1, blocked_reason = ? WHERE id = ?',
+      [`教师删除（${req.user.userId}）`, id]
+    );
+    if (!result.affectedRows) {
+      return res.status(404).json({ data: null, error: '消息不存在' });
+    }
+    res.json({ data: { ok: true }, error: null });
+  } catch (error) {
+    console.error('删除学生消息失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 禁言列表
+app.get('/api/teacher/message-mutes', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT mu.student_id, mu.student_username, mu.student_real_name,
+              mu.mute_until, mu.reason, mu.created_at,
+              GREATEST(0, TIMESTAMPDIFF(DAY, NOW(), mu.mute_until)) AS remain_days,
+              (mu.mute_until > NOW()) AS active
+         FROM student_message_mutes mu
+         ORDER BY active DESC, mu.mute_until DESC`
+    );
+    res.json({ data: rows, error: null });
+  } catch (error) {
+    console.error('获取禁言列表失败:', error);
+    res.status(500).json({ data: [], error: error.message });
+  }
+});
+
+// 设置禁言（同一学生重复设置 = 覆盖，取新的截止时间）
+app.post('/api/teacher/message-mutes', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const { student_username, student_id, days, reason } = req.body || {};
+    const d = Number(days);
+    if (!Number.isFinite(d) || d <= 0 || d > 365) {
+      return res.status(400).json({ data: null, error: '禁言天数需为 1~365 之间的整数' });
+    }
+    let target = null;
+    if (student_id) {
+      const [rows] = await pool.query("SELECT id, username, real_name FROM profiles WHERE id = ? AND role = 'student'", [student_id]);
+      target = rows[0] || null;
+    } else if (student_username) {
+      const [rows] = await pool.query("SELECT id, username, real_name FROM profiles WHERE username = ? AND role = 'student'", [String(student_username).trim()]);
+      target = rows[0] || null;
+    } else {
+      return res.status(400).json({ data: null, error: '请指定要禁言的学生' });
+    }
+    if (!target) {
+      return res.status(404).json({ data: null, error: '未找到该学生账号' });
+    }
+    const reasonText = String(reason || '违反消息使用规范').slice(0, 500);
+    await pool.query(
+      `INSERT INTO student_message_mutes (student_id, student_username, student_real_name, mute_until, reason, operator_id)
+       VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL ? DAY), ?, ?)
+       ON DUPLICATE KEY UPDATE
+         mute_until = DATE_ADD(NOW(), INTERVAL ? DAY),
+         reason = VALUES(reason),
+         operator_id = VALUES(operator_id),
+         student_username = VALUES(student_username),
+         student_real_name = VALUES(student_real_name)`,
+      [target.id, target.username, target.real_name || target.username, d, reasonText, req.user.userId, d]
+    );
+    res.json({ data: { ok: true, student_name: target.real_name || target.username, days: d }, error: null });
+  } catch (error) {
+    console.error('设置禁言失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 解除禁言
+app.delete('/api/teacher/message-mutes/:studentId', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const [result] = await pool.query('DELETE FROM student_message_mutes WHERE student_id = ?', [studentId]);
+    if (!result.affectedRows) {
+      return res.status(404).json({ data: null, error: '该学生当前不在禁言中' });
+    }
+    res.json({ data: { ok: true }, error: null });
+  } catch (error) {
+    console.error('解除禁言失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 举报列表（含举报人/被举报人/理由/消息内容）
+app.get('/api/teacher/message-reports', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const { status } = req.query;
+    const where = [];
+    const params = [];
+    if (status && ['pending', 'handled', 'rejected'].includes(status)) {
+      where.push('r.status = ?');
+      params.push(status);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const [rows] = await pool.query(
+      `SELECT r.*, m.is_deleted AS message_deleted
+         FROM student_message_reports r
+         LEFT JOIN student_messages m ON m.id = r.message_id
+         ${whereSql}
+         ORDER BY (r.status = 'pending') DESC, r.created_at DESC
+         LIMIT 500`,
+      params
+    );
+    res.json({ data: rows, error: null });
+  } catch (error) {
+    console.error('获取举报列表失败:', error);
+    res.status(500).json({ data: [], error: error.message });
+  }
+});
+
+// 处置举报：标记已处理/驳回，可选「一键禁言 N 天」+「删除该消息」
+app.post('/api/teacher/message-reports/:id/handle', authenticate, requireTeachingRole, async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    const { id } = req.params;
+    const { action, note, mute_days, delete_message } = req.body || {};
+    if (!['handle', 'reject'].includes(action)) {
+      return res.status(400).json({ data: null, error: 'action 必须为 handle 或 reject' });
+    }
+    const [rows] = await connection.query('SELECT * FROM student_message_reports WHERE id = ?', [id]);
+    if (!rows.length) return res.status(404).json({ data: null, error: '举报单不存在' });
+    const report = rows[0];
+    const d = Number(mute_days) || 0;
+
+    await connection.beginTransaction();
+    await connection.query(
+      `UPDATE student_message_reports
+          SET status = ?, handler_id = ?, handle_note = ?, handled_at = NOW(), muted_days = ?
+        WHERE id = ?`,
+      [action === 'handle' ? 'handled' : 'rejected', req.user.userId, String(note || '').slice(0, 500), d, id]
+    );
+    if (delete_message) {
+      await connection.query(
+        'UPDATE student_messages SET is_deleted = 1, blocked_reason = ? WHERE id = ?',
+        [`举报处置删除（${id}）`, report.message_id]
+      );
+    }
+    if (action === 'handle' && d > 0) {
+      await connection.query(
+        `INSERT INTO student_message_mutes (student_id, student_username, student_real_name, mute_until, reason, operator_id)
+         VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL ? DAY), ?, ?)
+         ON DUPLICATE KEY UPDATE
+           mute_until = DATE_ADD(NOW(), INTERVAL ? DAY),
+           reason = VALUES(reason),
+           operator_id = VALUES(operator_id)`,
+        [report.reported_id, report.reported_username, report.reported_real_name,
+         d, `举报核实：${String(note || report.reason).slice(0, 200)}`, req.user.userId, d]
+      );
+    }
+    await connection.commit();
+    res.json({ data: { ok: true }, error: null });
+  } catch (error) {
+    try { await connection.rollback(); } catch (_) { /* ignore */ }
+    console.error('处置举报失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  } finally {
+    connection.release();
+  }
+});
+
+// 屏蔽关键词：列表
+app.get('/api/teacher/message-keywords', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      'SELECT id, word, category, enabled, created_at FROM student_message_keywords ORDER BY enabled DESC, category ASC, word ASC'
+    );
+    res.json({ data: rows, error: null });
+  } catch (error) {
+    console.error('获取屏蔽词失败:', error);
+    res.status(500).json({ data: [], error: error.message });
+  }
+});
+
+// 屏蔽关键词：新增
+app.post('/api/teacher/message-keywords', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const { word, category } = req.body || {};
+    const w = String(word || '').trim();
+    if (!w) return res.status(400).json({ data: null, error: '请输入屏蔽词' });
+    if (w.length > 100) return res.status(400).json({ data: null, error: '屏蔽词最长 100 字' });
+    const [dup] = await pool.query('SELECT id FROM student_message_keywords WHERE word = ?', [w]);
+    if (dup.length) return res.status(400).json({ data: null, error: '该屏蔽词已存在' });
+    const id = `smk_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    await pool.query(
+      'INSERT INTO student_message_keywords (id, word, category, enabled) VALUES (?, ?, ?, 1)',
+      [id, w, String(category || '自定义').slice(0, 50)]
+    );
+    res.json({ data: { ok: true, id }, error: null });
+  } catch (error) {
+    console.error('新增屏蔽词失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 屏蔽关键词：启用/停用
+app.put('/api/teacher/message-keywords/:id', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { enabled, word, category } = req.body || {};
+    const sets = [];
+    const params = [];
+    if (enabled !== undefined) { sets.push('enabled = ?'); params.push(enabled ? 1 : 0); }
+    if (word !== undefined) {
+      const w = String(word).trim();
+      if (!w) return res.status(400).json({ data: null, error: '屏蔽词不能为空' });
+      sets.push('word = ?'); params.push(w);
+    }
+    if (category !== undefined) { sets.push('category = ?'); params.push(String(category).slice(0, 50)); }
+    if (!sets.length) return res.status(400).json({ data: null, error: '没有需要更新的字段' });
+    params.push(id);
+    const [result] = await pool.query(`UPDATE student_message_keywords SET ${sets.join(', ')} WHERE id = ?`, params);
+    if (!result.affectedRows) return res.status(404).json({ data: null, error: '屏蔽词不存在' });
+    res.json({ data: { ok: true }, error: null });
+  } catch (error) {
+    console.error('更新屏蔽词失败:', error);
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(400).json({ data: null, error: '该屏蔽词已存在' });
+    }
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 屏蔽关键词：删除
+app.delete('/api/teacher/message-keywords/:id', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [result] = await pool.query('DELETE FROM student_message_keywords WHERE id = ?', [id]);
+    if (!result.affectedRows) return res.status(404).json({ data: null, error: '屏蔽词不存在' });
+    res.json({ data: { ok: true }, error: null });
+  } catch (error) {
+    console.error('删除屏蔽词失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 快捷短语：列表（教师端含停用项）
+app.get('/api/teacher/message-quick-replies', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      'SELECT id, content, sort_order, enabled, created_at FROM student_message_quick_replies ORDER BY sort_order ASC, created_at ASC'
+    );
+    res.json({ data: rows, error: null });
+  } catch (error) {
+    console.error('获取快捷短语失败:', error);
+    res.status(500).json({ data: [], error: error.message });
+  }
+});
+
+// 快捷短语：新增
+app.post('/api/teacher/message-quick-replies', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const { content, sort_order } = req.body || {};
+    const c = String(content || '').trim();
+    if (!c) return res.status(400).json({ data: null, error: '请输入快捷短语内容' });
+    if (c.length > 200) return res.status(400).json({ data: null, error: '快捷短语最长 200 字' });
+    const id = `smq_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    await pool.query(
+      'INSERT INTO student_message_quick_replies (id, content, sort_order, enabled) VALUES (?, ?, ?, 1)',
+      [id, c, Number(sort_order) || 999]
+    );
+    res.json({ data: { ok: true, id }, error: null });
+  } catch (error) {
+    console.error('新增快捷短语失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 快捷短语：修改内容/排序/启用
+app.put('/api/teacher/message-quick-replies/:id', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { content, sort_order, enabled } = req.body || {};
+    const sets = [];
+    const params = [];
+    if (content !== undefined) {
+      const c = String(content).trim();
+      if (!c) return res.status(400).json({ data: null, error: '快捷短语内容不能为空' });
+      sets.push('content = ?'); params.push(c);
+    }
+    if (sort_order !== undefined) { sets.push('sort_order = ?'); params.push(Number(sort_order) || 0); }
+    if (enabled !== undefined) { sets.push('enabled = ?'); params.push(enabled ? 1 : 0); }
+    if (!sets.length) return res.status(400).json({ data: null, error: '没有需要更新的字段' });
+    params.push(id);
+    const [result] = await pool.query(`UPDATE student_message_quick_replies SET ${sets.join(', ')} WHERE id = ?`, params);
+    if (!result.affectedRows) return res.status(404).json({ data: null, error: '快捷短语不存在' });
+    res.json({ data: { ok: true }, error: null });
+  } catch (error) {
+    console.error('更新快捷短语失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 快捷短语：删除
+app.delete('/api/teacher/message-quick-replies/:id', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [result] = await pool.query('DELETE FROM student_message_quick_replies WHERE id = ?', [id]);
+    if (!result.affectedRows) return res.status(404).json({ data: null, error: '快捷短语不存在' });
+    res.json({ data: { ok: true }, error: null });
+  } catch (error) {
+    console.error('删除快捷短语失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 消息相关概览（教师端「消息设置」首页的统计卡片）
+app.get('/api/teacher/message-overview', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const settings = await getMessageSettings();
+    const [[msgCnt]] = await pool.query(
+      'SELECT COUNT(*) AS total, COUNT(DISTINCT sender_id) AS senders FROM student_messages WHERE DATE(sent_at) = CURDATE()'
+    );
+    const [[pending]] = await pool.query(
+      "SELECT COUNT(*) AS cnt FROM student_message_reports WHERE status = 'pending'"
+    );
+    const [[muted]] = await pool.query(
+      'SELECT COUNT(*) AS cnt FROM student_message_mutes WHERE mute_until > NOW()'
+    );
+    const [[kw]] = await pool.query(
+      'SELECT COUNT(*) AS total, SUM(enabled = 1) AS enabled FROM student_message_keywords'
+    );
+    res.json({
+      data: {
+        settings,
+        today_messages: Number(msgCnt?.total) || 0,
+        today_senders: Number(msgCnt?.senders) || 0,
+        pending_reports: Number(pending?.cnt) || 0,
+        muted_students: Number(muted?.cnt) || 0,
+        keywords_total: Number(kw?.total) || 0,
+        keywords_enabled: Number(kw?.enabled) || 0,
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('获取消息概览失败:', error);
+    res.status(500).json({ data: null, error: error.message });
   }
 });
 

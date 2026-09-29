@@ -92,7 +92,9 @@ main{padding:34px 0 60px}
   padding:18px; box-shadow:0 1px 3px rgba(15,23,42,.04); transition:.2s;
 }
 .card:hover{box-shadow:0 8px 22px rgba(15,23,42,.09); transform:translateY(-2px)}
-.card h3{font-size:16px;font-weight:700;display:flex;align-items:center;gap:9px;margin-bottom:10px}
+.card h3{font-size:16px;font-weight:700;display:flex;align-items:center;gap:9px;margin-bottom:10px;flex-wrap:wrap}
+.tag{font-size:11px;font-weight:700;padding:2px 8px;border-radius:99px;letter-spacing:.3px}
+.tag.new{background:#dcfce7;color:#15803d;border:1px solid #86efac}
 .card .ico{
   width:34px;height:34px;flex:0 0 34px;border-radius:9px;display:grid;place-items:center;font-size:18px;
 }
@@ -521,10 +523,15 @@ footer b{color:#e2e8f0}
         </ul>
       </div>
       <div class="card stu">
-        <h3><span class="ico">🔔</span>通知中心</h3>
+        <h3><span class="ico">🔔</span>通知中心 · 消息</h3>
         <ul>
           <li>任务栏铃铛打开，红点显示未读。</li>
-          <li>三页签：通知 / <b>发送数字消息</b>（仅限数字，最长 8 位）/ 收到的消息。</li>
+          <li>四个页签：通知 / <b>发送消息</b> / 收到的消息 / <b>黑名单</b>。</li>
+          <li><b>发送消息</b>：可发任意文字（不再限于数字），字数上限由老师设定。发送会<b>消耗积分</b>（每条扣多少由老师设定），积分不足则发不出。</li>
+          <li>输入框上方有合规提示，下方有<b>快捷短语</b>可一点即填，省去打字。</li>
+          <li>消息含<b>违规词</b>会被拦截，并提示命中了哪个词。</li>
+          <li>被老师<b>禁言</b>时不能发送，会提示还需多少天。</li>
+          <li>点开收到的消息可<b>加入黑名单</b>或<b>举报</b>（举报需填理由）。拉黑后不再收到对方消息，且对方不会知道是谁拉黑的。</li>
         </ul>
       </div>
       <div class="card stu">
@@ -703,6 +710,19 @@ footer b{color:#e2e8f0}
           <li>可附：奖励积分、扣除积分、<b>临时 Buff</b>（暴击修正 % + 时长）、允许兑换/应用。</li>
           <li>勾「允许上网」即给接收者开通上网。</li>
           <li>填定时时间 = 定时发送（每分钟检查一次）；不填 = 立即发送。</li>
+        </ul>
+      </div>
+      <div class="card tea">
+        <h3><span class="ico">💬</span>消息设置 <span class="tag new">v2.7.0 新增</span></h3>
+        <ul>
+          <li>学生之间发消息的<b>管理中枢</b>，共 6 个页签：消息设置 / 消息记录 / 禁言管理 / 举报处理 / 屏蔽词 / 快捷短语。</li>
+          <li><b>消息设置</b>：功能总开关、每条消息消耗积分（0=不扣，积分不足则发不出）、单条字数上限、每日条数上限（0=不限）。</li>
+          <li><b>消息记录</b>：查看全部学生消息（可按内容搜索），可删除单条；显示发送人、接收人、扣分、是否被举报。</li>
+          <li><b>禁言管理</b>：输入账号 + 天数即可禁言，被禁言学生在学生端会看到「还需 N 天」且发不出消息；可随时解除。</li>
+          <li><b>举报处理</b>：每条举报显示<b>举报人 / 被举报人 / 举报理由 / 被举报的消息原文</b>；可一键<b>禁言 N 天</b>并<b>删除该消息</b>，或驳回。</li>
+          <li><b>屏蔽词</b>：学生消息含任一启用词即发不出。已预置 18 个基础词（色情 / 暴力 / 辱骂 / 违法），可自行增删与启停。</li>
+          <li><b>快捷短语</b>：学生发送面板上的文字模板，一点即填。已预置 10 条课堂 / PK 常用语。</li>
+          <li>是否允许某个班使用消息功能，仍在「<b>班级管理</b>」里的<b>消息开关</b>单独控制。</li>
         </ul>
       </div>
     </div>

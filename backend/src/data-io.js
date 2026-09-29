@@ -28,7 +28,11 @@ const DOMAIN_DEFS = [
   { id: 'learning', name: '学习活动', tables: ['word_list', 'student_word_progress', 'learn_visited_records', 'studious_checkins', 'keyboard_lesson_progress', 'typing_rooms', 'typing_scores', 'typing_duel_records', 'roll_call_layout', 'roll_call_seating', 'roll_call_attendance'] },
   { id: 'ai', name: 'AI与编程', tables: ['ai_qa_history', 'ai_qa_knowledge_base', 'ai_works', 'ai_workshop_config', 'ai_work_purchases', 'ai_work_ratings', 'ai_work_reviews', 'ai_work_versions', 'python_tasks', 'python_submissions', 'python_drafts', 'python_gradings', 'python_wrong_problems', 'python_magic_progress', 'code_realm_progress', 'code_snippets'] },
   { id: 'pk', name: 'PK对战', tables: ['pk_rooms', 'pk_room_players', 'pk_match_answers', 'pk_battle_configs', 'pk_battle_config_class_visibility', 'pk_rank_history'] },
-  { id: 'system', name: '系统配置', tables: ['system_config', 'apps', 'app_reviews', 'app_visibility', 'desktop_backgrounds', 'proxy_sites', 'proxy_pending_domains', 'notifications', 'notification_recipients', 'security_settings', 'student_messages', 'backup_records'] },
+  { id: 'system', name: '系统配置', tables: ['system_config', 'apps', 'app_reviews', 'app_visibility', 'desktop_backgrounds', 'proxy_sites', 'proxy_pending_domains', 'notifications', 'notification_recipients', 'security_settings', 'backup_records'] },
+  // 学生消息体系（v2.7.0）：设置/屏蔽词/快捷短语属于「配置」，与消息流水分域，
+  // 便于教师只导出流水、或只搬配置到新机器。
+  // ⚠️ 顺序：被引用的配置表排在流水之前，导入后流水的外键/快照才有意义。
+  { id: 'messages', name: '学生消息', tables: ['student_message_settings', 'student_message_keywords', 'student_message_quick_replies', 'student_messages', 'student_message_blacklist', 'student_message_reports', 'student_message_mutes'] },
   { id: 'logs', name: '运行日志', tables: ['proxy_cache_files', 'proxy_access_log', 'login_history', 'login_sessions', 'python_run_logs', 'student_app_usage', 'app_usage_logs', 'mental_health_chat_history', 'mental_health_access', 'mental_health_alerts'], defaultOff: true },
 ];
 

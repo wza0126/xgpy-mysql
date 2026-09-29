@@ -14,6 +14,7 @@ import { Analytics } from '../components/teacher/Analytics';
 import { AppManager } from '../components/teacher/AppManager';
 import { GameSettings } from '../components/teacher/GameSettings';
 import { NotificationManager } from '../components/teacher/NotificationManager';
+import { MessageManager } from '../components/teacher/MessageManager';
 import { PythonManager } from '../components/teacher/PythonManager';
 import { MentalHealthManager } from '../components/teacher/MentalHealthManager';
 import { KnowledgeBaseManager } from '../components/teacher/KnowledgeBaseManager';
@@ -41,6 +42,7 @@ const PAID_MENU_ITEMS = ['apps', 'prizes', 'pets', 'taskManager', 'proxyNet', 'g
 
 const menuItems = [
   { id: 'notifications', title: '通知管理', icon: 'fa-bell' },
+  { id: 'messageManager', title: '消息设置', icon: 'fa-comments' },
   { id: 'taskManager', title: '备课工作台', icon: 'fa-chalkboard-user' },
   { id: 'rollCall', title: '课堂点名', icon: 'fa-hand-pointer' },
   { id: 'proxyNet', title: '上网管理', icon: 'fa-earth-asia' },
@@ -62,6 +64,7 @@ const menuItems = [
 
 const components: Record<string, React.ReactNode> = {
   notifications: <NotificationManager />,
+  messageManager: <MessageManager />,
   taskManager: <TaskManager />,
   rollCall: <RollCallApp />,
   proxyNet: <ProxyManager />,

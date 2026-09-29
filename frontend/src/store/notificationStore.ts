@@ -8,7 +8,9 @@ export interface Notification {
   teacher_id: number;
   title: string;
   content: string;
-  notification_type: 'all' | 'class' | 'student';
+  // 'digital_message' 是学生消息弹窗复用的伪类型（见 pollDigitalMessages），
+  // 后端 notifications 表本身没有这个值，故必须显式加进联合类型。
+  notification_type: 'all' | 'class' | 'student' | 'digital_message';
   target_class_id: number | null;
   target_student_ids: number[] | null;
   has_point_reward: boolean;
