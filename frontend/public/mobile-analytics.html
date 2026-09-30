@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#1e293b">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>学情分析 · 移动端</title>
+<!-- FontAwesome 本地化：与 app 共用 public/vendor 资源，内网离线可用 -->
+<link rel="stylesheet" href="./vendor/fontawesome/css/all.min.css">
+<style>
+  :root{
+    --bg:#0f172a; --card:#1e293b; --card2:#273449; --line:#334155;
+    --txt:#e2e8f0; --muted:#94a3b8; --accent:#38bdf8; --accent2:#22d3ee;
+    --up:#f87171; --down:#4ade80;      /* 中国习惯：涨红跌绿 */
+    --ok:#34d399; --warn:#fbbf24; --danger:#f87171;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;
+    background:var(--bg); color:var(--txt); overflow-x:hidden;
+    padding-bottom:env(safe-area-inset-bottom);
+  }
+  .hide{display:none!important}
+
+  /* ---------- 登录 ---------- */
+  #loginView{min-height:100vh;display:flex;flex-direction:column;justify-content:center;padding:24px}
+  .login-logo{
+    width:76px;height:76px;border-radius:22px;margin:0 auto 20px;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));
+    display:flex;align-items:center;justify-content:center;
+    box-shadow:0 12px 32px rgba(56,189,248,.28);
+  }
+  .login-logo i{font-size:34px;color:#0f172a}
+  .login-title{text-align:center;font-size:23px;font-weight:700;margin-bottom:6px;letter-spacing:.5px}
+  .login-sub{text-align:center;font-size:13px;color:var(--muted);margin-bottom:32px}
+  .field{margin-bottom:14px}
+  .field label{display:block;font-size:12px;color:var(--muted);margin-bottom:7px;padding-left:2px}
+  .field input{
+    width:100%;padding:15px 16px;border-radius:14px;border:1px solid var(--line);
+    background:var(--card);color:var(--txt);font-size:16px;outline:none;
+    transition:border-color .18s,box-shadow .18s;
+  }
+  .field input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(56,189,248,.14)}
+  .btn{
+    width:100%;padding:15px;border:none;border-radius:14px;font-size:16px;font-weight:600;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));color:#0f172a;
+    cursor:pointer;transition:transform .12s,opacity .18s;margin-top:8px;
+  }
+  .btn:active{transform:scale(.98)}
+  .btn:disabled{opacity:.55;cursor:default}
+  .btn-ghost{background:var(--card2);color:var(--txt);border:1px solid var(--line)}
+  .err{color:var(--danger);font-size:13px;text-align:center;margin-top:14px;min-height:18px;line-height:1.5}
+
+  /* ---------- 顶栏 ---------- */
+  .topbar{
+    position:sticky;top:0;z-index:50;
+    background:rgba(15,23,42,.92);backdrop-filter:blur(12px);
+    border-bottom:1px solid var(--line);
+    padding:12px 16px calc(12px + env(safe-area-inset-top)) 16px;
+    padding-top:calc(12px + env(safe-area-inset-top));
+  }
+  .topbar-row{display:flex;align-items:center;gap:10px}
+  .topbar h1{font-size:16px;font-weight:650;flex:1;display:flex;align-items:center;gap:8px}
+  .topbar h1 i{color:var(--accent)}
+  .icon-btn{
+    width:38px;height:38px;border-radius:11px;border:1px solid var(--line);
+    background:var(--card);color:var(--txt);display:flex;align-items:center;justify-content:center;
+    font-size:15px;cursor:pointer;flex-shrink:0;transition:background .18s;
+  }
+  .icon-btn:active{background:var(--card2)}
+  .meta{font-size:11px;color:var(--muted);margin-top:5px;display:flex;gap:10px;flex-wrap:wrap}
+  .meta span{display:inline-flex;align-items:center;gap:4px}
+
+  /* ---------- 工具条 ---------- */
+  .toolbar{padding:12px 16px;display:flex;gap:9px;flex-wrap:wrap;align-items:center}
+  select{
+    flex:1;min-width:130px;padding:11px 12px;border-radius:12px;border:1px solid var(--line);
+    background:var(--card);color:var(--txt);font-size:14px;outline:none;
+  }
+  .chip-row{display:flex;gap:7px;overflow-x:auto;padding:0 16px 12px;scrollbar-width:none}
+  .chip-row::-webkit-scrollbar{display:none}
+  .chip{
+    flex-shrink:0;padding:8px 14px;border-radius:20px;border:1px solid var(--line);
+    background:var(--card);color:var(--muted);font-size:12.5px;cursor:pointer;white-space:nowrap;
+    transition:all .18s;user-select:none;
+  }
+  .chip:active{transform:scale(.96)}
+  .chip.on{background:rgba(56,189,248,.16);border-color:var(--accent);color:var(--accent)}
+
+  /* ---------- 概览 ---------- */
+  .stats{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;padding:0 16px 14px}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:13px 14px}
+  .stat-v{font-size:22px;font-weight:700;line-height:1.15;font-variant-numeric:tabular-nums}
+  .stat-l{font-size:11.5px;color:var(--muted);margin-top:3px}
+  .stat.hl .stat-v{color:var(--accent)}
+
+  /* ---------- 学生卡片 ---------- */
+  .list{padding:0 16px 90px}
+  .s-card{
+    background:var(--card);border:1px solid var(--line);border-radius:15px;
+    padding:13px 14px;margin-bottom:10px;
+  }
+  .s-head{display:flex;align-items:baseline;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+  .s-name{font-size:16px;font-weight:650}
+  .s-acc{
+    font-size:11.5px;color:var(--muted);background:var(--card2);
+    padding:2px 7px;border-radius:6px;font-family:ui-monospace,monospace;
+  }
+  .s-rank{
+    margin-left:auto;font-size:11.5px;color:var(--muted);
+    background:var(--card2);border-radius:8px;padding:3px 9px;font-weight:600;
+  }
+  .s-rank.top1{background:rgba(251,191,36,.18);color:var(--warn)}
+  .s-rank.top2{background:rgba(148,163,184,.2);color:#cbd5e1}
+  .s-rank.top3{background:rgba(251,146,60,.16);color:#fdba74}
+  .s-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}
+  /* 字段多于 3 个时自动折行，末行不足 3 个也不拉伸错位 */
+  .s-grid.rows2{grid-template-columns:repeat(3,1fr);row-gap:11px}
+  .s-cell{min-width:0}
+  .s-cell-v{font-size:15px;font-weight:600;line-height:1.25;font-variant-numeric:tabular-nums;word-break:break-all}
+  .s-cell-l{font-size:10.5px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .s-cell.master .s-cell-v{color:var(--accent)}
+  .bar{height:4px;border-radius:3px;background:var(--card2);overflow:hidden;margin-top:7px}
+  .bar i{display:block;height:100%;border-radius:3px;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .5s}
+
+  .empty{text-align:center;color:var(--muted);padding:60px 20px;font-size:14px;line-height:1.9}
+  .empty i{font-size:38px;display:block;margin-bottom:14px;opacity:.4}
+  .loading{text-align:center;padding:50px;color:var(--muted)}
+  .spin{display:inline-block;width:26px;height:26px;border:3px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:sp .8s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+
+  /* ---------- 排序面板（底部抽屉） ---------- */
+  .sheet-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:100;opacity:0;pointer-events:none;transition:opacity .22s}
+  .sheet-mask.on{opacity:1;pointer-events:auto}
+  .sheet{
+    position:fixed;left:0;right:0;bottom:0;z-index:101;
+    background:var(--card);border-radius:22px 22px 0 0;
+    transform:translateY(103%);
+    transition:transform .26s cubic-bezier(.32,.72,0,1);
+    max-height:82vh;overflow-y:auto;
+    padding-bottom:calc(18px + env(safe-area-inset-bottom));
+    -webkit-overflow-scrolling:touch;
+    /* 未打开时彻底移出交互与无障碍树，避免被当成页面内容 */
+    visibility:hidden;
+  }
+  .sheet.on{transform:translateY(0);visibility:visible}
+  .sheet-bar{width:38px;height:4px;border-radius:3px;background:var(--line);margin:10px auto 4px}
+  .sheet-hd{padding:12px 20px 4px;font-size:16px;font-weight:650}
+  .sheet-hint{padding:0 20px 12px;font-size:12px;color:var(--muted);line-height:1.6}
+  .opt{
+    display:flex;align-items:center;gap:12px;padding:14px 20px;
+    border-bottom:1px solid rgba(51,65,85,.5);cursor:pointer;font-size:14.5px;
+  }
+  .opt:active{background:var(--card2)}
+  .opt .lock{
+    font-size:10.5px;background:var(--card2);color:var(--muted);
+    padding:2px 7px;border-radius:6px;margin-left:auto;
+  }
+  .sw{
+    width:44px;height:25px;border-radius:14px;background:var(--line);position:relative;
+    transition:background .2s;flex-shrink:0;margin-left:auto;
+  }
+  .sw::after{
+    content:'';position:absolute;top:2.5px;left:2.5px;width:20px;height:20px;border-radius:50%;
+    background:#fff;transition:transform .2s;
+  }
+  .sw.on{background:var(--accent)}
+  .sw.on::after{transform:translateX(19px)}
+  .sort-row{display:flex;align-items:center;gap:10px;padding:12px 20px;border-bottom:1px solid rgba(51,65,85,.5)}
+  .sort-row .nm{flex:1;font-size:14.5px}
+  .sort-dir{
+    width:38px;height:32px;border-radius:9px;border:1px solid var(--line);background:var(--card2);
+    color:var(--txt);font-size:14px;cursor:pointer;flex-shrink:0;
+  }
+  .sort-dir.on{background:rgba(56,189,248,.16);border-color:var(--accent);color:var(--accent)}
+  .sheet-ft{display:flex;gap:10px;padding:16px 20px 4px}
+  .sheet-ft button{flex:1;padding:14px;border-radius:13px;border:none;font-size:15px;font-weight:600;cursor:pointer}
+  .sheet-ft .apply{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#0f172a}
+  .sheet-ft .reset{background:var(--card2);color:var(--txt);border:1px solid var(--line)}
+</style>
+</head>
+<body>
+
+<!-- ================= 登录 ================= -->
+<div id="loginView">
+  <div class="login-logo"><i class="fa-solid fa-chart-line"></i></div>
+  <div class="login-title">学情分析 · 移动端</div>
+  <div class="login-sub">请使用教师账号登录</div>
+  <div class="field">
+    <label>账号</label>
+    <input id="u" type="text" inputmode="text" autocomplete="username" placeholder="教师账号">
+  </div>
+  <div class="field">
+    <label>密码</label>
+    <input id="p" type="password" autocomplete="current-password" placeholder="登录密码">
+  </div>
+  <button class="btn" id="loginBtn">登录</button>
+  <div class="err" id="loginErr"></div>
+</div>
+
+<!-- ================= 主视图 ================= -->
+<div id="appView" class="hide">
+  <div class="topbar">
+    <div class="topbar-row">
+      <h1><i class="fa-solid fa-chart-line"></i>学情分析</h1>
+      <button class="icon-btn" id="refreshBtn" title="刷新"><i class="fa-solid fa-rotate"></i></button>
+      <button class="icon-btn" id="sortBtn" title="显示字段与排序"><i class="fa-solid fa-sliders"></i></button>
+      <button class="icon-btn" id="logoutBtn" title="退出登录"><i class="fa-solid fa-right-from-bracket"></i></button>
+    </div>
+    <div class="meta">
+      <span id="metaClass"><i class="fa-solid fa-users"></i> —</span>
+      <span id="metaTime"><i class="fa-regular fa-clock"></i> —</span>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <select id="classSel"></select>
+  </div>
+  <div class="chip-row" id="chips"></div>
+  <div class="stats" id="stats"></div>
+  <div class="list" id="list"></div>
+</div>
+
+<!-- ================= 排序/字段抽屉 ================= -->
+<div class="sheet-mask" id="mask"></div>
+<div class="sheet" id="sheet">
+  <div class="sheet-bar"></div>
+  <div class="sheet-hd">显示字段 · 排序方式</div>
+  <div class="sheet-hint">
+    账号与姓名始终显示，不可关闭。点右侧开关选择其余字段；再点某一字段名可将其设为排序依据。
+  </div>
+  <div id="fieldOpts"></div>
+  <div class="sheet-ft">
+    <button class="reset" id="resetBtn">恢复默认</button>
+    <button class="apply" id="applyBtn">完成</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var API = '';
+  var TOKEN_KEY = 'xgpy_mobile_token';
+  var PREFS_KEY = 'xgpy_mobile_prefs';
+
+  // 固定列：账号、姓名（不可取消）
+  var FIXED = ['username', 'real_name'];
+
+  // 可选字段定义：key / 名称 / 取值 / 默认是否显示 / 默认排序方向
+  var FIELDS = [
+    { key:'total_mastered',  name:'总掌握',   def:true,  dir:'desc' },
+    { key:'current_points',  name:'当前积分', def:true,  dir:'desc' },
+    { key:'max_points',      name:'最高积分', def:false, dir:'desc' },
+    { key:'accuracy',        name:'正确率',   def:true,  dir:'desc' },
+    { key:'total_answers',   name:'做题量',   def:true,  dir:'desc' },
+    { key:'correct_answers', name:'答对题数', def:false, dir:'desc' },
+    { key:'pet_level',       name:'萌宠等级', def:false, dir:'desc' },
+    { key:'class_name',      name:'班级',     def:false, dir:'asc'  }
+  ];
+
+  var state = {
+    token: null,
+    classes: [],
+    students: [],
+    classId: '',
+    threshold: 0,
+    generatedAt: '',
+    prefs: loadPrefs()
+  };
+
+  /* ---------------- 偏好持久化 ---------------- */
+  function loadPrefs() {
+    var d = { visible:{}, sortKey:'total_mastered', sortDir:'desc' };
+    FIELDS.forEach(function (f) { d.visible[f.key] = f.def; });
+    try {
+      var raw = localStorage.getItem(PREFS_KEY);
+      if (raw) {
+        var p = JSON.parse(raw);
+        if (p && typeof p === 'object') {
+          if (p.visible) FIELDS.forEach(function (f) {
+            if (typeof p.visible[f.key] === 'boolean') d.visible[f.key] = p.visible[f.key];
+          });
+          if (typeof p.sortKey === 'string') d.sortKey = p.sortKey;
+          if (p.sortDir === 'asc' || p.sortDir === 'desc') d.sortDir = p.sortDir;
+        }
+      }
+    } catch (e) { /* 忽略：偏好损坏就用默认 */ }
+    return d;
+  }
+  function savePrefs() {
+    try { localStorage.setItem(PREFS_KEY, JSON.stringify(state.prefs)); } catch (e) { /* 忽略 */ }
+  }
+
+  /* ---------------- 工具 ---------------- */
+  function $(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s === null || s === undefined ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function fmtTime(iso) {
+    if (!iso) return '—';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return '—';
+    var p = function (n) { return n < 10 ? '0' + n : '' + n; };
+    return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  async function req(method, path, body) {
+    var h = { 'Content-Type':'application/json' };
+    if (state.token) h['Authorization'] = 'Bearer ' + state.token;
+    var res = await fetch(API + path, {
+      method: method, headers: h, body: body ? JSON.stringify(body) : undefined
+    });
+    var json = null;
+    try { json = await res.json(); } catch (e) { /* 非 JSON 响应 */ }
+    if (!res.ok) {
+      var msg = (json && json.error) || ('请求失败（HTTP ' + res.status + '）');
+      var err = new Error(msg);
+      err.status = res.status;
+      throw err;
+    }
+    return json;
+  }
+
+  /* ---------------- 登录 ---------------- */
+  async function doLogin() {
+    var u = $('u').value.trim();
+    var p = $('p').value;
+    var btn = $('loginBtn');
+    $('loginErr').textContent = '';
+    if (!u || !p) { $('loginErr').textContent = '请输入账号和密码'; return; }
+    btn.disabled = true; btn.textContent = '登录中…';
+    try {
+      var r = await req('POST', '/api/auth/secure-login', { username:u, password:p });
+      var d = r && r.data;
+      var tok = (d && d.session && d.session.access_token) || (d && d.token);
+      if (!tok) throw new Error('登录响应异常，未取得凭证');
+      var role = (d && (d.user && d.user.role || d.role)) || '';
+      // 学生账号也能登录系统，但这里必须是教师角色
+      if (role && role !== 'teacher' && role !== 'admin' && role !== 'super_admin') {
+        throw new Error('该账号不是教师账号，无法查看学情分析');
+      }
+      state.token = tok;
+      try {
+        localStorage.setItem(TOKEN_KEY, tok);
+        if (d && d.user) localStorage.setItem('xgpy_mobile_user', JSON.stringify({
+          username: d.user.username, real_name: d.user.real_name
+        }));
+      } catch (e) { /* 忽略 */ }
+      $('loginView').classList.add('hide');
+      $('appView').classList.remove('hide');
+      await loadData();
+    } catch (e) {
+      $('loginErr').textContent = e.message || '登录失败';
+    } finally {
+      btn.disabled = false; btn.textContent = '登录';
+    }
+  }
+
+  function doLogout() {
+    state.token = null;
+    try { localStorage.removeItem(TOKEN_KEY); } catch (e) { /* 忽略 */ }
+    $('appView').classList.add('hide');
+    $('loginView').classList.remove('hide');
+    $('p').value = '';
+    $('loginErr').textContent = '';
+  }
+
+  /* ---------------- 数据加载 ---------------- */
+  async function loadData(isSilent) {
+    var list = $('list');
+    if (!isSilent) list.innerHTML = '<div class="loading"><div class="spin"></div></div>';
+    try {
+      var q = state.classId ? ('?classId=' + encodeURIComponent(state.classId)) : '';
+      var r = await req('GET', '/api/teacher/mobile/analytics' + q);
+      var d = (r && r.data) || {};
+      state.classes = d.classes || [];
+      state.students = d.students || [];
+      state.threshold = d.master_threshold || 0;
+      state.generatedAt = d.generated_at || '';
+      renderClassSelect();
+      renderStats();
+      renderList();
+    } catch (e) {
+      if (e.status === 401 || e.status === 403) {
+        // 凭证过期：退回登录页
+        doLogout();
+        $('loginErr').textContent = '登录已过期，请重新登录';
+        return;
+      }
+      list.innerHTML = '<div class="empty"><i class="fa-solid fa-triangle-exclamation"></i>' +
+        esc(e.message || '加载失败') + '</div>';
+    }
+  }
+
+  function renderClassSelect() {
+    var sel = $('classSel');
+    var cur = state.classId;
+    var html = '<option value="">全部班级</option>';
+    state.classes.forEach(function (c) {
+      html += '<option value="' + esc(c.id) + '">' + esc(c.name) + '</option>';
+    });
+    sel.innerHTML = html;
+    sel.value = cur;
+  }
+
+  function renderStats() {
+    var s = state.students;
+    var n = s.length;
+    var avgMaster = n ? Math.round(s.reduce(function (a, b) { return a + (b.total_mastered || 0); }, 0) / n) : 0;
+    var avgAcc = n ? Math.round(s.reduce(function (a, b) { return a + (b.accuracy || 0); }, 0) / n) : 0;
+    var totalMaster = s.reduce(function (a, b) { return a + (b.total_mastered || 0); }, 0);
+    var card = function (v, l, hl) {
+      return '<div class="stat' + (hl ? ' hl' : '') + '"><div class="stat-v">' + esc(v) + '</div>' +
+             '<div class="stat-l">' + esc(l) + '</div></div>';
+    };
+    $('stats').innerHTML =
+      card(n, '学生人数') +
+      card(totalMaster, '掌握题数合计', true) +
+      card(avgMaster, '人均掌握') +
+      card(avgAcc + '%', '平均正确率');
+
+    $('metaClass').innerHTML = '<i class="fa-solid fa-users"></i> ' +
+      (state.classId ? esc((state.classes.find(function (c) { return c.id === state.classId; }) || {}).name || '') : '全部班级') +
+      ' · ' + n + ' 人';
+    $('metaTime').innerHTML = '<i class="fa-regular fa-clock"></i> ' + esc(fmtTime(state.generatedAt)) +
+      ' · 掌握线 ' + state.threshold + ' 次';
+  }
+
+  /** 排序：默认按所选字段，同值恒定按账号升序（与学情表格口径一致） */
+  function sortStudents(rows) {
+    var key = state.prefs.sortKey, dir = state.prefs.sortDir === 'asc' ? 1 : -1;
+    var fd = (FIELDS.find(function (f) { return f.key === key; }) || {}).dir || 'desc';
+    return rows.slice().sort(function (a, b) {
+      var x = a[key], y = b[key];
+      if (typeof x === 'number' && typeof y === 'number') {
+        if (x !== y) return (x - y) * dir;
+      } else {
+        var sx = String(x === null || x === undefined ? '' : x);
+        var sy = String(y === null || y === undefined ? '' : y);
+        var c = sx.localeCompare(sy, 'zh-Hans-CN');
+        if (c !== 0) return c * dir;
+      }
+      return String(a.username).localeCompare(String(b.username), 'zh-Hans-CN');
+    });
+  }
+
+  function renderList() {
+    var list = $('list');
+    var rows = state.students;
+    if (!rows.length) {
+      list.innerHTML = '<div class="empty"><i class="fa-regular fa-folder-open"></i>' +
+        '该范围内暂无学生数据</div>';
+      return;
+    }
+    var sorted = sortStudents(rows);
+    // 排名一律以「总掌握」为基准展示，与当前排序无关（名次是绝对量，不该随视角变化）
+    var byMaster = rows.slice().sort(function (a, b) {
+      return (b.total_mastered || 0) - (a.total_mastered || 0) ||
+             String(a.username).localeCompare(String(b.username), 'zh-Hans-CN');
+    });
+    var rank = {};
+    byMaster.forEach(function (s, i) { rank[s.id] = i + 1; });
+
+    var vis = FIELDS.filter(function (f) { return state.prefs.visible[f.key]; });
+    var maxMaster = Math.max.apply(null, rows.map(function (s) { return s.total_mastered || 0; }).concat([1]));
+
+    var html = '';
+    sorted.forEach(function (s) {
+      var rk = rank[s.id];
+      var rkCls = rk === 1 ? ' top1' : rk === 2 ? ' top2' : rk === 3 ? ' top3' : '';
+      html += '<div class="s-card">';
+      html += '<div class="s-head">';
+      // ⛔ 账号与姓名恒定显示（用户明确要求）
+      html += '<span class="s-name">' + esc(s.real_name || s.username) + '</span>';
+      html += '<span class="s-acc">' + esc(s.username) + '</span>';
+      html += '<span class="s-rank' + rkCls + '">No.' + rk + '</span>';
+      html += '</div>';
+      html += '<div class="s-grid' + (vis.length > 3 ? ' rows2' : '') + '">';
+      vis.forEach(function (f) {
+        var v = s[f.key];
+        if (f.key === 'accuracy') v = (v || 0) + '%';
+        if (f.key === 'pet_level') v = v ? ('Lv.' + v) : '未领养';
+        if (typeof v === 'number') v = v.toLocaleString('zh-CN');
+        var cls = f.key === 'total_mastered' ? ' master' : '';
+        html += '<div class="s-cell' + cls + '">' +
+                  '<div class="s-cell-v">' + esc(v) + '</div>' +
+                  '<div class="s-cell-l">' + esc(f.name) + '</div>' +
+                '</div>';
+      });
+      html += '</div>';
+      if (state.prefs.visible.total_mastered) {
+        var pct = Math.round(((s.total_mastered || 0) / maxMaster) * 100);
+        html += '<div class="bar"><i style="width:' + pct + '%"></i></div>';
+      }
+      html += '</div>';
+    });
+    list.innerHTML = html;
+  }
+
+  /* ---------------- 抽屉：字段与排序 ---------------- */
+  function openSheet() {
+    renderSheet();
+    $('mask').classList.add('on');
+    $('sheet').classList.add('on');
+  }
+  function closeSheet() {
+    $('mask').classList.remove('on');
+    $('sheet').classList.remove('on');
+  }
+  function renderSheet() {
+    var h = '';
+    // 固定列
+    FIXED.forEach(function (k) {
+      var nm = k === 'username' ? '账号' : '姓名';
+      h += '<div class="opt"><span>' + nm + '</span>' +
+           '<span class="lock">始终显示</span></div>';
+    });
+    // 开关 + 排序按钮
+    h += '<div class="sheet-hint" style="padding-top:14px">点字段名可切换排序依据</div>';
+    FIELDS.forEach(function (f) {
+      var on = !!state.prefs.visible[f.key];
+      var isSort = state.prefs.sortKey === f.key;
+      h += '<div class="sort-row">' +
+             '<span class="nm" data-sort="' + esc(f.key) + '">' + esc(f.name) +
+               (isSort ? ' <i class="fa-solid fa-arrow-down-long" style="font-size:11px;opacity:.55"></i>' : '') +
+             '</span>' +
+             (isSort
+               ? '<button class="sort-dir on" data-dir="' + esc(f.key) + '">' +
+                   (state.prefs.sortDir === 'asc' ? '↑' : '↓') + '</button>'
+               : '') +
+             '<div class="sw' + (on ? ' on' : '') + '" data-sw="' + esc(f.key) + '"></div>' +
+           '</div>';
+    });
+    $('fieldOpts').innerHTML = h;
+  }
+
+  function bindSheet() {
+    $('fieldOpts').addEventListener('click', function (e) {
+      var sw = e.target.closest('[data-sw]');
+      if (sw) {
+        var k = sw.getAttribute('data-sw');
+        state.prefs.visible[k] = !state.prefs.visible[k];
+        savePrefs(); renderSheet(); renderList();
+        return;
+      }
+      var dir = e.target.closest('[data-dir]');
+      if (dir) {
+        state.prefs.sortDir = state.prefs.sortDir === 'asc' ? 'desc' : 'asc';
+        savePrefs(); renderSheet(); renderList();
+        return;
+      }
+      var nm = e.target.closest('[data-sort]');
+      if (nm) {
+        var key = nm.getAttribute('data-sort');
+        if (state.prefs.sortKey === key) {
+          state.prefs.sortDir = state.prefs.sortDir === 'asc' ? 'desc' : 'asc';
+        } else {
+          state.prefs.sortKey = key;
+          state.prefs.sortDir = (FIELDS.find(function (f) { return f.key === key; }) || {}).dir || 'desc';
+        }
+        savePrefs(); renderSheet(); renderList();
+      }
+    });
+  }
+
+  /* ---------------- 事件绑定 ---------------- */
+  function bind() {
+    $('loginBtn').addEventListener('click', doLogin);
+    $('p').addEventListener('keydown', function (e) { if (e.key === 'Enter') doLogin(); });
+    $('u').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('p').focus(); });
+    $('logoutBtn').addEventListener('click', function () {
+      if (confirm('确定退出登录吗？')) doLogout();
+    });
+    $('refreshBtn').addEventListener('click', function () { loadData(true); });
+    $('sortBtn').addEventListener('click', openSheet);
+    $('mask').addEventListener('click', closeSheet);
+    $('applyBtn').addEventListener('click', closeSheet);
+    $('resetBtn').addEventListener('click', function () {
+      var d = { visible:{}, sortKey:'total_mastered', sortDir:'desc' };
+      FIELDS.forEach(function (f) { d.visible[f.key] = f.def; });
+      state.prefs = d;
+      savePrefs(); renderSheet(); renderList();
+    });
+    $('classSel').addEventListener('change', function () {
+      state.classId = this.value;
+      loadData();
+    });
+    bindSheet();
+  }
+
+  /* ---------------- 启动 ---------------- */
+  function boot() {
+    bind();
+    // 渲染快捷筛选标签（常用视角，一键切换排序）
+    var chips = [
+      { k:'total_mastered', n:'总掌握' },
+      { k:'current_points', n:'当前积分' },
+      { k:'accuracy',       n:'正确率' },
+      { k:'total_answers',  n:'做题量' },
+      { k:'max_points',     n:'最高积分' },
+      { k:'pet_level',      n:'萌宠等级' }
+    ];
+    $('chips').innerHTML = chips.map(function (c) {
+      return '<div class="chip" data-chip="' + esc(c.k) + '">' + esc(c.n) + '</div>';
+    }).join('');
+    $('chips').addEventListener('click', function (e) {
+      var el = e.target.closest('[data-chip]');
+      if (!el) return;
+      var k = el.getAttribute('data-chip');
+      if (state.prefs.sortKey === k) {
+        state.prefs.sortDir = state.prefs.sortDir === 'asc' ? 'desc' : 'asc';
+      } else {
+        state.prefs.sortKey = k;
+        state.prefs.sortDir = (FIELDS.find(function (f) { return f.key === k; }) || {}).dir || 'desc';
+      }
+      // 排序字段顺带打开显示，避免「按某字段排序却看不到它」
+      state.prefs.visible[k] = true;
+      savePrefs();
+      Array.prototype.forEach.call($('chips').children, function (c) {
+        c.classList.toggle('on', c.getAttribute('data-chip') === k);
+      });
+      renderList();
+    });
+    // 初始标签高亮
+    Array.prototype.forEach.call($('chips').children, function (c) {
+      c.classList.toggle('on', c.getAttribute('data-chip') === state.prefs.sortKey);
+    });
+
+    // 已登录则直进（token 失效由 loadData 的 401/403 兜回登录页）
+    var saved = null;
+    try { saved = localStorage.getItem(TOKEN_KEY); } catch (e) { /* 忽略 */ }
+    if (saved) {
+      state.token = saved;
+      $('loginView').classList.add('hide');
+      $('appView').classList.remove('hide');
+      loadData();
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
+  }
+})();
+</script>
+</body>
+</html>

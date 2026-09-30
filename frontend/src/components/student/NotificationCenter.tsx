@@ -56,6 +56,13 @@ const DEFAULT_STATUS: MessageStatus = {
 /** 消息内容框上的合规提示（用户要求第 4 条，务必与后端风控一致） */
 const USAGE_NOTICE = '本功能主要用于课堂互动学习，请合理使用消息文明沟通。你的消息受到老师监督，如有违规会受到相应惩罚。';
 
+/**
+ * 上次发送对象暂存（用户要求第 3 条：不用每次重选账号）。
+ * 用 localStorage 持久化，直到学生重新选择同学或手工改写账号为止。
+ * ⚠️ 按学生 id 分键，避免同一台电脑上多个学生登录时互相串号。
+ */
+const receiverKey = (studentId: string) => `xgpy_msg_receiver_${studentId}`;
+
 export const NotificationCenter: React.FC = () => {
   const {
     notifications,
@@ -95,6 +102,13 @@ export const NotificationCenter: React.FC = () => {
   const [reportMsg, setReportMsg] = useState<string | null>(null);
 
   const dmEnabled = status.dm_enabled && status.settings_enabled;
+
+  // 恢复上次的发送对象（user 要求 3：临时保存，直到重新选择或手工输入）
+  useEffect(() => {
+    if (!profile?.id) return;
+    const saved = localStorage.getItem(receiverKey(profile.id));
+    if (saved) setDmReceiver(saved);
+  }, [profile?.id]);
 
   useEffect(() => {
     if (profile) {
@@ -166,7 +180,8 @@ export const NotificationCenter: React.FC = () => {
 
   const sendMessage = async () => {
     setDmResult(null);
-    if (!dmReceiver.trim()) { setDmResult({ ok: false, text: '请输入对方账号' }); return; }
+    const receiver = dmReceiver.trim();
+    if (!receiver) { setDmResult({ ok: false, text: '请输入对方账号' }); return; }
     const text = dmContent.trim();
     if (!text) { setDmResult({ ok: false, text: '请输入发送内容' }); return; }
     if (text.length > status.max_length) {
@@ -176,7 +191,7 @@ export const NotificationCenter: React.FC = () => {
     setDmSending(true);
     try {
       const res = await backendClient.post('/api/student/digital-messages/send', {
-        receiver_username: dmReceiver.trim(),
+        receiver_username: receiver,
         content: text,
       });
       if (res?.error) { setDmResult({ ok: false, text: res.error }); return; }
@@ -187,7 +202,7 @@ export const NotificationCenter: React.FC = () => {
           ? `发送成功，已扣除 ${d.points_cost} 积分（剩余 ${d.current_points} 积分）`
           : '发送成功',
       });
-      setDmReceiver('');
+      // 只清空内容，保留接收人——连续给同一个人发消息时不必重选（用户要求 3）
       setDmContent('');
       await loadMessages();
     } catch (e: any) {
@@ -195,6 +210,36 @@ export const NotificationCenter: React.FC = () => {
     } finally {
       setDmSending(false);
     }
+  };
+
+  /** 设置发送对象并持久化（下拉选择 / 手工输入都走这里） */
+  const updateReceiver = (username: string) => {
+    setDmReceiver(username);
+    setDmResult(null);
+    if (profile?.id) {
+      if (username.trim()) localStorage.setItem(receiverKey(profile.id), username);
+      else localStorage.removeItem(receiverKey(profile.id));
+    }
+  };
+
+  /** 收到的消息：全部标为已读 */
+  const markAllInboxRead = async () => {
+    try {
+      const res = await backendClient.post('/api/student/digital-messages/read-all', {});
+      if (res?.error) { setDmResult({ ok: false, text: res.error }); return; }
+      setDmInbox(prev => prev.map(m => ({ ...m, is_read: true })));
+    } catch (e: any) {
+      setDmResult({ ok: false, text: e?.message || '操作失败' });
+    }
+  };
+
+  /** 从消息弹窗点「回复」：切到发送页签并预填对方账号 */
+  const replyTo = (m: InboxMessage) => {
+    updateReceiver(m.sender_username);
+    setDmContent('');
+    setActiveMsg(null);
+    setDmResult(null);
+    setDmTab('send');
   };
 
   /** 打开一条收到的消息（弹窗），顺带标为已读 */
@@ -484,10 +529,7 @@ export const NotificationCenter: React.FC = () => {
                       value={dmReceiver ? classmates.find(c => c.username === dmReceiver)?.id || '' : ''}
                       onChange={e => {
                         const selected = classmates.find(c => c.id === e.target.value);
-                        if (selected) {
-                          setDmReceiver(selected.username);
-                          setDmResult(null);
-                        }
+                        if (selected) updateReceiver(selected.username);
                       }}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-white"
                     >
@@ -501,14 +543,29 @@ export const NotificationCenter: React.FC = () => {
                   </div>
 
                   <div className="mb-3">
-                    <label className="block text-xs text-gray-500 mb-1">对方账号（也可手动输入）</label>
-                    <input
-                      type="text"
-                      value={dmReceiver}
-                      onChange={e => { setDmReceiver(e.target.value); setDmResult(null); }}
-                      placeholder="对方学生账号"
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-white"
-                    />
+                    <label className="block text-xs text-gray-500 mb-1">
+                      对方账号
+                      <span className="text-gray-400 ml-1">（已记住，下次打开自动填入；改了就按新的算）</span>
+                    </label>
+                    <div className="relative">
+                      <input
+                        type="text"
+                        value={dmReceiver}
+                        onChange={e => updateReceiver(e.target.value)}
+                        placeholder="对方学生账号"
+                        className="w-full px-3 py-2 pr-8 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-white"
+                      />
+                      {dmReceiver && (
+                        <button
+                          type="button"
+                          onClick={() => updateReceiver('')}
+                          title="清除"
+                          className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                        >
+                          <i className="fa-solid fa-circle-xmark text-sm"></i>
+                        </button>
+                      )}
+                    </div>
                   </div>
 
                   {/* 快捷短语 */}
@@ -572,38 +629,55 @@ export const NotificationCenter: React.FC = () => {
 
               {/* 收到的消息 tab */}
               {dmTab === 'inbox' && (
-                <div className="flex-1 overflow-y-auto">
-                  {dmInbox.length === 0 ? (
-                    <div className="p-8 text-center text-gray-500">
-                      <i className="fa-regular fa-envelope text-4xl mb-2"></i>
-                      <p>暂无收到消息</p>
-                    </div>
-                  ) : (
-                    <div className="divide-y divide-gray-100">
-                      {dmInbox.map(m => (
-                        <div
-                          key={m.id}
-                          onClick={() => openMessage(m)}
-                          className={`p-4 cursor-pointer hover:bg-blue-50/70 transition-colors ${m.is_read ? 'bg-white' : 'bg-blue-50/50'}`}
-                        >
-                          <div className="flex items-center justify-between mb-1">
-                            <span className="text-sm font-medium text-gray-800">
-                              <i className="fa-solid fa-user text-blue-500 mr-1"></i>
-                              {m.sender_real_name || m.sender_username}
-                              <span className="text-xs text-gray-400 ml-1">({m.sender_username})</span>
-                            </span>
-                            <span className="text-xs text-gray-400">
-                              {formatDate(m.sent_at)}
-                            </span>
+                <div className="flex-1 flex flex-col overflow-hidden">
+                  {/* 操作栏：与「通知」页签一致的全部标为已读 */}
+                  <div className="p-3 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
+                    <span className="text-xs text-gray-500">
+                      共 {dmInbox.length} 条{unreadInbox > 0 ? `，${unreadInbox} 条未读` : ''}
+                    </span>
+                    {unreadInbox > 0 && (
+                      <button
+                        onClick={markAllInboxRead}
+                        className="text-sm text-blue-600 hover:text-blue-800 flex items-center gap-1"
+                      >
+                        <i className="fa-solid fa-check-double"></i>
+                        全部标为已读
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex-1 overflow-y-auto">
+                    {dmInbox.length === 0 ? (
+                      <div className="p-8 text-center text-gray-500">
+                        <i className="fa-regular fa-envelope text-4xl mb-2"></i>
+                        <p>暂无收到消息</p>
+                      </div>
+                    ) : (
+                      <div className="divide-y divide-gray-100">
+                        {dmInbox.map(m => (
+                          <div
+                            key={m.id}
+                            onClick={() => openMessage(m)}
+                            className={`p-4 cursor-pointer hover:bg-blue-50/70 transition-colors ${m.is_read ? 'bg-white' : 'bg-blue-50/50'}`}
+                          >
+                            <div className="flex items-center justify-between mb-1">
+                              <span className="text-sm font-medium text-gray-800">
+                                <i className="fa-solid fa-user text-blue-500 mr-1"></i>
+                                {m.sender_real_name || m.sender_username}
+                                <span className="text-xs text-gray-400 ml-1">({m.sender_username})</span>
+                              </span>
+                              <span className="text-xs text-gray-400">
+                                {formatDate(m.sent_at)}
+                              </span>
+                            </div>
+                            <p className="text-sm text-gray-700 whitespace-pre-wrap break-words">{m.content}</p>
+                            {!m.is_read && (
+                              <span className="inline-block mt-1 text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-600">未读</span>
+                            )}
                           </div>
-                          <p className="text-sm text-gray-700 whitespace-pre-wrap break-words">{m.content}</p>
-                          {!m.is_read && (
-                            <span className="inline-block mt-1 text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-600">未读</span>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -806,8 +880,14 @@ export const NotificationCenter: React.FC = () => {
                     </p>
                   )}
 
-                  {/* 操作按钮 */}
+                  {/* 操作按钮：回复 / 拉黑 / 举报 */}
                   <div className="flex gap-2">
+                    <button
+                      onClick={() => replyTo(activeMsg)}
+                      className="flex-1 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 flex items-center justify-center gap-1.5 transition-colors"
+                    >
+                      <i className="fa-solid fa-reply"></i>回复
+                    </button>
                     <button
                       onClick={() => blockSender(activeMsg)}
                       className="flex-1 py-2.5 rounded-xl border border-gray-300 text-sm text-gray-700 hover:bg-gray-50 flex items-center justify-center gap-1.5 transition-colors"

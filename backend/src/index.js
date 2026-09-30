@@ -874,6 +874,108 @@ app.get('/api/teacher/analytics/chapter-mastery/:classId', authenticate, require
   }
 });
 
+// ==================== 移动端学情分析 (v2.7.1) ====================
+// 教师账号在手机浏览器打开即可查看各班学生情况。
+// 设计要点：
+//  1. 「总掌握」复用 chapter-mastery 的同一套口径（同一条 SQL 语义），不另算一套；
+//  2. 账号(username) 与 姓名(real_name) 恒定返回，前端不可取消勾选；
+//  3. 其余字段一次性返回，由前端自行勾选/排序 —— 避免每换一次字段就打一次接口。
+app.get('/api/teacher/mobile/analytics', authenticate, requireTeacher, requireLicense(FEATURES.ANALYTICS), async (req, res) => {
+  try {
+    const teacherId = req.user.userId;
+    const role = req.user.role;
+
+    // 1) 该教师可见的班级
+    const classSql = (role === 'super_admin' || role === 'admin')
+      ? 'SELECT id, name FROM classes ORDER BY name'
+      : 'SELECT id, name FROM classes WHERE teacher_id = ? ORDER BY name';
+    const [classes] = await pool.query(classSql, role === 'super_admin' || role === 'admin' ? [] : [teacherId]);
+
+    const masterThreshold = await getMasterThreshold();
+
+    // 2) 班级学生 + 积分 + 宠物（一次取全，避免 N+1）
+    const pickClassId = String(req.query.classId || '').trim();
+    const targetClassIds = pickClassId
+      ? classes.filter(c => String(c.id) === pickClassId).map(c => c.id)
+      : classes.map(c => c.id);
+
+    let students = [];
+    if (targetClassIds.length) {
+      const [rows] = await pool.query(
+        `SELECT p.id, p.username, p.real_name, p.class_id, p.current_points,
+                COALESCE(p.max_points, p.current_points) AS max_points,
+                pet.growth_level AS pet_level,
+                (SELECT COUNT(*) FROM student_answers a WHERE a.student_id = p.id) AS total_answers,
+                (SELECT COUNT(*) FROM student_answers a WHERE a.student_id = p.id AND a.is_correct = 1) AS correct_answers
+           FROM profiles p
+           LEFT JOIN (
+             -- ⛔ 必须先聚合成「一学生一行」再 JOIN：
+             --    student_pets 允许一个学生多条记录（历史数据），直接 JOIN 会把学生行翻倍，
+             --    表现为名单里同一个人出现两次（曾经真的出现过）。
+             SELECT student_id, MAX(growth_level) AS growth_level
+               FROM student_pets GROUP BY student_id
+           ) pet ON pet.student_id = p.id
+          WHERE p.class_id IN (?) AND p.role = 'student'
+          ORDER BY p.real_name ASC, p.username ASC`,
+        [targetClassIds]
+      );
+      students = rows;
+    }
+
+    // 3) 总掌握（与 chapter-mastery 同口径：practice 答对次数 ≥ 阈值）
+    const masteredMap = new Map();
+    if (students.length) {
+      const ids = students.map(s => s.id);
+      const [mrows] = await pool.query(
+        `SELECT m.student_id, COUNT(*) AS n FROM (
+           SELECT student_id, question_id FROM student_answers
+           WHERE student_id IN (?) AND source = 'practice' AND is_correct = 1
+           GROUP BY student_id, question_id
+           HAVING COUNT(*) >= ?
+         ) m
+         JOIN questions q ON q.id = m.question_id
+         WHERE q.cluster_id IS NOT NULL AND q.cluster_id <> ''
+         GROUP BY m.student_id`,
+        [ids, masterThreshold]
+      );
+      for (const r of mrows) masteredMap.set(r.student_id, Number(r.n) || 0);
+    }
+
+    const data = students.map(s => {
+      const total = Number(s.total_answers) || 0;
+      const correct = Number(s.correct_answers) || 0;
+      return {
+        id: s.id,
+        username: s.username,
+        real_name: s.real_name,
+        class_id: s.class_id,
+        class_name: classes.find(c => String(c.id) === String(s.class_id))?.name || '',
+        current_points: Number(s.current_points) || 0,
+        max_points: Number(s.max_points) || 0,
+        total_answers: total,
+        correct_answers: correct,
+        accuracy: total > 0 ? Math.round((correct / total) * 100) : 0,
+        total_mastered: masteredMap.get(s.id) || 0,
+        has_pet: !!s.pet_level,
+        pet_level: Number(s.pet_level) || 0,
+      };
+    });
+
+    res.json({
+      data: {
+        classes,
+        students: data,
+        master_threshold: masterThreshold,
+        generated_at: new Date().toISOString(),
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('移动端学情分析失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
 function formatRow(row, forWriting = false) {
   const formatted = { ...row };
   
@@ -5984,6 +6086,21 @@ app.post('/api/student/digital-messages/read', authenticate, async (req, res) =>
   }
 });
 
+// 全部标为已读（仅限收到的、尚未读的、未被教师删除的消息）
+app.post('/api/student/digital-messages/read-all', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const [result] = await pool.query(
+      'UPDATE student_messages SET is_read = TRUE WHERE receiver_id = ? AND is_read = FALSE AND is_deleted = 0',
+      [userId]
+    );
+    res.json({ data: { ok: true, updated: result.affectedRows || 0 }, error: null });
+  } catch (error) {
+    console.error('全部标记消息已读失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
 // ==================== 消息黑名单（学生自助） ====================
 
 // 我的黑名单列表
@@ -6229,27 +6346,59 @@ app.put('/api/teacher/message-settings', authenticate, requireTeachingRole, asyn
   }
 });
 
+/**
+ * 构造「学生消息列表 / 批量删除」共用的查询条件。
+ * ⛔ 列表与批量删除必须共用这一个函数：两边各写一份迟早会漂移，
+ *    出现「看到 20 条、删掉 500 条」这类事故。
+ * @returns {{whereSql:string, params:any[]}}
+ */
+async function buildStudentMessageFilter(req) {
+  // ⛔ 列表接口筛选走 query（GET 无 body），批量删除走 body（POST）。
+  //    只读 req.query 会让批量删除拿到空条件 → 变成「清空全部」，
+  //    正是本函数注释里警告的「看到 20 条、删掉 500 条」事故。两个来源都要吃。
+  const src = Object.keys(req.query || {}).length ? req.query : (req.body || {});
+  const keyword = (src.keyword ?? '').toString().trim();
+  const sender = (src.sender ?? '').toString().trim();
+  const receiver = (src.receiver ?? '').toString().trim();
+  const filter = await getTeacherStudentFilter(req.user.userId, req.user.role);
+  const where = [];
+  const params = [];
+  if (filter.clause) {
+    where.push('c.teacher_id = ?');
+    params.push(...filter.params);
+  }
+  // ⛔ LIKE 通配符必须转义：`_` 匹配任意单字符、`%` 匹配任意串。
+  //    不转义的话搜「bulksub_」会连「bulk_keep_outer」一起命中（曾经真的误删了范围外数据），
+  //    而批量删除是按同一条件执行的，等于把误判放大成数据事故。
+  const like = v => `%${String(v).replace(/[\\%_]/g, c => '\\' + c)}%`;
+  if (sender) {
+    where.push('(m.sender_username LIKE ? OR m.sender_real_name LIKE ?)');
+    params.push(like(sender), like(sender));
+  }
+  if (receiver) {
+    where.push('(m.receiver_username LIKE ? OR m.receiver_real_name LIKE ?)');
+    params.push(like(receiver), like(receiver));
+  }
+  if (keyword) {
+    where.push('m.content LIKE ?');
+    params.push(like(keyword));
+  }
+  // LIKE ... ESCAPE '\\'：MariaDB 默认转义符即反斜杠，显式声明以固定语义
+  const whereSql = where.length
+    ? `WHERE ${where.join(' AND ')}`.replace(/ LIKE \?/g, " LIKE ? ESCAPE '\\\\'")
+    : '';
+  // ⚠️ 调用方需要区分「只有教师可见范围」和「教师真的设了筛选条件」：
+  //    whereSql 非空不代表有筛选（教师范围恒定产生一个 c.teacher_id 条件），
+  //    批量删除的「全清二次确认」必须看 userFiltered。
+  return { whereSql, params, userFiltered: !!(keyword || sender || receiver) };
+}
+
 // 全部学生发送的消息（含被删的，教师视角要能追溯）
 app.get('/api/teacher/student-messages', authenticate, requireTeachingRole, async (req, res) => {
   try {
-    const { keyword, sender, limit } = req.query;
+    const { limit } = req.query;
     const lim = Math.min(Math.max(Number(limit) || 200, 1), 1000);
-    const filter = await getTeacherStudentFilter(req.user.userId, req.user.role);
-    const where = [];
-    const params = [];
-    if (filter.clause) {
-      where.push('c.teacher_id = ?');
-      params.push(...filter.params);
-    }
-    if (sender) {
-      where.push('(m.sender_username LIKE ? OR m.sender_real_name LIKE ?)');
-      params.push(`%${sender}%`, `%${sender}%`);
-    }
-    if (keyword) {
-      where.push('m.content LIKE ?');
-      params.push(`%${keyword}%`);
-    }
-    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const { whereSql, params } = await buildStudentMessageFilter(req);
     const [rows] = await pool.query(
       `SELECT m.id, m.sender_id, m.sender_username, m.sender_real_name,
               m.receiver_id, m.receiver_username, m.receiver_real_name,
@@ -6267,6 +6416,51 @@ app.get('/api/teacher/student-messages', authenticate, requireTeachingRole, asyn
   } catch (error) {
     console.error('获取学生消息列表失败:', error);
     res.status(500).json({ data: [], error: error.message });
+  }
+});
+
+// 教师批量删除学生消息（按当前筛选条件一次性清空）。
+// ⚠️ 走软删（is_deleted=1），教师端仍可追溯；学生端不再展示。
+// ⛔ 无筛选条件时必须显式确认「清空全部」，避免误点把整库消息清空（后端兜底，不信前端）。
+app.post('/api/teacher/student-messages/bulk-delete', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    // 复用列表的筛选构造，保证「看到什么就删什么」
+    const { whereSql, params, userFiltered } = await buildStudentMessageFilter(req);
+    const body = req.body || {};
+    // 无任何筛选 = 全清，必须明确带上 confirm_all
+    if (!userFiltered && body.confirm_all !== true && body.confirm_all !== 'true') {
+      return res.status(400).json({
+        data: null,
+        error: '未设置任何筛选条件。这会删除全部消息记录，请确认后再操作。',
+        code: 'CONFIRM_ALL_REQUIRED',
+      });
+    }
+    // 先数一下影响范围，回执给教师确认
+    const [countRows] = await pool.query(
+      `SELECT COUNT(*) AS n
+         FROM student_messages m
+         LEFT JOIN profiles sp ON sp.id = m.sender_id
+         LEFT JOIN classes c ON c.id = sp.class_id
+         ${whereSql} ${whereSql ? 'AND' : 'WHERE'} m.is_deleted = 0`,
+      params
+    );
+    const willDelete = Number(countRows[0]?.n) || 0;
+    if (willDelete === 0) {
+      return res.json({ data: { ok: true, deleted: 0 }, error: null });
+    }
+    // UPDATE 语句的 JOIN 写法与 SELECT 一致，whereSql 直接可用
+    const [result] = await pool.query(
+      `UPDATE student_messages m
+         LEFT JOIN profiles sp ON sp.id = m.sender_id
+         LEFT JOIN classes c ON c.id = sp.class_id
+          SET m.is_deleted = 1, m.blocked_reason = ?
+        ${whereSql} ${whereSql ? 'AND' : 'WHERE'} m.is_deleted = 0`,
+      [`教师批量删除（${req.user.userId}）`, ...params]
+    );
+    res.json({ data: { ok: true, deleted: result.affectedRows || willDelete }, error: null });
+  } catch (error) {
+    console.error('批量删除学生消息失败:', error);
+    res.status(500).json({ data: null, error: error.message });
   }
 });
 
@@ -6448,6 +6642,62 @@ app.get('/api/teacher/message-keywords', authenticate, requireTeachingRole, asyn
   } catch (error) {
     console.error('获取屏蔽词失败:', error);
     res.status(500).json({ data: [], error: error.message });
+  }
+});
+
+// 屏蔽关键词：批量保存（文本框一次性提交，整体替换）
+//
+// 设计取舍：教师端不再做「一个个加/停用/删除」的逐条管理（用户明确要求），
+// 改为一个大文本框，按行/逗号/空格分隔批量录入，保存时**整体替换**。
+// ⛔ 必须用事务：先清空再插入，中途失败会把词库清光，学生瞬间失去内容防护。
+app.post('/api/teacher/message-keywords/bulk', authenticate, requireTeachingRole, async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    // 兼容两种字段名：前端传 words，旧调用/手工测试可能传 text
+    const raw = req.body?.words ?? req.body?.text;
+    if (typeof raw !== 'string') {
+      return res.status(400).json({ data: null, error: '缺少关键词内容' });
+    }
+    // 按换行 / 逗号（中英文）/ 分号 / 顿号 / 空格 切分；去重去空
+    const words = [...new Set(
+      raw
+        .split(/[\n\r,，;；、\t ]+/)
+        .map(w => w.trim())
+        .filter(Boolean)
+    )];
+    if (words.length > 1000) {
+      return res.status(400).json({ data: null, error: `关键词最多 1000 个，当前 ${words.length} 个` });
+    }
+    const tooLong = words.find(w => w.length > 100);
+    if (tooLong) {
+      return res.status(400).json({ data: null, error: `关键词「${tooLong.slice(0, 20)}…」超过 100 字` });
+    }
+
+    await connection.beginTransaction();
+    await connection.query('DELETE FROM student_message_keywords');
+    if (words.length) {
+      const values = words.map(w => [`smk_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, w, '自定义', 1]);
+      await connection.query(
+        'INSERT INTO student_message_keywords (id, word, category, enabled) VALUES ?',
+        [values]
+      );
+    }
+    await connection.commit();
+
+    const [rows] = await connection.query(
+      'SELECT id, word, category, enabled FROM student_message_keywords ORDER BY word ASC'
+    );
+    // words 供前端回填文本框；total/count 双写，避免调用方字段名不一致踩坑
+    res.json({
+      data: { ok: true, total: rows.length, count: rows.length, words: rows.map(r => r.word), keywords: rows },
+      error: null,
+    });
+  } catch (error) {
+    try { await connection.rollback(); } catch (_) { /* ignore */ }
+    console.error('批量保存屏蔽词失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  } finally {
+    connection.release();
   }
 });
 

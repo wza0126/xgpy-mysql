@@ -243,6 +243,9 @@ export const Analytics: React.FC = () => {
         </div>
       </div>
 
+      {/* 移动端学情分析入口：手机随时查（v2.7.1） */}
+      <MobileAnalyticsCard />
+
       <div className="grid grid-cols-2 gap-6 mb-6">
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
           <h3 className="text-lg font-bold text-gray-800 mb-4">积分排行榜 TOP10</h3>
@@ -617,6 +620,74 @@ const WrongQuestionDetailModal: React.FC<{
               </div>
             )}
           </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// 0. 移动端学情分析入口（v2.7.1）
+// 手机浏览器打开即可用教师账号查看各班学生情况；地址由当前访问来源推导，
+// 避免把 localhost 写死导致别的老师拿到打不开的链接。
+const MobileAnalyticsCard: React.FC = () => {
+  const [copied, setCopied] = useState(false);
+  const url = typeof window !== 'undefined'
+    ? `${window.location.origin}/mobile-analytics.html`
+    : '/mobile-analytics.html';
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      // 剪贴板不可用（非 HTTPS / 旧浏览器）时退回手动复制
+      window.prompt('请手动复制下面的地址：', url);
+    }
+  };
+
+  return (
+    <div className="bg-gradient-to-r from-sky-50 to-cyan-50 rounded-xl border border-sky-200 p-5 mb-6">
+      <div className="flex items-start gap-4 flex-wrap">
+        <div className="w-11 h-11 rounded-xl bg-sky-500 text-white flex items-center justify-center flex-shrink-0">
+          <i className="fa-solid fa-mobile-screen-button text-lg"></i>
+        </div>
+        <div className="flex-1 min-w-[240px]">
+          <h3 className="font-bold text-gray-800 mb-1">
+            移动端学情分析
+            <span className="ml-2 text-[11px] font-normal px-2 py-0.5 rounded-full bg-sky-500 text-white align-middle">
+              手机查看
+            </span>
+          </h3>
+          <p className="text-sm text-gray-600 leading-relaxed">
+            用手机浏览器打开下面的地址，教师账号登录后即可查看各班级学生的
+            <span className="font-medium text-sky-700">总掌握数</span>、积分、做题量、正确率等；
+            账号与姓名始终显示，其余字段可自由勾选并按所选字段排序。
+          </p>
+          <div className="mt-3 flex items-center gap-2 flex-wrap">
+            <code className="px-3 py-2 rounded-lg bg-white border border-sky-200 text-xs text-sky-800 break-all font-mono">
+              {url}
+            </code>
+            <button
+              onClick={copy}
+              className="px-3 py-2 rounded-lg bg-sky-500 text-white text-xs hover:bg-sky-600 transition-colors whitespace-nowrap"
+            >
+              <i className={`fa-solid ${copied ? 'fa-check' : 'fa-copy'} mr-1`}></i>
+              {copied ? '已复制' : '复制地址'}
+            </button>
+            <a
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-3 py-2 rounded-lg bg-white border border-sky-300 text-sky-700 text-xs hover:bg-sky-50 transition-colors whitespace-nowrap"
+            >
+              <i className="fa-solid fa-arrow-up-right-from-square mr-1"></i>打开
+            </a>
+          </div>
+          <p className="text-[11px] text-gray-500 mt-2">
+            <i className="fa-solid fa-circle-info mr-1"></i>
+            手机需与本系统在同一网络（或能访问本地址）才能打开。
+          </p>
         </div>
       </div>
     </div>

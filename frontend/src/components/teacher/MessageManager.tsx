@@ -110,7 +110,10 @@ export const MessageManager: React.FC = () => {
 
   const [messages, setMessages] = useState<MessageRow[]>([]);
   const [msgKeyword, setMsgKeyword] = useState('');
+  const [msgSender, setMsgSender] = useState('');     // 按发送人账号/姓名筛选
+  const [msgReceiver, setMsgReceiver] = useState(''); // 按接收人账号/姓名筛选
   const [loadingMessages, setLoadingMessages] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
 
   const [mutes, setMutes] = useState<MuteRow[]>([]);
   const [muteAccount, setMuteAccount] = useState('');
@@ -127,9 +130,9 @@ export const MessageManager: React.FC = () => {
   const [handleMsg, setHandleMsg] = useState<string | null>(null);
 
   const [keywords, setKeywords] = useState<KeywordRow[]>([]);
-  const [newWord, setNewWord] = useState('');
-  const [newWordCategory, setNewWordCategory] = useState('自定义');
+  const [keywordDraft, setKeywordDraft] = useState(''); // 批量文本框草稿（多行/逗号分隔）
   const [keywordMsg, setKeywordMsg] = useState<string | null>(null);
+  const [savingKeywords, setSavingKeywords] = useState(false);
 
   const [quick, setQuick] = useState<QuickRow[]>([]);
   const [newQuick, setNewQuick] = useState('');
@@ -160,19 +163,30 @@ export const MessageManager: React.FC = () => {
     } catch { /* 忽略 */ }
   }, []);
 
+  /**
+   * 当前「消息记录」筛选条件。
+   * ⛔ 列表查询与批量删除必须共用这一个来源：两处各拼一份迟早漂移，
+   *    会出现「看到 20 条、删掉 500 条」的事故（后端亦对应 buildStudentMessageFilter）。
+   */
+  const messageFilterParams = useCallback((): Record<string, string> => {
+    const params: Record<string, string> = {};
+    if (msgKeyword.trim()) params.keyword = msgKeyword.trim();
+    if (msgSender.trim()) params.sender = msgSender.trim();
+    if (msgReceiver.trim()) params.receiver = msgReceiver.trim();
+    return params;
+  }, [msgKeyword, msgSender, msgReceiver]);
+
   const loadMessages = useCallback(async () => {
     setLoadingMessages(true);
     try {
-      const params: Record<string, string> = {};
-      if (msgKeyword.trim()) params.keyword = msgKeyword.trim();
-      const res = await backendClient.get('/api/teacher/student-messages', params);
+      const res = await backendClient.get('/api/teacher/student-messages', messageFilterParams());
       setMessages(res?.data || []);
     } catch {
       setMessages([]);
     } finally {
       setLoadingMessages(false);
     }
-  }, [msgKeyword]);
+  }, [messageFilterParams]);
 
   const loadMutes = useCallback(async () => {
     try {
@@ -193,7 +207,10 @@ export const MessageManager: React.FC = () => {
   const loadKeywords = useCallback(async () => {
     try {
       const res = await backendClient.get('/api/teacher/message-keywords');
-      setKeywords(res?.data || []);
+      const list: KeywordRow[] = res?.data || [];
+      setKeywords(list);
+      // 仅当用户还没动过文本框时回填，避免把正在编辑的内容冲掉
+      setKeywordDraft(prev => (prev.trim() ? prev : list.map(k => k.word).join('\n')));
     } catch { setKeywords([]); }
   }, []);
 
@@ -243,6 +260,39 @@ export const MessageManager: React.FC = () => {
       await loadOverview();
     } catch (e: any) {
       alert(e?.message || '删除失败');
+    }
+  };
+
+  /**
+   * 按当前筛选条件批量清空消息。
+   * 二次确认必须把「影响条数」说清楚——一键删除不可撤销，不能让老师凭感觉点。
+   */
+  const bulkDeleteMessages = async () => {
+    const params = messageFilterParams();
+    const scope = [
+      params.keyword ? `内容含「${params.keyword}」` : '',
+      params.sender ? `发送人含「${params.sender}」` : '',
+      params.receiver ? `接收人含「${params.receiver}」` : '',
+    ].filter(Boolean).join('、');
+    if (!confirm(
+      scope
+        ? `确定删除【${scope}】的全部消息吗？\n当前已载入 ${messages.length} 条，实际删除以后端筛选结果为准。\n此操作不可撤销！`
+        : `⚠️ 未设置任何筛选条件，将删除【全部】学生消息记录（不可撤销）！\n建议先按发送人/接收人/关键词筛选。\n确定继续吗？`
+    )) return;
+    setBulkDeleting(true);
+    try {
+      // 无筛选时后端会拒（CONFIRM_ALL_REQUIRED），这里显式带上确认标记
+      const payload: Record<string, unknown> = { ...params };
+      if (!scope) payload.confirm_all = true;
+      const res = await backendClient.post('/api/teacher/student-messages/bulk-delete', payload);
+      if (res?.error) { alert(res.error); return; }
+      alert(`已删除 ${res?.data?.deleted ?? 0} 条消息`);
+      await loadMessages();
+      await loadOverview();
+    } catch (e: any) {
+      alert(e?.message || '批量删除失败');
+    } finally {
+      setBulkDeleting(false);
     }
   };
 
@@ -299,41 +349,25 @@ export const MessageManager: React.FC = () => {
     }
   };
 
-  const addKeyword = async () => {
+  /**
+   * 批量保存屏蔽词：文本框整体替换后端词库。
+   * 支持换行 / 逗号 / 分号 / 顿号 / 空格分隔，自动去重去空。
+   */
+  const saveKeywordsBulk = async () => {
     setKeywordMsg(null);
-    if (!newWord.trim()) { setKeywordMsg('请输入屏蔽词'); return; }
+    setSavingKeywords(true);
     try {
-      const res = await backendClient.post('/api/teacher/message-keywords', {
-        word: newWord.trim(),
-        category: newWordCategory.trim() || '自定义',
-      });
+      const res = await backendClient.post('/api/teacher/message-keywords/bulk', { words: keywordDraft });
       if (res?.error) { setKeywordMsg(res.error); return; }
-      setNewWord('');
+      const d = res?.data;
+      setKeywordMsg(`保存成功：共 ${d?.total ?? 0} 个屏蔽词`);
+      setKeywordDraft((d?.words || []).join('\n'));
       await loadKeywords();
       await loadOverview();
     } catch (e: any) {
-      setKeywordMsg(e?.message || '添加失败');
-    }
-  };
-
-  const toggleKeyword = async (k: KeywordRow) => {
-    try {
-      await backendClient.put(`/api/teacher/message-keywords/${k.id}`, { enabled: k.enabled ? 0 : 1 });
-      await loadKeywords();
-      await loadOverview();
-    } catch (e: any) {
-      alert(e?.message || '操作失败');
-    }
-  };
-
-  const deleteKeyword = async (k: KeywordRow) => {
-    if (!confirm(`确定删除屏蔽词「${k.word}」吗？`)) return;
-    try {
-      await backendClient.delete(`/api/teacher/message-keywords/${k.id}`);
-      await loadKeywords();
-      await loadOverview();
-    } catch (e: any) {
-      alert(e?.message || '删除失败');
+      setKeywordMsg(e?.message || '保存失败');
+    } finally {
+      setSavingKeywords(false);
     }
   };
 
@@ -505,8 +539,8 @@ export const MessageManager: React.FC = () => {
       {/* ② 消息记录 */}
       {tab === 'messages' && (
         <div className="bg-white rounded-xl border border-gray-200 p-5">
-          <div className="flex items-center gap-3 mb-4">
-            <div className="flex-1 relative">
+          <div className="flex flex-wrap items-center gap-3 mb-4">
+            <div className="flex-1 min-w-[200px] relative">
               <i className="fa-solid fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"></i>
               <input
                 type="text"
@@ -517,10 +551,52 @@ export const MessageManager: React.FC = () => {
                 className="w-full pl-9 pr-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
               />
             </div>
+            <div className="w-[180px] relative">
+              <i className="fa-solid fa-right-from-bracket absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"></i>
+              <input
+                type="text"
+                value={msgSender}
+                onChange={e => setMsgSender(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') loadMessages(); }}
+                placeholder="发送人（账号/姓名）"
+                className="w-full pl-9 pr-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+              />
+            </div>
+            <div className="w-[180px] relative">
+              <i className="fa-solid fa-right-to-bracket absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"></i>
+              <input
+                type="text"
+                value={msgReceiver}
+                onChange={e => setMsgReceiver(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') loadMessages(); }}
+                placeholder="接收人（账号/姓名）"
+                className="w-full pl-9 pr-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+              />
+            </div>
             <button onClick={loadMessages} className="px-4 py-2.5 rounded-lg bg-blue-600 text-white text-sm hover:bg-blue-700">
               查询
             </button>
+            {(msgKeyword || msgSender || msgReceiver) && (
+              <button
+                onClick={() => { setMsgKeyword(''); setMsgSender(''); setMsgReceiver(''); }}
+                className="px-3 py-2.5 rounded-lg border border-gray-300 text-gray-600 text-sm hover:bg-gray-50"
+              >
+                重置
+              </button>
+            )}
+            <button
+              onClick={bulkDeleteMessages}
+              disabled={bulkDeleting}
+              className="ml-auto px-4 py-2.5 rounded-lg bg-red-600 text-white text-sm hover:bg-red-700 disabled:opacity-50 whitespace-nowrap"
+            >
+              <i className="fa-solid fa-trash-can mr-1"></i>
+              {bulkDeleting ? '删除中…' : '批量删除'}
+            </button>
           </div>
+          <p className="text-xs text-gray-500 mb-3">
+            <i className="fa-solid fa-circle-info text-blue-400 mr-1"></i>
+            「批量删除」按下方的当前筛选条件执行，未设置任何条件时会删除全部记录，请谨慎操作。
+          </p>
 
           {loadingMessages ? (
             <div className="p-8 text-center text-gray-500">
@@ -771,86 +847,48 @@ export const MessageManager: React.FC = () => {
 
       {/* ⑤ 屏蔽词 */}
       {tab === 'keywords' && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-          <div className="bg-white rounded-xl border border-gray-200 p-5">
-            <h2 className="text-base font-semibold text-gray-800 mb-4">
-              <i className="fa-solid fa-ban text-amber-500 mr-1"></i>添加屏蔽词
-            </h2>
-            <div className="space-y-3">
-              <div>
-                <label className="block text-sm text-gray-600 mb-1">关键词</label>
-                <input
-                  type="text"
-                  value={newWord}
-                  onChange={e => { setNewWord(e.target.value); setKeywordMsg(null); }}
-                  placeholder="例如：作弊"
-                  className={inputCls}
-                />
-              </div>
-              <div>
-                <label className="block text-sm text-gray-600 mb-1">分类</label>
-                <select
-                  value={newWordCategory}
-                  onChange={e => setNewWordCategory(e.target.value)}
-                  className={inputCls}
-                >
-                  {['自定义', '色情', '暴力', '辱骂', '违法', '其他'].map(c => (
-                    <option key={c} value={c}>{c}</option>
-                  ))}
-                </select>
-              </div>
-              <button
-                onClick={addKeyword}
-                className="w-full py-2.5 rounded-lg bg-amber-500 text-white font-medium hover:bg-amber-600"
-              >
-                添加
-              </button>
-              {keywordMsg && <p className="text-sm text-red-500">{keywordMsg}</p>}
-              <p className="text-xs text-gray-500 leading-relaxed pt-1">
-                学生发出的消息只要包含任一启用的屏蔽词，就会被拒绝发送，并提示命中了哪个词。
-              </p>
-            </div>
-          </div>
-
-          <div className="lg:col-span-2 bg-white rounded-xl border border-gray-200 p-5">
-            <h2 className="text-base font-semibold text-gray-800 mb-4">
-              屏蔽词库
-              <span className="ml-2 text-xs font-normal text-gray-400">
-                共 {keywords.length} 个，启用 {keywords.filter(k => k.enabled).length} 个
+        <div className="bg-white rounded-xl border border-gray-200 p-5">
+          <h2 className="text-base font-semibold text-gray-800 mb-1">
+            <i className="fa-solid fa-ban text-amber-500 mr-1"></i>屏蔽词批量设置
+            <span className="ml-2 text-xs font-normal text-gray-400">
+              当前词库 {keywords.length} 个
+            </span>
+          </h2>
+          <p className="text-xs text-gray-500 leading-relaxed mb-4">
+            每行一个词，也可用逗号、分号、顿号或空格分隔；保存时整表替换（前后端共用一套边界：最多 1000 个、单个不超过 100 字）。
+            学生发出的消息只要包含任一屏蔽词就会被拒绝发送，并提示命中了哪个词。
+          </p>
+          <textarea
+            rows={16}
+            value={keywordDraft}
+            onChange={e => { setKeywordDraft(e.target.value); setKeywordMsg(null); }}
+            placeholder={'例如：\n作弊\n代写\n色情\n赌博'}
+            className={`${inputCls} resize-y font-mono text-xs leading-relaxed`}
+          />
+          <div className="flex items-center gap-3 mt-3">
+            <button
+              onClick={saveKeywordsBulk}
+              disabled={savingKeywords}
+              className="px-5 py-2.5 rounded-lg bg-amber-500 text-white font-medium hover:bg-amber-600 disabled:opacity-50"
+            >
+              {savingKeywords ? '保存中…' : '保存屏蔽词库'}
+            </button>
+            <button
+              onClick={() => { setKeywordDraft(keywords.map(k => k.word).join('\n')); setKeywordMsg(null); }}
+              className="px-4 py-2.5 rounded-lg border border-gray-300 text-gray-600 text-sm hover:bg-gray-50"
+            >
+              还原为当前词库
+            </button>
+            <button
+              onClick={() => { if (confirm('确定清空文本框吗？（需再次点击「保存」才会生效）')) setKeywordDraft(''); }}
+              className="px-4 py-2.5 rounded-lg border border-red-200 text-red-600 text-sm hover:bg-red-50"
+            >
+              清空草稿
+            </button>
+            {keywordMsg && (
+              <span className={`text-sm ${keywordMsg.includes('成功') ? 'text-emerald-600' : 'text-red-500'}`}>
+                {keywordMsg}
               </span>
-            </h2>
-            {keywords.length === 0 ? (
-              <div className="p-8 text-center text-gray-400">
-                <p>暂无屏蔽词</p>
-              </div>
-            ) : (
-              <div className="flex flex-wrap gap-2 max-h-[560px] overflow-y-auto">
-                {keywords.map(k => (
-                  <div
-                    key={k.id}
-                    className={`flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-full border text-sm ${
-                      k.enabled ? 'bg-white border-gray-300' : 'bg-gray-100 border-gray-200 opacity-60'
-                    }`}
-                  >
-                    <span className={k.enabled ? 'text-gray-800' : 'text-gray-500 line-through'}>{k.word}</span>
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">{k.category}</span>
-                    <button
-                      onClick={() => toggleKeyword(k)}
-                      title={k.enabled ? '停用' : '启用'}
-                      className={`text-xs px-1.5 ${k.enabled ? 'text-amber-600 hover:text-amber-800' : 'text-emerald-600 hover:text-emerald-800'}`}
-                    >
-                      <i className={`fa-solid ${k.enabled ? 'fa-toggle-on' : 'fa-toggle-off'}`}></i>
-                    </button>
-                    <button
-                      onClick={() => deleteKeyword(k)}
-                      title="删除"
-                      className="text-xs px-1 text-gray-400 hover:text-red-600"
-                    >
-                      <i className="fa-solid fa-xmark"></i>
-                    </button>
-                  </div>
-                ))}
-              </div>
             )}
           </div>
         </div>

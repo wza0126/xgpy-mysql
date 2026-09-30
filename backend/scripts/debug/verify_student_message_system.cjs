@@ -58,6 +58,9 @@ async function main() {
   const [origSettingsRows] = await conn.query('SELECT * FROM student_message_settings WHERE id = 1');
   const origSettings = origSettingsRows[0];
   const [origKwCount] = await conn.query('SELECT COUNT(*) AS n FROM student_message_keywords');
+  // ⛔ 屏蔽词「批量文本框」接口是整体替换语义 —— 跑完必须把原词库原样写回，
+  //    否则教师的真实词库会被脚本清空（历史事故高发点）。
+  const [origKeywords] = await conn.query('SELECT word, category, enabled FROM student_message_keywords ORDER BY id');
   const [origQuickCount] = await conn.query('SELECT COUNT(*) AS n FROM student_message_quick_replies');
 
   // 测试用学生：a（发送方）、b（接收方）
@@ -505,6 +508,197 @@ async function main() {
       token: teacherToken, body: { enabled: true, points_per_message: 2, max_length: 20, max_per_day: 0 },
     });
 
+    // ---------- N. (v2.7.1) 全部标为已读 ----------
+    section('N. 学生「全部标为已读」');
+    // 先造一条未读：b → a。
+    // ⚠️ 此刻 max_length 已被 E 段压到 20、且扣分开关仍为 2 分，必须用短内容，
+    //    并临时把积分成本设为 0，避免 b 因余额/长度校验发不出（脚本早期的假失败原因）。
+    // ⚠️⚠️ J 段「举报核实」会顺手给被举报人 b 加 3 天禁言 —— 不清掉的话这里必然 403。
+    await api('PUT', '/api/teacher/message-settings', {
+      token: teacherToken, body: { enabled: true, points_per_message: 0, max_length: 2000, max_per_day: 0 },
+    });
+    await conn.query('DELETE FROM student_message_mutes WHERE student_id = ?', [B.id]);
+    // 顺手把 a 的收件箱清零，保证后面读到的未读一定是本次造的
+    await conn.query('UPDATE student_messages SET is_read = TRUE WHERE receiver_id = ?', [A.id]);
+    const btoa = await api('POST', '/api/student/digital-messages/send', {
+      token: tokenB, body: { receiver_username: 'a', content: 'unread-probe' },
+    });
+    ok('b 给 a 发一条消息', btoa.status === 200,
+       `status=${btoa.status} body=${JSON.stringify(btoa.body)}`);
+    if (btoa.body?.data?.message?.id) createdMsgIds.push(btoa.body.data.message.id);
+    const [[unreadBefore]] = await conn.query(
+      'SELECT COUNT(*) AS n FROM student_messages WHERE receiver_id = ? AND is_read = FALSE AND is_deleted = 0', [A.id]);
+    ok('a 存在未读消息', unreadBefore.n > 0, `未读 ${unreadBefore.n} 条`);
+
+    const readAll = await api('POST', '/api/student/digital-messages/read-all', { token: tokenA });
+    ok('★ 全部标为已读接口返回 200', readAll.status === 200, JSON.stringify(readAll.body?.data));
+    ok('回执含已处理条数', typeof readAll.body?.data?.updated === 'number', `updated=${readAll.body?.data?.updated}`);
+    const [[unreadAfter]] = await conn.query(
+      'SELECT COUNT(*) AS n FROM student_messages WHERE receiver_id = ? AND is_read = FALSE AND is_deleted = 0', [A.id]);
+    ok('★ a 已无未读消息', unreadAfter.n === 0, `剩余 ${unreadAfter.n} 条`);
+
+    // ⛔ 不能越权改别人的已读状态
+    const bUnread = await api('POST', '/api/student/digital-messages/read-all', { token: tokenB });
+    ok('b 调用只影响自己的收件箱', bUnread.status === 200, '');
+    const [[aStillRead]] = await conn.query(
+      'SELECT COUNT(*) AS n FROM student_messages WHERE receiver_id = ? AND is_read = FALSE AND is_deleted = 0', [A.id]);
+    ok('⛔ a 的已读状态未被 b 影响', aStillRead.n === 0, `剩余 ${aStillRead.n} 条`);
+
+    // ---------- O. (v2.7.1) 消息记录：发送人/接收人筛选 + 批量删除 ----------
+    section('O. 消息记录筛选与批量删除');
+    const bySender = await api('GET',
+      '/api/teacher/student-messages?sender=' + encodeURIComponent('a'), { token: teacherToken });
+    ok('按发送人筛选返回 200', bySender.status === 200, `命中 ${bySender.body?.data?.length} 条`);
+    ok('★ 按发送人筛选结果全部来自 a',
+       (bySender.body?.data || []).every(m => m.sender_username === 'a' || m.sender_real_name === 'a'),
+       (bySender.body?.data || []).map(m => m.sender_username).join(','));
+
+    const byReceiver = await api('GET',
+      '/api/teacher/student-messages?receiver=' + encodeURIComponent('b'), { token: teacherToken });
+    ok('按接收人筛选返回 200', byReceiver.status === 200, `命中 ${byReceiver.body?.data?.length} 条`);
+    ok('★ 按接收人筛选结果全部指向 b',
+       (byReceiver.body?.data || []).every(m => m.receiver_username === 'b' || m.receiver_real_name === 'b'),
+       (byReceiver.body?.data || []).map(m => m.receiver_username).join(','));
+
+    const bothFilter = await api('GET',
+      `/api/teacher/student-messages?sender=${encodeURIComponent('a')}&receiver=${encodeURIComponent('b')}&keyword=${encodeURIComponent(TMP)}`,
+      { token: teacherToken });
+    ok('内容+发送人+接收人三条件组合筛选',
+       bothFilter.status === 200 && (bothFilter.body?.data || []).every(m => String(m.content).includes(TMP)),
+       `命中 ${bothFilter.body?.data?.length} 条`);
+
+    // 用独立样本验证「按筛选批量删除」，且不影响筛选外数据。
+    // ⛔ 样本内容不能用 `_`：那正是 LIKE 通配符，会让「筛选外样本」也被顺手命中，
+    //    自测反而测不出转义问题（转义验证见 O2）。
+    const keepTag = TMP + 'keepout-';
+    const bulkTag = TMP + 'bulksubX';
+    const keepMsg = await api('POST', '/api/student/digital-messages/send', {
+      token: tokenA, body: { receiver_username: 'b', content: keepTag + 'should-survive' },
+    });
+    if (keepMsg.body?.data?.message?.id) createdMsgIds.push(keepMsg.body.data.message.id);
+    ok('筛选外样本已就绪', keepMsg.status === 200, keepMsg.body?.error || '');
+    // 再造 3 条专供批量删除的样本
+    for (let i = 0; i < 3; i++) {
+      const r = await api('POST', '/api/student/digital-messages/send', {
+        token: tokenA, body: { receiver_username: 'b', content: bulkTag + i },
+      });
+      if (r.body?.data?.message?.id) createdMsgIds.push(r.body.data.message.id);
+    }
+    const [[bulkBefore]] = await conn.query(
+      'SELECT COUNT(*) AS n FROM student_messages WHERE content LIKE ? AND is_deleted = 0', [bulkTag + '%']);
+    ok('批量删除样本已就绪', bulkBefore.n >= 3, `${bulkBefore.n} 条`);
+
+    const bulkDel = await api('POST', '/api/teacher/student-messages/bulk-delete', {
+      token: teacherToken, body: { keyword: bulkTag },
+    });
+    ok('★ 批量删除接口返回 200', bulkDel.status === 200, JSON.stringify(bulkDel.body?.data));
+    ok('回执含删除条数', typeof bulkDel.body?.data?.deleted === 'number', `deleted=${bulkDel.body?.data?.deleted}`);
+    const [[bulkAfter]] = await conn.query(
+      'SELECT COUNT(*) AS n FROM student_messages WHERE content LIKE ? AND is_deleted = 0', [bulkTag + '%']);
+    ok('★ 筛选内的消息已全部删除', bulkAfter.n === 0, `残留 ${bulkAfter.n} 条`);
+    const [[bulkOuter]] = await conn.query(
+      'SELECT COUNT(*) AS n FROM student_messages WHERE content LIKE ? AND is_deleted = 0', [keepTag + '%']);
+    ok('★ 筛选外的消息未被误删', bulkOuter.n === 1, `保留 ${bulkOuter.n} 条`);
+
+    const stuCantBulk = await api('POST', '/api/teacher/student-messages/bulk-delete', {
+      token: tokenA, body: { keyword: TMP },
+    });
+    ok('⛔ 学生不能批量删除消息', stuCantBulk.status === 403, `status=${stuCantBulk.status}`);
+
+    // ⛔ 无筛选条件时后端必须拒绝，不能默默清空整库
+    const noFilter = await api('POST', '/api/teacher/student-messages/bulk-delete', {
+      token: teacherToken, body: {},
+    });
+    ok('★ 无筛选条件时拒绝批量删除（需 confirm_all）', noFilter.status === 400,
+       `status=${noFilter.status} ${JSON.stringify(noFilter.body?.code || '')}`);
+    const [[stillAlive]] = await conn.query(
+      'SELECT COUNT(*) AS n FROM student_messages WHERE content LIKE ? AND is_deleted = 0', [keepTag + '%']);
+    ok('★ 被拒绝后未误删任何数据', stillAlive.n === 1, `保留 ${stillAlive.n} 条`);
+
+    // ---------- O2. LIKE 通配符转义（防「搜 A 删到 B」） ----------
+    section('O2. LIKE 通配符转义');
+    // 造两对「仅差一个字符」的内容：`_` 若被当通配符，probe 会误伤 probe2
+    const escA = await api('POST', '/api/student/digital-messages/send', {
+      token: tokenA, body: { receiver_username: 'b', content: TMP + 'esc_a' },
+    });
+    if (escA.body?.data?.message?.id) createdMsgIds.push(escA.body.data.message.id);
+    const escB = await api('POST', '/api/student/digital-messages/send', {
+      token: tokenA, body: { receiver_username: 'b', content: TMP + 'escXa' },
+    });
+    if (escB.body?.data?.message?.id) createdMsgIds.push(escB.body.data.message.id);
+    const escQ = await api('GET',
+      '/api/teacher/student-messages?keyword=' + encodeURIComponent(TMP + 'esc_a'), { token: teacherToken });
+    const escHits = (escQ.body?.data || []).map(m => String(m.content));
+    ok('★ 下划线按字面匹配，不误伤同类内容',
+       escHits.length > 0 && escHits.every(c => c === TMP + 'esc_a'),
+       `命中=${escHits.join('|')}`);
+    // `%` 同样必须转义
+    const pctA = await api('POST', '/api/student/digital-messages/send', {
+      token: tokenA, body: { receiver_username: 'b', content: TMP + 'pct%z' },
+    });
+    if (pctA.body?.data?.message?.id) createdMsgIds.push(pctA.body.data.message.id);
+    const pctQ = await api('GET',
+      '/api/teacher/student-messages?keyword=' + encodeURIComponent('%z'), { token: teacherToken });
+    ok('★ 百分号按字面匹配（不会匹配到所有内容）',
+       pctQ.status === 200 && (pctQ.body?.data || []).length < 5,
+       `命中 ${pctQ.body?.data?.length} 条`);
+
+    // ---------- P. (v2.7.1) 屏蔽词批量文本框 ----------
+    section('P. 屏蔽词批量保存');
+    const [[kwCountBefore]] = await conn.query('SELECT COUNT(*) AS n FROM student_message_keywords');
+    const kwPayload = [
+      TMP + 'bulk_a', TMP + 'bulk_b', TMP + 'bulk_c',
+      TMP + 'bulk_d', TMP + 'bulk_e', TMP + 'bulk_f',
+      TMP + 'bulk_g', TMP + 'bulk_h', TMP + 'bulk_i',
+      TMP + 'bulk_j',
+    ].join('\n');
+    const kwBulk = await api('POST', '/api/teacher/message-keywords/bulk', {
+      token: teacherToken, body: { words: kwPayload },
+    });
+    ok('★ 屏蔽词批量保存返回 200', kwBulk.status === 200, JSON.stringify(kwBulk.body?.data));
+    ok('回执返回总数', typeof kwBulk.body?.data?.total === 'number', `total=${kwBulk.body?.data?.total}`);
+    const [[kwCountAfter]] = await conn.query('SELECT COUNT(*) AS n FROM student_message_keywords');
+    ok('★ 词库被整体替换为 10 个', kwCountAfter.n === 10, `${kwCountAfter.n} 个`);
+
+    // 多种分隔符混合 + 去重
+    const kwMixed = await api('POST', '/api/teacher/message-keywords/bulk', {
+      token: teacherToken,
+      body: { words: `${TMP}mix_1，${TMP}mix_2,${TMP}mix_3;${TMP}mix_4、${TMP}mix_5\n${TMP}mix_1` },
+    });
+    ok('混合分隔符（逗号/分号/顿号/换行）解析成功', kwMixed.status === 200,
+       `total=${kwMixed.body?.data?.total}`);
+    ok('★ 重复词被去重', kwMixed.body?.data?.total === 5, `total=${kwMixed.body?.data?.total}`);
+
+    // 命中批量写入的词，学生发不出
+    const hitBulkWord = await api('POST', '/api/student/digital-messages/send', {
+      token: tokenA, body: { receiver_username: 'b', content: '这是 ' + TMP + 'mix_1 内容' },
+    });
+    ok('★ 批量写入的屏蔽词同样生效', hitBulkWord.status === 400 || hitBulkWord.status === 403,
+       `status=${hitBulkWord.status} ${hitBulkWord.body?.error || ''}`);
+
+    // 空文本 → 清空词库（合法，不应 500）
+    const kwEmpty = await api('POST', '/api/teacher/message-keywords/bulk', {
+      token: teacherToken, body: { words: '   \n  \n' },
+    });
+    ok('空文本提交合法（清空词库）', kwEmpty.status === 200, `total=${kwEmpty.body?.data?.total}`);
+    ok('★ 清空后词库为 0', kwEmpty.body?.data?.total === 0, `total=${kwEmpty.body?.data?.total}`);
+
+    const stuCantKw = await api('POST', '/api/teacher/message-keywords/bulk', {
+      token: tokenA, body: { words: TMP + 'x' },
+    });
+    ok('⛔ 学生不能改屏蔽词库', stuCantKw.status === 403, `status=${stuCantKw.status}`);
+
+    // ---------- Q. 恢复原始词库 ----------
+    section('Q. 恢复原始屏蔽词库');
+    const origWords = origKeywords.map(k => k.word);
+    const kwRestore = await api('POST', '/api/teacher/message-keywords/bulk', {
+      token: teacherToken, body: { words: origWords.join('\n') },
+    });
+    ok('原始词库已回写', kwRestore.status === 200, `total=${kwRestore.body?.data?.total}`);
+    const [[kwCountRestored]] = await conn.query('SELECT COUNT(*) AS n FROM student_message_keywords');
+    ok('★ 词库数量恢复到原值', kwCountRestored.n === kwCountBefore.n,
+       `${kwCountRestored.n} vs ${kwCountBefore.n}`);
+
   } catch (e) {
     console.error('\n脚本异常：', e.message);
     fail++;
@@ -533,13 +727,14 @@ async function main() {
       // 4. 删除脚本产生的举报单
       await conn.query('DELETE FROM student_message_reports WHERE reason LIKE ?', [TMP + '%']);
       await conn.query('DELETE FROM student_message_reports WHERE reported_id = ? AND reporter_id = ?', [A.id, B.id]);
-      // 5. 清理脚本产生的禁言
-      for (const sid of [A.id]) {
+      // 5. 清理脚本产生的禁言（a 与 b 都可能被脚本/j 段举报流程禁言）
+      for (const sid of [A.id, B.id]) {
         if (!origMuteIds.has(sid)) {
           await conn.query('DELETE FROM student_message_mutes WHERE student_id = ?', [sid]);
         }
       }
       await conn.query('DELETE FROM student_message_mutes WHERE student_id = ?', [A.id]);
+      await conn.query('DELETE FROM student_message_mutes WHERE student_id = ?', [B.id]);
       // 6. 清理脚本新增的黑名单（保留教师原有数据）
       const [nowBl] = await conn.query('SELECT id FROM student_message_blacklist');
       for (const row of nowBl) {
@@ -562,6 +757,8 @@ async function main() {
       ok('无 tmp_ 快捷短语残留', m4.n === 0, `残留 ${m4.n} 条`);
       const [[m5]] = await conn.query('SELECT COUNT(*) AS n FROM student_message_mutes WHERE student_id = ?', [A.id]);
       ok('学生 a 未被留下禁言', m5.n === 0, `残留 ${m5.n} 条`);
+      const [[m5b]] = await conn.query('SELECT COUNT(*) AS n FROM student_message_mutes WHERE student_id = ?', [B.id]);
+      ok('学生 b 未被留下禁言', m5b.n === 0, `残留 ${m5b.n} 条`);
       const [[m6]] = await conn.query('SELECT current_points FROM profiles WHERE id = ?', [A.id]);
       ok('学生 a 积分已还原', m6.current_points === origAPoints,
          `现在=${m6.current_points} 原值=${origAPoints}`);
@@ -574,6 +771,20 @@ async function main() {
       ok('消息设置已还原',
          m9.points_per_message === origSettings.points_per_message && m9.max_length === origSettings.max_length,
          `${m9.points_per_message}/${m9.max_length}`);
+      // 9. 屏蔽词「整表替换」后必须与原词表逐词一致（不只比数量）
+      // ⛔ 不能用 localeCompare 对拍：MariaDB 的 utf8mb4_unicode_ci 按码点排，
+      //    JS localeCompare 按拼音排，中文顺序天然不同 → 假失败。
+      const [kwNow] = await conn.query('SELECT word, enabled FROM student_message_keywords');
+      const norm = rows => rows.map(r => `${r.word}|${Number(r.enabled)}`).sort();
+      const kwSame = JSON.stringify(norm(kwNow)) === JSON.stringify(norm(origKeywords));
+      ok('★ 屏蔽词词表逐词已还原', kwSame,
+         `now=${norm(kwNow).join(',')} orig=${norm(origKeywords).join(',')}`);
+      const [[m10]] = await conn.query(
+        "SELECT COUNT(*) AS n FROM student_messages WHERE is_deleted = 0 AND content LIKE ?", ['%' + TMP + '%']);
+      ok('无 tmp_ 内容的消息残留（未删除态）', m10.n === 0, `残留 ${m10.n} 条`);
+      const [[m11]] = await conn.query(
+        'SELECT COUNT(*) AS n FROM student_messages WHERE receiver_id = ? AND is_read = FALSE AND is_deleted = 0', [A.id]);
+      ok('学生 a 收件箱无未读残留（已读状态改动属正常业务，不还原）', m11.n === 0, `未读 ${m11.n} 条`);
     } catch (e) {
       console.error('还原过程出错：', e.message);
       fail++;
