@@ -103,16 +103,37 @@ function stripSpecForStudent(spec) {
     full_score: Number(s.full_score) || DEFAULT_FULL_SCORE,
     templates,
     template: templates[0] || null, // 兼容只认单个模板的旧前端
-    steps: (Array.isArray(s.steps) ? s.steps : []).map((st, i) => ({
-      id: st.id || ('s' + (i + 1)),
-      index: i + 1,
-      title: st.title || '',
-      desc: st.desc || '',
-      score: Number(st.score) || 0,
-      video_url: st.video_url || '',
-      check_count: Array.isArray(st.checks) ? st.checks.length : 0,
-    })),
+    steps: (Array.isArray(s.steps) ? s.steps : []).map((st, i) => {
+      const videos = normalizeVideoUrls(st);
+      return {
+        id: st.id || ('s' + (i + 1)),
+        index: i + 1,
+        title: st.title || '',
+        desc: st.desc || '',
+        score: Number(st.score) || 0,
+        video_url: videos[0] || '',   // 兼容只认单视频的旧前端
+        video_urls: videos,           // 一个步骤可挂多条演示视频
+        check_count: Array.isArray(st.checks) ? st.checks.length : 0,
+      };
+    }),
   };
+}
+
+/**
+ * 统一步骤视频字段。
+ * 新格式：step.video_urls = [url, ...]（一个步骤可配多条视频）
+ * 旧格式：step.video_url  = url          ← 一期数据，必须继续认
+ */
+function normalizeVideoUrls(step) {
+  const st = step || {};
+  const out = [];
+  const push = (u) => {
+    const v = String(u || '').trim();
+    if (v && !out.includes(v)) out.push(v);
+  };
+  if (Array.isArray(st.video_urls)) st.video_urls.forEach(push);
+  push(st.video_url);
+  return out;
 }
 
 /** 提交回执给学生看的形态（去掉内部字段，保留逐评分点明细——作答后可见） */

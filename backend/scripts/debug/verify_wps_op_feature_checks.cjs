@@ -187,9 +187,13 @@ function run(model, kind, check) {
   // ---------- I. 检查器清单 ----------
   section('I. 检查器清单');
   const kinds = grader.CHECK_KINDS;
-  ok('CHECK_KINDS 共 20 种', kinds.length === 20, 'count=' + kinds.length);
+  ok('CHECK_KINDS 共 25 种', kinds.length === 25, 'count=' + kinds.length);
   for (const k of ['auto_filter', 'sorted_range', 'subtotal', 'cond_format']) {
     ok('包含新检查器 ' + k, kinds.includes(k));
+  }
+  // 2026-10-10 新增（88 道真题覆盖分析后补齐）：底纹/边框/列宽/行高/通用函数
+  for (const k of ['fill', 'border', 'col_width', 'row_height', 'func_range']) {
+    ok('包含补充检查器 ' + k, kinds.includes(k));
   }
   ok('原有 16 种未丢', ['sheet_exists', 'merged', 'cell_text', 'cell_value', 'cell_has_formula',
     'cell_formula', 'formula_tokens', 'sum_range', 'range_formula', 'range_values',
@@ -253,6 +257,100 @@ function run(model, kind, check) {
     && Math.abs(specSub.steps.reduce((a, s) => a + s.score, 0) - 100) < 0.01);
   const sgSub = selfGrade(specSub, mSub);
   ok('★ 汇总卷骨架自评满分', sgSub.got === sgSub.full, `${sgSub.got}/${sgSub.full}`);
+
+  // ---------- K. 本轮新增五类检查器（底纹/边框/列宽/行高/通用函数）+ 字体/对齐扩展 ----------
+  section('K. 新增检查器（底纹 / 边框 / 列宽 / 行高 / 通用函数 / 字体扩展）');
+  {
+    const m = await modelOf('feat_combo.xlsx');
+    const sh = m.sheets[0];
+    const ref = Array.from(sh.cells.keys())[0];
+    const cell = sh.cells.get(ref);
+
+    // 注入底纹（solid 黄）+ 边框（thin 蓝）
+    m.styles.fills.push({ patternType: 'solid', fgColor: 'FFFFFF00', bgColor: null, color: 'FFFFFF00' });
+    const fillId = m.styles.fills.length - 1;
+    m.styles.borders.push({
+      left: { style: 'thin', color: 'FF0000FF' }, right: { style: 'thin', color: 'FF0000FF' },
+      top: { style: 'thin', color: 'FF0000FF' }, bottom: { style: 'thin', color: 'FF0000FF' },
+    });
+    const borderId = m.styles.borders.length - 1;
+    const baseXf = m.styles.cellXfs[cell.styleIndex] || {};
+    m.styles.cellXfs.push({ ...baseXf, fillId, borderId });
+    cell.styleIndex = m.styles.cellXfs.length - 1;
+
+    ok('★ fill 判底纹黄色 → 通过', run(m, 'fill', { ref, color: '黄' }).pass === true);
+    ok('fill 判底纹绿色 → 不通过', run(m, 'fill', { ref, color: '绿' }).pass === false);
+    ok('★ border 判 thin 蓝边框 → 通过', run(m, 'border', { range: ref, style: 'thin', color: '蓝' }).pass === true);
+    ok('border 判 double 边框 → 不通过', run(m, 'border', { range: ref, style: 'double' }).pass === false);
+    ok('border 判颜色红 → 不通过', run(m, 'border', { range: ref, style: 'thin', color: '红' }).pass === false);
+    ok('border style=any 只要求有线 → 通过', run(m, 'border', { range: ref, style: 'any' }).pass === true);
+
+    sh.cols.push({ min: 1, max: 1, width: 15, customWidth: true });
+    ok('★ col_width 判 A 列 =15 → 通过', run(m, 'col_width', { col: 'A', width: 15, mode: 'exact' }).pass === true);
+    ok('col_width 判 A 列 =20 → 不通过', run(m, 'col_width', { col: 'A', width: 20, mode: 'exact' }).pass === false);
+    ok('col_width atLeast 10 → 通过', run(m, 'col_width', { col: 'A', width: 10, mode: 'atLeast' }).pass === true);
+
+    sh.rowHeights.set(1, 23);
+    ok('★ row_height 判第 1 行 =23 → 通过', run(m, 'row_height', { row: 1, height: 23, mode: 'exact' }).pass === true);
+    ok('row_height 判第 1 行 =18 → 不通过', run(m, 'row_height', { row: 1, height: 18, mode: 'exact' }).pass === false);
+    ok('row_height 判未设行高的第 500 行 =23 → 不通过', run(m, 'row_height', { row: 500, height: 23, mode: 'exact' }).pass === false);
+  }
+
+  // 字体 / 对齐 / 通用函数 / 数字格式类型 / 图表进阶（纯合成模型，断言检查器逻辑）
+  {
+    const styles = {
+      fonts: [{ name: '黑体', size: 14, bold: true, italic: true, underline: true, color: 'FFFF0000' }],
+      fills: [], borders: [], numFmts: {},
+      cellXfs: [{ numFmtId: 0, fontId: 0, fillId: 0, borderId: 0, alignment: { horizontal: 'center', vertical: 'center' } }],
+    };
+    const sheet = {
+      name: 'Sheet1',
+      cells: new Map([
+        ['A1', { ref: 'A1', styleIndex: 0, formula: null, value: '标题', type: 's' }],
+        ['B10', { ref: 'B10', styleIndex: 0, formula: 'AVERAGE(B2,B9)', value: 5, type: 'n' }],
+      ]),
+      merges: [], styles, charts: [], cols: [], rowHeights: new Map(),
+    };
+    const model = { styles, sheets: [sheet] };
+    const R = (kind, check) => grader.CHECKERS[kind]({ model, sheet, check });
+
+    ok('★ font 判黑体/加粗/倾斜/下划线/14/红 → 通过',
+      R('font', { ref: 'A1', name: '黑体', bold: true, italic: true, underline: true, size: 14, color: '红' }).pass === true);
+    ok('font 判字号 12 → 不通过', R('font', { ref: 'A1', size: 12 }).pass === false);
+    ok('font 判颜色蓝 → 不通过', R('font', { ref: 'A1', color: '蓝' }).pass === false);
+    ok('font 判倾斜（应为否）→ 不通过', R('font', { ref: 'A1', italic: false }).pass === false);
+
+    ok('★ align 判垂直居中 → 通过', R('align', { ref: 'A1', vertical: 'center' }).pass === true);
+    ok('align 判水平右对齐 → 不通过', R('align', { ref: 'A1', horizontal: 'right' }).pass === false);
+
+    ok('★ func_range 判 AVERAGE(B2:B9) → 通过', R('func_range', { ref: 'B10', fn: 'AVERAGE', range: 'B2:B9' }).pass === true);
+    ok('func_range 判 SUM → 不通过', R('func_range', { ref: 'B10', fn: 'SUM', range: 'B2:B9' }).pass === false);
+
+    styles.numFmts[10] = '0.00%';
+    styles.cellXfs.push({ numFmtId: 10, fontId: 0, fillId: 0, borderId: 0, alignment: null });
+    sheet.cells.set('C1', { ref: 'C1', styleIndex: 1, formula: null, value: 0.5, type: 'n' });
+    ok('★ number_format 判 percent + 2 位小数 → 通过',
+      R('number_format', { ref: 'C1', type: 'percent', decimals: 2 }).pass === true);
+    ok('number_format 判 currency → 不通过', R('number_format', { ref: 'C1', type: 'currency' }).pass === false);
+
+    const chartSheet = {
+      name: 'Sheet1', cells: new Map(), merges: [], styles,
+      charts: [{
+        chartType: 'bar', barDir: 'col', title: '销售', titleRef: null,
+        series: [{ name: '', cat: 'A2:A5', val: 'B2:B5' }],
+        legend: { show: true, pos: 'r' },
+        dataLabels: { show: true, pos: 'outEnd', showVal: true, showPercent: false, showCatName: false },
+        catTitle: '月份', valTitle: '销量', seriesByRow: false,
+      }],
+    };
+    const cm = { styles, sheets: [chartSheet] };
+    const C = (check) => grader.CHECKERS.chart({ model: cm, sheet: chartSheet, check });
+    ok('★ chart 判图例靠右 + 数据标签 + 轴标题 + 系列在列 → 通过',
+      C({ index: 0, legend: true, legendPos: 'r', dataLabels: true, catTitle: '月份', valTitle: '销量', seriesByRow: false }).pass === true);
+    ok('chart 判系列产生在行 → 不通过', C({ index: 0, seriesByRow: true }).pass === false);
+    ok('chart 判不应显示数据标签 → 不通过', C({ index: 0, dataLabels: false }).pass === false);
+    ok('chart 判图例靠下 → 不通过', C({ index: 0, legendPos: 'b' }).pass === false);
+  }
 
   console.log('\n========================================');
   console.log(`结果：${pass} 通过 / ${fail} 失败`);

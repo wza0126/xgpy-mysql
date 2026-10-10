@@ -33,7 +33,10 @@ interface StepDef {
   title: string;
   desc?: string;
   score: number;
+  /** 兼容一期单视频字段（后端/前端都会合并进 video_urls） */
   video_url?: string;
+  /** 一个步骤可挂多条演示视频（同一操作可能有多个视角/版本） */
+  video_urls?: string[];
   checks: CheckDef[];
 }
 
@@ -73,14 +76,90 @@ const KIND_META: Record<string, { label: string; fields: { key: string; label: s
   cell_formula: { label: '公式内容一致', fields: [{ key: 'ref', label: '单元格', type: 'text' }, { key: 'formula', label: '公式（不带=）', type: 'text' }] },
   formula_tokens: { label: '公式引用单元格', fields: [{ key: 'ref', label: '单元格', type: 'text' }, { key: 'tokens', label: '须引用的单元格（逗号分隔）', type: 'csv' }] },
   sum_range: { label: 'SUM 求和且区间正确', fields: [{ key: 'ref', label: '结果单元格', type: 'text' }, { key: 'range', label: '求和区域', type: 'text' }] },
+  func_range: {
+    label: '函数计算（SUM/AVERAGE/MAX/MIN…）',
+    fields: [
+      { key: 'ref', label: '结果单元格', type: 'text' },
+      { key: 'fn', label: '函数名(SUM/AVERAGE/MAX/MIN/COUNT)', type: 'text' },
+      { key: 'range', label: '引用区域', type: 'text' },
+    ],
+  },
   range_formula: { label: '区域内全部使用公式', fields: [{ key: 'range', label: '区域', type: 'text' }] },
   range_values: { label: '区域内数值全部正确', fields: [{ key: 'range', label: '区域', type: 'text' }, { key: 'values', label: '期望值（逗号分隔，从左到右/从上到下）', type: 'csv' }, { key: 'tol', label: '容差', type: 'number' }] },
   range_integer_display: { label: '区域内不保留小数', fields: [{ key: 'range', label: '区域', type: 'text' }] },
   integer_display: { label: '单元格不保留小数', fields: [{ key: 'ref', label: '单元格', type: 'text' }] },
-  font: { label: '字体名称/加粗/字号', fields: [{ key: 'ref', label: '单元格', type: 'text' }, { key: 'name', label: '字体名', type: 'text' }, { key: 'bold', label: '加粗', type: 'bool' }, { key: 'size', label: '字号', type: 'number' }] },
-  align: { label: '水平对齐', fields: [{ key: 'ref', label: '单元格', type: 'text' }, { key: 'horizontal', label: '对齐(center/left/right)', type: 'text' }] },
-  number_format: { label: '数字格式小数位', fields: [{ key: 'ref', label: '单元格', type: 'text' }, { key: 'decimals', label: '小数位', type: 'number' }, { key: 'mode', label: '判定(exact/atMost)', type: 'text' }] },
-  chart: { label: '图表', fields: [{ key: 'chartType', label: '类型(bar/line/pie...)', type: 'text' }, { key: 'barDir', label: '柱形方向(col/bar)', type: 'text' }, { key: 'title', label: '标题', type: 'text' }, { key: 'catRange', label: '分类轴区域', type: 'text' }, { key: 'valRange', label: '数值轴区域', type: 'text' }] },
+  font: {
+    label: '字体（名称/加粗/倾斜/下划线/字号/颜色）',
+    fields: [
+      { key: 'ref', label: '单元格', type: 'text' },
+      { key: 'name', label: '字体名', type: 'text' },
+      { key: 'bold', label: '加粗', type: 'bool' },
+      { key: 'italic', label: '倾斜', type: 'bool' },
+      { key: 'underline', label: '下划线', type: 'bool' },
+      { key: 'size', label: '字号', type: 'number' },
+      { key: 'color', label: '颜色(红/蓝/FF0000)', type: 'text' },
+    ],
+  },
+  fill: { label: '底纹填充色', fields: [{ key: 'ref', label: '单元格', type: 'text' }, { key: 'color', label: '底纹色(浅绿/黄/蓝…)', type: 'text' }] },
+  border: {
+    label: '区域边框',
+    fields: [
+      { key: 'range', label: '区域', type: 'text' },
+      { key: 'style', label: '线型(thin单实/double双实/dashed虚/any不限)', type: 'text' },
+      { key: 'color', label: '边框色', type: 'text' },
+      { key: 'edges', label: '范围(all/outline仅外/inner仅内)', type: 'text' },
+    ],
+  },
+  col_width: {
+    label: '列宽',
+    fields: [
+      { key: 'col', label: '列(A / A:C)', type: 'text' },
+      { key: 'width', label: '列宽值', type: 'number' },
+      { key: 'mode', label: '判定(exact/atLeast/autoFit)', type: 'text' },
+    ],
+  },
+  row_height: {
+    label: '行高',
+    fields: [
+      { key: 'rows', label: '行(1 / 1:3)', type: 'text' },
+      { key: 'height', label: '行高值', type: 'number' },
+      { key: 'mode', label: '判定(exact/atLeast/autoFit)', type: 'text' },
+    ],
+  },
+  align: {
+    label: '对齐（水平/垂直）',
+    fields: [
+      { key: 'ref', label: '单元格', type: 'text' },
+      { key: 'horizontal', label: '水平(center/left/right)', type: 'text' },
+      { key: 'vertical', label: '垂直(center/top/bottom)', type: 'text' },
+    ],
+  },
+  number_format: {
+    label: '数字格式（类型/小数位）',
+    fields: [
+      { key: 'ref', label: '单元格', type: 'text' },
+      { key: 'type', label: '类型(percent百分比/currency货币/number/text)', type: 'text' },
+      { key: 'decimals', label: '小数位', type: 'number' },
+      { key: 'mode', label: '小数判定(exact/atMost/atLeast)', type: 'text' },
+    ],
+  },
+  chart: {
+    label: '图表',
+    fields: [
+      { key: 'chartType', label: '类型(bar/line/pie...)', type: 'text' },
+      { key: 'barDir', label: '柱形方向(col/bar)', type: 'text' },
+      { key: 'title', label: '标题', type: 'text' },
+      { key: 'catRange', label: '分类轴区域', type: 'text' },
+      { key: 'valRange', label: '数值轴区域', type: 'text' },
+      { key: 'legend', label: '显示图例', type: 'bool' },
+      { key: 'legendPos', label: '图例位置(r右/b下/l左/t上)', type: 'text' },
+      { key: 'dataLabels', label: '显示数据标签', type: 'bool' },
+      { key: 'dataLabelPos', label: '标签位置(outEnd/inEnd/ctr)', type: 'text' },
+      { key: 'catTitle', label: 'X(分类)轴标题', type: 'text' },
+      { key: 'valTitle', label: 'Y(数值)轴标题', type: 'text' },
+      { key: 'seriesByRow', label: '系列产生在行(true行/false列)', type: 'bool' },
+    ],
+  },
   sheet_exists: { label: '工作表存在', fields: [{ key: 'sheet', label: '工作表名', type: 'text' }] },
   // ---- 与真实 Excel 2016 产物实测校准的四类（2026-10-10）----
   sorted_range: {
@@ -112,10 +191,13 @@ const KIND_META: Record<string, { label: string; fields: { key: string; label: s
     label: '条件格式',
     fields: [
       { key: 'range', label: '区域', type: 'text' },
-      { key: 'type', label: '类型(cellIs/expression)', type: 'text' },
+      { key: 'type', label: '类型(cellIs/expression/dataBar)', type: 'text' },
       { key: 'operator', label: '条件(greaterThan/lessThan/between...)', type: 'text' },
       { key: 'value', label: '阈值', type: 'number' },
       { key: 'fillColor', label: '填充色(红 / FF0000)', type: 'text' },
+      { key: 'fontColor', label: '字体色(红色文本用)', type: 'text' },
+      { key: 'barColor', label: '数据条颜色(绿/FF63BE7B)', type: 'text' },
+      { key: 'gradient', label: '数据条为渐变', type: 'bool' },
     ],
   },
 };
@@ -143,6 +225,18 @@ const mergeTemplates = (v: any): TemplateDef[] => {
   return out;
 };
 
+/** 统一步骤视频字段：合并 video_urls[] 与旧的 video_url（去重、去空） */
+const normalizeVideos = (s: any): string[] => {
+  const out: string[] = [];
+  const push = (u: any) => {
+    const v = String(u || '').trim();
+    if (v && !out.includes(v)) out.push(v);
+  };
+  if (Array.isArray(s?.video_urls)) s.video_urls.forEach(push);
+  push(s?.video_url);
+  return out;
+};
+
 const parseSpec = (raw: any): SpecDef => {
   if (!raw) return defaultSpec();
   let v = raw;
@@ -155,14 +249,18 @@ const parseSpec = (raw: any): SpecDef => {
     grader: v.grader || { sheet: 'Sheet1' },
     templates,
     template: templates[0],
-    steps: v.steps.map((s: any, i: number) => ({
-      id: s.id || 's' + (i + 1),
-      title: s.title || '',
-      desc: s.desc || '',
-      score: Number(s.score) || 0,
-      video_url: s.video_url || '',
-      checks: Array.isArray(s.checks) ? s.checks.map((c: any) => ({ ...c })) : [],
-    })),
+    steps: v.steps.map((s: any, i: number) => {
+      const videos = normalizeVideos(s);
+      return {
+        id: s.id || 's' + (i + 1),
+        title: s.title || '',
+        desc: s.desc || '',
+        score: Number(s.score) || 0,
+        video_url: videos[0] || '',
+        video_urls: videos,
+        checks: Array.isArray(s.checks) ? s.checks.map((c: any) => ({ ...c })) : [],
+      };
+    }),
   };
 };
 
@@ -374,7 +472,34 @@ export const WpsOpManager: React.FC = () => {
     });
   };
 
-  /** 上传本地演示视频 → 挂到指定步骤 */
+  /** 往指定步骤追加一条演示视频（保留原有，支持一个步骤多条） */
+  const appendVideo = (si: number, url: string) => {
+    const v = String(url || '').trim();
+    if (!v) return;
+    setSpec((s) => ({
+      ...s,
+      steps: s.steps.map((st, i) => {
+        if (i !== si) return st;
+        const list = normalizeVideos(st);
+        if (list.includes(v)) return { ...st, video_urls: list, video_url: list[0] || '' };
+        const next = [...list, v];
+        return { ...st, video_urls: next, video_url: next[0] || '' };
+      }),
+    }));
+  };
+
+  const removeVideo = (si: number, url: string) => {
+    setSpec((s) => ({
+      ...s,
+      steps: s.steps.map((st, i) => {
+        if (i !== si) return st;
+        const next = normalizeVideos(st).filter((u) => u !== url);
+        return { ...st, video_urls: next, video_url: next[0] || '' };
+      }),
+    }));
+  };
+
+  /** 上传本地演示视频 → 追加到指定步骤 */
   const pickVideo = (si: number) => {
     setVideoTarget(si);
     videoRef.current?.click();
@@ -387,8 +512,8 @@ export const WpsOpManager: React.FC = () => {
     setMsg(null);
     try {
       const d = await uploadFile('/api/teacher/wps-op/video', f);
-      patchStep(si, { video_url: d.url });
-      setMsg({ type: 'ok', text: `视频已上传并挂到第 ${si + 1} 步（${fmtSize(d.size)}），机房断网也能播` });
+      appendVideo(si, d.url);
+      setMsg({ type: 'ok', text: `视频已上传并追加到第 ${si + 1} 步（${fmtSize(d.size)}），机房断网也能播` });
     } catch (e: any) {
       setMsg({ type: 'err', text: e?.isAuthError ? '登录已失效，请重新登录' : (e?.message || '视频上传失败') });
     } finally {
@@ -398,7 +523,7 @@ export const WpsOpManager: React.FC = () => {
     }
   };
 
-  /** 外链抓取到本地（抓不到就提示改用本地上传） */
+  /** 外链抓取到本地（抓不到就提示改用本地上传），抓到的追加到步骤 */
   const fetchVideo = async (si: number) => {
     const url = window.prompt('粘贴视频直链（http/https，需服务端能直接下载）：', '');
     if (!url) return;
@@ -416,8 +541,8 @@ export const WpsOpManager: React.FC = () => {
       if (res.status === 401) { const e: any = new Error('登录已失效，请重新登录'); e.isAuthError = true; throw e; }
       if (!res.ok) throw new Error(json?.error || `抓取失败（${res.status}）`);
       const d = json?.data || {};
-      patchStep(si, { video_url: d.url });
-      setMsg({ type: 'ok', text: `外链视频已抓到本地并挂到第 ${si + 1} 步（${fmtSize(d.size)}）` });
+      appendVideo(si, d.url);
+      setMsg({ type: 'ok', text: `外链视频已抓到本地并追加到第 ${si + 1} 步（${fmtSize(d.size)}）` });
     } catch (e: any) {
       setMsg({ type: 'err', text: e?.isAuthError ? '登录已失效，请重新登录' : (e?.message || '抓取失败') });
     } finally {
@@ -759,16 +884,11 @@ export const WpsOpManager: React.FC = () => {
                     className="mb-2 w-full rounded border border-gray-300 px-2 py-1 text-xs"
                   />
 
-                  {/* 演示视频 */}
+                  {/* 演示视频（一个步骤可挂多条） */}
                   <div className="mb-2 rounded border border-gray-200 bg-white p-2">
-                    <div className="flex flex-wrap items-center gap-2">
+                    <div className="mb-1 flex flex-wrap items-center gap-2">
                       <span className="text-[11px] font-medium text-gray-500">演示视频</span>
-                      <input
-                        value={st.video_url || ''}
-                        onChange={(e) => patchStep(si, { video_url: e.target.value })}
-                        placeholder="视频地址（可留空，或用右侧按钮上传/抓取）"
-                        className="min-w-[180px] flex-1 rounded border border-gray-300 px-2 py-1 text-xs"
-                      />
+                      <span className="rounded bg-violet-50 px-1.5 py-0.5 text-[10px] text-violet-700">{normalizeVideos(st).length} 条</span>
                       <button
                         onClick={() => pickVideo(si)}
                         disabled={videoBusy}
@@ -784,18 +904,33 @@ export const WpsOpManager: React.FC = () => {
                       >
                         <i className="fas fa-cloud-arrow-down mr-1" />抓取外链到本地
                       </button>
-                      {st.video_url ? (
-                        <a href={st.video_url} target="_blank" rel="noreferrer" className="flex-none text-[11px] text-sky-600 hover:underline">测试播放</a>
-                      ) : null}
+                      <button
+                        onClick={() => appendVideo(si, window.prompt('视频地址（http/https 或 /uploads/…）：', '') || '')}
+                        disabled={videoBusy}
+                        className="flex-none rounded border border-gray-300 px-2 py-1 text-[11px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                      >
+                        <i className="fas fa-link mr-1" />粘贴地址
+                      </button>
                     </div>
-                    {st.video_url ? (
-                      <div className="mt-1 text-[11px] text-gray-400">
-                        <span className={`mr-1 rounded px-1.5 py-0.5 ${isLocalVideo(st.video_url) ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
-                          {isLocalVideo(st.video_url) ? '本地（断网可用）' : '外链（需联网）'}
-                        </span>
-                        建议外链抓成本地后再发布，避免机房断网时学生看不到。
+                    {normalizeVideos(st).length === 0 ? (
+                      <div className="rounded border border-dashed border-gray-200 px-2 py-1.5 text-[11px] text-gray-400">
+                        还没有视频。同一操作可挂<b>多条</b>视频（不同角度 / 不同版本），学生端会按顺序列出。
                       </div>
-                    ) : null}
+                    ) : (
+                      <div className="space-y-1">
+                        {normalizeVideos(st).map((u, vi) => (
+                          <div key={vi} className="flex items-center gap-2 rounded bg-gray-50 px-2 py-1">
+                            <span className="flex h-4 w-4 flex-none items-center justify-center rounded-full bg-violet-500 text-[9px] font-bold text-white">{vi + 1}</span>
+                            <span className="min-w-0 flex-1 truncate text-[11px] text-gray-600" title={u}>{u}</span>
+                            <span className={`flex-none rounded px-1.5 py-0.5 text-[10px] ${isLocalVideo(u) ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                              {isLocalVideo(u) ? '本地(断网可用)' : '外链(需联网)'}
+                            </span>
+                            <a href={u} target="_blank" rel="noreferrer" className="flex-none text-[11px] text-sky-600 hover:underline">测试播放</a>
+                            <button onClick={() => removeVideo(si, u)} className="flex-none rounded border border-rose-200 px-1.5 py-0.5 text-[11px] text-rose-600 hover:bg-rose-50">移除</button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   <div className="space-y-1.5">
@@ -960,7 +1095,8 @@ export const WpsOpManager: React.FC = () => {
               {rows.map((r) => {
                 const sp = parseSpec(r.wps_spec);
                 const tpls = sp.templates || [];
-                const videos = sp.steps.filter((s) => s.video_url).length;
+                const videoTotal = sp.steps.reduce((a, s) => a + normalizeVideos(s).length, 0);
+                const videos = sp.steps.filter((s) => normalizeVideos(s).length > 0).length;
                 return (
                   <div key={r.id} className="flex items-start justify-between gap-4 rounded-lg border border-gray-200 bg-white p-4">
                     <div className="min-w-0 flex-1">
@@ -977,8 +1113,8 @@ export const WpsOpManager: React.FC = () => {
                         <span className="rounded bg-sky-50 px-2 py-0.5 text-[11px] text-sky-700">
                           模板 {tpls.length}
                         </span>
-                        <span className={`rounded px-2 py-0.5 text-[11px] ${videos ? 'bg-violet-50 text-violet-700' : 'bg-gray-100 text-gray-500'}`}>
-                          视频 {videos}/{sp.steps.length}
+                        <span className={`rounded px-2 py-0.5 text-[11px] ${videoTotal ? 'bg-violet-50 text-violet-700' : 'bg-gray-100 text-gray-500'}`}>
+                          视频 {videoTotal} 条 · {videos}/{sp.steps.length} 步
                         </span>
                       </div>
                       <div className="line-clamp-2 text-sm text-gray-700">{stripHtml(r.content)}</div>

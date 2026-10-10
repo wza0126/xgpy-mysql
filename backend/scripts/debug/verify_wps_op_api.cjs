@@ -108,6 +108,7 @@ async function login(username, password) {
     ok('详情含 4 个步骤说明', (spec.steps || []).length === 4, 'steps=' + (spec.steps || []).length);
     ok('步骤带说明文字', (spec.steps || []).every((s) => !!s.title));
     ok('步骤带演示视频字段（后期每步配视频）', (spec.steps || []).every((s) => 'video_url' in s));
+    ok('★ 步骤带多视频数组字段 video_urls', (spec.steps || []).every((s) => Array.isArray(s.video_urls)));
     const raw = JSON.stringify(detail.body);
     ok('⛔ 响应体不含 checks 字段', !raw.includes('"checks"'));
     ok('⛔ 响应体不含 range_values 答案值', !raw.includes('15089') && !raw.includes('17736'));
@@ -133,6 +134,29 @@ async function login(username, password) {
       ok('xlsx 模板可下载 200', res.status === 200, 'status=' + res.status + ' type=' + res.headers.get('content-type'));
     }
 
+    section('C3. ★ 一个步骤可挂多条演示视频（video_urls 往返 + 旧字段兼容）');
+    {
+      const [origRows] = await conn.query('SELECT wps_spec FROM questions WHERE id = ?', [QUESTION_ID]);
+      const origSpecRaw = origRows.length ? origRows[0].wps_spec : null;
+      const asText = (v) => (typeof v === 'string' ? v : JSON.stringify(v));
+      const tmpSpec = JSON.parse(asText(origSpecRaw) || '{}');
+      if (Array.isArray(tmpSpec.steps) && tmpSpec.steps.length) {
+        tmpSpec.steps[0].video_urls = ['/uploads/wps-op/videos/__t_a.mp4', '/uploads/wps-op/videos/__t_b.mp4'];
+        tmpSpec.steps[0].video_url = '/uploads/wps-op/videos/__t_c.mp4'; // 旧单字段也要被合并进来
+      }
+      try {
+        await conn.query('UPDATE questions SET wps_spec = ? WHERE id = ?', [JSON.stringify(tmpSpec), QUESTION_ID]);
+        const d2 = await api('GET', `/api/student/wps-op/${QUESTION_ID}`, { token: stuToken });
+        const s0 = (d2.body?.data?.spec?.steps || [])[0] || {};
+        ok('★ video_urls 数组下发且旧单字段被合并（2 + 1 = 3 条）', Array.isArray(s0.video_urls) && s0.video_urls.length === 3, JSON.stringify(s0.video_urls));
+        ok('★ 旧字段 video_url 与数组第一条一致', s0.video_url === '/uploads/wps-op/videos/__t_a.mp4', s0.video_url);
+      } finally {
+        await conn.query('UPDATE questions SET wps_spec = ? WHERE id = ?', [asText(origSpecRaw), QUESTION_ID]);
+      }
+      const [afterRows] = await conn.query('SELECT wps_spec FROM questions WHERE id = ?', [QUESTION_ID]);
+      ok('⛔ 多视频测试后已还原题目 spec', asText(afterRows[0].wps_spec) === asText(origSpecRaw));
+    }
+
     section('D. ⛔ 通用表接口对学生同样不得泄露 wps_spec');
     const tbl = await api('GET', '/api/tables/questions?filters=' + encodeURIComponent(JSON.stringify({ id: QUESTION_ID })), { token: stuToken });
     const tblRow = (tbl.body?.data || [])[0] || {};
@@ -154,6 +178,7 @@ async function login(username, password) {
     ok('明细含 4 个步骤', steps1.length === 4);
     ok('每步均满分', steps1.every((s) => s.pass && s.obtained === s.score));
     ok('步骤带演示视频位', steps1.every((s) => 'video_url' in s));
+    ok('★ 回执步骤带多视频数组', steps1.every((s) => Array.isArray(s.video_urls)));
     ok('明细含逐评分点 label', steps1.every((s) => (s.checks || []).every((c) => !!c.label)));
     ok('⛔ 回执不含 sha256 内部字段', !('sha256' in (d1.detail || {})));
 
@@ -247,7 +272,9 @@ async function login(username, password) {
     ok('清单含 chart 与 range_values', kindList.includes('chart') && kindList.includes('range_values'));
     ok('清单含新增四类（排序/筛选/分类汇总/条件格式）',
       ['sorted_range', 'auto_filter', 'subtotal', 'cond_format'].every((k) => kindList.includes(k)), 'n=' + kindList.length);
-    ok('清单共 20 种检查器', kindList.length === 20, 'n=' + kindList.length);
+    ok('清单含补充五类（底纹/边框/列宽/行高/通用函数）',
+      ['fill', 'border', 'col_width', 'row_height', 'func_range'].every((k) => kindList.includes(k)));
+    ok('清单共 25 种检查器', kindList.length === 25, 'n=' + kindList.length);
     ok('清单下发视频大小上限（前端提示用）', (kinds.body?.data?.video_max_mb || 0) > 0, 'max=' + kinds.body?.data?.video_max_mb);
 
     const insp = await upload('/api/teacher/wps-op/inspect', path.join(FIX, 'wps_popshen_correct.xlsx'), { token: teacherToken });

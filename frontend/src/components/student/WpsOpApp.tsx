@@ -21,7 +21,10 @@ interface StepView {
   title: string;
   desc: string;
   score: number;
+  /** 兼容旧字段（单视频） */
   video_url: string;
+  /** 一个步骤可挂多条演示视频 */
+  video_urls?: string[];
   check_count: number;
 }
 
@@ -68,6 +71,7 @@ interface StepResult {
   title: string;
   desc: string;
   video_url: string;
+  video_urls?: string[];
   score: number;
   obtained: number;
   pass: boolean;
@@ -127,38 +131,55 @@ const fmtSize = (n?: number | null) => {
 /** 本地上传/抓取的视频（相对路径）可内嵌播放；外链在新窗口打开（机房断网时可能打不开） */
 const isLocalVideo = (u: string) => /^\/uploads\//.test(u) || /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//i.test(u);
 
-const VideoBlock: React.FC<{ url: string; compact?: boolean }> = ({ url, compact }) => {
+/** 一个步骤可挂多条演示视频：本地的内嵌播放，外链的给链接 */
+const VideoBlock: React.FC<{ urls?: string[]; url?: string; compact?: boolean }> = ({ urls, url, compact }) => {
   const [open, setOpen] = React.useState(false);
-  if (!url) return null;
-  if (!isLocalVideo(url)) {
-    return (
-      <a
-        href={url}
-        target="_blank"
-        rel="noreferrer"
-        className="mt-1 inline-flex items-center gap-1 text-[11px] text-sky-600 hover:underline"
-        title="外链视频，需要联网才能播放"
-      >
-        <i className="fas fa-circle-play" /> 演示视频（外链，需联网）
-      </a>
-    );
-  }
+  const list = (Array.isArray(urls) && urls.length ? urls : (url ? [url] : []))
+    .map((u) => String(u || '').trim())
+    .filter(Boolean);
+  if (!list.length) return null;
+  const local = list.filter((u) => isLocalVideo(u));
+  const remote = list.filter((u) => !isLocalVideo(u));
   return (
     <div className="mt-1">
       <button
         onClick={() => setOpen((o) => !o)}
         className="inline-flex items-center gap-1 text-[11px] text-sky-600 hover:underline"
       >
-        <i className={`fas ${open ? 'fa-circle-pause' : 'fa-circle-play'}`} /> {open ? '收起演示视频' : '看这一步的演示视频'}
+        <i className={`fas ${open ? 'fa-circle-pause' : 'fa-circle-play'}`} />
+        {open ? '收起演示视频' : (list.length > 1 ? `看这一步的演示视频（${list.length} 个）` : '看这一步的演示视频')}
       </button>
       {open && (
-        // eslint-disable-next-line jsx-a11y/media-has-caption
-        <video
-          src={`${API_CONFIG.apiUrl}${url}`}
-          controls
-          preload="metadata"
-          className={`mt-2 w-full rounded-lg border border-gray-200 bg-black ${compact ? 'max-w-sm' : 'max-w-lg'}`}
-        />
+        <div className="mt-2 space-y-2">
+          {local.map((u, i) => (
+            <div key={'l' + i}>
+              {local.length > 1 && <div className="mb-1 text-[11px] text-gray-500">视频 {i + 1} / {local.length}</div>}
+              {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+              <video
+                src={`${API_CONFIG.apiUrl}${u}`}
+                controls
+                preload="metadata"
+                className={`w-full rounded-lg border border-gray-200 bg-black ${compact ? 'max-w-sm' : 'max-w-lg'}`}
+              />
+            </div>
+          ))}
+          {remote.length > 0 && (
+            <div className="space-y-1">
+              {remote.map((u, i) => (
+                <a
+                  key={'r' + i}
+                  href={u}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-[11px] text-sky-600 hover:underline"
+                  title="外链视频，需要联网才能播放"
+                >
+                  <i className="fas fa-circle-play" /> 演示视频（外链，需联网）
+                </a>
+              ))}
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
@@ -422,7 +443,7 @@ export const WpsOpApp: React.FC = () => {
                       <span className="flex-none text-xs font-semibold text-emerald-700">{s.score} 分</span>
                     </div>
                     {s.desc && <p className="mt-0.5 text-xs text-gray-500">{s.desc}</p>}
-                    <VideoBlock url={s.video_url} />
+                    <VideoBlock urls={s.video_urls} url={s.video_url} />
                   </div>
                 </li>
               ))}
@@ -557,7 +578,7 @@ export const WpsOpApp: React.FC = () => {
                               </div>
                             </div>
                           ))}
-                          <VideoBlock url={s.video_url} compact />
+                          <VideoBlock urls={s.video_urls} url={s.video_url} compact />
                         </div>
                       )}
                     </div>

@@ -258,7 +258,7 @@ async function clickByText(b, text) {
     ok('★ 有 WPS / Access 一级分段', /WPS 操作题/.test(tText) && /Access 操作题/.test(tText));
     ok('★ 有「题库管理」「练习情况」二级页签', /题库管理/.test(tText) && /练习情况/.test(tText));
     ok('★ 列表显示样例题（100 分 · 4 步）', /100 分 · 4 步/.test(tText), '');
-    ok('★ 列表显示模板数/视频数标注', /模板 2/.test(tText) && /视频 \d+\/4/.test(tText));
+    ok('★ 列表显示模板数/视频数标注', /模板 2/.test(tText) && /视频 \d+ 条/.test(tText));
     ok('★ 显示所属分类', /数据获取与表达/.test(tText), '');
 
     section('G2. ★ 教师端 Access 占位分段');
@@ -323,13 +323,15 @@ async function clickByText(b, text) {
     })()`);
     ok('★ 新建时默认满分 100', fullScoreVal === '100', String(fullScoreVal));
 
-    // 每步视频：输入框 + 本地上传/外链抓取两个按钮
-    const videoInputs = await b.evalJs(`document.querySelectorAll('input[placeholder*="视频地址"]').length`);
-    ok('★ 每个步骤有演示视频输入框', videoInputs >= 1, 'count=' + videoInputs);
+    // 每步视频：★ 一个步骤可挂多条 —— 上传 / 抓取 / 粘贴 三个入口 + 条数标注
     const videoUpBtns = await b.evalJs(`Array.from(document.querySelectorAll('button')).filter(x => (x.textContent||'').includes('上传本地视频')).length`);
     ok('★ 提供「上传本地视频」按钮（机房断网兜底）', videoUpBtns >= 1, 'count=' + videoUpBtns);
     const videoFetchBtns = await b.evalJs(`Array.from(document.querySelectorAll('button')).filter(x => (x.textContent||'').includes('抓取外链到本地')).length`);
     ok('★ 提供「抓取外链到本地」按钮', videoFetchBtns >= 1, 'count=' + videoFetchBtns);
+    const videoPasteBtns = await b.evalJs(`Array.from(document.querySelectorAll('button')).filter(x => (x.textContent||'').includes('粘贴地址')).length`);
+    ok('★ 提供「粘贴地址」直接加一条视频', videoPasteBtns >= 1, 'count=' + videoPasteBtns);
+    ok('★ 提示"同一操作可挂多条视频"', /同一操作可挂/.test(eText) && /多条/.test(eText));
+    ok('★ 每步有视频条数标注', /演示视频/.test(eText) && /\d+ 条/.test(eText));
     const videoInputAccept = await b.evalJs(`(() => { const i = Array.from(document.querySelectorAll('input[type=file]')).find(x => (x.accept||'').startsWith('video')); return i ? i.accept : 'none'; })()`);
     ok('★ 视频文件选择框只收视频', String(videoInputAccept).startsWith('video'), String(videoInputAccept));
     const tplInputAccept = await b.evalJs(`(() => { const i = Array.from(document.querySelectorAll('input[type=file]')).find(x => (x.accept||'').includes('.txt')); return i ? (i.accept + '|multiple=' + i.multiple) : 'none'; })()`);
@@ -355,7 +357,33 @@ async function clickByText(b, text) {
     ok('★ 评分点类型含「自动筛选」', /自动筛选/.test(kindText));
     ok('★ 评分点类型含「分类汇总」', /分类汇总/.test(kindText));
     ok('★ 评分点类型含「条件格式」', /条件格式/.test(kindText));
-    ok('★ 评分点类型共 20 种', (kindOptions.options || []).length === 20, 'n=' + (kindOptions.options || []).length);
+    // 2026-10-10 依 88 道真题补齐的五类
+    ok('★ 评分点类型含「底纹填充色」', /底纹填充色/.test(kindText));
+    ok('★ 评分点类型含「区域边框」', /区域边框/.test(kindText));
+    ok('★ 评分点类型含「列宽」', /列宽/.test(kindText));
+    ok('★ 评分点类型含「行高」', /行高/.test(kindText));
+    ok('★ 评分点类型含「函数计算」', /函数计算/.test(kindText));
+    ok('★ 对齐项已扩展为「水平/垂直」', /水平\/垂直/.test(kindText));
+    ok('★ 数字格式项已扩展「类型/小数位」', /类型\/小数位/.test(kindText));
+    ok('★ 评分点类型共 25 种', (kindOptions.options || []).length === 25, 'n=' + (kindOptions.options || []).length);
+
+    // 字段级断言：选中「图表」后必须出现进阶字段（图例位置 / 数据标签 / 轴标题 / 系列产生在行）
+    const chartSel = await b.evalJs(`(() => {
+      const sels = Array.from(document.querySelectorAll('select'));
+      const sel = sels.find(s => Array.from(s.options).some(o => o.textContent.trim() === '合并单元格'));
+      if (!sel) return 'no-sel';
+      const opt = Array.from(sel.options).find(o => o.textContent.trim() === '图表');
+      if (!opt) return 'no-opt';
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+      setter.call(sel, opt.value);
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      return 'ok';
+    })()`);
+    ok('可把评分点类型切到「图表」', chartSel === 'ok', String(chartSel));
+    await sleep(500);
+    const panelText = await b.evalJs(`document.body.innerText`);
+    ok('★ 选「图表」后出现进阶字段（图例位置/数据标签/轴标题/系列方向）',
+      /图例位置/.test(panelText) && /数据标签/.test(panelText) && /轴标题/.test(panelText) && /系列产生在行/.test(panelText));
 
     section('I. 教师端无 JS 异常');
     ok('无 JS 运行时错误', b.jsErrors.length === 0, b.jsErrors.slice(0, 3).join(' | ') || '无');

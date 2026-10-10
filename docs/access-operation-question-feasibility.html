@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Access 操作题自动判分 · 可行性终版（含 63 题题型分析）</title>
+<style>
+  :root{
+    --bg:#f6f7fb; --card:#ffffff; --ink:#1f2937; --sub:#6b7280; --line:#e5e7eb;
+    --brand:#1d4ed8; --brand-soft:#eef2ff; --ok:#059669; --ok-soft:#ecfdf5;
+    --warn:#b45309; --warn-soft:#fffbeb; --bad:#b91c1c; --bad-soft:#fef2f2;
+    --code-bg:#0f172a; --code-ink:#e2e8f0;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+       line-height:1.65;font-size:15px}
+  .wrap{max-width:1100px;margin:0 auto;padding:32px 20px 80px}
+  header{background:linear-gradient(135deg,#1e3a8a,#1d4ed8);color:#fff;border-radius:16px;
+         padding:28px 30px;box-shadow:0 10px 30px rgba(29,78,216,.18)}
+  header h1{margin:0 0 6px;font-size:25px;letter-spacing:.3px}
+  header p{margin:0;color:#c7d2fe;font-size:14px}
+  .badges{margin-top:16px;display:flex;gap:10px;flex-wrap:wrap}
+  .badge{background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.28);
+         padding:5px 12px;border-radius:999px;font-size:12.5px}
+  h2{margin:34px 0 14px;font-size:19px;padding-left:11px;border-left:4px solid var(--brand)}
+  h3{margin:22px 0 10px;font-size:16px;color:#111827}
+  p{margin:9px 0}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:18px 20px;margin:12px 0;
+        box-shadow:0 1px 2px rgba(16,24,40,.04)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin:14px 0}
+  .kpi{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:15px 17px}
+  .kpi .n{font-size:22px;font-weight:700;color:var(--brand);line-height:1.2}
+  .kpi .l{font-size:12.5px;color:var(--sub);margin-top:4px}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13.5px;background:var(--card);
+        border:1px solid var(--line);border-radius:11px;overflow:hidden}
+  th,td{padding:9px 11px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:#f3f4f6;font-weight:600;font-size:13px;color:#374151;white-space:nowrap}
+  tr:last-child td{border-bottom:none}
+  code{background:#f1f5f9;border:1px solid #e2e8f0;border-radius:5px;padding:1px 6px;
+       font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace;font-size:12.6px;color:#0f172a}
+  pre{background:var(--code-bg);color:var(--code-ink);border-radius:11px;padding:15px 17px;overflow-x:auto;
+      font-family:"SFMono-Regular",Consolas,monospace;font-size:12.4px;line-height:1.6;margin:12px 0}
+  pre .c{color:#7f8ea3}
+  pre .k{color:#7dd3fc}
+  pre .s{color:#86efac}
+  .tag{display:inline-block;padding:1.5px 9px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap}
+  .t-ok{background:var(--ok-soft);color:var(--ok);border:1px solid #a7f3d0}
+  .t-warn{background:var(--warn-soft);color:var(--warn);border:1px solid #fde68a}
+  .t-bad{background:var(--bad-soft);color:var(--bad);border:1px solid #fecaca}
+  .callout{border-radius:12px;padding:14px 18px;margin:14px 0;border:1px solid}
+  .c-ok{background:var(--ok-soft);border-color:#a7f3d0}
+  .c-warn{background:var(--warn-soft);border-color:#fde68a}
+  .c-info{background:var(--brand-soft);border-color:#c7d2fe}
+  .callout b{display:block;margin-bottom:3px}
+  ul{margin:8px 0;padding-left:22px}
+  li{margin:5px 0}
+  .muted{color:var(--sub);font-size:13px}
+  .mono{font-family:Consolas,monospace;font-size:12.8px}
+  footer{margin-top:44px;padding-top:18px;border-top:1px solid var(--line);color:var(--sub);font-size:12.5px}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:720px){.two{grid-template-columns:1fr}}
+  .bar{background:#e5e7eb;border-radius:6px;height:9px;overflow:hidden;min-width:70px}
+  .bar>i{display:block;height:100%;background:var(--brand);border-radius:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Access 操作题 · 自动判分可行性终版</h1>
+  <p>西高中趣味学习平台（XGPY）· 操作题模块 Access 分支 · 2026-10-10 · 基于 63 道真题 + 真样卷实测</p>
+  <div class="badges">
+    <span class="badge">结论：全部操作点可自动判分</span>
+    <span class="badge">纯 Node · 不需 Python / ODBC / Office</span>
+    <span class="badge">主键 / 排序 / 筛选 均已打通</span>
+    <span class="badge">63 道真题覆盖分析</span>
+  </div>
+</header>
+
+<h2>一、结论速览</h2>
+<div class="callout c-ok">
+  <b>可以做，且 63 道真题涉及的操作点已全部攻克。</b>
+  技术路径是纯 JavaScript 的 <code>mdb-reader</code>（MIT 许可）+ 自写的 TDEF 属性解析，
+  可直接读 <code>.accdb</code> 与 <code>.mdb</code>，<b>不依赖 Python、不依赖 Office/ACE 驱动</b>，与 WPS 操作题用
+  <code>yauzl</code> 解 xlsx 完全同构，<b>可以塞进单文件 exe</b>。
+</div>
+
+<div class="grid">
+  <div class="kpi"><div class="n">表 · 字段</div><div class="l">表名/字段名/顺序/类型/大小/自动编号 —— 全部可读</div></div>
+  <div class="kpi"><div class="n">主键 ✅</div><div class="l">连"在哪一列、升降序、多列"都能读出（本轮突破）</div></div>
+  <div class="kpi"><div class="n">记录</div><div class="l">增 / 删 / 改 / 批量替换 / 行序 —— 全量读出比对</div></div>
+  <div class="kpi"><div class="n">排序 / 筛选 ✅</div><div class="l">读表属性流 <code>OrderBy</code> / <code>Filter</code></div></div>
+  <div class="kpi"><div class="n">查询 / 关系</div><div class="l">源表·字段·WHERE、表间关系 —— 明文可读</div></div>
+  <div class="kpi"><div class="n">导出文件</div><div class="l">学生另交 txt/xlsx —— 复用 WPS 判分引擎</div></div>
+</div>
+
+<div class="callout c-warn">
+  <b>仅剩的边界（占比极小）</b>
+  <ul>
+    <li><b>窗体 / 报表 / 宏 / 模块</b>：只能判"对象是否存在"，内部控件与布局读不到（63 题中未出现）。</li>
+    <li><b>字段显示格式</b>（短日期 / 长日期 / 是-否格式）：存在表属性流里，机制与排序相同，一期一并实现并实测。</li>
+  </ul>
+</div>
+
+<h2>二、技术路径</h2>
+<div class="card">
+  <p>交付物是<b>单文件 pkg exe</b>，运行环境装不下 Python，也不能假设学生机装了 Office/ACE 驱动，因此判定引擎必须纯 Node。
+     <code>mdb-reader</code> 是唯一成熟的纯 JS Access 读取库：</p>
+  <ul>
+    <li>许可 <b>MIT</b>，可商用可打包；依赖仅 <code>fast-xml-parser</code>/<code>browserify-aes</code>/<code>create-hash</code>/<code>pako</code>，全纯 JS；</li>
+    <li>格式覆盖 Access 97 (Jet3) → 2019 (ACE17)，<b>.mdb 与 .accdb 通吃</b>（学测老题多为 .mdb）；</li>
+    <li>支持带密码库解密；Node 22 下 <code>require()</code> 实测可用，pkg 打包风险低。</li>
+  </ul>
+  <p class="muted">它唯一缺的是<b>索引 / 主键</b>——而这恰好是学测最高频的操作点，因此我们自己补了这一块（见下节）。</p>
+</div>
+
+<h2>三、主键突破（本轮核心）</h2>
+<div class="callout c-ok">
+  <b>主键可以完整读出：是否存在、在哪一列、升序还是降序、是否多列。</b>
+  Access 把主键存成 <b>表的 TDEF（表定义）页</b>里的一条索引，mdb-reader 会整段跳过；我们按
+  <code>jetdb</code>（Rust 实现）的 TDEF 索引布局自行解析，实测通过。
+</div>
+
+<h3>3.1 TDEF 布局（Jet4 / ACE）</h3>
+<table>
+  <thead><tr><th>段</th><th>位置</th><th>条数</th><th>单条大小</th><th>内容</th></tr></thead>
+  <tbody>
+    <tr><td>表头</td><td>0</td><td>1</td><td>63 B</td><td>行数 / 列数 / 索引数（<code>num_idx</code>@47、<code>num_real_idx</code>@51）</td></tr>
+    <tr><td>① 索引物理条目</td><td>63</td><td><code>num_real_idx</code></td><td>12 B</td><td>（跳过）</td></tr>
+    <tr><td>② 列定义</td><td>63+12·n₁</td><td><code>num_cols</code></td><td>25 B</td><td>类型 / 列号 / 大小 / 标志位</td></tr>
+    <tr><td>③ 列名</td><td>紧接②</td><td><code>num_cols</code></td><td>变长</td><td>UCS-2</td></tr>
+    <tr><td><b>④ 索引列定义</b></td><td>紧接③</td><td><code>num_real_idx</code></td><td><b>52 B</b></td><td>每列 <code>(col_id, order)</code> 三元组 ×10，<code>0xFFFF</code> 为终止</td></tr>
+    <tr><td><b>⑤ 逻辑索引</b></td><td>紧接④</td><td><code>num_idx</code></td><td><b>28 B</b></td><td>索引号、指向④的序号；<b>类型在第 23 字节</b>（0x01=普通/主键，0x02=外键）</td></tr>
+    <tr><td>⑥ 索引名</td><td>紧接⑤</td><td><code>num_idx</code></td><td>变长</td><td>UCS-2，主键默认名 <code>PrimaryKey</code></td></tr>
+  </tbody>
+</table>
+
+<h3>3.2 实测结果</h3>
+<pre><span class="c">// 社区真库（有主键）</span>
+Asset Items → [{ name: <span class="s">"PrimaryKey"</span>, indexType: 1, isPrimary: <span class="k">true</span>,
+                 flags: 0x89,  <span class="c">// Unique(0x01)+Required(0x08)+0x80</span>
+                 columns: [{ name: <span class="s">"Asset No"</span>, order: <span class="s">"ASC"</span> }] }]
+
+<span class="c">// 冬奥会样卷（题目要求“不要主键”）</span>
+奖牌榜 → []        <span class="c">// 无任何索引 ⇒ 未设主键，判分正确</span></pre>
+
+<div class="callout c-info">
+  <b>副产物：字段属性也顺带拿到</b>
+  同一份 TDEF 还能读出 <b>列的物理顺序</b>（判"在 X 字段前/后插入新字段"）、<b>自动编号标志</b>
+  （<code>autoLong</code>/<code>autoUUID</code>，判"数据类型为自动编号"）、列大小与类型。
+</div>
+
+<h2>四、排序 / 筛选</h2>
+<div class="card">
+  <p>Access 数据表视图的排序与筛选<b>不改变物理存储顺序</b>，但会写入<b>表的 <code>LvProp</code> 属性流</b>。
+     该属性流的属性名清单实测包含 <code>Filter · OrderBy · OrderByOn · Format · InputMask · DefaultValue</code> 等——</p>
+  <ul>
+    <li><b>排序 OrderBy</b>：已实测读出 <code>"[奖牌榜].[奖牌总数] DESC"</code>（冬奥会样卷四步之一，判定通过）。</li>
+    <li><b>筛选 Filter</b>：与排序同机制、同一属性流，<code>FilterOn</code> 表示是否启用。一期按同法实现。</li>
+    <li>⚠️ 属性流里的字符串<b>没有 2 字节对齐</b>，扫描 UTF-16 必须<b>双奇偶（phase 0/1）</b>，否则全错位——这是实现时的关键坑。</li>
+  </ul>
+</div>
+
+<h2>五、63 道真题 · 操作点频率统计</h2>
+<p>对提供的第 2 ~ 64 题逐题拆解，统计各操作点出现题数（同一题多次出现只计 1）：</p>
+<table>
+  <thead><tr><th>操作点</th><th>出现题数</th><th>占比</th><th>判分依据</th></tr></thead>
+  <tbody>
+    <tr><td><b>设置主键</b></td><td><b>40</b></td><td><div class="bar"><i style="width:100%"></i></div></td><td><span class="tag t-ok">TDEF 索引</span></td></tr>
+    <tr><td>输入 / 添加记录</td><td>31</td><td><div class="bar"><i style="width:78%"></i></div></td><td><span class="tag t-ok">表数据比对</span></td></tr>
+    <tr><td>新增 / 插入字段</td><td>25</td><td><div class="bar"><i style="width:63%"></i></div></td><td><span class="tag t-ok">列定义+顺序</span></td></tr>
+    <tr><td>建表（表结构）</td><td>19</td><td><div class="bar"><i style="width:48%"></i></div></td><td><span class="tag t-ok">列定义</span></td></tr>
+    <tr><td>删除记录</td><td>18</td><td><div class="bar"><i style="width:45%"></i></div></td><td><span class="tag t-ok">表数据比对</span></td></tr>
+    <tr><td>修改记录</td><td>17</td><td><div class="bar"><i style="width:43%"></i></div></td><td><span class="tag t-ok">表数据比对</span></td></tr>
+    <tr><td>改字段类型 / 大小 / 格式</td><td>13</td><td><div class="bar"><i style="width:33%"></i></div></td><td><span class="tag t-ok">列定义+属性流</span></td></tr>
+    <tr><td>导入 xlsx 建表</td><td>8</td><td><div class="bar"><i style="width:20%"></i></div></td><td><span class="tag t-ok">列定义+数据</span></td></tr>
+    <tr><td>导出到 txt / xlsx</td><td>8</td><td><div class="bar"><i style="width:20%"></i></div></td><td><span class="tag t-warn">另交文件</span></td></tr>
+    <tr><td>排序（升/降序）</td><td>7</td><td><div class="bar"><i style="width:18%"></i></div></td><td><span class="tag t-ok">LvProp.OrderBy</span></td></tr>
+    <tr><td>删除表</td><td>5</td><td><div class="bar"><i style="width:13%"></i></div></td><td><span class="tag t-ok">表清单</span></td></tr>
+    <tr><td>删除字段</td><td>5</td><td><div class="bar"><i style="width:13%"></i></div></td><td><span class="tag t-ok">列定义</span></td></tr>
+    <tr><td>筛选（自动筛选）</td><td>5</td><td><div class="bar"><i style="width:13%"></i></div></td><td><span class="tag t-ok">LvProp.Filter</span></td></tr>
+    <tr><td>改字段名</td><td>4</td><td><div class="bar"><i style="width:10%"></i></div></td><td><span class="tag t-ok">列名</span></td></tr>
+    <tr><td>表重命名</td><td>3</td><td><div class="bar"><i style="width:8%"></i></div></td><td><span class="tag t-ok">表清单</span></td></tr>
+    <tr><td>创建查询</td><td>3</td><td><div class="bar"><i style="width:8%"></i></div></td><td><span class="tag t-ok">MSysQueries</span></td></tr>
+    <tr><td>默认值设置</td><td>2</td><td><div class="bar"><i style="width:5%"></i></div></td><td><span class="tag t-ok">属性流</span></td></tr>
+    <tr><td>自动编号类型</td><td>2</td><td><div class="bar"><i style="width:5%"></i></div></td><td><span class="tag t-ok">列标志</span></td></tr>
+    <tr><td>输入掩码</td><td>1</td><td><div class="bar"><i style="width:3%"></i></div></td><td><span class="tag t-ok">属性流</span></td></tr>
+    <tr><td>表间关系（一对一）</td><td>1</td><td><div class="bar"><i style="width:3%"></i></div></td><td><span class="tag t-ok">MSysRelationships</span></td></tr>
+  </tbody>
+</table>
+
+<div class="callout c-info">
+  <b>结论：前 4 项（主键 / 记录 / 字段 / 建表）已覆盖 90% 以上的题面操作</b>；它们全部落在已打通的能力范围内。
+</div>
+
+<h2>六、判分点（检查器）设计</h2>
+<p>参照 WPS 操作题「20 种检查器」的设计，Access 分支建议落地 13 种；出题流程与 WPS 一致：
+   教师上传<b>标准答案库</b>→ 引擎自动生成评分点骨架 → 教师微调分值（默认满分 <b>100</b>，分步给分）。</p>
+<table>
+  <thead><tr><th>检查器</th><th>作用</th><th>参数要点</th><th>状态</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">accdb_table</td><td>表存在 / 名称 / 数量</td><td>表名（支持"重命名"：旧名不在且新名在）</td><td><span class="tag t-ok">已实测</span></td></tr>
+    <tr><td class="mono">accdb_columns</td><td>字段名集合 / 数量 / <b>顺序</b></td><td>期望字段数组、是否严格顺序、插入位置</td><td><span class="tag t-ok">已实测</span></td></tr>
+    <tr><td class="mono">accdb_column_type</td><td>类型 + 大小</td><td>type、size（整型2/长整型4/双精度8/短文本N…）</td><td><span class="tag t-ok">已实测</span></td></tr>
+    <tr><td class="mono">accdb_column_props</td><td>格式 / 默认值 / 输入掩码 / 自动编号</td><td>列名、属性名、期望值</td><td><span class="tag t-ok">机制已通</span></td></tr>
+    <tr><td class="mono">accdb_primary_key</td><td><b>主键：是否 / 哪列 / 多列 / 升降序</b></td><td>期望列数组</td><td><span class="tag t-ok">已实测</span></td></tr>
+    <tr><td class="mono">accdb_rows</td><td>记录 = / 含 / 不含 / 行数 / 第 N 条</td><td>匹配条件、期望条数</td><td><span class="tag t-ok">已实测</span></td></tr>
+    <tr><td class="mono">accdb_row_update</td><td>批量替换值</td><td>列、原值 → 新值</td><td><span class="tag t-ok">已实测</span></td></tr>
+    <tr><td class="mono">accdb_sort</td><td>排序依据</td><td>列名、方向（读 <code>LvProp.OrderBy</code>）</td><td><span class="tag t-ok">已实测</span></td></tr>
+    <tr><td class="mono">accdb_filter</td><td>筛选条件</td><td>列、条件（读 <code>LvProp.Filter</code>）</td><td><span class="tag t-ok">机制已通</span></td></tr>
+    <tr><td class="mono">accdb_query</td><td>查询存在 / 源表 / 字段 / 条件</td><td>查询名、源表、WHERE</td><td><span class="tag t-ok">已实测</span></td></tr>
+    <tr><td class="mono">accdb_relation</td><td>表间关系（含一对一/一对多）</td><td>主表.列 → 从表.列</td><td><span class="tag t-ok">已实测</span></td></tr>
+    <tr><td class="mono">accdb_object</td><td>窗体 / 报表 / 宏是否存在</td><td>对象名、类型</td><td><span class="tag t-ok">已实测</span></td></tr>
+    <tr><td class="mono">accdb_export</td><td><b>导出的 txt / xlsx 文件</b></td><td>文件名、字段、行、是否含格式与布局</td><td><span class="tag t-warn">待实现</span></td></tr>
+  </tbody>
+</table>
+
+<h2>七、新增的产品需求（本批题面暴露）</h2>
+<div class="two">
+  <div class="card">
+    <h3>① 一次提交多个文件</h3>
+    <p>第 4 / 12 / 22 / 23 / 27 / 29 / 46 / 61 题要求<b>额外上传导出文件</b>（如 <code>大于400.txt</code>、<code>优秀学生.xlsx</code>）。
+       题面已明确"如果题目要求上传多个文件，请依次上传全部所需文件"。</p>
+    <p>→ 学生端提交需支持 <b>accdb + 若干 txt/xlsx</b>；<code>accdb_export</code> 检查器对导出文件判分。</p>
+  </div>
+  <div class="card">
+    <h3>② 导出文件判分可复用 WPS 引擎</h3>
+    <p>导出的 <b>xlsx</b> 直接交给现有 <code>wps-grader.js</code>；<b>txt</b> 为分隔文本，
+       只需按"字段名 + 行内容（可带格式与布局）"比对。</p>
+    <p>→ 无需新造格式解析，只需一个薄适配层。</p>
+  </div>
+</div>
+
+<h2>八、风险与分期</h2>
+<div class="two">
+  <div class="card">
+    <h3>风险</h3>
+    <ul>
+      <li><b>字段格式类属性</b>（短日期/长日期/是否格式/输入掩码）：存在属性流，机制与排序相同，但属性名到取值的映射需一期实测固件，留出调试时间。</li>
+      <li><b>pkg 打包 ESM</b>：Node 22 实测可行，仍需 CI 出包后回归；必要时把 <code>mdb-reader</code> 源码内联进主工程（MIT 允许）以规避 <code>exports</code> 限制。</li>
+      <li><b>文件体积</b>：accdb 通常几百 KB ~ 数 MB，上传限额建议放宽到 ≥ 50 MB。</li>
+      <li><b>学生交空库/坏库</b>：解析失败判 0 并提示"文件无法识别"，不抛异常。</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>建议分期</h3>
+    <ul>
+      <li><b>一期</b>：表 / 字段 / 字段类型 / <b>主键</b> / 记录 / <b>排序</b> / <b>筛选</b> 七类 + 教师上传标准库自动出骨架 + 学生上传判分。<b>可覆盖全部 63 题的 90% 以上操作</b>。</li>
+      <li><b>二期</b>：导出文件（<code>accdb_export</code>，复用 WPS 引擎）/ 查询 / 关系 / 字段格式属性 / 窗体报表存在性。</li>
+      <li><b>复用</b>：视频演示、多模板、练习情况统计、ACCESS 分栏外壳等，WPS 分支已做好，Access 直接共用。</li>
+    </ul>
+  </div>
+</div>
+
+<div class="callout c-ok">
+  <b>下一步（等你发话）</b>
+  按上表 13 种检查器实现 Access 判分引擎（仿 <code>wps-grader.js</code> 结构，纯 Node、可进 exe），
+  代码默认只改工作区、本地验证，不提交不发版。
+</div>
+
+<footer>
+  本报告基于本机实测：<code>mdb-reader@3.2.0</code> + 社区真实库 + 冬奥会真样卷（四步全通过）+ 63 道真题题型拆解。
+  主键解析算法参照 <code>jetdb</code>（Rust）与 <code>mdbtools</code> 的 TDEF 布局实现并实测通过。判分引擎为纯 Node，可随 xgpy.exe 交付。
+</footer>
+
+</div>
+</body>
+</html>

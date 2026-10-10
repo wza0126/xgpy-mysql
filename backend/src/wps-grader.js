@@ -323,9 +323,18 @@ function decimalsFromFormat(code) {
 }
 
 function parseStyles(xml) {
-  const styles = { fonts: [], cellXfs: [], numFmts: Object.assign({}, BUILTIN_NUMFMT), dxfs: [] };
+  const styles = { fonts: [], fills: [], borders: [], cellXfs: [], numFmts: Object.assign({}, BUILTIN_NUMFMT), dxfs: [] };
   if (!xml) return styles;
   const root = parseXml(xml);
+
+  // 颜色节点 → 归一化色值（rgb 优先；theme/indexed 存成可辨识串）
+  const colorOf = (c) => {
+    if (!c) return null;
+    if (c.attrs.rgb !== undefined) return String(c.attrs.rgb);
+    if (c.attrs.theme !== undefined) return 'theme:' + c.attrs.theme;
+    if (c.attrs.indexed !== undefined) return 'indexed:' + c.attrs.indexed;
+    return null;
+  };
 
   const numFmtsNode = findFirst(root, 'numFmts');
   if (numFmtsNode) {
@@ -353,7 +362,44 @@ function parseStyles(xml) {
         name: nameNode ? nameNode.attrs.val : null,
         size: szNode ? Number(szNode.attrs.val) : null,
         bold, italic, underline,
-        color: colorNode ? (colorNode.attrs.rgb || (colorNode.attrs.theme !== undefined ? ('theme:' + colorNode.attrs.theme) : null)) : null,
+        color: colorOf(colorNode),
+      });
+    }
+  }
+
+  // ---- 填充（底纹）----
+  // 实测：<fills count="2"><fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/><bgColor indexed="64"/></patternFill></fill></fills>
+  const fillsNode = childNode(root, 'fills') || findFirst(root, 'fills');
+  if (fillsNode) {
+    for (const f of fillsNode.children) {
+      if (f.local !== 'fill') continue;
+      const pf = childNode(f, 'patternFill') || findFirst(f, 'patternFill');
+      let patternType = null;
+      let fg = null;
+      let bg = null;
+      if (pf) {
+        patternType = pf.attrs.patternType || null;
+        fg = colorOf(childNode(pf, 'fgColor') || findFirst(pf, 'fgColor'));
+        bg = colorOf(childNode(pf, 'bgColor') || findFirst(pf, 'bgColor'));
+      }
+      const solid = patternType && patternType !== 'none';
+      styles.fills.push({ patternType, fgColor: fg, bgColor: bg, color: solid ? (fg || bg) : null });
+    }
+  }
+
+  // ---- 边框 ----
+  // <borders><border><left style="thin"><color rgb="FF0000FF"/></left><right .../><top .../><bottom .../></border>
+  const bordersNode = childNode(root, 'borders') || findFirst(root, 'borders');
+  if (bordersNode) {
+    for (const b of bordersNode.children) {
+      if (b.local !== 'border') continue;
+      const side = (nm) => {
+        const n = childNode(b, nm) || findFirst(b, nm);
+        if (!n) return { style: null, color: null };
+        return { style: n.attrs.style || null, color: colorOf(childNode(n, 'color') || findFirst(n, 'color')) };
+      };
+      styles.borders.push({
+        left: side('left'), right: side('right'), top: side('top'), bottom: side('bottom'),
       });
     }
   }
@@ -366,6 +412,8 @@ function parseStyles(xml) {
       styles.cellXfs.push({
         numFmtId: xf.attrs.numFmtId !== undefined ? parseInt(xf.attrs.numFmtId, 10) : 0,
         fontId: xf.attrs.fontId !== undefined ? parseInt(xf.attrs.fontId, 10) : 0,
+        fillId: xf.attrs.fillId !== undefined ? parseInt(xf.attrs.fillId, 10) : 0,
+        borderId: xf.attrs.borderId !== undefined ? parseInt(xf.attrs.borderId, 10) : 0,
         applyNumberFormat: xf.attrs.applyNumberFormat,
         alignment: al ? {
           horizontal: al.attrs.horizontal || null,
@@ -413,7 +461,11 @@ function parseStyles(xml) {
 // ============================================================
 
 function parseChart(xml) {
-  const chart = { chartType: null, barDir: null, title: '', titleRef: null, series: [] };
+  const chart = {
+    chartType: null, barDir: null, title: '', titleRef: null, series: [],
+    legend: { show: false, pos: null }, dataLabels: { show: false, pos: null, showVal: false, showPercent: false, showCatName: false },
+    catTitle: '', valTitle: '', seriesByRow: null,
+  };
   if (!xml) return chart;
   const root = parseXml(xml);
   const plotArea = findFirst(root, 'plotArea') || root;
@@ -445,6 +497,40 @@ function parseChart(xml) {
     chart.title = deepText(titleNode).replace(/\s+/g, ' ').trim();
   }
 
+  // 图例：<c:legend><c:legendPos val="r"/></c:legend>；完全没有 legend 节点 = 不显示图例
+  const legendNode = childNode(root, 'legend') || findFirst(root, 'legend');
+  if (legendNode) {
+    const lp = findFirst(legendNode, 'legendPos');
+    chart.legend = { show: true, pos: lp ? lp.attrs.val : 'r' };
+  }
+
+  // 数据标签：<c:dLbls><c:showVal val="1"/><c:showPercent val="1"/><c:showCatName val="1"/><c:dLblPos val="outEnd"/></c:dLbls>
+  const dLbls = host ? (childNode(host, 'dLbls') || findFirst(host, 'dLbls')) : null;
+  if (dLbls) {
+    const boolOf = (nm) => {
+      const n = childNode(dLbls, nm) || findFirst(dLbls, nm);
+      return !!n && !/^(0|false)$/i.test(String(n.attrs.val === undefined ? '1' : n.attrs.val));
+    };
+    const posN = childNode(dLbls, 'dLblPos') || findFirst(dLbls, 'dLblPos');
+    chart.dataLabels = {
+      show: true,
+      pos: posN ? posN.attrs.val : null,
+      showVal: boolOf('showVal'),
+      showPercent: boolOf('showPercent'),
+      showCatName: boolOf('showCatName'),
+    };
+  }
+
+  // 轴标题：<c:catAx><c:title>…</c:title></c:catAx> / <c:valAx><c:title>…</c:title></c:valAx>
+  const axisTitle = (axisName) => {
+    const ax = childNode(plotArea, axisName) || findFirst(plotArea, axisName);
+    if (!ax) return '';
+    const t = childNode(ax, 'title') || findFirst(ax, 'title');
+    return t ? deepText(t).replace(/\s+/g, ' ').trim() : '';
+  };
+  chart.catTitle = axisTitle('catAx');
+  chart.valTitle = axisTitle('valAx');
+
   if (host) {
     for (const ser of findAll(host, 'ser')) {
       const txNode = childNode(ser, 'tx');
@@ -461,6 +547,13 @@ function parseChart(xml) {
         val: refOf(valNode),
       });
     }
+  }
+
+  // 系列产生在行/列：由首个系列的数值区走向推断（横向区间 = 系列在"行"）
+  const first = chart.series[0];
+  if (first && first.val) {
+    const cells = rangeCells(first.val);
+    if (cells.length > 1) chart.seriesByRow = parseRef(cells[0]).row === parseRef(cells[cells.length - 1]).row;
   }
   return chart;
 }
@@ -497,12 +590,29 @@ function parseSheet(files, sheetPath, ctx) {
     styles: ctx.styles,
     sharedStrings: ctx.sharedStrings,
     rowMeta: new Map(),      // 行号 → { hidden, outlineLevel }（筛选隐藏行 / 分类汇总分组）
+    rowHeights: new Map(),   // 行号 → 自定义行高（pt）
+    cols: [],                // [{ min, max, width, customWidth }] 列宽定义
     autoFilter: null,        // { ref, columns }
     condFormats: [],         // [{ sqref, rules }]
     sortState: null,         // { ref, conditions }
     filterMode: false,
     outlineLevelRow: 0,
   };
+
+  // ---- 列宽：<cols><col min="1" max="1" width="15" customWidth="1"/></cols> ----
+  const colsNode = findFirst(root, 'cols');
+  if (colsNode) {
+    for (const c of findAll(colsNode, 'col')) {
+      const min = parseInt(c.attrs.min, 10);
+      const max = parseInt(c.attrs.max, 10);
+      if (isNaN(min) || isNaN(max)) continue;
+      sheet.cols.push({
+        min, max,
+        width: c.attrs.width !== undefined ? Number(c.attrs.width) : null,
+        customWidth: /^(1|true)$/i.test(String(c.attrs.customWidth || '')),
+      });
+    }
+  }
 
   const sd = childNode(root, 'sheetData') || findFirst(root, 'sheetData');
   if (sd) {
@@ -513,6 +623,8 @@ function parseSheet(files, sheetPath, ctx) {
         const hidden = /^(1|true)$/i.test(String(row.attrs.hidden || ''));
         const ol = row.attrs.outlineLevel !== undefined ? parseInt(row.attrs.outlineLevel, 10) : 0;
         if (hidden || (ol && ol > 0)) sheet.rowMeta.set(rNum, { hidden, outlineLevel: ol || 0 });
+        // 行高：<row r="1" ht="23" customHeight="1">
+        if (row.attrs.ht !== undefined && !isNaN(Number(row.attrs.ht))) sheet.rowHeights.set(rNum, Number(row.attrs.ht));
       }
       for (const c of row.children) {
         if (c.local !== 'c') continue;
@@ -602,6 +714,20 @@ function parseSheet(files, sheetPath, ctx) {
       const cfvo = findAll(r, 'cfvo').map((v) => ({
         type: v.attrs.type, val: v.attrs.val, gte: v.attrs.gte,
       }));
+      // 数据条：<dataBar><cfvo type="min"/><cfvo type="max"/><color rgb="FF63BE7B"/></dataBar>
+      const dbNode = childNode(r, 'dataBar') || findFirst(r, 'dataBar');
+      let dataBar = null;
+      if (dbNode) {
+        const col = childNode(dbNode, 'color') || findFirst(dbNode, 'color');
+        const grad = childNode(dbNode, 'gradientFill') || findFirst(dbNode, 'gradientFill');
+        const dbCfvo = findAll(dbNode, 'cfvo').map((v) => ({ type: v.attrs.type, val: v.attrs.val }));
+        dataBar = {
+          color: col ? (col.attrs.rgb || (col.attrs.theme !== undefined ? 'theme:' + col.attrs.theme : null)) : null,
+          gradient: !!grad,
+          minType: dbCfvo[0] ? dbCfvo[0].type : null,
+          maxType: dbCfvo[1] ? dbCfvo[1].type : null,
+        };
+      }
       rules.push({
         type: r.attrs.type || '',
         operator: r.attrs.operator || '',
@@ -610,6 +736,7 @@ function parseSheet(files, sheetPath, ctx) {
         text: r.attrs.text,
         formulas: findAll(r, 'formula').map((x) => String(x.text || '')),
         cfvo,
+        dataBar,
       });
     }
     if (rules.length) sheet.condFormats.push({ sqref: normRange(cfn.attrs.sqref), rules });
@@ -863,7 +990,7 @@ const CHECKERS = {
     return { pass, got: '=' + f, want: `SUM(${wantRange})`, note: hasSum ? (covers ? '' : '求和区间不符') : '未使用 SUM 函数' };
   },
 
-  // 字体（名称/加粗/字号）
+  // 字体（名称/加粗/倾斜/下划线/字号/颜色）
   font({ sheet, check }) {
     const { cell } = locateCell(sheet, check.ref);
     const xf = styleOf(sheet, cell);
@@ -876,43 +1003,259 @@ const CHECKERS = {
     if (check.bold !== undefined) {
       if (!!font.bold !== !!check.bold) problems.push(`${check.bold ? '需加粗' : '不应加粗'}`);
     }
+    if (check.italic !== undefined) {
+      if (!!font.italic !== !!check.italic) problems.push(`${check.italic ? '需倾斜' : '不应倾斜'}`);
+    }
+    if (check.underline !== undefined) {
+      if (!!font.underline !== !!check.underline) problems.push(`${check.underline ? '需加下划线' : '不应加下划线'}`);
+    }
     if (check.size !== undefined) {
       if (Number(font.size) !== Number(check.size)) problems.push(`字号应为${check.size}（实为${font.size}）`);
+    }
+    if (check.color !== undefined) {
+      if (!colorMatches(font.color, check.color)) problems.push(`字体颜色应为${check.color}（实为${font.color || '默认'}）`);
     }
     const want = [];
     if (check.name !== undefined) want.push(check.name);
     if (check.bold) want.push('加粗');
+    if (check.italic) want.push('倾斜');
+    if (check.underline) want.push('下划线');
     if (check.size !== undefined) want.push(check.size + '磅');
+    if (check.color !== undefined) want.push(String(check.color));
     return {
       pass: problems.length === 0,
-      got: `${font.name || '默认'}${font.bold ? ' 加粗' : ''} ${font.size !== null && font.size !== undefined ? font.size + '磅' : ''}`.trim(),
+      got: `${font.name || '默认'}${font.bold ? ' 加粗' : ''}${font.italic ? ' 倾斜' : ''}${font.underline ? ' 下划线' : ''} ${font.size !== null && font.size !== undefined ? font.size + '磅' : ''}${font.color ? ' ' + font.color : ''}`.replace(/\s+/g, ' ').trim(),
       want: want.join(' '),
       note: problems.join('；'),
     };
   },
 
-  // 水平居中
+  /** 底纹填充色。check: { ref, color:'浅绿'|'C6EFCE', patternType:'solid' } */
+  fill({ sheet, check }) {
+    const { cell } = locateCell(sheet, check.ref);
+    const xf = styleOf(sheet, cell);
+    const f = xf ? (sheet.styles.fills[xf.fillId || 0] || {}) : {};
+    const gotColor = f.color || null;
+    const problems = [];
+    if (check.color !== undefined && !colorMatches(gotColor, check.color)) {
+      problems.push(`底纹应为${check.color}（实为${gotColor || '无'}）`);
+    }
+    if (check.patternType && f.patternType !== check.patternType) {
+      problems.push(`填充样式应为 ${check.patternType}（实为 ${f.patternType || 'none'}）`);
+    }
+    return {
+      pass: problems.length === 0,
+      got: f.patternType ? `${f.patternType} ${gotColor || ''}`.trim() : '(无填充)',
+      want: `底纹 ${check.color || ''}${check.patternType ? ' ' + check.patternType : ''}`.trim(),
+      note: problems.join('；'),
+    };
+  },
+
+  /**
+   * 区域边框。check:
+   *   { range, style:'thin|medium|double|dashed|dotted|any', color:'蓝', edges:'all'|'outline'|'inner' }
+   * edges 省略时两条都校验；线型写 'any' 表示题面"线型不限"。
+   */
+  border({ sheet, check }) {
+    const range = normRange(check.range);
+    const cells = rangeCells(range);
+    if (!cells.length) return { pass: false, got: '(区域为空)', want: check.range };
+    const refs = cells.map(parseRef);
+    const minRow = Math.min(...refs.map((p) => p.row));
+    const maxRow = Math.max(...refs.map((p) => p.row));
+    const minCol = Math.min(...refs.map((p) => p.col));
+    const maxCol = Math.max(...refs.map((p) => p.col));
+
+    const wantStyles = borderStyleSet(check.style);
+    let edgeFlags;
+    if (check.edges && check.edges !== 'all') {
+      edgeFlags = Array.isArray(check.edges) ? check.edges.slice() : [check.edges];
+    } else if (check.inner || check.outline) {
+      edgeFlags = [];
+      if (check.outline) edgeFlags.push('outline');
+      if (check.inner) edgeFlags.push('inner');
+    } else {
+      edgeFlags = ['outline', 'inner'];
+    }
+
+    const problems = [];
+    let checked = 0;
+    for (const ref of cells) {
+      const p = parseRef(ref);
+      const { cell } = locateCell(sheet, ref);
+      const xf = styleOf(sheet, cell);
+      const bd = xf ? (sheet.styles.borders[xf.borderId || 0] || {}) : {};
+      const sides = [
+        ['left', p.col === minCol],
+        ['right', p.col === maxCol],
+        ['top', p.row === minRow],
+        ['bottom', p.row === maxRow],
+      ];
+      for (const [name, isEdge] of sides) {
+        const kind = isEdge ? 'outline' : 'inner';
+        if (!edgeFlags.includes(kind)) continue;
+        checked++;
+        const s = bd[name] || {};
+        const styleOk = wantStyles ? (!!s.style && wantStyles.has(s.style)) : !!s.style;
+        if (!styleOk) problems.push(`${ref} 的${sideCN(name)}缺${check.style && check.style !== 'any' ? check.style : '边框'}线`);
+        else if (check.color !== undefined && !colorMatches(s.color, check.color)) {
+          problems.push(`${ref} 的${sideCN(name)}边框颜色应为${check.color}（实为${s.color || '默认'}）`);
+        }
+      }
+    }
+    return {
+      pass: problems.length === 0,
+      got: problems.length ? `${problems.slice(0, 3).join('；')}${problems.length > 3 ? ' 等' : ''}` : `${range} 边框符合（校验 ${checked} 条边）`,
+      want: `${range} ${check.style || '任意'}线${check.color ? '/' + check.color : ''} ${edgeFlags.join('+')}`,
+      note: problems.length > 3 ? `共 ${problems.length} 处不符` : '',
+    };
+  },
+
+  /**
+   * 列宽。check: { col:'A'|'A:C', width:15, mode:'exact'|'atLeast'|'autoFit' }
+   * ⚠️ autoFit（最适合列宽）无法从 OOXML 精确还原，采用宽松判定：列有显式宽度即通过。
+   */
+  col_width({ sheet, check }) {
+    const span = parseColSpec(check.col !== undefined ? check.col : check.range);
+    const problems = [];
+    for (let c = span.min; c <= span.max; c++) {
+      const def = (sheet.cols || []).find((d) => c >= d.min && c <= d.max);
+      const w = def ? def.width : null;
+      const custom = def ? def.customWidth : false;
+      if (check.mode === 'autoFit') {
+        if (w === null) problems.push(`${numToCol(c)} 未设置列宽`);
+      } else if (check.mode === 'atLeast') {
+        if (w === null || w + 1e-6 < Number(check.width)) problems.push(`${numToCol(c)} 列宽应≥${check.width}（实为 ${w === null ? '默认' : round2(w)}）`);
+      } else if (w === null || !custom || Math.abs(w - Number(check.width)) > 0.6) {
+        problems.push(`${numToCol(c)} 列宽应为${check.width}（实为 ${w === null ? '默认' : round2(w)}${custom ? '' : ' 未自定义'}）`);
+      }
+    }
+    return {
+      pass: problems.length === 0,
+      got: problems.length ? problems.slice(0, 3).join('；') : `${check.col || check.range} 列宽符合`,
+      want: `${check.col || check.range} ${check.mode === 'autoFit' ? '最适合列宽' : '列宽 ' + check.width}`,
+      note: problems.length > 3 ? `共 ${problems.length} 处不符` : '',
+    };
+  },
+
+  /** 行高。check: { row:1 } 或 { rows:'1:2', height:23 } 或 { row:1, mode:'atLeast'|'autoFit' } */
+  row_height({ sheet, check }) {
+    const span = parseRowSpec(check.rows !== undefined ? check.rows : (check.row !== undefined ? check.row : check.range));
+    const problems = [];
+    for (let r = span.min; r <= span.max; r++) {
+      // ⚠️ Map.get 对未设置的行返回 undefined（不是 null），必须显式归一化，
+      //    否则 `undefined === null` 为假 → 未设行高会被误判为通过（曾实测踩到）。
+      const h = (sheet.rowHeights && sheet.rowHeights.has(r)) ? sheet.rowHeights.get(r) : null;
+      if (check.mode === 'autoFit') {
+        if (h === null) problems.push(`第 ${r} 行未设置行高`);
+      } else if (check.mode === 'atLeast') {
+        if (h === null || h + 1e-6 < Number(check.height)) problems.push(`第 ${r} 行行高应≥${check.height}（实为 ${h === null ? '默认' : round2(h)}）`);
+      } else if (h === null || Math.abs(h - Number(check.height)) > 0.6) {
+        problems.push(`第 ${r} 行行高应为${check.height}（实为 ${h === null ? '默认' : round2(h)}）`);
+      }
+    }
+    return {
+      pass: problems.length === 0,
+      got: problems.length ? problems.slice(0, 3).join('；') : '行高符合',
+      want: `${check.rows || check.row || ''} ${check.mode === 'autoFit' ? '最适合行高' : '行高 ' + check.height}`,
+      note: problems.length > 3 ? `共 ${problems.length} 处不符` : '',
+    };
+  },
+
+  /**
+   * 通用聚合函数：公式以指定函数覆盖指定区域。
+   * check: { ref, fn:'AVERAGE'|'SUM'|'MAX'|'MIN'|'COUNT', range:'B2:B11' }；fn 省略 → 任意函数。
+   */
+  func_range({ sheet, check }) {
+    const { cell } = locateCell(sheet, check.ref);
+    const f = cell && cell.formula ? normFormula(cell.formula) : '';
+    if (!f) return { pass: false, got: '(无公式)', want: `${check.fn || '函数'}(${check.range || ''})` };
+    const fn = String(check.fn || '').toUpperCase();
+    const fnHit = !fn || f.includes(fn + '(');
+    let covers = true;
+    let wantRange = '';
+    if (check.range) {
+      wantRange = normRange(check.range);
+      const cells = rangeCells(wantRange);
+      covers = f.includes(wantRange) || (cells.length > 0 && f.includes(cells[0]) && f.includes(cells[cells.length - 1]));
+    }
+    return {
+      pass: fnHit && covers,
+      got: '=' + f,
+      want: `${fn || '任一函数'}(${wantRange || ''})`,
+      note: fnHit ? (covers ? '' : '引用区间不符') : `未使用 ${fn} 函数`,
+    };
+  },
+
+  // 水平 / 垂直对齐
   align({ sheet, check }) {
     const { cell } = locateCell(sheet, check.ref);
     const xf = styleOf(sheet, cell);
-    const got = xf && xf.alignment ? (xf.alignment.horizontal || '') : '';
-    const want = check.horizontal || 'center';
-    const aliases = { center: ['center', 'centerContinuous'], left: ['left'], right: ['right'] };
-    const pass = (aliases[want] || [want]).includes(got);
-    return { pass, got: got || '(默认)', want };
+    const al = (xf && xf.alignment) || {};
+    const problems = [];
+    const wantDesc = [];
+    // 向后兼容：只看 horizontal 时默认要求居中；显式给 vertical 则不强制 horizontal
+    if (check.horizontal !== undefined || check.vertical === undefined) {
+      const want = check.horizontal || 'center';
+      const aliases = { center: ['center', 'centerContinuous'], left: ['left'], right: ['right'], justify: ['justify'], distributed: ['distributed'] };
+      const got = al.horizontal || '';
+      if (!(aliases[want] || [want]).includes(got)) problems.push(`水平应${want}（实为 ${got || '默认'}）`);
+      wantDesc.push(`水平${want}`);
+    }
+    if (check.vertical !== undefined) {
+      const want = check.vertical;
+      const aliases = { center: ['center'], top: ['top'], bottom: ['bottom'], justify: ['justify'], distributed: ['distributed'] };
+      const got = al.vertical || '';
+      if (!(aliases[want] || [want]).includes(got)) problems.push(`垂直应${want}（实为 ${got || '默认'}）`);
+      wantDesc.push(`垂直${want}`);
+    }
+    return {
+      pass: problems.length === 0,
+      got: `水平 ${al.horizontal || '默认'} / 垂直 ${al.vertical || '默认'}`,
+      want: wantDesc.join(' + '),
+      note: problems.join('；'),
+    };
   },
 
-  // 数字格式小数位
+  /**
+   * 数字格式。check: { ref, type:'percent|currency|number|text|general', decimals, mode:'exact|atMost|atLeast' }
+   * type 与 decimals 可单独或同时校验。
+   */
   number_format({ sheet, check }) {
     const { cell } = locateCell(sheet, check.ref);
     const xf = styleOf(sheet, cell);
     const code = xf ? sheet.styles.numFmts[xf.numFmtId] : undefined;
-    const dec = decimalsFromFormat(code);
-    const want = check.decimals === undefined ? 0 : Number(check.decimals);
-    const mode = check.mode || 'exact';
-    let pass = false;
-    if (dec !== null) pass = mode === 'atMost' ? dec <= want : dec === want;
-    return { pass, got: dec === null ? `不定（${code || 'General'}）` : `${dec} 位小数（${code}）`, want: `${mode === 'atMost' ? '最多' : ''}${want} 位小数` };
+    const codeStr = String(code || 'General');
+    const problems = [];
+    if (check.type !== undefined) {
+      const wantType = String(check.type).toLowerCase();
+      const isPercent = /%/.test(codeStr);
+      const isCurrency = /[¥￥]|\[\$[¥￥]|\b元\b/.test(codeStr);
+      const isText = /@/.test(codeStr);
+      const isGeneral = /^general$/i.test(codeStr.trim());
+      const isNumber = !isPercent && !isCurrency && !isText && !isGeneral && /[0#]/.test(codeStr);
+      const hit = (wantType === 'percent' && isPercent)
+        || (wantType === 'currency' && isCurrency)
+        || (wantType === 'text' && isText)
+        || (wantType === 'general' && isGeneral)
+        || (wantType === 'number' && isNumber);
+      if (!hit) problems.push(`数字格式应为${check.type}（实为 ${codeStr}）`);
+    }
+    let wantDesc = '';
+    if (check.decimals !== undefined) {
+      const dec = decimalsFromFormat(code);
+      const want = Number(check.decimals);
+      const mode = check.mode || 'exact';
+      const ok = dec !== null && (mode === 'atMost' ? dec <= want : mode === 'atLeast' ? dec >= want : dec === want);
+      if (!ok) problems.push(`小数位应${mode === 'atMost' ? '≤' : mode === 'atLeast' ? '≥' : '='}${want}（实为 ${dec === null ? '不定' : dec}）`);
+      wantDesc = `${mode === 'atMost' ? '最多' : mode === 'atLeast' ? '至少' : ''}${want} 位小数`;
+    }
+    return {
+      pass: problems.length === 0,
+      got: codeStr,
+      want: [check.type, wantDesc].filter(Boolean).join(' '),
+      note: problems.join('；'),
+    };
   },
 
   /**
@@ -973,10 +1316,39 @@ const CHECKERS = {
     if (check.seriesCount !== undefined && chart.series.length !== Number(check.seriesCount)) {
       problems.push(`数据系列应为 ${check.seriesCount} 组（实为 ${chart.series.length} 组）`);
     }
+    // 数据标签
+    if (check.dataLabels !== undefined && !!chart.dataLabels.show !== !!check.dataLabels) {
+      problems.push(check.dataLabels ? '需显示数据标签' : '不应显示数据标签');
+    }
+    if (check.dataLabelPos !== undefined && chart.dataLabels.show) {
+      if (!chart.dataLabels.pos || normText(chart.dataLabels.pos).toLowerCase() !== normText(check.dataLabelPos).toLowerCase()) {
+        problems.push(`数据标签位置应为${check.dataLabelPos}（实为 ${chart.dataLabels.pos || '默认'}）`);
+      }
+    }
+    // 图例
+    if (check.legend !== undefined && !!chart.legend.show !== !!check.legend) {
+      problems.push(check.legend ? '需显示图例' : '不应显示图例');
+    }
+    if (check.legendPos !== undefined && chart.legend.show) {
+      const normPos = (p) => ({ r: 'r', right: 'r', b: 'b', bottom: 'b', l: 'l', left: 'l', t: 't', top: 't', tr: 'tr' })[String(p || '').toLowerCase()] || String(p || '').toLowerCase();
+      if (normPos(chart.legend.pos) !== normPos(check.legendPos)) problems.push(`图例位置应为${check.legendPos}（实为 ${chart.legend.pos || '默认'}）`);
+    }
+    // 轴标题
+    if (check.catTitle !== undefined && normText(chart.catTitle).toLowerCase() !== normText(check.catTitle).toLowerCase()) {
+      problems.push(`X(分类)轴标题应为「${check.catTitle}」（实为「${chart.catTitle || '无'}」）`);
+    }
+    if (check.valTitle !== undefined && normText(chart.valTitle).toLowerCase() !== normText(check.valTitle).toLowerCase()) {
+      problems.push(`Y(数值)轴标题应为「${check.valTitle}」（实为「${chart.valTitle || '无'}」）`);
+    }
+    // 系列产生在行 / 列
+    if (check.seriesByRow !== undefined) {
+      if (chart.seriesByRow === null) problems.push('无法判断系列方向（图表无数据系列）');
+      else if (!!chart.seriesByRow !== !!check.seriesByRow) problems.push(check.seriesByRow ? '系列应产生在「行」' : '系列应产生在「列」');
+    }
     return {
       pass: problems.length === 0,
-      got: `${chart.chartType || '?'}${chart.barDir ? '/' + chart.barDir : ''} 标题「${chart.title || '无'}」 分类 ${series0.cat || '无'} 数值 ${(chart.series.map((s) => s.val).filter(Boolean).join(',') || '无')}`,
-      want: [check.chartType, check.title, check.catRange, check.valRange].filter(Boolean).join(' '),
+      got: `${chart.chartType || '?'}${chart.barDir ? '/' + chart.barDir : ''} 标题「${chart.title || '无'}」 分类 ${series0.cat || '无'} 数值 ${(chart.series.map((s) => s.val).filter(Boolean).join(',') || '无')} 图例${chart.legend.show ? chart.legend.pos || '有' : '无'} 标签${chart.dataLabels.show ? (chart.dataLabels.pos || '有') : '无'}`,
+      want: [check.chartType, check.title, check.catRange, check.valRange, check.legendPos ? '图例' + check.legendPos : '', check.dataLabels ? '数据标签' : ''].filter(Boolean).join(' '),
       note: problems.join('；'),
     };
   },
@@ -1148,6 +1520,23 @@ const CHECKERS = {
           ps.push(`填充色应为 ${check.fillColor}（实为 ${gotColor || '无'}）`);
         }
       }
+      // 字体色（条件格式的"红色文本"实际是把字体设为红，而非填充）
+      if (check.fontColor) {
+        const dxf = r.dxfId !== null && r.dxfId !== undefined ? (sheet.styles.dxfs || [])[r.dxfId] : null;
+        const gotColor = dxf ? dxf.fontColor : null;
+        if (!colorMatches(gotColor, check.fontColor)) {
+          ps.push(`字体色应为 ${check.fontColor}（实为 ${gotColor || '无'}）`);
+        }
+      }
+      // 数据条
+      if (check.barColor) {
+        const got = r.dataBar ? r.dataBar.color : null;
+        if (!colorMatches(got, check.barColor)) ps.push(`数据条颜色应为 ${check.barColor}（实为 ${got || '无'}）`);
+      }
+      if (check.gradient !== undefined) {
+        if (!r.dataBar) ps.push('未找到数据条');
+        else if (!!r.dataBar.gradient !== !!check.gradient) ps.push(check.gradient ? '应为渐变填充数据条' : '应为实心填充数据条');
+      }
       if (!ps.length) {
         return {
           pass: true,
@@ -1241,6 +1630,50 @@ function colorMatches(got, want) {
   const a = normColor(got);
   const b = normColor(want);
   return !!a && !!b && a === b;
+}
+
+/**
+ * OOXML 边框线型名 → 该名兼容的同义集。
+ * 真实产物：单实线=thin、双实线=double、粗线=medium、虚线=dashed、点线=dotted。
+ * 返回 null 表示"任意线型均可"（题面写"线型不限"时用）。
+ */
+function borderStyleSet(style) {
+  const key = String(style || '').toLowerCase();
+  if (!key || key === 'any') return null;
+  const MAP = {
+    thin: ['thin', 'hair'],
+    medium: ['medium', 'thick'],
+    thick: ['thick', 'medium'],
+    double: ['double'],
+    dashed: ['dashed', 'mediumDashed', 'dashDot', 'mediumDashDot', 'longDash', 'longDashDot'],
+    dotted: ['dotted', 'mediumDotted'],
+  };
+  return new Set(MAP[key] || [key]);
+}
+
+function sideCN(n) {
+  return ({ left: '左边', right: '右边', top: '上边', bottom: '下边' })[n] || n;
+}
+
+/** 'A' / 'A:C' / 'A2:C5' → { min, max }（列号，1-based） */
+function parseColSpec(spec) {
+  const clean = String(spec === undefined || spec === null ? '' : spec).toUpperCase().replace(/[^A-Z:]/g, '');
+  const [a, b] = clean.split(':');
+  const min = colToNum(a) || 1;
+  const max = b ? (colToNum(b) || min) : min;
+  return { min: Math.min(min, max), max: Math.max(min, max) };
+}
+
+/** 1 / '1:2' / 'A1:B2' → { min, max }（行号，1-based） */
+function parseRowSpec(spec) {
+  if (typeof spec === 'number') return { min: spec, max: spec };
+  const clean = String(spec === undefined || spec === null ? '' : spec).toUpperCase();
+  const [a, b] = clean.split(':');
+  const numA = parseInt(String(a).replace(/[^0-9]/g, ''), 10);
+  const numB = b !== undefined ? parseInt(String(b).replace(/[^0-9]/g, ''), 10) : numA;
+  const min = isNaN(numA) ? 1 : numA;
+  const max = isNaN(numB) ? min : numB;
+  return { min: Math.min(min, max), max: Math.max(min, max) };
 }
 
 function describeCol(col) {
@@ -1344,11 +1777,20 @@ async function gradeFile(input, spec) {
     stepEarned = round2(stepEarned);
     total += stepScore;
     earned += stepEarned;
+    // 演示视频：一个步骤可挂多条（video_urls[]），旧单字段 video_url 继续兼容
+    const stepVideos = (() => {
+      const out = [];
+      const push = (u) => { const v = String(u || '').trim(); if (v && !out.includes(v)) out.push(v); };
+      if (Array.isArray(st.video_urls)) st.video_urls.forEach(push);
+      push(st.video_url);
+      return out;
+    })();
     result.steps.push({
       id: st.id || '',
       title: st.title || '',
       desc: st.desc || '',
-      video_url: st.video_url || '',
+      video_url: stepVideos[0] || '',
+      video_urls: stepVideos,
       score: round2(stepScore),
       obtained: stepEarned,
       pass: checksIn.length ? stepEarned >= round2(stepScore) - 1e-9 : false,
@@ -1423,11 +1865,28 @@ function suggestSpecFromModel(model, opts = {}) {
         }
         const xf = model.styles.cellXfs[cell.styleIndex] || {};
         const font = model.styles.fonts[xf.fontId] || {};
-        if (font.name || font.bold || font.size) {
-          checks.push({ kind: 'font', ref: anchor, name: font.name || undefined, bold: !!font.bold, size: font.size || undefined, score: 1, label: '字体设置' });
+        if (font.name || font.bold || font.italic || font.underline || font.size || font.color) {
+          checks.push({
+            kind: 'font', ref: anchor, score: 1, label: '字体设置',
+            name: font.name || undefined,
+            bold: !!font.bold,
+            italic: font.italic ? true : undefined,
+            underline: font.underline ? true : undefined,
+            size: font.size || undefined,
+            // 只在明确设了非黑前景色时才生成颜色检查（避免 theme/默认色噪声）
+            color: (font.color && /^[0-9A-F]{8}$/i.test(font.color) && !/^FF000000$/i.test(font.color)) ? font.color : undefined,
+          });
         }
-        if (xf.alignment && xf.alignment.horizontal) {
-          checks.push({ kind: 'align', ref: anchor, horizontal: xf.alignment.horizontal, score: 1, label: '对齐方式' });
+        const fillDef = model.styles.fills[xf.fillId || 0] || {};
+        if (fillDef.color && /^[0-9A-F]{8}$/i.test(fillDef.color)) {
+          checks.push({ kind: 'fill', ref: anchor, color: fillDef.color, score: 1, label: '底纹填充' });
+        }
+        if (xf.alignment && (xf.alignment.horizontal || xf.alignment.vertical)) {
+          checks.push({
+            kind: 'align', ref: anchor, score: 1, label: '对齐方式',
+            horizontal: xf.alignment.horizontal || undefined,
+            vertical: xf.alignment.vertical || undefined,
+          });
         }
       }
     }
@@ -1476,8 +1935,70 @@ function suggestSpecFromModel(model, opts = {}) {
         title: chart.title || undefined,
         catRange: s0.cat || undefined,
         valRange: s0.val || undefined,
+        legend: chart.legend.show ? true : undefined,
+        legendPos: chart.legend.show ? (chart.legend.pos || undefined) : undefined,
+        dataLabels: chart.dataLabels.show ? true : undefined,
+        dataLabelPos: chart.dataLabels.show ? (chart.dataLabels.pos || undefined) : undefined,
+        catTitle: chart.catTitle || undefined,
+        valTitle: chart.valTitle || undefined,
       }],
     });
+  }
+
+  // 步骤：边框 / 列宽 / 行高（表格外观；88 道真题里高频出现）
+  {
+    const checks = [];
+    // 边框：以"有边框的单元格"的外接矩形作为检查区域
+    const bordered = [];
+    for (const c of sheet.cells.values()) {
+      const xf = model.styles.cellXfs[c.styleIndex] || {};
+      const bd = model.styles.borders[xf.borderId || 0];
+      if (!bd) continue;
+      if (['left', 'right', 'top', 'bottom'].some((s) => bd[s] && bd[s].style)) bordered.push(c.ref);
+    }
+    if (bordered.length) {
+      const ps = bordered.map(parseRef).filter(Boolean);
+      const minR = Math.min(...ps.map((p) => p.row));
+      const maxR = Math.max(...ps.map((p) => p.row));
+      const minC = Math.min(...ps.map((p) => p.col));
+      const maxC = Math.max(...ps.map((p) => p.col));
+      const range = `${numToCol(minC)}${minR}:${numToCol(maxC)}${maxR}`;
+      const firstCell = sheet.cells.get(bordered[0]);
+      const fbd = model.styles.borders[(model.styles.cellXfs[firstCell.styleIndex] || {}).borderId || 0] || {};
+      const st = ['left', 'top', 'right', 'bottom'].map((k) => fbd[k] && fbd[k].style).find(Boolean) || undefined;
+      const clr = ['left', 'top', 'right', 'bottom'].map((k) => fbd[k] && fbd[k].color).find(Boolean) || undefined;
+      checks.push({
+        kind: 'border', range, score: 3, label: `区域边框 ${range}`,
+        style: st || 'any',
+        color: (clr && /^[0-9A-F]{8}$/i.test(clr)) ? clr : undefined,
+        edges: 'all',
+      });
+    }
+    // 列宽：仅取显式自定义宽度（跳过默认列宽）
+    const seenCols = [];
+    for (const d of (sheet.cols || [])) {
+      if (!d.customWidth || d.width === null) continue;
+      if (seenCols.length >= 8) break;
+      if (d.max - d.min > 3) continue; // 大跨度列宽定义不逐个生成
+      for (let cNum = d.min; cNum <= d.max && seenCols.length < 8; cNum++) {
+        seenCols.push(cNum);
+        checks.push({ kind: 'col_width', col: numToCol(cNum), width: round2(d.width), mode: 'exact', score: 1, label: `${numToCol(cNum)} 列宽 ${round2(d.width)}` });
+      }
+    }
+    // 行高：取前 3 个不同的自定义高度各生成一条
+    const heightSeen = new Map();
+    for (const [r, h] of (sheet.rowHeights || new Map()).entries()) {
+      if (!heightSeen.has(h)) heightSeen.set(h, r);
+    }
+    let hi = 0;
+    for (const [h, r] of heightSeen.entries()) {
+      if (hi >= 3) break;
+      checks.push({ kind: 'row_height', row: r, height: round2(h), mode: 'exact', score: 1, label: `第 ${r} 行 行高 ${round2(h)}` });
+      hi++;
+    }
+    if (checks.length) {
+      steps.push({ id: 's' + (steps.length + 1), title: '边框 / 列宽 / 行高', desc: '', video_url: '', score: checks.reduce((a, c) => a + c.score, 0), checks });
+    }
   }
 
   // 步骤四：排序（优先信 sortState；没有就启发式找"严格有序的数值列"）
