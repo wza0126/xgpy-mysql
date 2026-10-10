@@ -1774,11 +1774,18 @@ ${isChoice ? `5. 对于选择题，answers字段必须填写选项字母（A、B
                       <span className={`px-2 py-1 rounded-full text-xs ${
                         question.type === 'choice' ? 'bg-blue-100 text-blue-600' :
                         question.type === 'composite' ? 'bg-purple-100 text-purple-600' :
+                        question.type === 'wps_op' ? 'bg-emerald-100 text-emerald-600' :
                         'bg-green-100 text-green-600'
                       }`}>
                         {question.type === 'choice' ? '选择题' :
-                         question.type === 'composite' ? '综合题' : '填空题'}
+                         question.type === 'composite' ? '综合题' :
+                         question.type === 'wps_op' ? 'WPS操作题' : '填空题'}
                       </span>
+                      {question.type === 'wps_op' && (
+                        <span className="px-1.5 py-0.5 bg-emerald-50 text-emerald-600 rounded text-xs">
+                          操作题
+                        </span>
+                      )}
                       {question.type === 'composite' && (() => {
                         try {
                           const subQs = JSON.parse(question.answers || '[]');
@@ -1843,12 +1850,25 @@ ${isChoice ? `5. 对于选择题，answers字段必须填写选项字母（A、B
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex gap-2 justify-end">
-                      <button
-                        onClick={() => openEdit(question)}
-                        className="text-blue-600 hover:bg-blue-50 px-2 py-1 rounded transition-colors"
-                      >
-                        <i className="fa-solid fa-edit"></i>
-                      </button>
+                      {question.type === 'wps_op' ? (
+                        // ⛔ WPS 操作题带评分点 spec（wps_spec），本页的普通编辑器改不了它，
+                        //    硬开编辑器会把 content/answers 覆盖成普通题格式 → 只能去「WPS操作题」菜单里编辑。
+                        <button
+                          type="button"
+                          disabled
+                          title="WPS 操作题请到左侧菜单「WPS操作题」中编辑"
+                          className="text-gray-300 px-2 py-1 rounded cursor-not-allowed"
+                        >
+                          <i className="fa-solid fa-edit"></i>
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => openEdit(question)}
+                          className="text-blue-600 hover:bg-blue-50 px-2 py-1 rounded transition-colors"
+                        >
+                          <i className="fa-solid fa-edit"></i>
+                        </button>
+                      )}
                       <button
                         onClick={(e) => {
                           e.preventDefault();

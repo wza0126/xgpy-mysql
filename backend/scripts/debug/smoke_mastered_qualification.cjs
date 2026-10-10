@@ -249,9 +249,11 @@ async function main() {
   section('B2. 类目可练习题量接口');
 
   // 独立算出 practice_enabled=1 的题量分布，与接口比对
+  // ⛔ 必须同样排除 WPS 操作题（type='wps_op'）：它走独立入口，不计入可练习题量口径
+  //    （后端 index.js 的 SQL_NOT_WPS_OP）。漏掉这个条件接口与实测会差 1 题。
   const [pcRows] = await pool.query(
     `SELECT cluster_id, COUNT(*) AS cnt FROM questions
-     WHERE practice_enabled = 1 AND cluster_id IS NOT NULL AND cluster_id <> ''
+     WHERE practice_enabled = 1 AND type <> 'wps_op' AND cluster_id IS NOT NULL AND cluster_id <> ''
      GROUP BY cluster_id`
   );
   const expectPrimary = {};
@@ -303,15 +305,18 @@ async function main() {
     /\/api\/student\/qualification\/pk\/:configId/.test(idxSrc));
   ok('新增教师端类目题量接口（供设置上限参考）',
     /\/api\/teacher\/qualification\/counts/.test(idxSrc));
-  ok('题量口径用 practice_enabled=1（与掌握来源一致）',
+  ok('题量口径用 practice_enabled=1 且排除 WPS 操作题（与掌握来源一致）',
     /async function getPracticableCountInClusters\(/.test(idxSrc)
-    && /WHERE practice_enabled = 1'/.test(idxSrc));
+    && /WHERE practice_enabled = 1\$\{SQL_NOT_WPS_OP\}/.test(idxSrc));
   // 注：断言不要依赖「这两列是 INSERT 列表的最后两项」——迁移 086 之后后面还跟了奖励列。
   ok('PK 教师端接口透传新字段（POST）',
     /INSERT INTO pk_battle_configs[\s\S]{0,600}?qualification_mastered_count, qualification_mastered_clusters/.test(idxSrc)
     && /qualification_mastered_count, qualification_mastered_clusters[\s\S]{0,400}?VALUES \(/.test(idxSrc));
+  // 注：该 SQL 后来加了表别名 c（配合 pk_battle_config_class_visibility 投放班级），
+  //     旧断言写的是 `FROM pk_battle_configs WHERE is_active`，早已匹配不上 → 更正为带别名的形态。
   ok('学生端 battle-configs/active 返回新字段',
-    /qualification_mastered_count, qualification_mastered_clusters FROM pk_battle_configs WHERE is_active/.test(idxSrc));
+    /qualification_mastered_count, c\.qualification_mastered_clusters/.test(idxSrc)
+    && /FROM pk_battle_configs c\s*\n\s*WHERE c\.is_active = 1/.test(idxSrc));
 
   // 教师端
   const tm = readFe('src/components/teacher/TestManager.tsx');

@@ -1077,7 +1077,9 @@ const TaskEditPanel: React.FC<{
         console.error('加载题库失败:', result.error);
         return;
       }
-      setBankQuestions(result.data || []);
+      // ⛔ 随堂习题里不放 WPS 操作题（type='wps_op'）：它走独立入口，没有 options/answers，
+      //    学生端随堂作答渲染不了。教师布置操作题请让学生到桌面「操作题」里做。
+      setBankQuestions((result.data || []).filter((q: any) => q.type !== 'wps_op'));
       if (result.tags) setBankAllTags(result.tags);
       if (result.cluster_tree) setBankClusterTree(result.cluster_tree);
       if (result.total !== undefined) setBankTotal(result.total);

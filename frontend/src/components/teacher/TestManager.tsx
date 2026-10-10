@@ -72,13 +72,14 @@ export const TestManager: React.FC = () => {
     const { data: questions } = await backendClient.from('questions').select('*').eq('exam_enabled', true);
     if (questions) {
       const tagSet = new Set<string>();
-      (questions as Question[]).forEach((q) => {
+      // ⛔ 排除 WPS 操作题（type='wps_op'）：不进普通测试池，别让它的标签污染筛选树
+      (questions as Question[]).filter((q) => (q as any).type !== 'wps_op').forEach((q) => {
         const tags = parseTags(q.tags);
         tags.forEach((t) => tagSet.add(t));
       });
       setAllTags(Array.from(tagSet).sort());
       // 顺带构建 AI 聚类树（只用可用于考试的题目）
-      setClusterTree(buildClusterTree((questions as any[]).map((q) => q.cluster_id)));
+      setClusterTree(buildClusterTree((questions as any[]).filter((q) => q.type !== 'wps_op').map((q) => q.cluster_id)));
     }
   };
 

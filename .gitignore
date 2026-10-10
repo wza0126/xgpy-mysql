@@ -36,6 +36,12 @@ backend/tmp-data-io/
 # backend/database/migrations/ 下的迁移脚本是代码，必须入库）
 /*.sql
 
+# 根目录临时素材（题目模板等已固化到 backend/scripts/debug/fixtures/，不入库）
+/*.xlsx
+
+# 调试截图产物（UI 验证脚本写入 backend/scripts/debug/shots/）
+backend/scripts/debug/shots/
+
 # 日志
 *.log
 

@@ -6,6 +6,7 @@ import { API_CONFIG } from '../api/config';
 import { ClassManager } from '../components/teacher/ClassManager';
 import { StudentManager } from '../components/teacher/StudentManager';
 import { QuestionBank } from '../components/teacher/QuestionBank';
+import { WpsOpManager } from '../components/teacher/WpsOpManager';
 import { TestManager } from '../components/teacher/TestManager';
 import { PrizeManager } from '../components/teacher/PrizeManager';
 import { PetConfig } from '../components/teacher/PetConfig';
@@ -51,6 +52,7 @@ const menuItems = [
   { id: 'classes', title: '班级管理', icon: 'fa-users' },
   { id: 'students', title: '学生管理', icon: 'fa-user-graduate' },
   { id: 'questions', title: '题库管理', icon: 'fa-book' },
+  { id: 'wpsOp', title: 'WPS操作题', icon: 'fa-file-excel' },
   { id: 'knowledgeBase', title: '答疑库管理', icon: 'fa-graduation-cap' },
   { id: 'tests', title: '考试管理', icon: 'fa-clipboard-check' },
   { id: 'python', title: 'Python编程', icon: 'fa-code' },
@@ -73,6 +75,7 @@ const components: Record<string, React.ReactNode> = {
   classes: <ClassManager />,
   students: <StudentManager />,
   questions: <QuestionBank />,
+  wpsOp: <WpsOpManager />,
   knowledgeBase: <KnowledgeBaseManager />,
   tests: <TestManager />,
   python: <PythonManager />,

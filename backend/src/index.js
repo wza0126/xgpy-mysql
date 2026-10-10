@@ -6,6 +6,7 @@ const SecureAuth = require('./secure-auth');
 const { LicenseManager, FEATURES } = require('./license-manager');
 const { runMigrations } = require('./migrate');
 const { registerWebProxy, invalidateProxyPerm } = require('./web-proxy');
+const { registerWpsOp } = require('./wps-op');
 const PythonSandbox = require('./python-sandbox');
 const PythonGrader = require('./python-grader');
 const { v4: uuidv4 } = require('uuid');
@@ -803,7 +804,7 @@ app.get('/api/teacher/analytics/chapter-mastery/:classId', authenticate, require
     // 各章题库总量（与学习模块的分母口径一致）
     const [clusterRows] = await pool.query(
       `SELECT cluster_id, COUNT(*) AS cnt FROM questions
-       WHERE cluster_id IS NOT NULL AND cluster_id <> ''
+       WHERE cluster_id IS NOT NULL AND cluster_id <> ''${SQL_NOT_WPS_OP}
        GROUP BY cluster_id`
     );
     const chapterQCount = new Map();
@@ -1071,7 +1072,17 @@ function formatRows(rows) {
 //   1) 练习 / 错题 / 举一反三 —— 提交后由 /api/business/submit-answer 回执带回；
 //   2) 测试 / 考试 —— 提交后由 submit-test / submit-exam 回执带回；
 //   3) 错题本回看 —— /api/practice/reveal-answers（只返回本人做过的题）。
-const QUESTION_ANSWER_FIELDS = ['answers', 'explanation'];
+// ⛔ wps_spec 必须在这里：它内含操作题的评分点（即答案），
+//    通用表接口 /api/tables/questions 对学生走 stripQuestionRowsForRequester，
+//    漏加会让整份评分点从旁路泄露给学生。
+const QUESTION_ANSWER_FIELDS = ['answers', 'explanation', 'wps_spec'];
+
+// ⛔ WPS 操作题（type='wps_op'）的**唯一入口**是学生端桌面「操作题」/ 教师端「WPS操作题」。
+//    它没有 options/answers，普通作答 UI 渲染不了 → 一律不进练习/考试抽题池，
+//    也不计入「可练习题量」「章节题量」等口径（否则页面上显示的数与实际能练的数对不上）。
+//    凡取题/计数 SQL 都要带上这个片段。将来若要把操作题并入测试/考试，
+//    改这一处 + 各作答 UI 即可（操作题自己的路由见 wps-op.js）。
+const SQL_NOT_WPS_OP = " AND type <> 'wps_op'";
 
 function stripQuestionForStudent(row) {
   if (!row || typeof row !== 'object') return row;
@@ -3519,7 +3530,7 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
       return secondaries.includes(secondary);
     };
     if (testTagFilters.length > 0) {
-      const [poolRows] = await connection.query('SELECT tags, cluster_id FROM questions WHERE exam_enabled = 1');
+      const [poolRows] = await connection.query(`SELECT tags, cluster_id FROM questions WHERE exam_enabled = 1${SQL_NOT_WPS_OP}`);
       poolCount = poolRows.filter(r => {
         let t = r.tags;
         if (typeof t === 'string') {
@@ -3529,10 +3540,10 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
         return tagHit && hitClusterFilter(r.cluster_id);
       }).length;
     } else if (testClusterFilters.length > 0) {
-      const [poolRows] = await connection.query('SELECT cluster_id FROM questions WHERE exam_enabled = 1');
+      const [poolRows] = await connection.query(`SELECT cluster_id FROM questions WHERE exam_enabled = 1${SQL_NOT_WPS_OP}`);
       poolCount = poolRows.filter(r => hitClusterFilter(r.cluster_id)).length;
     } else {
-      const [poolCountRows] = await connection.query('SELECT COUNT(*) n FROM questions WHERE exam_enabled = 1');
+      const [poolCountRows] = await connection.query(`SELECT COUNT(*) n FROM questions WHERE exam_enabled = 1${SQL_NOT_WPS_OP}`);
       poolCount = Number(poolCountRows[0]?.n || 0);
     }
     const submittedCount = new Set(
@@ -8689,10 +8700,10 @@ app.get('/api/practice/similar/:questionId', authenticate, async (req, res) => {
     // 排除当前题 + 已掌握题
     const excludeSet = new Set([questionId, ...excludeIds]);
 
-    // 候选题库：必须是练习可用题（practice_enabled）
+    // 候选题库：必须是练习可用题（practice_enabled），且排除 WPS 操作题（走独立入口）
     const fetchQuestions = async (whereClause, params) => {
       const allExcluded = Array.from(excludeSet);
-      let sql = `SELECT id, type, content, options, answers, tags, explanation FROM questions WHERE practice_enabled = 1 ${whereClause}`;
+      let sql = `SELECT id, type, content, options, answers, tags, explanation FROM questions WHERE practice_enabled = 1${SQL_NOT_WPS_OP} ${whereClause}`;
       const queryParams = [...params];
       if (allExcluded.length > 0) {
         sql += ' AND id NOT IN (?)';
@@ -8723,7 +8734,7 @@ app.get('/api/practice/similar/:questionId', authenticate, async (req, res) => {
       // 取前 3 个关键词
       const keywords = keywordMatch.slice(0, 3);
       if (keywords.length > 0) {
-        let sql = `SELECT id, type, content, options, answers, tags, explanation FROM questions WHERE practice_enabled = 1 AND (`;
+        let sql = `SELECT id, type, content, options, answers, tags, explanation FROM questions WHERE practice_enabled = 1${SQL_NOT_WPS_OP} AND (`;
         const ors = keywords.map(() => 'content LIKE ?').join(' OR ');
         sql += ors + ')';
         const params = keywords.map(k => `%${k}%`);
@@ -9027,13 +9038,13 @@ async function getPracticableCountInClusters(primaryNames) {
     : [];
   if (names.length === 0) {
     const [rows] = await pool.query(
-      'SELECT COUNT(*) AS n FROM questions WHERE practice_enabled = 1'
+      `SELECT COUNT(*) AS n FROM questions WHERE practice_enabled = 1${SQL_NOT_WPS_OP}`
     );
     return Number(rows[0]?.n) || 0;
   }
   const [rows] = await pool.query(
     `SELECT cluster_id FROM questions
-     WHERE practice_enabled = 1 AND cluster_id IS NOT NULL AND cluster_id <> ''`
+     WHERE practice_enabled = 1${SQL_NOT_WPS_OP} AND cluster_id IS NOT NULL AND cluster_id <> ''`
   );
   const wanted = new Set(names);
   let count = 0;
@@ -9159,7 +9170,7 @@ app.get('/api/teacher/qualification/counts', authenticate, requireTeacher, async
   try {
     const [rows] = await pool.query(
       `SELECT cluster_id, COUNT(*) AS cnt FROM questions
-       WHERE practice_enabled = 1 AND cluster_id IS NOT NULL AND cluster_id <> ''
+       WHERE practice_enabled = 1${SQL_NOT_WPS_OP} AND cluster_id IS NOT NULL AND cluster_id <> ''
        GROUP BY cluster_id`
     );
     const byPrimary = {};
@@ -9241,7 +9252,7 @@ app.get('/api/student/learn-chapters', authenticate, async (req, res) => {
     // 各 cluster_id 的题量（一级章 + 二级"章/小节"）
     const [clusterRows] = await pool.query(
       `SELECT cluster_id, COUNT(*) AS cnt FROM questions
-       WHERE cluster_id IS NOT NULL AND cluster_id <> ''
+       WHERE cluster_id IS NOT NULL AND cluster_id <> ''${SQL_NOT_WPS_OP}
        GROUP BY cluster_id`
     );
     const chapterCount = new Map();
@@ -9345,7 +9356,7 @@ app.get('/api/student/learn-chapter/:clusterId', authenticate, async (req, res) 
       const paths = secs.map(s => `${clusterId}/${s}`);
       const [rows] = await pool.query(
         `SELECT cluster_id, COUNT(*) AS cnt FROM questions
-         WHERE cluster_id IN (${placeholders}) GROUP BY cluster_id`,
+         WHERE cluster_id IN (${placeholders})${SQL_NOT_WPS_OP} GROUP BY cluster_id`,
         paths
       );
       counts = rows;
@@ -13121,6 +13132,11 @@ function requireTeachingRole(req, res, next) {
   }
   next();
 }
+
+// ===== WPS 操作题（学测操作题一期）=====
+// 模板上传 / 标准答案解析 / 学生作答判分 / 历史查询，全部在 wps-op.js 内注册。
+// ⚠️ 必须放在 requireTeacher / requireStudent 定义之后（const 无提升，靠前会 TDZ 报错）。
+registerWpsOp(app, { pool, authenticate, requireTeacher, requireStudent, uploadsDir });
 
 // ===== 教师端接口 =====
 

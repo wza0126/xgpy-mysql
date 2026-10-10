@@ -12,6 +12,7 @@ import { QuickAccessPanel } from '../components/common/QuickAccessPanel';
 import { LearnModule } from '../components/student/LearnModule';
 import { PracticeModule } from '../components/student/PracticeModule';
 import { TestModule } from '../components/student/TestModule';
+import { WpsOpApp } from '../components/student/WpsOpApp';
 import { WrongQuestions } from '../components/student/WrongQuestions';
 import { Notebook } from '../components/student/Notebook';
 import { PetModule } from '../components/student/PetModule';
@@ -60,6 +61,7 @@ const moduleComponents: Record<string, React.ReactNode> = {
   learn: <LearnModule />,
   practice: <PracticeModule />,
   test: <TestModule />,
+  wpsOp: <WpsOpApp />,
   wrong: <WrongQuestions />,
   notebook: <Notebook />,
   python: <PythonProgramming />,

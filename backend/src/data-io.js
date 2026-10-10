@@ -22,7 +22,9 @@ const DOMAIN_DEFS = [
   { id: 'accounts', name: '学生账号', tables: ['classes', 'profiles', 'user_roles'] },
   { id: 'questions', name: '题库', tables: ['questions', 'knowledge_points'] },
   { id: 'tests', name: '测试与考试', tables: ['tests', 'test_records', 'exam_records', 'exam_progress'] },
-  { id: 'answers', name: '答题记录', tables: ['student_answers', 'wrong_questions', 'question_explained_marks'] },
+  // ⛔ wps_op_submissions 必须归域：不进 DOMAIN_DEFS 会落「其他」域且 defaultOff，导出静默丢数据。
+  //    操作题提交与判分明细属于答题记录，与 student_answers 同域。
+  { id: 'answers', name: '答题记录', tables: ['student_answers', 'wps_op_submissions', 'wrong_questions', 'question_explained_marks'] },
   { id: 'points', name: '积分与游戏化', tables: ['point_transactions', 'pets', 'pet_config', 'pet_foods', 'student_pets', 'student_equipments', 'student_skins', 'student_buffs', 'equipments', 'prizes', 'prize_class_visibility', 'exchange_records', 'pet_tips', 'internet_codes'] },
   { id: 'tasks', name: '课堂任务', tables: ['task_resource', 'task_question', 'task_class', 'task_study_log', 'notes'] },
   { id: 'learning', name: '学习活动', tables: ['word_list', 'student_word_progress', 'learn_visited_records', 'studious_checkins', 'keyboard_lesson_progress', 'typing_rooms', 'typing_scores', 'typing_duel_records', 'roll_call_layout', 'roll_call_seating', 'roll_call_attendance'] },

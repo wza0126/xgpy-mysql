@@ -994,10 +994,16 @@ export const TestModule: React.FC = () => {
     console.log('startTest - testData:', testData);
     console.log('startTest - tag_filters:', testData.tag_filters, typeof testData.tag_filters);
 
-    const { data: allQuestions } = await backendClient
+    const { data: allQuestionsRaw } = await backendClient
       .from('questions')
       .select('*')
-      .eq('exam_enabled', true);
+      .eq('exam_enabled', true)
+      .neq('type', 'wps_op');
+
+    // ⛔ 兜底过滤：WPS 操作题（type='wps_op'）走独立入口（桌面「操作题」），
+    //    没有 options/answers，进普通测试会被渲染成无法作答的空白题。
+    //    后端 poolCount 分母同样剔除了它（index.js 的 SQL_NOT_WPS_OP），两边口径必须一致。
+    const allQuestions = (allQuestionsRaw || []).filter((q: any) => q.type !== 'wps_op');
 
     console.log('startTest - allQuestions count:', allQuestions?.length);
 

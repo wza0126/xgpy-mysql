@@ -287,13 +287,22 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
   };
 
   const fetchInitialData = async () => {
-    const { data: questionsData } = await backendClient.from('questions').select('*').eq('practice_enabled', true);
+    // ⛔ 服务端就把 WPS 操作题（type='wps_op'）挡掉：它走**独立入口**（桌面「操作题」→ WpsOpApp），
+    //    没有 options/answers，混进普通练习池会被渲染成一道无法作答的空白题。
+    //    下面再按题型兜底过滤一次（双保险，防止通用表接口 _neq 行为变化）。
+    const { data: questionsData } = await backendClient
+      .from('questions')
+      .select('*')
+      .eq('practice_enabled', true)
+      .neq('type', 'wps_op');
+
+    const practiceRows = (questionsData || []).filter((q: any) => q.type !== 'wps_op');
 
     if (questionsData) {
-      setQuestions(questionsData as Question[]);
+      setQuestions(practiceRows as Question[]);
       const tagsSet = new Set<string>();
       const tree: ClusterTree = {};
-      questionsData.forEach((q: Question) => {
+      practiceRows.forEach((q: Question) => {
         const tags = parseTags(q.tags);
         tags.forEach((tag) => tagsSet.add(tag));
         // 聚合 AI 聚类：cluster_id 形如 "信息系统/分类与类型"

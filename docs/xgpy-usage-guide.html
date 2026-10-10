@@ -276,6 +276,7 @@ footer b{color:#e2e8f0}
           <div class="dicon"><div class="box" style="background:#ef4444">❌</div><span>错题集</span></div>
           <div class="dicon"><div class="box" style="background:#eab308">📝</div><span>记事本</span></div>
           <div class="dicon"><div class="box" style="background:#2563eb">🐍</div><span>Python</span></div>
+          <div class="dicon"><div class="box" style="background:#059669">📊</div><span>操作题</span></div>
           <div class="dicon"><div class="box" style="background:#6366f1">🚀</div><span>应用中心</span></div>
           <div class="dicon"><div class="box" style="background:#ec4899">🐾</div><span>萌宠</span></div>
           <div class="dicon"><div class="box" style="background:#f97316">🎁</div><span>兑换</span></div>
@@ -290,10 +291,10 @@ footer b{color:#e2e8f0}
 
       <div class="card tea">
         <h3><span class="ico">👩‍🏫</span>教师端：左侧菜单工作台</h3>
-        <p>登录后是左侧 18 项菜单的工作台，点一项右侧即切换，无需开多个页面。</p>
+        <p>登录后是左侧 20 项菜单的工作台，点一项右侧即切换，无需开多个页面。</p>
         <table class="tbl">
           <tr><th>分组</th><th>包含菜单</th></tr>
-          <tr><td><b>课前准备</b></td><td>班级管理、学生管理、题库管理、答疑库管理</td></tr>
+          <tr><td><b>课前准备</b></td><td>班级管理、学生管理、题库管理、WPS操作题、答疑库管理</td></tr>
           <tr><td><b>课堂进行</b></td><td>课堂点名、课堂任务（备课工作台）、上网管理、通知管理</td></tr>
           <tr><td><b>练习与考试</b></td><td>考试管理（普通测试 / 试卷 / 对战配置 / 对战数据）</td></tr>
           <tr><td><b>课后分析</b></td><td>学情分析、Python编程批改</td></tr>
@@ -345,6 +346,18 @@ footer b{color:#e2e8f0}
           <li>答错可点「<b>同类题强化练习</b>」巩固（不计分、不掉装备）。</li>
         </ul>
         <div class="note warn"><b>掌握门禁：</b>同一题累计答对达到「掌握题目阈值」（默认 3 次，实际以教师端设置为准）后，该题不再计分、不再掉装备，并自动移出练习队列，提示「已掌握」；答错达阈值后本次不再扣分。</div>
+      </div>
+      <div class="card stu">
+        <h3><span class="ico">📊</span>操作题（WPS 表格实操） <span class="tag new">新增</span></h3>
+        <ul>
+          <li>桌面图标「<b>操作题</b>」。做的是<b>真 WPS / Excel 表格</b>：下载模板 → 在表格软件里按要求改 → 把 <code>.xlsx</code> 传回来，<b>由系统自动判分</b>。</li>
+          <li>每道操作题<b>满分 10 分、分步得分</b>：合并居中、字体字号、公式、数字格式、图表……对一步得一步的分。</li>
+          <li>提交后立刻出总分与<b>逐评分点明细</b>（哪一步对、哪一步没对、期望值是什么），可展开逐条核对。</li>
+          <li><b>同一份文件重复上传不会重复记分</b>（按文件指纹判重），只有改了内容再传才算新的一次。</li>
+          <li>「我的提交记录」保留历次成绩，能看出自己有没有进步。</li>
+          <li>部分步骤旁带 <b>▶ 演示视频</b>，不会做可以照着看。</li>
+        </ul>
+        <div class="note tip"><b>小提示：</b>模板请用 WPS 打开，不要用其它软件另存转换；做完直接「另存为」原名上传，格式必须是 <code>.xlsx</code>。</div>
       </div>
     </div>
   </div>
@@ -592,6 +605,20 @@ footer b{color:#e2e8f0}
           <li><b>人工改过的不被重跑覆盖</b>；任务可断点续跑。</li>
           <li>归类后，练习/学情/组卷都能按章节筛选，务必先跑一次。</li>
         </ul>
+      </div>
+      <div class="card tea">
+        <h3><span class="ico">📊</span>WPS 操作题 <span class="tag new">新增</span></h3>
+        <ul>
+          <li>左侧菜单第 4 项就是「<b>WPS操作题</b>」，独立于题库管理，专管学测的 <b>Office 实操题</b>（满分 10 分、分步得分）。</li>
+          <li><b>出题四步走</b>：① 填题干、选章节分类、定满分（默认 10）→ ② 上传<b>空白模板</b>（发给学生的 <code>.xlsx</code>）→ ③ 上传<b>标准答案表</b>，系统自动读表结构<b>生成评分点骨架</b>（合并、公式、小数位、图表等一次配齐）→ ④ 微调分值后保存。</li>
+          <li>评分点按「<b>操作步骤</b>」组织，每步可写说明和小分；每个评分点由一条<b>检查规则</b>构成，共 <b>16 种</b>：工作表存在 / 合并单元格 / 单元格文本 / 单元格数值 / 公式是否存在 / 公式内容 / 公式关键字 / 求和区域 / 区域内公式 / 区域内数值 / 区域内整数显示 / 整数显示 / 字体 / 对齐 / 数字格式 / 图表。</li>
+          <li>每步可填<b>演示视频链接</b>，学生端会显示 <b>▶</b> 按钮，后期逐步录视频即可，不必重做题目。</li>
+          <li>表格右上角有「<b>按评分点重算步骤分</b>」「<b>等比缩放到满分</b>」「<b>直接编辑 JSON</b>」三个快捷工具，改分值不用手算。</li>
+          <li>下方是<b>提交记录</b>：谁交了、第几次、几分、错在哪一步，一目了然。</li>
+          <li>题型为 <b>WPS操作题（wps_op）</b>，在题库列表中与选择/填空/综合题并列。</li>
+        </ul>
+        <div class="note tip"><b>判分怎么算：</b>系统直接读学生上传文件里的 <b>表格结构</b>（公式、合并、字体、数字格式、图表 XML），不是比对文字。所以「用公式算出来」和「手填一个数字」结果不一样——手填会判这一步不得分。评分配置里已针对这点做了<b>区域批量检查</b>，防止学生只在首尾格用公式、中间手填。</div>
+        <div class="note warn"><b>答案保护：</b>标准答案与评分细则<b>绝不下发</b>给学生接口，学生只能看到题干、模板、步骤说明与分值；只有提交后才会回传他这次的得分明细。</div>
       </div>
     </div>
   </div>

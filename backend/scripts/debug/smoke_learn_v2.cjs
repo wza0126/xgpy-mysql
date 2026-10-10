@@ -51,16 +51,23 @@ async function api(token, method, url, body) {
   });
 
   let token;
+  // ⛔ 用于 finally 里还原学生密码（见下）
+  let stuRowId = null;
+  let stuPwdBefore = null;
   try {
     // 找一个学生账号
     const [stuRows] = await pool.query(
-      "SELECT username FROM profiles WHERE role='student' ORDER BY created_at LIMIT 1"
+      "SELECT id, username, password_hash FROM profiles WHERE role='student' ORDER BY created_at LIMIT 1"
     );
     const stuName = stuRows[0]?.username;
     if (!stuName) throw new Error('库中没有学生账号');
     console.log(`使用学生账号: ${stuName}`);
 
-    // 学生初始密码在种子数据里是 meoo.local，实际库中可能已改；用管理员重置成临时密码
+    // ⛔ 该账号的真实密码未知（种子密码早被改过），只能临时重置来登录。
+    //    但必须先快照原 password_hash，并在 finally 里还原 —— 否则每跑一次冒烟
+    //    就把一个真实学生的密码永久改掉（本脚本曾经这样污染过学生 c 的密码且未还原）。
+    stuRowId = stuRows[0].id;
+    stuPwdBefore = stuRows[0].password_hash;
     const tmpPwd = 'SmokeLearn!2026';
     await pool.query("UPDATE profiles SET password_hash=SHA2(?,256) WHERE username=?", [tmpPwd, stuName]);
     token = await login(stuName, tmpPwd);
@@ -215,12 +222,25 @@ async function api(token, method, url, body) {
     await pool.query('UPDATE profiles SET studious_times=? WHERE id=?', [timesBefore, stuId]);
     const [leftQa] = await pool.query('SELECT COUNT(*) c FROM ai_qa_history WHERE id LIKE ?', ['smoke_qa_%']);
     ok(Number(leftQa[0].c) === 0, '临时答疑记录已清理');
-    ok(!!token, '学生密码已改为临时密码（不影响生产，改动前请确认）');
+    ok(!!token, '临时登录成功（密码会在 finally 里还原）');
   } catch (e) {
     fail++;
     console.error('\n[EXCEPTION]', e.message);
     console.error(e.stack);
   } finally {
+    // ⛔ 还原学生密码：必须放 finally（异常路径也要还原），末尾再做「不留痕」断言。
+    try {
+      if (stuRowId && stuPwdBefore) {
+        await pool.query('UPDATE profiles SET password_hash=? WHERE id=?', [stuPwdBefore, stuRowId]);
+        const [chkRows] = await pool.query('SELECT password_hash FROM profiles WHERE id=?', [stuRowId]);
+        ok(chkRows[0]?.password_hash === stuPwdBefore, '⛔ 不留痕：学生密码已还原到跑之前');
+      } else {
+        ok(stuRowId || !fail, '⛔ 不留痕：学生密码无需还原（未改）');
+      }
+    } catch (e) {
+      fail++;
+      console.error('  ✗ 还原学生密码失败：' + e.message);
+    }
     await pool.end();
   }
 
