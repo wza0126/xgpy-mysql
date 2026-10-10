@@ -374,7 +374,12 @@ function extractZip(zipPath, destDir) {
     yauzl.open(zipPath, { lazyEntries: true, autoClose: true }, (err, zipfile) => {
       if (err) return reject(err);
       let pending = 0;
+      let ended = false;   // 所有 entry 都已读完
       let failed = false;
+      // ⛔ 必须同时满足「entry 读完」与「写盘都结束」才 resolve。
+      //    旧写法只在 pending===0 时 resolve：首个文件（manifest.json，很小）写完 pending 就归零，
+      //    而此时后续 entry 尚未读完 → 提前 resolve → 导入只看到极少数文件（文件域恢复会静默丢文件）。
+      const done = () => { if (ended && pending === 0 && !failed) resolve(); };
       zipfile.on('error', (e) => { failed = true; reject(e); });
       zipfile.on('entry', (entry) => {
         const name = entry.fileName;
@@ -390,12 +395,12 @@ function extractZip(zipPath, destDir) {
           if (e2) { failed = true; return reject(e2); }
           const ws = fs.createWriteStream(dest);
           rs.pipe(ws);
-          ws.on('finish', () => { pending--; if (pending === 0 && !failed) resolve(); });
+          ws.on('finish', () => { pending--; done(); });
           ws.on('error', (e3) => { failed = true; reject(e3); });
         });
         zipfile.readEntry();
       });
-      zipfile.on('end', () => { if (pending === 0 && !failed) resolve(); });
+      zipfile.on('end', () => { ended = true; done(); });
       zipfile.readEntry();
     });
   });

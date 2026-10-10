@@ -663,6 +663,29 @@ function registerWpsOp(app, deps) {
   });
 
   /**
+   * 下载「我自己」提交的作答文件（只能下自己的）。
+   * 用途：学生下载上次交的文件，在此基础上修改后再上传，避免从头重做。
+   * ⛔ 归属校验：WHERE student_id = ?，别人的提交一概 404。
+   */
+  app.get('/api/student/wps-op/submissions/:submissionId/file', authenticate, requireStudent, async (req, res) => {
+    try {
+      const [rows] = await pool.query(
+        `SELECT file_path, original_filename FROM wps_op_submissions
+          WHERE id = ? AND student_id = ? AND kind = 'wps' LIMIT 1`, [req.params.submissionId, req.user.userId]);
+      if (!rows.length || !rows[0].file_path) return res.status(404).json({ data: null, error: '提交记录不存在' });
+      const rel = String(rows[0].file_path).replace(/^\/+/, '').replace(/^uploads[\\/]/, '');
+      const abs = path.resolve(uploadsDir, rel);
+      // ⛔ 防目录穿越：解析后必须仍落在 submissions 目录内
+      if (!abs.startsWith(submissionDir + path.sep)) return res.status(400).json({ data: null, error: '非法文件路径' });
+      if (!fs.existsSync(abs)) return res.status(404).json({ data: null, error: '文件已不存在（可能被清理）' });
+      res.download(abs, rows[0].original_filename || path.basename(abs));
+    } catch (e) {
+      console.error('wps-op submission download error:', e);
+      res.status(500).json({ data: null, error: e.message });
+    }
+  });
+
+  /**
    * 提交作答并判分。
    * ⛔ 必须 requireStudent：本接口会把结果写进 student_answers（掌握口径按 student_id 统计），
    *    若放行教师，教师的提交会以教师 id 落进答题记录，污染统计且无法归属到任何学生。

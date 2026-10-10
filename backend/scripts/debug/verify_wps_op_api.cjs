@@ -68,6 +68,7 @@ async function login(username, password) {
   let teacherToken = null, stuToken = null, stuId = null;
   let baselineSubs = 0;
   let baselineAnswerIds = new Set();
+  let baselineMySubIds = new Set();
 
   try {
     const [[b1]] = await conn.query('SELECT COUNT(*) AS n FROM wps_op_submissions');
@@ -78,6 +79,11 @@ async function login(username, password) {
     baselineAnswerIds = new Set(bRows.map((r) => r.id));
     const [stuRows] = await conn.query("SELECT id, class_id FROM profiles WHERE username = 'a' LIMIT 1");
     if (!stuRows.length) throw new Error('找不到学生 a');
+    // ⚠️ 基线/兜底/断言全部限定「测试学生 a」：运行期间真实用户可能正在提交，
+    //    全表差集兜底会把别人的提交当泄漏删掉（2026-10-10 误删事故）。
+    baselineMySubIds = new Set(
+      (await conn.query('SELECT id FROM wps_op_submissions WHERE question_id = ? AND student_id = ?', [QUESTION_ID, stuRows[0].id]))[0].map((r) => r.id)
+    );
     stuId = stuRows[0].id;
     const stuClassId = stuRows[0].class_id;
 
@@ -383,7 +389,7 @@ async function login(username, password) {
     const [[wpsPrac]] = await conn.query("SELECT COUNT(*) AS n FROM questions WHERE practice_enabled = 1 AND type = 'wps_op'");
     ok('样例操作题处于练习可用态（否则下面几条断言是空转）', Number(wpsPrac.n) > 0, 'n=' + wpsPrac.n);
 
-    const [[dbPool]] = await conn.query("SELECT COUNT(*) AS n FROM questions WHERE practice_enabled = 1 AND type <> 'wps_op'");
+    const [[dbPool]] = await conn.query("SELECT COUNT(*) AS n FROM questions WHERE practice_enabled = 1 AND type NOT IN ('wps_op','access_op')");
 
     // 1) 学生端练习池：走通用表接口，与 PracticeModule 完全同一条链路
     const poolFilters = encodeURIComponent(JSON.stringify({ practice_enabled: true, type_neq: 'wps_op' }));
@@ -406,7 +412,7 @@ async function login(username, password) {
     const allSecs = [];
     (chaptersRes.body?.data?.chapters || []).forEach((c) => (c.sections || []).forEach((s) => allSecs.push(s)));
     const [secRows] = await conn.query(
-      "SELECT cluster_id, COUNT(*) AS cnt FROM questions WHERE type <> 'wps_op' AND cluster_id IS NOT NULL AND cluster_id <> '' GROUP BY cluster_id"
+      "SELECT cluster_id, COUNT(*) AS cnt FROM questions WHERE type NOT IN ('wps_op','access_op') AND cluster_id IS NOT NULL AND cluster_id <> '' GROUP BY cluster_id"
     );
     const dbSecMap = new Map(secRows.map((r) => [r.cluster_id, Number(r.cnt)]));
     const secMismatch = allSecs.filter((s) => Number(s.question_count) !== (dbSecMap.get(s.path) || 0));
@@ -419,7 +425,7 @@ async function login(username, password) {
 
     // 4) 举一反三（同类题）的回退池同样不得混入 wps_op
     const [peerRows] = await conn.query(
-      "SELECT id FROM questions WHERE type <> 'wps_op' AND practice_enabled = 1 ORDER BY RAND() LIMIT 1"
+      "SELECT id FROM questions WHERE type NOT IN ('wps_op','access_op') AND practice_enabled = 1 ORDER BY RAND() LIMIT 1"
     );
     if (peerRows.length) {
       const sim = await api('GET', `/api/practice/similar/${peerRows[0].id}?limit=10`, { token: stuToken });
@@ -444,16 +450,24 @@ async function login(username, password) {
         const [r] = await conn.query('DELETE FROM student_answers WHERE id IN (?)', [createdAnswerIds]);
         console.log(`  已删除答题记录 ${r.affectedRows} 行`);
       }
-      // 兜底：按「差集」清掉本题本次跑出来的全部答题记录（不管学生是谁、id 有没有被记到）
-      const [curRows] = await conn.query("SELECT id FROM student_answers WHERE question_id = ? AND answer LIKE '[WPS操作题]%'", [QUESTION_ID]);
-      const leaked = curRows.map((r) => r.id).filter((id) => !baselineAnswerIds.has(id));
+      // 兜底：按「差集」清掉本题测试学生 a 本次跑出来的答题记录（基线除外）。
+      // ⛔ 只碰 a 的行：真实用户的答题记录不能当泄漏误删。
+      const [curRows] = await conn.query("SELECT id, student_id FROM student_answers WHERE question_id = ? AND answer LIKE '[WPS操作题]%'", [QUESTION_ID]);
+      const leaked = curRows
+        .filter((r) => r.student_id === stuId)
+        .map((r) => r.id)
+        .filter((id) => !baselineAnswerIds.has(id));
       if (leaked.length) {
         const [r3] = await conn.query('DELETE FROM student_answers WHERE id IN (?)', [leaked]);
         console.log(`  兜底清理答题记录 ${r3.affectedRows} 行`);
       }
-      // 兜底：清掉本题本次跑出来的提交记录（同样按差集）
-      const [curSubs] = await conn.query('SELECT id FROM wps_op_submissions WHERE question_id = ?', [QUESTION_ID]);
-      const leakedSubs = curSubs.map((r) => r.id).filter((id) => !createdSubmissionIds.includes(id));
+      // 兜底：清掉本题「测试学生 a」本次跑出来的提交记录（基线 + 本脚本已记录的除外）。
+      // ⛔ 只碰 a 的行：运行期间真实用户可能正提交本题，不能当泄漏误删。
+      const [curSubs] = await conn.query('SELECT id, student_id FROM wps_op_submissions WHERE question_id = ?', [QUESTION_ID]);
+      const leakedSubs = curSubs
+        .filter((r) => r.student_id === stuId)
+        .map((r) => r.id)
+        .filter((id) => !createdSubmissionIds.includes(id) && !baselineMySubIds.has(id));
       if (leakedSubs.length) {
         const [r4] = await conn.query('DELETE FROM wps_op_submissions WHERE id IN (?)', [leakedSubs]);
         if (r4.affectedRows) console.log(`  兜底清理提交记录 ${r4.affectedRows} 行`);
@@ -468,7 +482,14 @@ async function login(username, password) {
       let swept = 0;
       if (fs.existsSync(SUB_DIR)) {
         for (const name of fs.readdirSync(SUB_DIR)) {
-          if (!liveNames.has(name)) { try { fs.unlinkSync(path.join(SUB_DIR, name)); swept++; } catch { /* ignore */ } }
+          // ⚠️ 只清「老」孤儿：2 分钟内的新文件可能是真实用户正在提交判分中（已写盘、未落库）
+          try {
+            if (liveNames.has(name)) continue;
+            const st = fs.statSync(path.join(SUB_DIR, name));
+            if (Date.now() - st.mtimeMs < 2 * 60 * 1000) continue;
+            fs.unlinkSync(path.join(SUB_DIR, name));
+            swept++;
+          } catch { /* ignore */ }
         }
       }
       if (swept) console.log(`  兜底清理孤儿提交文件 ${swept} 个`);
@@ -483,10 +504,14 @@ async function login(username, password) {
       }
       if (vSwept) console.log(`  兜底清理抓取失败残留视频 ${vSwept} 个`);
 
-      const [[b2]] = await conn.query('SELECT COUNT(*) AS n FROM wps_op_submissions');
-      const [[b3]] = await conn.query("SELECT COUNT(*) AS n FROM student_answers WHERE question_id = ? AND answer LIKE '[WPS操作题]%'", [QUESTION_ID]);
-      ok('⛔ 不留痕：提交记录回到基线', b2.n === baselineSubs, `${baselineSubs} → ${b2.n}`);
-      ok('⛔ 不留痕：无残留操作题答题记录', b3.n === 0, 'n=' + b3.n);
+      // ⚠️ 差集语义：学生 a 同时是测试账号和日常账号，不能要求绝对为 0。
+      //    只要求「本次跑出来的新行」（基线 + 本脚本已记录之外）已被清干净。
+      const [postSubs] = await conn.query('SELECT id FROM wps_op_submissions WHERE question_id = ? AND student_id = ?', [QUESTION_ID, stuId]);
+      const subLeak = postSubs.map((r) => r.id).filter((id) => !baselineMySubIds.has(id) && !createdSubmissionIds.includes(id));
+      ok('⛔ 不留痕：本次提交记录已清理（差集）', subLeak.length === 0, `leak=${subLeak.length}`);
+      const [postAns] = await conn.query("SELECT id FROM student_answers WHERE question_id = ? AND student_id = ? AND answer LIKE '[WPS操作题]%'", [QUESTION_ID, stuId]);
+      const ansLeak = postAns.map((r) => r.id).filter((id) => !baselineAnswerIds.has(id) && !createdAnswerIds.includes(id));
+      ok('⛔ 不留痕：本次答题记录已清理（差集）', ansLeak.length === 0, `leak=${ansLeak.length}`);
     } catch (e) {
       console.error('清理阶段异常：', e.message);
       fail++;

@@ -7,6 +7,7 @@ import { usePoints } from '../../hooks/usePoints';
 import { toDatabaseDateTime } from '../../utils/dateUtils';
 import { sanitizeHtml, htmlToPlainText } from '../../utils/htmlUtils';
 import { parseDbClusterFilters, matchDbClusterFilters } from '../../utils/clusterFilters';
+import { isOperationType } from '../../utils/questionType';
 import { EquipmentDropEffect } from './game/EquipmentDropEffect';
 import { useGameEventStore } from '../../store/gameEventStore';
 
@@ -1000,10 +1001,10 @@ export const TestModule: React.FC = () => {
       .eq('exam_enabled', true)
       .neq('type', 'wps_op');
 
-    // ⛔ 兜底过滤：WPS 操作题（type='wps_op'）走独立入口（桌面「操作题」），
+    // ⛔ 兜底过滤：操作题（WPS / Access）走独立入口（桌面「操作题」），
     //    没有 options/answers，进普通测试会被渲染成无法作答的空白题。
-    //    后端 poolCount 分母同样剔除了它（index.js 的 SQL_NOT_WPS_OP），两边口径必须一致。
-    const allQuestions = (allQuestionsRaw || []).filter((q: any) => q.type !== 'wps_op');
+    //    后端 poolCount 分母同样剔除了它们（index.js 的 SQL_NOT_WPS_OP），两边口径必须一致。
+    const allQuestions = (allQuestionsRaw || []).filter((q: any) => !isOperationType(q.type));
 
     console.log('startTest - allQuestions count:', allQuestions?.length);
 

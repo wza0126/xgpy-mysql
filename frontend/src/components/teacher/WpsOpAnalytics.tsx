@@ -3,12 +3,15 @@ import { backendClient } from '../../api/backendClient';
 import { studentLabel } from '../../utils/studentLabel';
 
 /**
- * 教师端 · WPS 操作题「练习情况」
+ * 教师端 · 操作题「练习情况」（WPS / Access 共用）
  * ============================================================
  * 口径（与学生端「我的最好成绩」完全一致）：
  *     score(学生, 题) = MAX(wps_op_submissions.score_obtained)
  *     学生总分 = Σ 各题最高分（没做过的题不计入，只影响「已做」列）
  * 也就是同一题反复提交只认最好的一次，避免学生被自己的低分拖累。
+ *
+ * ⚠️ WPS 与 Access 共用同一张提交表 wps_op_submissions，用 kind 区分
+ *    （'wps' / 'access'），所以本组件只需换一个 base 路径即可复用。
  */
 
 interface QMeta {
@@ -66,7 +69,10 @@ const scoreColor = (obtained: number, full: number) => {
   return 'text-rose-600';
 };
 
-export const WpsOpAnalytics: React.FC = () => {
+export const WpsOpAnalytics: React.FC<{ kind?: 'wps' | 'access' }> = ({ kind = 'wps' }) => {
+  const isAccess = kind === 'access';
+  const base = isAccess ? '/api/teacher/access-op' : '/api/teacher/wps-op';
+  const kindLabel = isAccess ? 'Access' : 'WPS';
   const [data, setData] = useState<AnalyticsData | null>(null);
   const [classId, setClassId] = useState('');
   const [loading, setLoading] = useState(true);
@@ -78,7 +84,7 @@ export const WpsOpAnalytics: React.FC = () => {
     setErr('');
     try {
       const qs = cid ? `?classId=${encodeURIComponent(cid)}` : '';
-      const { data: d, error } = await backendClient.get(`/api/teacher/wps-op/analytics${qs}`);
+      const { data: d, error } = await backendClient.get(`${base}/analytics${qs}`);
       if (error) throw new Error(error.message || String(error));
       setData(d || null);
     } catch (e: any) {
@@ -86,7 +92,7 @@ export const WpsOpAnalytics: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [base]);
 
   useEffect(() => { load(''); }, [load]);
 
@@ -145,7 +151,7 @@ export const WpsOpAnalytics: React.FC = () => {
     const blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `wps操作题练习情况_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `${kindLabel}操作题练习情况_${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   };
@@ -197,7 +203,7 @@ export const WpsOpAnalytics: React.FC = () => {
 
       {!questions.length && (
         <div className="rounded-lg border border-dashed border-gray-300 bg-white py-12 text-center text-sm text-gray-400">
-          还没有 WPS 操作题，先在「题库管理」里出题。
+          还没有 {kindLabel} 操作题，先在「题库管理」里出题。
         </div>
       )}
 

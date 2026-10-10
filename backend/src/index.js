@@ -7,6 +7,7 @@ const { LicenseManager, FEATURES } = require('./license-manager');
 const { runMigrations } = require('./migrate');
 const { registerWebProxy, invalidateProxyPerm } = require('./web-proxy');
 const { registerWpsOp } = require('./wps-op');
+const { registerAccessOp } = require('./access-op');
 const PythonSandbox = require('./python-sandbox');
 const PythonGrader = require('./python-grader');
 const { v4: uuidv4 } = require('uuid');
@@ -1072,17 +1073,17 @@ function formatRows(rows) {
 //   1) 练习 / 错题 / 举一反三 —— 提交后由 /api/business/submit-answer 回执带回；
 //   2) 测试 / 考试 —— 提交后由 submit-test / submit-exam 回执带回；
 //   3) 错题本回看 —— /api/practice/reveal-answers（只返回本人做过的题）。
-// ⛔ wps_spec 必须在这里：它内含操作题的评分点（即答案），
+// ⛔ wps_spec / access_spec 必须在这里：它们内含操作题的评分点（即答案），
 //    通用表接口 /api/tables/questions 对学生走 stripQuestionRowsForRequester，
 //    漏加会让整份评分点从旁路泄露给学生。
-const QUESTION_ANSWER_FIELDS = ['answers', 'explanation', 'wps_spec'];
+const QUESTION_ANSWER_FIELDS = ['answers', 'explanation', 'wps_spec', 'access_spec'];
 
-// ⛔ WPS 操作题（type='wps_op'）的**唯一入口**是学生端桌面「操作题」/ 教师端「WPS操作题」。
-//    它没有 options/answers，普通作答 UI 渲染不了 → 一律不进练习/考试抽题池，
+// ⛔ 操作题（type IN ('wps_op','access_op')）的**唯一入口**是学生端桌面「操作题」/ 教师端「WPS/ACCESS」。
+//    它们没有 options/answers，普通作答 UI 渲染不了 → 一律不进练习/考试抽题池，
 //    也不计入「可练习题量」「章节题量」等口径（否则页面上显示的数与实际能练的数对不上）。
 //    凡取题/计数 SQL 都要带上这个片段。将来若要把操作题并入测试/考试，
-//    改这一处 + 各作答 UI 即可（操作题自己的路由见 wps-op.js）。
-const SQL_NOT_WPS_OP = " AND type <> 'wps_op'";
+//    改这一处 + 各作答 UI 即可（操作题自己的路由见 wps-op.js / access-op.js）。
+const SQL_NOT_WPS_OP = " AND type NOT IN ('wps_op','access_op')";
 
 function stripQuestionForStudent(row) {
   if (!row || typeof row !== 'object') return row;
@@ -1383,6 +1384,14 @@ app.get('/api/tables/:tableName', authenticate, async (req, res) => {
       }
     }
     
+    // ⛔ 服务端兜底：操作题（wps_op / access_op）走各自独立入口，绝不从通用表接口下发给学生。
+    //    即使某个页面忘了在前端加过滤，学生也拿不到操作题（它们没有 options/answers，渲染必崩）。
+    //    教师不受限（教师端要用这个接口做题库浏览）。
+    if (tableName === 'questions' && !isTeachingRole(req.user && req.user.role)) {
+      query += query.includes(' WHERE ') ? ' AND ' : ' WHERE ';
+      query += SQL_NOT_WPS_OP.trim().replace(/^AND\s+/i, '');
+    }
+
     const [rows] = await pool.query(query, params);
     // questions 表对学生脱敏：不下发 answers / explanation
     res.json({ data: formatRows(stripQuestionRowsForRequester(tableName, rows, req)), error: null });
@@ -13137,6 +13146,10 @@ function requireTeachingRole(req, res, next) {
 // 模板上传 / 标准答案解析 / 学生作答判分 / 历史查询，全部在 wps-op.js 内注册。
 // ⚠️ 必须放在 requireTeacher / requireStudent 定义之后（const 无提升，靠前会 TDZ 报错）。
 registerWpsOp(app, { pool, authenticate, requireTeacher, requireStudent, uploadsDir });
+
+// ===== Access 操作题（与 WPS 同构，判的是 .accdb）=====
+// 全部路由在 access-op.js 内注册；同样必须在中间件定义之后。
+registerAccessOp(app, { pool, authenticate, requireTeacher, requireStudent, uploadsDir });
 
 // ===== 教师端接口 =====
 

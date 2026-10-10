@@ -5,6 +5,7 @@ import { Question } from '../../types';
 import { formatDateTime } from '../../utils/dateUtils';
 import * as XLSX from 'xlsx';
 import { sanitizeHtml, htmlToPlainText } from '../../utils/htmlUtils';
+import { isOperationType } from '../../utils/questionType';
 import { PKBattleConfigTab } from './PKBattleConfigTab';
 import { PKStatsTab } from './PKStatsTab';
 
@@ -519,9 +520,9 @@ export const ExamManager: React.FC = () => {
   };
 
   const filteredQuestions = questions.filter((q) => {
-    // ⛔ WPS 操作题（type='wps_op'）不能进试卷：走独立入口、没有 options/answers，
+    // ⛔ 操作题（WPS / Access）不能进试卷：走独立入口、没有 options/answers，
     //    学生端渲染不了。这里直接挡掉，避免教师误选进卷子。
-    if (q.type === 'wps_op') return false;
+    if (isOperationType(q.type)) return false;
     const matchesSearch = q.content.toLowerCase().includes(searchText.toLowerCase());
     let matchesType = true;
     if (filterType) {

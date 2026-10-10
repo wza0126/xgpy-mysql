@@ -6,20 +6,30 @@ import { CHAPTER_TAXONOMY } from '../../data/chapterTaxonomy';
 import { WpsOpAnalytics } from './WpsOpAnalytics';
 
 /**
- * 教师端 · WPS / ACCESS 操作题
+ * 教师端 · 操作题（WPS / ACCESS 共用一套界面）
  * ============================================================
- * 一个菜单承载两类操作题（Access 暂为占位，不再单开模块）：
- *   ┌ WPS 操作题 ── 题库管理 / 练习情况
- *   └ Access 操作题（占位）
+ * 一个菜单承载两类操作题，一级分段切换：
+ *   ┌ WPS 操作题  ── 判 OOXML（wps-grader.js）
+ *   └ Access 操作题 ── 判 .accdb（access-grader.js）
+ *
+ * 两端**产品链路完全一致**，所以这里只做"参数化"，不复制一套代码：
+ *   · base 路径      /api/teacher/wps-op  ⇄  /api/teacher/access-op
+ *   · 题型           wps_op               ⇄  access_op
+ *   · 规格字段       wps_spec             ⇄  access_spec
+ *   · 检查器字典     KIND_META_BY_OP[opKind]
+ *   · 模板/答案文件后缀   xlsx ⇄ accdb
  *
  * 目标是「题库录入方便」：
- *   1) 上传做好的「标准答案表」→ 自动解析 OOXML 生成评分点骨架
- *      （合并区/公式/数值/图表/排序/筛选/分类汇总/条件格式 全自动认出）
+ *   1) 上传做好的「标准答案」（WPS 表 / Access 库）→ 自动解析生成评分点骨架
+ *      （WPS：合并区/公式/数值/图表/排序/筛选/分类汇总/条件格式
+ *        Access：表/字段/类型/主键/记录/排序/筛选/对象）
  *   2) 骨架可在可视化面板里改分值、改标签；也可以直接编辑 JSON
- *   3) 模板支持多文件：xlsx 空白表 + txt/csv 数据源（有些题要从 txt 导入数据）
- *   4) 每一步可挂演示视频：本地上传 或 外链抓取到本地（机房断网也能播）
+ *   3) 模板支持多文件：空白表 + txt/csv 数据源（Access 还要带上待导入的 xlsx）
+ *   4) 每一步可挂演示视频：本地上传 或 外链抓取到本地（机房断网也能播），**一步可多条**
  *   5) 默认满分 100（评分点很细，10 分不够用）
  */
+
+type OpKind = 'wps' | 'access';
 
 interface CheckDef {
   kind: string;
@@ -62,13 +72,27 @@ interface Row {
   content: string;
   cluster_id: string | null;
   practice_enabled: number;
-  wps_spec: any;
+  /** WPS 操作题的评分点规格 */
+  wps_spec?: any;
+  /** Access 操作题的评分点规格 */
+  access_spec?: any;
 }
 
 type FieldType = 'text' | 'number' | 'bool' | 'csv' | 'json';
 
-// 评分点类型 → 中文名 + 需要的字段（与后端 wps-grader.js 的 CHECKERS 一一对应）
-const KIND_META: Record<string, { label: string; fields: { key: string; label: string; type: FieldType }[] }> = {
+interface KindMeta {
+  label: string;
+  fields: { key: string; label: string; type: FieldType }[];
+}
+
+// ------------------------------------------------------------------
+// 评分点类型字典 —— 与后端判分引擎的 CHECKERS 一一对应
+//   · wps-grader.js    → 25 种（OOXML）
+//   · access-grader.js →  9 种（.accdb）
+// 改后端检查器必须同步这里，否则教师端下拉里选不到。
+// ------------------------------------------------------------------
+
+const WPS_KIND_META: Record<string, KindMeta> = {
   merged: { label: '合并单元格', fields: [{ key: 'range', label: '区域', type: 'text' }] },
   cell_text: { label: '单元格文本', fields: [{ key: 'ref', label: '单元格', type: 'text' }, { key: 'text', label: '应填文字', type: 'text' }] },
   cell_value: { label: '单元格数值', fields: [{ key: 'ref', label: '单元格', type: 'text' }, { key: 'value', label: '期望值', type: 'number' }, { key: 'tol', label: '容差', type: 'number' }] },
@@ -202,23 +226,174 @@ const KIND_META: Record<string, { label: string; fields: { key: string; label: s
   },
 };
 
+const ACCESS_KIND_META: Record<string, KindMeta> = {
+  accdb_table: {
+    label: '表存在 / 不存在',
+    fields: [
+      { key: 'table', label: '表名', type: 'text' },
+      { key: 'absent', label: '要求不存在（删表题）', type: 'bool' },
+    ],
+  },
+  accdb_columns: {
+    label: '字段名与顺序',
+    fields: [
+      { key: 'table', label: '表名', type: 'text' },
+      { key: 'columns', label: '字段（逗号分隔，按顺序）', type: 'csv' },
+      { key: 'contains', label: '须包含（逗号分隔）', type: 'csv' },
+      { key: 'absent', label: '不得包含（逗号分隔）', type: 'csv' },
+      { key: 'unordered', label: '忽略顺序', type: 'bool' },
+    ],
+  },
+  accdb_column_type: {
+    label: '字段类型 / 字段大小',
+    fields: [
+      { key: 'table', label: '表名', type: 'text' },
+      { key: 'column', label: '字段名', type: 'text' },
+      { key: 'type', label: '类型(文本/整型/长整型/日期/货币/是或否…)', type: 'text' },
+      { key: 'size', label: '字段大小（短文本填字符数）', type: 'number' },
+    ],
+  },
+  accdb_primary_key: {
+    label: '主键',
+    fields: [
+      { key: 'table', label: '表名', type: 'text' },
+      { key: 'columns', label: '主键字段（逗号分隔）', type: 'csv' },
+      { key: 'order', label: '升/降序(asc/desc)', type: 'text' },
+      { key: 'absent', label: '要求无主键', type: 'bool' },
+    ],
+  },
+  accdb_rows: {
+    label: '记录（数量 / 包含 / 不含）',
+    fields: [
+      { key: 'table', label: '表名', type: 'text' },
+      { key: 'count', label: '记录数', type: 'number' },
+      { key: 'contains', label: '须包含的记录（JSON，如 [{"学号":"1001"}]）', type: 'json' },
+      { key: 'absent', label: '不得包含的记录（JSON）', type: 'json' },
+    ],
+  },
+  accdb_row_update: {
+    label: '记录字段值（改记录）',
+    fields: [
+      { key: 'table', label: '表名', type: 'text' },
+      { key: 'match', label: '定位条件（JSON，如 {"学号":"1001"}）', type: 'json' },
+      { key: 'expect', label: '期望值（JSON，如 {"总分":95}）', type: 'json' },
+    ],
+  },
+  accdb_sort: {
+    label: '排序',
+    fields: [
+      { key: 'table', label: '表名', type: 'text' },
+      { key: 'column', label: '排序字段', type: 'text' },
+      { key: 'columns', label: '多字段排序（逗号分隔，可留空）', type: 'csv' },
+      { key: 'order', label: '方向(asc/desc)', type: 'text' },
+      { key: 'mode', label: '判定(auto/rows/property)', type: 'text' },
+    ],
+  },
+  accdb_filter: {
+    label: '筛选',
+    fields: [
+      { key: 'table', label: '表名', type: 'text' },
+      { key: 'column', label: '字段名', type: 'text' },
+      { key: 'op', label: '运算符(= / <> / > / < / contains …)', type: 'text' },
+      { key: 'value', label: '条件值', type: 'text' },
+    ],
+  },
+  accdb_object: {
+    label: '对象存在（查询 / 窗体 / 报表…）',
+    fields: [
+      { key: 'name', label: '对象名', type: 'text' },
+      { key: 'object_type', label: '类型(table/query/form/report/macro/module)', type: 'text' },
+      { key: 'absent', label: '要求不存在', type: 'bool' },
+    ],
+  },
+};
+
+const KIND_META_BY_OP: Record<OpKind, Record<string, KindMeta>> = {
+  wps: WPS_KIND_META,
+  access: ACCESS_KIND_META,
+};
+
+/** 两类操作题在接口 / 数据模型上的差异，全部收敛在这里 */
+const OP_CONF: Record<OpKind, {
+  label: string;
+  icon: string;
+  base: string;
+  rowType: string;
+  specField: 'wps_spec' | 'access_spec';
+  answerExt: string;
+  templateExt: string;
+  inspectExt: string;
+  defaultCheck: string;
+  sheet: string;
+}> = {
+  wps: {
+    label: 'WPS',
+    icon: 'fa-file-excel',
+    base: '/api/teacher/wps-op',
+    rowType: 'wps_op',
+    specField: 'wps_spec',
+    answerExt: '.xlsx,.xlsm',
+    templateExt: '.xlsx,.xlsm,.txt,.csv',
+    inspectExt: '.xlsx,.xlsm',
+    defaultCheck: 'merged',
+    sheet: 'Sheet1',
+  },
+  access: {
+    label: 'Access',
+    icon: 'fa-database',
+    base: '/api/teacher/access-op',
+    rowType: 'access_op',
+    specField: 'access_spec',
+    answerExt: '.accdb,.mdb',
+    templateExt: '.accdb,.mdb,.xlsx,.xlsm,.txt,.csv',
+    inspectExt: '.accdb,.mdb',
+    defaultCheck: 'accdb_table',
+    sheet: '',
+  },
+};
+
 const DEFAULT_FULL_SCORE = 100;
 
-const emptyCheck = (kind: string): CheckDef => ({ kind, label: KIND_META[kind]?.label || kind, score: 1 });
-const emptyStep = (i: number): StepDef => ({ id: 's' + (i + 1), title: '', desc: '', score: 1, video_url: '', checks: [emptyCheck('merged')] });
+const specOfRow = (r: Row | null | undefined, op: OpKind): any => {
+  if (!r) return null;
+  return op === 'wps' ? r.wps_spec : r.access_spec;
+};
 
-const defaultSpec = (): SpecDef => ({ version: 1, full_score: DEFAULT_FULL_SCORE, grader: { sheet: 'Sheet1' }, templates: [], steps: [emptyStep(0)] });
+const emptyCheck = (kind: string, km: Record<string, KindMeta>): CheckDef => ({ kind, label: km[kind]?.label || kind, score: 1 });
+
+const emptyStep = (i: number, op: OpKind): StepDef => ({
+  id: 's' + (i + 1),
+  title: '',
+  desc: '',
+  score: 1,
+  video_url: '',
+  checks: [emptyCheck(OP_CONF[op].defaultCheck, KIND_META_BY_OP[op])],
+});
+
+const defaultSpec = (op: OpKind): SpecDef => ({
+  version: 1,
+  full_score: DEFAULT_FULL_SCORE,
+  ...(op === 'wps' ? { grader: { sheet: 'Sheet1' } } : {}),
+  templates: [],
+  steps: [emptyStep(0, op)],
+});
 
 /** 统一模板清单（新格式 templates[] + 一期单模板 template，按 path 去重） */
 const mergeTemplates = (v: any): TemplateDef[] => {
   const out: TemplateDef[] = [];
   const seen = new Set<string>();
+  const inferKind = (t: any, p: string) => {
+    const nm = t.name || p;
+    if (/\.(txt|csv)$/i.test(nm)) return 'text';
+    if (/\.(accdb|mdb)$/i.test(nm)) return 'accdb';
+    return 'xlsx';
+  };
   const push = (t: any) => {
     if (!t || !t.path) return;
     const p = String(t.path);
     if (seen.has(p)) return;
     seen.add(p);
-    out.push({ name: t.name || p.split('/').pop() || '模板', path: p, size: t.size ?? null, kind: t.kind || (/\.(txt|csv)$/i.test(t.name || p) ? 'text' : 'xlsx') });
+    out.push({ name: t.name || p.split('/').pop() || '模板', path: p, size: t.size ?? null, kind: t.kind || inferKind(t, p) });
   };
   if (Array.isArray(v?.templates)) v.templates.forEach(push);
   push(v?.template);
@@ -237,16 +412,16 @@ const normalizeVideos = (s: any): string[] => {
   return out;
 };
 
-const parseSpec = (raw: any): SpecDef => {
-  if (!raw) return defaultSpec();
+const parseSpec = (raw: any, op: OpKind): SpecDef => {
+  if (!raw) return defaultSpec(op);
   let v = raw;
-  if (typeof v === 'string') { try { v = JSON.parse(v); } catch { return defaultSpec(); } }
-  if (!v || !Array.isArray(v.steps)) return defaultSpec();
+  if (typeof v === 'string') { try { v = JSON.parse(v); } catch { return defaultSpec(op); } }
+  if (!v || !Array.isArray(v.steps)) return defaultSpec(op);
   const templates = mergeTemplates(v);
   return {
     version: v.version || 1,
     full_score: Number(v.full_score) || DEFAULT_FULL_SCORE,
-    grader: v.grader || { sheet: 'Sheet1' },
+    ...(op === 'wps' ? { grader: v.grader || { sheet: 'Sheet1' } } : {}),
     templates,
     template: templates[0],
     steps: v.steps.map((s: any, i: number) => {
@@ -276,9 +451,16 @@ const fmtSize = (n?: number | null) => {
   return (n / 1048576).toFixed(1) + ' MB';
 };
 
+/** 模板文件的图标 / 标签（按类型区分：数据库 / 表格 / 数据源） */
+const tplIcon = (kind?: string) => (kind === 'text' ? 'fa-file-lines text-amber-600' : kind === 'accdb' ? 'fa-database text-indigo-600' : 'fa-file-excel text-emerald-600');
+const tplTag = (kind?: string) => (kind === 'text' ? '数据源' : kind === 'accdb' ? '数据库' : '表格');
+const tplTagCls = (kind?: string) => (kind === 'text' ? 'bg-amber-100 text-amber-700' : kind === 'accdb' ? 'bg-indigo-100 text-indigo-700' : 'bg-emerald-100 text-emerald-700');
+
 export const WpsOpManager: React.FC = () => {
-  const [opKind, setOpKind] = useState<'wps' | 'access'>('wps');
-  const [wpsTab, setWpsTab] = useState<'bank' | 'analytics'>('bank');
+  const [opKind, setOpKind] = useState<OpKind>('wps');
+  const [subTab, setSubTab] = useState<'bank' | 'analytics'>('bank');
+  const conf = OP_CONF[opKind];
+  const kindMeta = KIND_META_BY_OP[opKind];
 
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
@@ -286,7 +468,7 @@ export const WpsOpManager: React.FC = () => {
   const [content, setContent] = useState('');
   const [cluster, setCluster] = useState('');
   const [practiceEnabled, setPracticeEnabled] = useState(true);
-  const [spec, setSpec] = useState<SpecDef>(defaultSpec());
+  const [spec, setSpec] = useState<SpecDef>(() => defaultSpec('wps'));
   const [specJson, setSpecJson] = useState('');
   const [showJson, setShowJson] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -307,7 +489,7 @@ export const WpsOpManager: React.FC = () => {
       const { data, error } = await backendClient
         .from('questions')
         .select('*')
-        .eq('type', 'wps_op')
+        .eq('type', conf.rowType)
         .order('created_at', { ascending: false });
       if (error) throw new Error(error.error || error.message || '加载失败');
       setRows((data as any[]) || []);
@@ -316,7 +498,7 @@ export const WpsOpManager: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [conf.rowType]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -333,12 +515,22 @@ export const WpsOpManager: React.FC = () => {
     return out;
   }, []);
 
+  const switchKind = (k: OpKind) => {
+    if (k === opKind) return;
+    setOpKind(k);
+    setEditing(null);
+    setMsg(null);
+    setValidation(null);
+    setInspectNote('');
+    setRows([]);
+  };
+
   const startNew = () => {
-    setEditing({ id: '', content: '', cluster_id: null, practice_enabled: 1, wps_spec: null });
+    setEditing({ id: '', content: '', cluster_id: null, practice_enabled: 1 });
     setContent('');
     setCluster('');
     setPracticeEnabled(true);
-    setSpec(defaultSpec());
+    setSpec(defaultSpec(opKind));
     setValidation(null);
     setInspectNote('');
     setMsg(null);
@@ -349,7 +541,7 @@ export const WpsOpManager: React.FC = () => {
     setContent(r.content || '');
     setCluster(r.cluster_id || '');
     setPracticeEnabled(Number(r.practice_enabled) === 1);
-    setSpec(parseSpec(r.wps_spec));
+    setSpec(parseSpec(specOfRow(r, opKind), opKind));
     setValidation(null);
     setInspectNote('');
     setMsg(null);
@@ -359,7 +551,7 @@ export const WpsOpManager: React.FC = () => {
   const patchStep = (si: number, patch: Partial<StepDef>) => {
     setSpec((s) => ({ ...s, steps: s.steps.map((st, i) => (i === si ? { ...st, ...patch } : st)) }));
   };
-  const addStep = () => setSpec((s) => ({ ...s, steps: [...s.steps, emptyStep(s.steps.length)] }));
+  const addStep = () => setSpec((s) => ({ ...s, steps: [...s.steps, emptyStep(s.steps.length, opKind)] }));
   const delStep = (si: number) => setSpec((s) => ({ ...s, steps: s.steps.filter((_, i) => i !== si) }));
 
   const patchCheck = (si: number, ci: number, patch: Partial<CheckDef>) => {
@@ -371,7 +563,7 @@ export const WpsOpManager: React.FC = () => {
     }));
   };
   const addCheck = (si: number) => setSpec((s) => ({
-    ...s, steps: s.steps.map((st, i) => (i === si ? { ...st, checks: [...st.checks, emptyCheck('cell_value')] } : st)),
+    ...s, steps: s.steps.map((st, i) => (i === si ? { ...st, checks: [...st.checks, emptyCheck(conf.defaultCheck, kindMeta)] } : st)),
   }));
   const delCheck = (si: number, ci: number) => setSpec((s) => ({
     ...s, steps: s.steps.map((st, i) => (i === si ? { ...st, checks: st.checks.filter((_, j) => j !== ci) } : st)),
@@ -425,7 +617,7 @@ export const WpsOpManager: React.FC = () => {
     return json?.data;
   };
 
-  /** 多模板上传：一次可选 xlsx + txt 等；返回 items 数组 */
+  /** 多模板上传：一次可选空白表 + 数据源；返回 items 数组 */
   const onTemplatesPicked = async (files: FileList | null) => {
     if (!files || !files.length) return;
     setTemplateBusy(true);
@@ -434,7 +626,7 @@ export const WpsOpManager: React.FC = () => {
       const token = getAuthToken();
       const fd = new FormData();
       for (let i = 0; i < files.length; i++) fd.append('file', files[i]);
-      const res = await fetch(`${API_CONFIG.apiUrl}/api/teacher/wps-op/template`, {
+      const res = await fetch(`${API_CONFIG.apiUrl}${conf.base}/template`, {
         method: 'POST',
         headers: token ? { Authorization: `Bearer ${token}` } : {},
         body: fd,
@@ -511,7 +703,7 @@ export const WpsOpManager: React.FC = () => {
     setVideoBusy(true);
     setMsg(null);
     try {
-      const d = await uploadFile('/api/teacher/wps-op/video', f);
+      const d = await uploadFile(`${conf.base}/video`, f);
       appendVideo(si, d.url);
       setMsg({ type: 'ok', text: `视频已上传并追加到第 ${si + 1} 步（${fmtSize(d.size)}），机房断网也能播` });
     } catch (e: any) {
@@ -531,7 +723,7 @@ export const WpsOpManager: React.FC = () => {
     setMsg(null);
     try {
       const token = getAuthToken();
-      const res = await fetch(`${API_CONFIG.apiUrl}/api/teacher/wps-op/video/fetch`, {
+      const res = await fetch(`${API_CONFIG.apiUrl}${conf.base}/video/fetch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify({ url }),
@@ -560,7 +752,7 @@ export const WpsOpManager: React.FC = () => {
       const fd = new FormData();
       fd.append('file', f);
       fd.append('full_score', String(spec.full_score || DEFAULT_FULL_SCORE));
-      const res = await fetch(`${API_CONFIG.apiUrl}/api/teacher/wps-op/inspect`, {
+      const res = await fetch(`${API_CONFIG.apiUrl}${conf.base}/inspect`, {
         method: 'POST',
         headers: token ? { Authorization: `Bearer ${token}` } : {},
         body: fd,
@@ -572,16 +764,24 @@ export const WpsOpManager: React.FC = () => {
       const d = json?.data || {};
       const sug = d?.suggested_spec;
       if (!sug || !Array.isArray(sug.steps) || !sug.steps.length) {
-        setMsg({ type: 'err', text: '没能从这份文件里识别出可判分的内容（可能表格是空的）' });
+        setMsg({ type: 'err', text: '没能从这份文件里识别出可判分的内容（可能表格/库是空的）' });
         return;
       }
-      const sh = d.summary?.sheets?.[0];
       const checks = sug.steps.reduce((a: number, s: any) => a + (s.checks || []).length, 0);
-      setInspectNote(
-        `识别到 ${sh?.merges?.length || 0} 个合并区、${(sh?.cells || []).filter((c: any) => c.formula).length} 个公式、`
-        + `${sh?.charts?.length || 0} 个图表，已自动生成 ${sug.steps.length} 个步骤 / ${checks} 个评分点`
-      );
-      const parsed = parseSpec({ ...sug, full_score: spec.full_score || DEFAULT_FULL_SCORE, templates: spec.templates, template: spec.template });
+      if (opKind === 'access') {
+        const ts = d.summary?.tables || [];
+        setInspectNote(
+          `识别到 ${ts.length} 张表、${ts.reduce((a: number, t: any) => a + (t.columns || []).length, 0)} 个字段、`
+          + `${ts.reduce((a: number, t: any) => a + (t.row_count || 0), 0)} 条记录，已自动生成 ${sug.steps.length} 个步骤 / ${checks} 个评分点`
+        );
+      } else {
+        const sh = d.summary?.sheets?.[0];
+        setInspectNote(
+          `识别到 ${sh?.merges?.length || 0} 个合并区、${(sh?.cells || []).filter((c: any) => c.formula).length} 个公式、`
+          + `${sh?.charts?.length || 0} 个图表，已自动生成 ${sug.steps.length} 个步骤 / ${checks} 个评分点`
+        );
+      }
+      const parsed = parseSpec({ ...sug, full_score: spec.full_score || DEFAULT_FULL_SCORE, templates: spec.templates, template: spec.template }, opKind);
       setSpec(parsed);
       setMsg({ type: 'ok', text: '已用标准答案生成评分点骨架，请核对分值与描述后保存' });
     } catch (e: any) {
@@ -596,7 +796,7 @@ export const WpsOpManager: React.FC = () => {
   const validate = async () => {
     try {
       const token = getAuthToken();
-      const res = await fetch(`${API_CONFIG.apiUrl}/api/teacher/wps-op/validate-spec`, {
+      const res = await fetch(`${API_CONFIG.apiUrl}${conf.base}/validate-spec`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify({ spec, full_score: spec.full_score }),
@@ -626,12 +826,12 @@ export const WpsOpManager: React.FC = () => {
         template: (spec.templates || [])[0],
       };
       const payload: any = {
-        type: 'wps_op',
+        type: conf.rowType,
         content: content.trim(),
         cluster_id: cluster || null,
         practice_enabled: practiceEnabled ? 1 : 0,
-        wps_spec: clean,
-        answers: JSON.stringify({ note: 'WPS 操作题由 wps_spec 判分，answers 列仅占位' }),
+        [conf.specField]: clean,
+        answers: JSON.stringify({ note: `${conf.label} 操作题由 ${conf.specField} 判分，answers 列仅占位` }),
       };
       let err: any = null;
       if (editing.id) {
@@ -677,6 +877,9 @@ export const WpsOpManager: React.FC = () => {
             <i className="fas fa-arrow-left mr-1" /> 返回列表
           </button>
           <div className="flex items-center gap-2">
+            <span className="rounded bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
+              <i className={`fas ${conf.icon} mr-1`} />{conf.label} 操作题
+            </span>
             <button onClick={validate} className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">校验评分点</button>
             <button onClick={save} disabled={saving} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:bg-gray-300">
               {saving ? '保存中…' : '保存'}
@@ -711,7 +914,9 @@ export const WpsOpManager: React.FC = () => {
                   onChange={(e) => setContent(e.target.value)}
                   rows={6}
                   className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
-                  placeholder="<p>下载「xxx.xlsx」和「data.txt」，用 WPS 表格完成以下操作并保存：</p><p>1. ...</p>"
+                  placeholder={opKind === 'access'
+                    ? '<p>下载「xxx.accdb」和「data.xlsx」，用 Access 完成以下操作并保存：</p><p>1. ...</p>'
+                    : '<p>下载「xxx.xlsx」和「data.txt」，用 WPS 表格完成以下操作并保存：</p><p>1. ...</p>'}
                 />
               </div>
               <div>
@@ -756,13 +961,15 @@ export const WpsOpManager: React.FC = () => {
               <input
                 ref={templateRef}
                 type="file"
-                accept=".xlsx,.xlsm,.txt,.csv"
+                accept={conf.templateExt}
                 multiple
                 className="hidden"
                 onChange={(e) => onTemplatesPicked(e.target.files)}
               />
               <span className="text-xs text-gray-500">
-                支持 .xlsx/.xlsm 空白表 <b>和 .txt/.csv 数据源</b>（有些题要求"从 txt 导入数据"），学生端可分别下载
+                {opKind === 'access'
+                  ? <>支持 .accdb/.mdb <b>空白库</b>，以及 .xlsx/.txt 数据源（有些题要"把 xlsx 导入库"），学生端可分别下载</>
+                  : <>支持 .xlsx/.xlsm 空白表 <b>和 .txt/.csv 数据源</b>（有些题要求"从 txt 导入数据"），学生端可分别下载</>}
               </span>
             </div>
 
@@ -771,11 +978,11 @@ export const WpsOpManager: React.FC = () => {
               <div className="mt-3 space-y-1.5">
                 {(spec.templates || []).map((t) => (
                   <div key={t.path} className="flex items-center gap-2 rounded-lg bg-sky-50/60 px-3 py-2">
-                    <i className={`fas ${t.kind === 'text' ? 'fa-file-lines text-amber-600' : 'fa-file-excel text-emerald-600'}`} />
+                    <i className={`fas ${tplIcon(t.kind)}`} />
                     <span className="min-w-0 flex-1 truncate text-xs text-gray-700">{t.name}</span>
                     {t.size ? <span className="flex-none text-[11px] text-gray-400">{fmtSize(t.size)}</span> : null}
-                    <span className={`flex-none rounded px-1.5 py-0.5 text-[10px] ${t.kind === 'text' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>
-                      {t.kind === 'text' ? '数据源' : '表格'}
+                    <span className={`flex-none rounded px-1.5 py-0.5 text-[10px] ${tplTagCls(t.kind)}`}>
+                      {tplTag(t.kind)}
                     </span>
                     <a
                       href={`${API_CONFIG.apiUrl}${t.path}`}
@@ -799,11 +1006,13 @@ export const WpsOpManager: React.FC = () => {
                 disabled={inspectBusy}
                 className="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-medium text-white hover:bg-indigo-700 disabled:bg-gray-300"
               >
-                <i className="fas fa-wand-magic-sparkles mr-1" /> {inspectBusy ? '解析中…' : '上传标准答案表 → 自动生成评分点'}
+                <i className="fas fa-wand-magic-sparkles mr-1" /> {inspectBusy ? '解析中…' : `上传标准答案${opKind === 'access' ? '库' : '表'} → 自动生成评分点`}
               </button>
-              <input ref={inspectRef} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(e) => onInspectPicked(e.target.files?.[0] || null)} />
+              <input ref={inspectRef} type="file" accept={conf.inspectExt} className="hidden" onChange={(e) => onInspectPicked(e.target.files?.[0] || null)} />
               <span className="text-xs text-gray-500">
-                把做好的答案表丢进来，合并区/公式/数值/图表/排序/筛选/分类汇总/条件格式会自动识别成评分点
+                {opKind === 'access'
+                  ? '把做好的答案库(.accdb)丢进来，表/字段/类型/主键/记录/排序/筛选/对象会自动识别成评分点'
+                  : '把做好的答案表丢进来，合并区/公式/数值/图表/排序/筛选/分类汇总/条件格式会自动识别成评分点'}
               </span>
             </div>
             {inspectNote && <div className="mt-2 rounded-lg bg-indigo-50 p-2.5 text-xs text-indigo-700">{inspectNote}</div>}
@@ -839,7 +1048,7 @@ export const WpsOpManager: React.FC = () => {
                 <button
                   onClick={() => {
                     try {
-                      const parsed = parseSpec(JSON.parse(specJson));
+                      const parsed = parseSpec(JSON.parse(specJson), opKind);
                       setSpec(parsed);
                       setMsg({ type: 'ok', text: 'JSON 已应用' });
                     } catch (e: any) {
@@ -935,16 +1144,16 @@ export const WpsOpManager: React.FC = () => {
 
                   <div className="space-y-1.5">
                     {st.checks.map((c, ci) => {
-                      const meta = KIND_META[c.kind] || { label: c.kind, fields: [] };
+                      const meta = kindMeta[c.kind] || { label: c.kind, fields: [] as KindMeta['fields'] };
                       return (
                         <div key={ci} className="rounded border border-gray-200 bg-white p-2">
                           <div className="flex flex-wrap items-center gap-2">
                             <select
                               value={c.kind}
-                              onChange={(e) => patchCheck(si, ci, { kind: e.target.value, label: KIND_META[e.target.value]?.label || e.target.value })}
+                              onChange={(e) => patchCheck(si, ci, { kind: e.target.value, label: kindMeta[e.target.value]?.label || e.target.value })}
                               className="rounded border border-gray-300 px-1.5 py-1 text-xs"
                             >
-                              {Object.keys(KIND_META).map((k) => <option key={k} value={k}>{KIND_META[k].label}</option>)}
+                              {Object.keys(kindMeta).map((k) => <option key={k} value={k}>{kindMeta[k].label}</option>)}
                             </select>
                             <input
                               value={c.label || ''}
@@ -1019,7 +1228,7 @@ export const WpsOpManager: React.FC = () => {
       <div className="mb-4">
         <h2 className="text-xl font-bold text-gray-800">WPS / ACCESS 操作题</h2>
         <p className="mt-1 text-xs text-gray-500">
-          学测操作题（默认每题 100 分、按评分点分步给分）。上传做好的「标准答案表」可自动生成评分点，再改分值与描述即可。
+          学测操作题（默认每题 100 分、按评分点分步给分）。上传做好的「标准答案」可自动生成评分点，再改分值与描述即可。
         </p>
       </div>
 
@@ -1031,7 +1240,7 @@ export const WpsOpManager: React.FC = () => {
         ].map((t) => (
           <button
             key={t.k}
-            onClick={() => setOpKind(t.k as 'wps' | 'access')}
+            onClick={() => switchKind(t.k as OpKind)}
             className={`-mb-px flex items-center gap-1.5 border-b-2 px-4 py-2 text-sm font-medium transition ${
               opKind === t.k ? 'border-emerald-600 text-emerald-700' : 'border-transparent text-gray-500 hover:text-gray-700'
             }`}
@@ -1041,104 +1250,90 @@ export const WpsOpManager: React.FC = () => {
         ))}
       </div>
 
-      {opKind === 'access' ? (
-        <div className="rounded-xl border border-dashed border-gray-300 bg-white px-6 py-16 text-center">
-          <i className="fas fa-database mb-3 text-3xl text-gray-300" />
-          <div className="text-base font-semibold text-gray-700">Access 操作题（占位）</div>
-          <p className="mx-auto mt-2 max-w-xl text-xs leading-relaxed text-gray-500">
-            本模块已预留，用于承载 Access 数据库操作题（建表 / 查询 / 窗体 / 报表）。
-            目前尚未实现判分与作答流程，先占位以便后续扩展时不再新开菜单。
-            现在可以使用上方的「WPS 操作题」。
-          </p>
+      {/* 二级分段：题库管理 / 练习情况 */}
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        {[
+          { k: 'bank', label: '题库管理', icon: 'fa-list-check' },
+          { k: 'analytics', label: '练习情况', icon: 'fa-chart-column' },
+        ].map((t) => (
+          <button
+            key={t.k}
+            onClick={() => setSubTab(t.k as 'bank' | 'analytics')}
+            className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+              subTab === t.k ? 'bg-emerald-600 text-white' : 'border border-gray-300 text-gray-600 hover:bg-gray-50'
+            }`}
+          >
+            <i className={`fas ${t.icon} mr-1`} /> {t.label}
+          </button>
+        ))}
+        {subTab === 'bank' && (
+          <button onClick={startNew} className="ml-auto rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">
+            <i className="fas fa-plus mr-1" /> 新建操作题
+          </button>
+        )}
+      </div>
+
+      {msg && (
+        <div className={`mb-3 rounded-lg p-2.5 text-sm ${msg.type === 'ok' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>
+          {msg.text}
+        </div>
+      )}
+
+      {subTab === 'analytics' ? (
+        <WpsOpAnalytics kind={opKind} />
+      ) : loading ? (
+        <div className="py-10 text-center text-sm text-gray-400">加载中…</div>
+      ) : rows.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-gray-300 bg-white py-14 text-center text-sm text-gray-400">
+          还没有 {conf.label} 操作题。点右上角「新建操作题」，或在编辑页上传标准答案自动生成评分点。
         </div>
       ) : (
-        <>
-          {/* 二级分段：题库管理 / 练习情况 */}
-          <div className="mb-4 flex flex-wrap items-center gap-2">
-            {[
-              { k: 'bank', label: '题库管理', icon: 'fa-list-check' },
-              { k: 'analytics', label: '练习情况', icon: 'fa-chart-column' },
-            ].map((t) => (
-              <button
-                key={t.k}
-                onClick={() => setWpsTab(t.k as 'bank' | 'analytics')}
-                className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-                  wpsTab === t.k ? 'bg-emerald-600 text-white' : 'border border-gray-300 text-gray-600 hover:bg-gray-50'
-                }`}
-              >
-                <i className={`fas ${t.icon} mr-1`} /> {t.label}
-              </button>
-            ))}
-            {wpsTab === 'bank' && (
-              <button onClick={startNew} className="ml-auto rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">
-                <i className="fas fa-plus mr-1" /> 新建操作题
-              </button>
-            )}
-          </div>
-
-          {msg && (
-            <div className={`mb-3 rounded-lg p-2.5 text-sm ${msg.type === 'ok' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>
-              {msg.text}
-            </div>
-          )}
-
-          {wpsTab === 'analytics' ? (
-            <WpsOpAnalytics />
-          ) : loading ? (
-            <div className="py-10 text-center text-sm text-gray-400">加载中…</div>
-          ) : rows.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-gray-300 bg-white py-14 text-center text-sm text-gray-400">
-              还没有操作题。点右上角「新建操作题」，或在编辑页上传标准答案表自动生成评分点。
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {rows.map((r) => {
-                const sp = parseSpec(r.wps_spec);
-                const tpls = sp.templates || [];
-                const videoTotal = sp.steps.reduce((a, s) => a + normalizeVideos(s).length, 0);
-                const videos = sp.steps.filter((s) => normalizeVideos(s).length > 0).length;
-                return (
-                  <div key={r.id} className="flex items-start justify-between gap-4 rounded-lg border border-gray-200 bg-white p-4">
-                    <div className="min-w-0 flex-1">
-                      <div className="mb-1 flex flex-wrap items-center gap-2">
-                        <span className="rounded bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
-                          {sp.full_score} 分 · {sp.steps.length} 步
-                        </span>
-                        <span className="rounded bg-gray-100 px-2 py-0.5 text-[11px] text-gray-600">
-                          {r.cluster_id || '未分类'}
-                        </span>
-                        <span className={`rounded px-2 py-0.5 text-[11px] ${Number(r.practice_enabled) === 1 ? 'bg-sky-50 text-sky-700' : 'bg-gray-100 text-gray-500'}`}>
-                          {Number(r.practice_enabled) === 1 ? '学生可练' : '已下架'}
-                        </span>
-                        <span className="rounded bg-sky-50 px-2 py-0.5 text-[11px] text-sky-700">
-                          模板 {tpls.length}
-                        </span>
-                        <span className={`rounded px-2 py-0.5 text-[11px] ${videoTotal ? 'bg-violet-50 text-violet-700' : 'bg-gray-100 text-gray-500'}`}>
-                          视频 {videoTotal} 条 · {videos}/{sp.steps.length} 步
-                        </span>
-                      </div>
-                      <div className="line-clamp-2 text-sm text-gray-700">{stripHtml(r.content)}</div>
-                      {tpls.length > 0 && (
-                        <div className="mt-1 flex flex-wrap gap-1.5">
-                          {tpls.map((t) => (
-                            <span key={t.path} className="inline-flex items-center gap-1 rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500">
-                              <i className={`fas ${t.kind === 'text' ? 'fa-file-lines text-amber-600' : 'fa-file-excel text-emerald-600'}`} />
-                              {t.name}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex flex-none gap-2">
-                      <button onClick={() => startEdit(r)} className="rounded border border-gray-300 px-3 py-1 text-xs text-gray-700 hover:bg-gray-50">编辑</button>
-                      <button onClick={() => remove(r)} className="rounded border border-rose-200 px-3 py-1 text-xs text-rose-600 hover:bg-rose-50">删除</button>
-                    </div>
+        <div className="space-y-2">
+          {rows.map((r, idx) => {
+            const sp = parseSpec(specOfRow(r, opKind), opKind);
+            const tpls = sp.templates || [];
+            const videoTotal = sp.steps.reduce((a, s) => a + normalizeVideos(s).length, 0);
+            const videos = sp.steps.filter((s) => normalizeVideos(s).length > 0).length;
+            return (
+              <div key={r.id} className="flex items-start justify-between gap-4 rounded-lg border border-gray-200 bg-white p-4">
+                <div className="min-w-0 flex-1">
+                  <div className="mb-1 flex flex-wrap items-center gap-2">
+                    <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-emerald-600 text-[11px] font-bold text-white">
+                      {idx + 1}
+                    </span>
+                    <span className="rounded bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
+                      {sp.full_score} 分 · {sp.steps.length} 步
+                    </span>
+                    <span className={`rounded px-2 py-0.5 text-[11px] ${Number(r.practice_enabled) === 1 ? 'bg-sky-50 text-sky-700' : 'bg-gray-100 text-gray-500'}`}>
+                      {Number(r.practice_enabled) === 1 ? '学生可练' : '已下架'}
+                    </span>
+                    <span className="rounded bg-sky-50 px-2 py-0.5 text-[11px] text-sky-700">
+                      模板 {tpls.length}
+                    </span>
+                    <span className={`rounded px-2 py-0.5 text-[11px] ${videoTotal ? 'bg-violet-50 text-violet-700' : 'bg-gray-100 text-gray-500'}`}>
+                      视频 {videoTotal} 条 · {videos}/{sp.steps.length} 步
+                    </span>
                   </div>
-                );
-              })}
-            </div>
-          )}
-        </>
+                  <div className="line-clamp-2 text-sm text-gray-700">{stripHtml(r.content)}</div>
+                  {tpls.length > 0 && (
+                    <div className="mt-1 flex flex-wrap gap-1.5">
+                      {tpls.map((t) => (
+                        <span key={t.path} className="inline-flex items-center gap-1 rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500">
+                          <i className={`fas ${tplIcon(t.kind)}`} />
+                          {t.name}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="flex flex-none gap-2">
+                  <button onClick={() => startEdit(r)} className="rounded border border-gray-300 px-3 py-1 text-xs text-gray-700 hover:bg-gray-50">编辑</button>
+                  <button onClick={() => remove(r)} className="rounded border border-rose-200 px-3 py-1 text-xs text-rose-600 hover:bg-rose-50">删除</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       )}
     </div>
   );

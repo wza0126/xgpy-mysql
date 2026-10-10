@@ -5,11 +5,14 @@ import { getAuthToken } from '../../utils/authToken';
 import { sanitizeHtml } from '../../utils/htmlUtils';
 
 /**
- * 学测「操作题」
+ * 学测「操作题」（WPS / Access 共用一套作答界面）
  * ============================================================
- * 一个入口承载两类操作题：
- *   ┌ WPS 操作题 ── 下载模板（可多个：表格 + txt 数据源）→ 真 WPS 做题 → 上传 .xlsx → 服务端判分
- *   └ Access 操作题（占位，后续开放）
+ * 一个入口承载两类操作题，一级分段切换：
+ *   ┌ WPS 操作题  ── 下载模板（可多个：表格 + txt 数据源）→ 真 WPS 做题 → 上传 .xlsx → 服务端判分
+ *   └ Access 操作题 ── 下载模板（空白库 + 待导入的 xlsx）→ 真 Access 做题 → 上传 .accdb → 服务端判分
+ *
+ * 两类题的作答链路完全一致，所以这里只做"参数化"：
+ *   base 路径 / 接受的文件后缀 / 文案图标，其余全复用。
  *
  * ⛔ 前端拿不到评分点（答案）：后端下发的 spec 已被剥离 checks，
  *    回执里的逐评分点明细是「判完之后」才返回的，属正常作答反馈。
@@ -105,6 +108,51 @@ interface HistoryItem {
   created_at: string;
 }
 
+type OpKind = 'wps' | 'access';
+
+/** 两类操作题在作答链路上的差异，全部收敛在这里 */
+const OP_CONF: Record<OpKind, {
+  base: string;
+  tabLabel: string;
+  tabIcon: string;
+  title: string;
+  listDesc: string;
+  accept: string;
+  fileIcon: string;
+  uploadHint: string;
+  fileTip: string;
+  multiHint: string;
+  /** 是否有"另交附件"（导出题要另交 txt/xlsx） */
+  extras: boolean;
+}> = {
+  wps: {
+    base: '/api/student/wps-op',
+    tabLabel: 'WPS 操作题',
+    tabIcon: 'fa-file-excel',
+    title: 'WPS 操作题',
+    listDesc: '下载模板（可能同时有表格和数据源文件）→ 用 WPS 表格完成操作 → 另存为 .xlsx → 上传作答。系统按步骤逐项判分。',
+    accept: '.xlsx,.xlsm',
+    fileIcon: 'fa-file-excel',
+    uploadHint: '点击选择要上传的 .xlsx 作答文件',
+    fileTip: '用 WPS 表格打开，做完后「另存为 .xlsx」',
+    multiHint: '本题有多个文件：表格模板用来做题，数据源文件（txt/csv）里的数据需要按题目要求导入表格。',
+    extras: false,
+  },
+  access: {
+    base: '/api/student/access-op',
+    tabLabel: 'Access 操作题',
+    tabIcon: 'fa-database',
+    title: 'Access 操作题',
+    listDesc: '下载模板（空白库 + 可能要导入的数据源）→ 用 Access 完成建表 / 查询等操作 → 保存 .accdb → 上传作答。系统按步骤逐项判分。',
+    accept: '.accdb,.mdb',
+    fileIcon: 'fa-database',
+    uploadHint: '点击选择要上传的 .accdb 作答库',
+    fileTip: '用 Access 打开，做完后「文件 → 保存」（不要加密）',
+    multiHint: '本题有多个文件：空白库用来做题，xlsx 数据源需要按题目要求导入数据库（外部数据 → 导入）。',
+    extras: true,
+  },
+};
+
 const scoreColor = (obtained: number, full: number) => {
   if (full <= 0) return 'text-gray-500';
   const r = obtained / full;
@@ -127,6 +175,9 @@ const fmtSize = (n?: number | null) => {
   if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
   return (n / 1048576).toFixed(1) + ' MB';
 };
+
+/** 模板文件图标（数据库 / 表格 / 数据源） */
+const tplIcon = (kind?: string) => (kind === 'text' ? 'fa-file-lines' : kind === 'accdb' ? 'fa-database' : 'fa-file-excel');
 
 /** 本地上传/抓取的视频（相对路径）可内嵌播放；外链在新窗口打开（机房断网时可能打不开） */
 const isLocalVideo = (u: string) => /^\/uploads\//.test(u) || /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//i.test(u);
@@ -186,7 +237,8 @@ const VideoBlock: React.FC<{ urls?: string[]; url?: string; compact?: boolean }>
 };
 
 export const WpsOpApp: React.FC = () => {
-  const [opKind, setOpKind] = useState<'wps' | 'access'>('wps');
+  const [opKind, setOpKind] = useState<OpKind>('wps');
+  const conf = OP_CONF[opKind];
 
   const [list, setList] = useState<QuestionItem[]>([]);
   const [loadingList, setLoadingList] = useState(true);
@@ -199,17 +251,19 @@ export const WpsOpApp: React.FC = () => {
   const [loadingDetail, setLoadingDetail] = useState(false);
 
   const [file, setFile] = useState<File | null>(null);
+  const [extras, setExtras] = useState<File[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<GradeResult | null>(null);
   const [submitError, setSubmitError] = useState('');
   const [openSteps, setOpenSteps] = useState<Record<string, boolean>>({});
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const extrasInputRef = React.useRef<HTMLInputElement>(null);
 
   const loadList = useCallback(async () => {
     setLoadingList(true);
     setListError('');
     try {
-      const { data, error } = await backendClient.get('/api/student/wps-op/questions');
+      const { data, error } = await backendClient.get(`${conf.base}/questions`);
       if (error) throw new Error(error.message || String(error));
       setList(Array.isArray(data) ? data : []);
     } catch (e: any) {
@@ -217,20 +271,33 @@ export const WpsOpApp: React.FC = () => {
     } finally {
       setLoadingList(false);
     }
-  }, []);
+  }, [conf.base]);
 
   useEffect(() => { loadList(); }, [loadList]);
+
+  const switchKind = (k: OpKind) => {
+    if (k === opKind) return;
+    setOpKind(k);
+    setCurrent(null);
+    setResult(null);
+    setFile(null);
+    setExtras([]);
+    setSpec(null);
+    setSubmitError('');
+    setList([]);
+  };
 
   const openQuestion = async (item: QuestionItem) => {
     setCurrent(item);
     setSpec(null);
     setResult(null);
     setFile(null);
+    setExtras([]);
     setSubmitError('');
     setOpenSteps({});
     setLoadingDetail(true);
     try {
-      const { data, error } = await backendClient.get(`/api/student/wps-op/${item.id}`);
+      const { data, error } = await backendClient.get(`${conf.base}/${item.id}`);
       if (error) throw new Error(error.message || String(error));
       setSpec(data?.spec || null);
       setContent(data?.content || '');
@@ -244,7 +311,7 @@ export const WpsOpApp: React.FC = () => {
 
   const reloadHistory = async (id: string) => {
     try {
-      const { data } = await backendClient.get(`/api/student/wps-op/${id}`);
+      const { data } = await backendClient.get(`${conf.base}/${id}`);
       setHistory(data?.submissions || []);
     } catch { /* 忽略 */ }
   };
@@ -258,7 +325,8 @@ export const WpsOpApp: React.FC = () => {
       const token = getAuthToken();
       const fd = new FormData();
       fd.append('file', file);
-      const res = await fetch(`${API_CONFIG.apiUrl}/api/student/wps-op/${current.id}/submit`, {
+      extras.forEach((f) => fd.append('extras', f));
+      const res = await fetch(`${API_CONFIG.apiUrl}${conf.base}/${current.id}/submit`, {
         method: 'POST',
         // ⚠️ 不要手工设置 Content-Type，浏览器要自己带 multipart boundary
         headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -298,6 +366,46 @@ export const WpsOpApp: React.FC = () => {
     document.body.removeChild(a);
   };
 
+  /** 下载自己提交过的作答文件（带鉴权，走 blob），可在此基础上修改后再上传 */
+  const [downloading, setDownloading] = useState<string | null>(null);
+  const downloadSubmission = async (h: HistoryItem) => {
+    if (downloading) return;
+    setDownloading(h.id);
+    setSubmitError('');
+    try {
+      const token = getAuthToken();
+      const res = await fetch(`${API_CONFIG.apiUrl}${conf.base}/submissions/${h.id}/file`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (res.status === 401) {
+        const err: any = new Error('登录状态已失效，请重新登录');
+        err.isAuthError = true;
+        throw err;
+      }
+      if (!res.ok) {
+        let msg = `下载失败（${res.status}）`;
+        try { const j = await res.json(); if (j?.error) msg = j.error; } catch { /* 无 body */ }
+        throw new Error(msg);
+      }
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = h.filename || '我的提交';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(a.href);
+    } catch (e: any) {
+      setSubmitError(
+        e?.isAuthError
+          ? '登录状态已失效，请重新登录后再试。'
+          : (e?.message || '下载失败，请检查网络后重试')
+      );
+    } finally {
+      setDownloading(null);
+    }
+  };
+
   const plainContent = useMemo(() => sanitizeHtml(content || ''), [content]);
   const templates = useMemo<TemplateItem[]>(() => {
     if (!spec) return [];
@@ -308,38 +416,19 @@ export const WpsOpApp: React.FC = () => {
   // ---------------- 一级分段：WPS / Access ----------------
   const kindTabs = (
     <div className="mb-4 flex gap-1 border-b border-gray-200">
-      {[
-        { k: 'wps', label: 'WPS 操作题', icon: 'fa-file-excel' },
-        { k: 'access', label: 'Access 操作题', icon: 'fa-database' },
-      ].map((t) => (
+      {(Object.keys(OP_CONF) as OpKind[]).map((k) => (
         <button
-          key={t.k}
-          onClick={() => { setOpKind(t.k as 'wps' | 'access'); setCurrent(null); }}
+          key={k}
+          onClick={() => switchKind(k)}
           className={`-mb-px flex items-center gap-1.5 border-b-2 px-4 py-2 text-sm font-medium transition ${
-            opKind === t.k ? 'border-emerald-600 text-emerald-700' : 'border-transparent text-gray-500 hover:text-gray-700'
+            opKind === k ? 'border-emerald-600 text-emerald-700' : 'border-transparent text-gray-500 hover:text-gray-700'
           }`}
         >
-          <i className={`fas ${t.icon}`} /> {t.label}
+          <i className={`fas ${OP_CONF[k].tabIcon}`} /> {OP_CONF[k].tabLabel}
         </button>
       ))}
     </div>
   );
-
-  if (opKind === 'access') {
-    return (
-      <div className="h-full overflow-auto bg-gray-50 p-5">
-        {kindTabs}
-        <div className="rounded-xl border border-dashed border-gray-300 bg-white px-6 py-16 text-center">
-          <i className="fas fa-database mb-3 text-3xl text-gray-300" />
-          <div className="text-base font-semibold text-gray-700">Access 操作题</div>
-          <p className="mx-auto mt-2 max-w-md text-xs leading-relaxed text-gray-500">
-            这一部分还在准备中，老师开放后就能在这里练习数据库操作题。
-            现在可以先做「WPS 操作题」。
-          </p>
-        </div>
-      </div>
-    );
-  }
 
   // ---------------- 列表 ----------------
   if (!current) {
@@ -347,12 +436,10 @@ export const WpsOpApp: React.FC = () => {
       <div className="h-full overflow-auto bg-gray-50 p-5">
         {kindTabs}
         <div className="mb-1 flex items-center gap-2">
-          <i className="fas fa-file-excel text-emerald-600" />
-          <h2 className="text-lg font-bold text-gray-800">WPS 操作题</h2>
+          <i className={`fas ${conf.tabIcon} text-emerald-600`} />
+          <h2 className="text-lg font-bold text-gray-800">{conf.title}</h2>
         </div>
-        <p className="mb-4 text-xs text-gray-500">
-          下载模板（可能同时有表格和数据源文件）→ 用 WPS 表格完成操作 → 另存为 .xlsx → 上传作答。系统按步骤逐项判分。
-        </p>
+        <p className="mb-4 text-xs text-gray-500">{conf.listDesc}</p>
 
         {loadingList && <div className="py-10 text-center text-sm text-gray-400">加载中…</div>}
         {!loadingList && listError && (
@@ -368,7 +455,7 @@ export const WpsOpApp: React.FC = () => {
         )}
 
         <div className="grid gap-3 sm:grid-cols-2">
-          {list.map((it) => (
+          {list.map((it, idx) => (
             <button
               key={it.id}
               onClick={() => openQuestion(it)}
@@ -386,8 +473,10 @@ export const WpsOpApp: React.FC = () => {
                 )}
               </div>
               <div className="line-clamp-2 text-sm font-medium text-gray-800 group-hover:text-emerald-700">
-                {it.cluster_id || '未分类'}
-                {it.template_name ? ` · ${it.template_name}` : ''}
+                <span className="mr-1.5 inline-flex h-5 w-5 flex-none items-center justify-center rounded-full bg-emerald-600 align-[-2px] text-[11px] font-bold text-white">
+                  {idx + 1}
+                </span>
+                {it.template_name || '（未命名模板）'}
               </div>
               <div className="mt-2 text-[11px] text-gray-400">
                 {it.tries > 0 ? `已提交 ${it.tries} 次` : '尚未作答'}
@@ -404,7 +493,7 @@ export const WpsOpApp: React.FC = () => {
     <div className="h-full overflow-auto bg-gray-50 p-5">
       <div className="mb-4 flex items-center justify-between">
         <button
-          onClick={() => { setCurrent(null); setResult(null); }}
+          onClick={() => { setCurrent(null); setResult(null); setFile(null); setExtras([]); }}
           className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-800"
         >
           <i className="fas fa-arrow-left" /> 返回列表
@@ -464,7 +553,7 @@ export const WpsOpApp: React.FC = () => {
                       onClick={() => downloadTemplate(t)}
                       className="inline-flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700"
                     >
-                      <i className={`fas ${t.kind === 'text' ? 'fa-file-lines' : 'fa-download'}`} />
+                      <i className={`fas ${tplIcon(t.kind)}`} />
                       下载 {t.name}
                       {t.size ? <span className="opacity-80">（{fmtSize(t.size)}）</span> : null}
                     </button>
@@ -474,19 +563,19 @@ export const WpsOpApp: React.FC = () => {
                 <div className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-400">老师尚未上传模板文件</div>
               )}
               {templates.length > 1 && (
-                <div className="mt-1.5 text-[11px] text-gray-400">
-                  本题有多个文件：表格模板用来做题，数据源文件（txt/csv）里的数据需要按题目要求导入表格。
-                </div>
+                <div className="mt-1.5 text-[11px] text-gray-400">{conf.multiHint}</div>
               )}
-              <div className="mt-1 text-[11px] text-gray-400">用 WPS 表格打开，做完后「另存为 .xlsx」</div>
+              <div className="mt-1 text-[11px] text-gray-400">{conf.fileTip}</div>
             </div>
 
-            <div className="mb-1.5 text-xs font-medium text-gray-600">第 2 步：上传做好的 .xlsx</div>
+            <div className="mb-1.5 text-xs font-medium text-gray-600">
+              第 2 步：上传做好的 {conf.accept.split(',')[0]}
+            </div>
 
             <input
               ref={fileInputRef}
               type="file"
-              accept=".xlsx,.xlsm"
+              accept={conf.accept}
               className="hidden"
               onChange={(e) => { setFile(e.target.files?.[0] || null); setResult(null); setSubmitError(''); }}
             />
@@ -497,17 +586,62 @@ export const WpsOpApp: React.FC = () => {
             >
               {file ? (
                 <div className="text-sm text-gray-700">
-                  <i className="fas fa-file-excel mr-1 text-emerald-600" />
+                  <i className={`fas ${conf.fileIcon} mr-1 text-emerald-600`} />
                   {file.name}
                   <span className="ml-2 text-xs text-gray-400">{(file.size / 1024).toFixed(1)} KB</span>
                   <div className="mt-1 text-[11px] text-gray-400">点击可重新选择文件</div>
                 </div>
               ) : (
                 <div className="text-sm text-gray-500">
-                  <i className="fas fa-cloud-arrow-up mr-1" /> 点击选择要上传的 .xlsx 作答文件
+                  <i className="fas fa-cloud-arrow-up mr-1" /> {conf.uploadHint}
                 </div>
               )}
             </div>
+
+            {/* 另交附件（导出题：把导出的 txt / xlsx 一起交上来） */}
+            {conf.extras && (
+              <div className="mb-3 rounded-lg border border-gray-200 bg-gray-50 p-3">
+                <div className="mb-1.5 flex items-center gap-2">
+                  <span className="text-xs font-medium text-gray-600">另交的附件（选做）</span>
+                  <span className="text-[11px] text-gray-400">导出题：把导出的 txt / xlsx 一并交上来，方便老师核对</span>
+                </div>
+                <input
+                  ref={extrasInputRef}
+                  type="file"
+                  accept=".txt,.csv,.xlsx,.xlsm"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => {
+                    const picked = Array.from(e.target.files || []);
+                    setExtras(picked);
+                    setResult(null);
+                    setSubmitError('');
+                  }}
+                />
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() => extrasInputRef.current?.click()}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-100"
+                  >
+                    <i className="fas fa-paperclip" /> 选择附件
+                  </button>
+                  {extras.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {extras.map((f, i) => (
+                        <span key={i} className="inline-flex items-center gap-1 rounded bg-white px-2 py-0.5 text-[11px] text-gray-600">
+                          <i className="fas fa-file-lines text-amber-600" />{f.name}
+                          <button
+                            onClick={() => setExtras((arr) => arr.filter((_, j) => j !== i))}
+                            className="text-rose-500 hover:text-rose-700"
+                            title="移除"
+                          ><i className="fas fa-xmark" /></button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
 
             <button
               onClick={submit}
@@ -597,12 +731,24 @@ export const WpsOpApp: React.FC = () => {
           {/* 历史 */}
           {history.length > 0 && (
             <div className="rounded-xl border border-gray-200 bg-white p-4">
-              <h3 className="mb-3 text-sm font-bold text-gray-800">我的提交记录</h3>
+              <h3 className="text-sm font-bold text-gray-800">我的提交记录</h3>
+              <p className="mb-3 mt-0.5 text-[11px] text-gray-400">
+                点「下载」可取回当时提交的文件，在此基础上修改后再次上传即可（取最好成绩）。
+              </p>
               <div className="space-y-1.5">
                 {history.map((h) => (
                   <div key={h.id} className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2 text-xs">
                     <span className="truncate text-gray-600">{h.filename || '（未记录文件名）'}</span>
                     <span className="flex flex-none items-center gap-3">
+                      <button
+                        onClick={() => downloadSubmission(h)}
+                        disabled={downloading === h.id}
+                        className="inline-flex items-center gap-1 text-sky-600 hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+                        title="下载这份提交的文件，修改后可再次上传"
+                      >
+                        <i className={`fas ${downloading === h.id ? 'fa-spinner fa-spin' : 'fa-download'}`} />
+                        {downloading === h.id ? '下载中' : '下载'}
+                      </button>
                       <span className="text-gray-400">{fmtTime(h.created_at)}</span>
                       <span className={`font-bold ${scoreColor(h.score, h.full_score)}`}>{h.score}/{h.full_score}</span>
                     </span>

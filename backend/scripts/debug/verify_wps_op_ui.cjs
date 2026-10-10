@@ -5,7 +5,7 @@
  *
  * 覆盖：学生端「操作题」桌面入口 → WPS/Access 分段 → 列表（满分 100 + 多模板）
  *       → 题目详情（步骤/多模板下载/上传区）→ 真上传判分 → 逐评分点明细；
- *       教师端「WPS/ACCESS」菜单 → 题库管理 / 练习情况 / Access 占位
+ *       教师端「WPS/ACCESS」菜单 → 题库管理 / 练习情况 / Access 分段（已接线）
  *       → 新建编辑器（题干/多模板上传/评分点面板/每步视频上传）。
  */
 
@@ -110,10 +110,15 @@ async function clickByText(b, text) {
   // ⛔ 不留痕：UI 上传会真写 wps_op_submissions / student_answers，跑完必须清掉
   const mysql = require('../../node_modules/mysql2/promise');
   const conn = await mysql.createConnection({ host: '127.0.0.1', port: 3306, user: 'root', password: '122201', database: 'xgpy' });
-  const [bSubs] = await conn.query('SELECT id FROM wps_op_submissions WHERE question_id = ?', [QUESTION_ID]);
-  const [bAns] = await conn.query("SELECT id FROM student_answers WHERE question_id = ? AND answer LIKE '[WPS操作题]%'", [QUESTION_ID]);
+  // ⚠️ 基线/兜底/断言全部限定「测试学生 a」：运行期间真实用户可能正在提交本题，
+  //    全表差集兜底会把别人的提交当泄漏删掉（2026-10-10 误删事故）。
+  const [[stuRow]] = await conn.query("SELECT id FROM profiles WHERE username = 'a' LIMIT 1");
+  const STU_ID = stuRow ? stuRow.id : null;
+  const [bSubs] = await conn.query('SELECT id FROM wps_op_submissions WHERE question_id = ? AND student_id = ?', [QUESTION_ID, STU_ID]);
+  const [bAns] = await conn.query("SELECT id FROM student_answers WHERE question_id = ? AND student_id = ? AND answer LIKE '[WPS操作题]%'", [QUESTION_ID, STU_ID]);
   const baselineSubIds = new Set(bSubs.map((r) => r.id));
   const baselineAnsIds = new Set(bAns.map((r) => r.id));
+  const baselineMySubs = baselineSubIds.size;
 
   const b = await launchHeadless({
     userDataDir: path.join(__dirname, '.tmp-chrome-wpsop'),
@@ -139,12 +144,12 @@ async function clickByText(b, text) {
 
     section('B2. ★ 学生端 WPS / Access 分段');
     ok('★ 有「WPS 操作题」分段', /WPS 操作题/.test(openedText));
-    ok('★ 有「Access 操作题」分段（占位）', /Access 操作题/.test(openedText));
+    ok('★ 有「Access 操作题」分段', /Access 操作题/.test(openedText));
     const accClick = await clickByText(b, 'Access 操作题');
     ok('可切到 Access 分段', accClick === 'clicked', String(accClick));
-    await sleep(700);
+    await sleep(900);
     const accText = await b.evalJs(`document.body.innerText`);
-    ok('★ Access 段显示占位说明（不空白）', /Access 操作题/.test(accText) && /准备中|开放/.test(accText), accText.slice(0, 160).replace(/\n/g, ' '));
+    ok('★ Access 段已接线（不再是占位）', /Access 操作题/.test(accText) && !/还在准备中/.test(accText), accText.slice(0, 160).replace(/\n/g, ' '));
     await clickByText(b, 'WPS 操作题');
     await sleep(700);
 
@@ -259,14 +264,15 @@ async function clickByText(b, text) {
     ok('★ 有「题库管理」「练习情况」二级页签', /题库管理/.test(tText) && /练习情况/.test(tText));
     ok('★ 列表显示样例题（100 分 · 4 步）', /100 分 · 4 步/.test(tText), '');
     ok('★ 列表显示模板数/视频数标注', /模板 2/.test(tText) && /视频 \d+ 条/.test(tText));
-    ok('★ 显示所属分类', /数据获取与表达/.test(tText), '');
+    // 列表分类已按要求换成数字序号
+    ok('★ 列表显示数字序号（不再显示分类）', /(^|\n)\s*1\s*(\n| )/.test(tText) && !/数据获取与表达/.test(tText), '');
 
-    section('G2. ★ 教师端 Access 占位分段');
+    section('G2. ★ 教师端 Access 分段');
     const tAccClick = await clickByText(b, 'Access 操作题');
     ok('可切到 Access 分段', tAccClick === 'clicked', String(tAccClick));
-    await sleep(700);
+    await sleep(900);
     const tAccText = await b.evalJs(`document.body.innerText`);
-    ok('★ 教师端 Access 段显示占位说明', /Access 操作题（占位）/.test(tAccText), tAccText.slice(0, 200).replace(/\n/g, ' '));
+    ok('★ 教师端 Access 段已接线（不再是占位）', /新建操作题/.test(tAccText) && !/（占位）/.test(tAccText), tAccText.slice(0, 200).replace(/\n/g, ' '));
     await clickByText(b, 'WPS 操作题');
     await sleep(900);
 
@@ -395,8 +401,8 @@ async function clickByText(b, text) {
 
     // ---------- 不留痕 ----------
     try {
-      const [curSubs] = await conn.query('SELECT id, file_path FROM wps_op_submissions WHERE question_id = ?', [QUESTION_ID]);
-      const leakedSubs = curSubs.filter((r) => !baselineSubIds.has(r.id));
+      const [curSubs] = await conn.query('SELECT id, student_id, file_path FROM wps_op_submissions WHERE question_id = ?', [QUESTION_ID]);
+      const leakedSubs = curSubs.filter((r) => r.student_id === STU_ID && !baselineSubIds.has(r.id));
       if (leakedSubs.length) {
         await conn.query('DELETE FROM wps_op_submissions WHERE id IN (?)', [leakedSubs.map((r) => r.id)]);
         for (const r of leakedSubs) {
@@ -404,12 +410,16 @@ async function clickByText(b, text) {
           try { if (abs && fs.existsSync(abs)) fs.unlinkSync(abs); } catch { /* ignore */ }
         }
       }
-      const [curAns] = await conn.query("SELECT id FROM student_answers WHERE question_id = ? AND answer LIKE '[WPS操作题]%'", [QUESTION_ID]);
-      const leakedAns = curAns.map((r) => r.id).filter((id) => !baselineAnsIds.has(id));
+      const [curAns] = await conn.query("SELECT id, student_id FROM student_answers WHERE question_id = ? AND answer LIKE '[WPS操作题]%'", [QUESTION_ID]);
+      const leakedAns = curAns.filter((r) => r.student_id === STU_ID).map((r) => r.id).filter((id) => !baselineAnsIds.has(id));
       if (leakedAns.length) await conn.query('DELETE FROM student_answers WHERE id IN (?)', [leakedAns]);
 
-      const [[afterSubs]] = await conn.query('SELECT COUNT(*) AS n FROM wps_op_submissions WHERE question_id = ?', [QUESTION_ID]);
-      ok('⛔ 不留痕：提交记录回到基线', afterSubs.n === baselineSubIds.size, `${baselineSubIds.size} → ${afterSubs.n}`);
+      const [postSubs] = await conn.query('SELECT id FROM wps_op_submissions WHERE question_id = ? AND student_id = ?', [QUESTION_ID, STU_ID]);
+      const subLeak = postSubs.map((r) => r.id).filter((id) => !baselineSubIds.has(id));
+      ok('⛔ 不留痕：本次提交记录已清理（差集）', subLeak.length === 0, `leak=${subLeak.length}`);
+      const [postAns] = await conn.query("SELECT id FROM student_answers WHERE question_id = ? AND student_id = ? AND answer LIKE '[WPS操作题]%'", [QUESTION_ID, STU_ID]);
+      const ansLeak = postAns.map((r) => r.id).filter((id) => !baselineAnsIds.has(id));
+      ok('⛔ 不留痕：本次答题记录已清理（差集）', ansLeak.length === 0, `leak=${ansLeak.length}`);
     } catch (e) {
       console.error('清理阶段异常：', e.message);
       fail++;

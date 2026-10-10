@@ -6,6 +6,7 @@ import { useAuth } from '../../hooks/useAuth';
 import { ExamManager } from './ExamManager';
 import { ClusterFilter, buildClusterTree, type ClusterTree } from '../common/ClusterFilter';
 import { CHAPTER_NAMES } from '../../data/chapterTaxonomy';
+import { isOperationType } from '../../utils/questionType';
 
 const parseTags = (tags: any): string[] => {
   if (!tags) return [];
@@ -72,8 +73,8 @@ export const TestManager: React.FC = () => {
     const { data: questions } = await backendClient.from('questions').select('*').eq('exam_enabled', true);
     if (questions) {
       const tagSet = new Set<string>();
-      // ⛔ 排除 WPS 操作题（type='wps_op'）：不进普通测试池，别让它的标签污染筛选树
-      (questions as Question[]).filter((q) => (q as any).type !== 'wps_op').forEach((q) => {
+      // ⛔ 排除操作题（WPS / Access）：不进普通测试池，别让它们的标签污染筛选树
+      (questions as Question[]).filter((q) => !isOperationType((q as any).type)).forEach((q) => {
         const tags = parseTags(q.tags);
         tags.forEach((t) => tagSet.add(t));
       });

@@ -151,7 +151,10 @@ async function launchHeadless(opts = {}) {
     }
   });
   ws.on('Runtime.exceptionThrown', (p) => {
-    jsErrors.push((p.exceptionDetails && p.exceptionDetails.text) || 'exception');
+    const d = (p && p.exceptionDetails) || {};
+    const desc = (d.exception && d.exception.description) || '';
+    const first = String(desc).split('\n')[0];
+    jsErrors.push((d.text || 'exception') + (first ? ' :: ' + first : ''));
   });
 
   await ws.send('Runtime.enable');
