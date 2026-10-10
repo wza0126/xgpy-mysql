@@ -3,15 +3,22 @@ import { backendClient } from '../../api/backendClient';
 import { API_CONFIG } from '../../api/config';
 import { getAuthToken } from '../../utils/authToken';
 import { CHAPTER_TAXONOMY } from '../../data/chapterTaxonomy';
+import { WpsOpAnalytics } from './WpsOpAnalytics';
 
 /**
- * 教师端 · WPS 操作题录制
+ * 教师端 · WPS / ACCESS 操作题
  * ============================================================
+ * 一个菜单承载两类操作题（Access 暂为占位，不再单开模块）：
+ *   ┌ WPS 操作题 ── 题库管理 / 练习情况
+ *   └ Access 操作题（占位）
+ *
  * 目标是「题库录入方便」：
- *   1) 上传做好的「标准答案表」→ 自动解析 OOXML 生成评分点骨架（合并区/公式/数值/图表全自动认出）
- *   2) 骨架可继续在可视化面板里改分值、改标签；也可以直接编辑 JSON
- *   3) 模板文件上传后写进 spec.template，学生端一键下载
- *   4) 每一步预留 video_url（后期每步配演示视频）
+ *   1) 上传做好的「标准答案表」→ 自动解析 OOXML 生成评分点骨架
+ *      （合并区/公式/数值/图表/排序/筛选/分类汇总/条件格式 全自动认出）
+ *   2) 骨架可在可视化面板里改分值、改标签；也可以直接编辑 JSON
+ *   3) 模板支持多文件：xlsx 空白表 + txt/csv 数据源（有些题要从 txt 导入数据）
+ *   4) 每一步可挂演示视频：本地上传 或 外链抓取到本地（机房断网也能播）
+ *   5) 默认满分 100（评分点很细，10 分不够用）
  */
 
 interface CheckDef {
@@ -30,11 +37,20 @@ interface StepDef {
   checks: CheckDef[];
 }
 
+interface TemplateDef {
+  name: string;
+  path: string;
+  size?: number | null;
+  kind?: string;
+}
+
 interface SpecDef {
   version: number;
   full_score: number;
   grader?: { sheet?: string };
-  template?: { name?: string; path?: string; size?: number };
+  templates?: TemplateDef[];
+  /** 一期单模板字段：继续保留（后端 normalizeTemplates 会合并） */
+  template?: { name?: string; path?: string; size?: number | null };
   steps: StepDef[];
 }
 
@@ -46,8 +62,10 @@ interface Row {
   wps_spec: any;
 }
 
+type FieldType = 'text' | 'number' | 'bool' | 'csv' | 'json';
+
 // 评分点类型 → 中文名 + 需要的字段（与后端 wps-grader.js 的 CHECKERS 一一对应）
-const KIND_META: Record<string, { label: string; fields: { key: string; label: string; type: 'text' | 'number' | 'bool' | 'csv' }[] }> = {
+const KIND_META: Record<string, { label: string; fields: { key: string; label: string; type: FieldType }[] }> = {
   merged: { label: '合并单元格', fields: [{ key: 'range', label: '区域', type: 'text' }] },
   cell_text: { label: '单元格文本', fields: [{ key: 'ref', label: '单元格', type: 'text' }, { key: 'text', label: '应填文字', type: 'text' }] },
   cell_value: { label: '单元格数值', fields: [{ key: 'ref', label: '单元格', type: 'text' }, { key: 'value', label: '期望值', type: 'number' }, { key: 'tol', label: '容差', type: 'number' }] },
@@ -56,7 +74,7 @@ const KIND_META: Record<string, { label: string; fields: { key: string; label: s
   formula_tokens: { label: '公式引用单元格', fields: [{ key: 'ref', label: '单元格', type: 'text' }, { key: 'tokens', label: '须引用的单元格（逗号分隔）', type: 'csv' }] },
   sum_range: { label: 'SUM 求和且区间正确', fields: [{ key: 'ref', label: '结果单元格', type: 'text' }, { key: 'range', label: '求和区域', type: 'text' }] },
   range_formula: { label: '区域内全部使用公式', fields: [{ key: 'range', label: '区域', type: 'text' }] },
-  range_values: { label: '区域内数值全部正确', fields: [{ key: 'range', label: '区域', type: 'text' }, { key: 'values', label: '期望值（逗号分隔，按从左到右/从上到下）', type: 'csv' }, { key: 'tol', label: '容差', type: 'number' }] },
+  range_values: { label: '区域内数值全部正确', fields: [{ key: 'range', label: '区域', type: 'text' }, { key: 'values', label: '期望值（逗号分隔，从左到右/从上到下）', type: 'csv' }, { key: 'tol', label: '容差', type: 'number' }] },
   range_integer_display: { label: '区域内不保留小数', fields: [{ key: 'range', label: '区域', type: 'text' }] },
   integer_display: { label: '单元格不保留小数', fields: [{ key: 'ref', label: '单元格', type: 'text' }] },
   font: { label: '字体名称/加粗/字号', fields: [{ key: 'ref', label: '单元格', type: 'text' }, { key: 'name', label: '字体名', type: 'text' }, { key: 'bold', label: '加粗', type: 'bool' }, { key: 'size', label: '字号', type: 'number' }] },
@@ -64,23 +82,79 @@ const KIND_META: Record<string, { label: string; fields: { key: string; label: s
   number_format: { label: '数字格式小数位', fields: [{ key: 'ref', label: '单元格', type: 'text' }, { key: 'decimals', label: '小数位', type: 'number' }, { key: 'mode', label: '判定(exact/atMost)', type: 'text' }] },
   chart: { label: '图表', fields: [{ key: 'chartType', label: '类型(bar/line/pie...)', type: 'text' }, { key: 'barDir', label: '柱形方向(col/bar)', type: 'text' }, { key: 'title', label: '标题', type: 'text' }, { key: 'catRange', label: '分类轴区域', type: 'text' }, { key: 'valRange', label: '数值轴区域', type: 'text' }] },
   sheet_exists: { label: '工作表存在', fields: [{ key: 'sheet', label: '工作表名', type: 'text' }] },
+  // ---- 与真实 Excel 2016 产物实测校准的四类（2026-10-10）----
+  sorted_range: {
+    label: '排序（区域按某列有序）',
+    fields: [
+      { key: 'range', label: '区域', type: 'text' },
+      { key: 'col', label: '排序依据列（1=A）', type: 'number' },
+      { key: 'order', label: '方向(asc/desc)', type: 'text' },
+    ],
+  },
+  auto_filter: {
+    label: '自动筛选',
+    fields: [
+      { key: 'range', label: '筛选区域', type: 'text' },
+      { key: 'minColumns', label: '至少几列条件', type: 'number' },
+      { key: 'columns', label: '列条件（JSON，如 [{"col":4,"op":"greaterThan","value":45000}]）', type: 'json' },
+    ],
+  },
+  subtotal: {
+    label: '分类汇总',
+    fields: [
+      { key: 'range', label: '区域', type: 'text' },
+      { key: 'fn', label: '汇总方式(sum/count/average/max/min)', type: 'text' },
+      { key: 'minCount', label: '至少几个汇总', type: 'number' },
+      { key: 'requireOutline', label: '要求分级显示', type: 'bool' },
+    ],
+  },
+  cond_format: {
+    label: '条件格式',
+    fields: [
+      { key: 'range', label: '区域', type: 'text' },
+      { key: 'type', label: '类型(cellIs/expression)', type: 'text' },
+      { key: 'operator', label: '条件(greaterThan/lessThan/between...)', type: 'text' },
+      { key: 'value', label: '阈值', type: 'number' },
+      { key: 'fillColor', label: '填充色(红 / FF0000)', type: 'text' },
+    ],
+  },
 };
+
+const DEFAULT_FULL_SCORE = 100;
 
 const emptyCheck = (kind: string): CheckDef => ({ kind, label: KIND_META[kind]?.label || kind, score: 1 });
 const emptyStep = (i: number): StepDef => ({ id: 's' + (i + 1), title: '', desc: '', score: 1, video_url: '', checks: [emptyCheck('merged')] });
 
-const defaultSpec = (): SpecDef => ({ version: 1, full_score: 10, grader: { sheet: 'Sheet1' }, steps: [emptyStep(0)] });
+const defaultSpec = (): SpecDef => ({ version: 1, full_score: DEFAULT_FULL_SCORE, grader: { sheet: 'Sheet1' }, templates: [], steps: [emptyStep(0)] });
+
+/** 统一模板清单（新格式 templates[] + 一期单模板 template，按 path 去重） */
+const mergeTemplates = (v: any): TemplateDef[] => {
+  const out: TemplateDef[] = [];
+  const seen = new Set<string>();
+  const push = (t: any) => {
+    if (!t || !t.path) return;
+    const p = String(t.path);
+    if (seen.has(p)) return;
+    seen.add(p);
+    out.push({ name: t.name || p.split('/').pop() || '模板', path: p, size: t.size ?? null, kind: t.kind || (/\.(txt|csv)$/i.test(t.name || p) ? 'text' : 'xlsx') });
+  };
+  if (Array.isArray(v?.templates)) v.templates.forEach(push);
+  push(v?.template);
+  return out;
+};
 
 const parseSpec = (raw: any): SpecDef => {
   if (!raw) return defaultSpec();
   let v = raw;
   if (typeof v === 'string') { try { v = JSON.parse(v); } catch { return defaultSpec(); } }
   if (!v || !Array.isArray(v.steps)) return defaultSpec();
+  const templates = mergeTemplates(v);
   return {
     version: v.version || 1,
-    full_score: Number(v.full_score) || 10,
+    full_score: Number(v.full_score) || DEFAULT_FULL_SCORE,
     grader: v.grader || { sheet: 'Sheet1' },
-    template: v.template || undefined,
+    templates,
+    template: templates[0],
     steps: v.steps.map((s: any, i: number) => ({
       id: s.id || 's' + (i + 1),
       title: s.title || '',
@@ -94,7 +168,20 @@ const parseSpec = (raw: any): SpecDef => {
 
 const stripHtml = (html: string) => (html || '').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
 
+/** 本地上传/抓取到本地的视频（相对路径或本机地址）→ 可以内嵌播放；其余视为外链 */
+const isLocalVideo = (u: string) => /^\/uploads\//.test(u) || /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//i.test(u);
+
+const fmtSize = (n?: number | null) => {
+  if (!n || n <= 0) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1048576).toFixed(1) + ' MB';
+};
+
 export const WpsOpManager: React.FC = () => {
+  const [opKind, setOpKind] = useState<'wps' | 'access'>('wps');
+  const [wpsTab, setWpsTab] = useState<'bank' | 'analytics'>('bank');
+
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<Row | null>(null);
@@ -110,8 +197,11 @@ export const WpsOpManager: React.FC = () => {
   const [inspectBusy, setInspectBusy] = useState(false);
   const [inspectNote, setInspectNote] = useState('');
   const [templateBusy, setTemplateBusy] = useState(false);
+  const [videoBusy, setVideoBusy] = useState(false);
+  const [videoTarget, setVideoTarget] = useState<number | null>(null);
   const inspectRef = useRef<HTMLInputElement>(null);
   const templateRef = useRef<HTMLInputElement>(null);
+  const videoRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -202,11 +292,17 @@ export const WpsOpManager: React.FC = () => {
   const scaleToFull = () => {
     setSpec((s) => {
       const total = s.steps.reduce((a, st) => a + st.checks.reduce((b, c) => b + (Number(c.score) || 0), 0), 0);
-      const full = Number(s.full_score) || 10;
+      const full = Number(s.full_score) || DEFAULT_FULL_SCORE;
       if (!total || Math.abs(total - full) < 1e-9) return s;
-      const k = full / total;
-      const steps = s.steps.map((st) => {
-        const checks = st.checks.map((c) => ({ ...c, score: Math.round((Number(c.score) || 0) * k * 100) / 100 }));
+      let acc = 0;
+      const steps = s.steps.map((st, si) => {
+        const checks = st.checks.map((c, ci) => {
+          const isLast = si === s.steps.length - 1 && ci === st.checks.length - 1;
+          // 最后一个评分点用余数兜住浮点误差，保证合计恰好等于满分
+          const v = isLast ? Math.round((full - acc) * 100) / 100 : Math.round((Number(c.score) || 0) * (full / total) * 100) / 100;
+          acc += v;
+          return { ...c, score: v };
+        });
         return { ...st, checks, score: Math.round(checks.reduce((a, c) => a + c.score, 0) * 100) / 100 };
       });
       return { ...s, steps };
@@ -231,19 +327,101 @@ export const WpsOpManager: React.FC = () => {
     return json?.data;
   };
 
-  const onTemplatePicked = async (f: File | null) => {
-    if (!f) return;
+  /** 多模板上传：一次可选 xlsx + txt 等；返回 items 数组 */
+  const onTemplatesPicked = async (files: FileList | null) => {
+    if (!files || !files.length) return;
     setTemplateBusy(true);
     setMsg(null);
     try {
-      const d = await uploadFile('/api/teacher/wps-op/template', f);
-      setSpec((s) => ({ ...s, template: { name: d.name, path: d.path, size: d.size } }));
-      setMsg({ type: 'ok', text: `模板已上传：${d.name}` });
+      const token = getAuthToken();
+      const fd = new FormData();
+      for (let i = 0; i < files.length; i++) fd.append('file', files[i]);
+      const res = await fetch(`${API_CONFIG.apiUrl}/api/teacher/wps-op/template`, {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: fd,
+      });
+      let json: any = null;
+      try { json = await res.json(); } catch { /* ignore */ }
+      if (res.status === 401) { const e: any = new Error('登录已失效，请重新登录'); e.isAuthError = true; throw e; }
+      if (!res.ok) throw new Error(json?.error || `上传失败（${res.status}）`);
+      const items = json?.data?.files || (json?.data?.path ? [json.data] : []);
+      if (!items.length) throw new Error('没有解析到已上传的文件');
+      setSpec((s) => {
+        const cur = s.templates || [];
+        const seen = new Set(cur.map((t) => t.path));
+        const next = cur.slice();
+        for (const it of items) {
+          if (!it?.path || seen.has(it.path)) continue;
+          seen.add(it.path);
+          next.push({ name: it.name, path: it.path, size: it.size, kind: it.kind });
+        }
+        return { ...s, templates: next, template: next[0] };
+      });
+      setMsg({ type: 'ok', text: `已上传 ${items.length} 个模板文件` });
     } catch (e: any) {
       setMsg({ type: 'err', text: e?.isAuthError ? '登录已失效，请重新登录' : (e?.message || '模板上传失败') });
     } finally {
       setTemplateBusy(false);
       if (templateRef.current) templateRef.current.value = '';
+    }
+  };
+
+  const removeTemplate = (p: string) => {
+    setSpec((s) => {
+      const next = (s.templates || []).filter((t) => t.path !== p);
+      return { ...s, templates: next, template: next[0] };
+    });
+  };
+
+  /** 上传本地演示视频 → 挂到指定步骤 */
+  const pickVideo = (si: number) => {
+    setVideoTarget(si);
+    videoRef.current?.click();
+  };
+
+  const onVideoPicked = async (f: File | null) => {
+    const si = videoTarget;
+    if (!f || si === null) return;
+    setVideoBusy(true);
+    setMsg(null);
+    try {
+      const d = await uploadFile('/api/teacher/wps-op/video', f);
+      patchStep(si, { video_url: d.url });
+      setMsg({ type: 'ok', text: `视频已上传并挂到第 ${si + 1} 步（${fmtSize(d.size)}），机房断网也能播` });
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e?.isAuthError ? '登录已失效，请重新登录' : (e?.message || '视频上传失败') });
+    } finally {
+      setVideoBusy(false);
+      setVideoTarget(null);
+      if (videoRef.current) videoRef.current.value = '';
+    }
+  };
+
+  /** 外链抓取到本地（抓不到就提示改用本地上传） */
+  const fetchVideo = async (si: number) => {
+    const url = window.prompt('粘贴视频直链（http/https，需服务端能直接下载）：', '');
+    if (!url) return;
+    setVideoBusy(true);
+    setMsg(null);
+    try {
+      const token = getAuthToken();
+      const res = await fetch(`${API_CONFIG.apiUrl}/api/teacher/wps-op/video/fetch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ url }),
+      });
+      let json: any = null;
+      try { json = await res.json(); } catch { /* ignore */ }
+      if (res.status === 401) { const e: any = new Error('登录已失效，请重新登录'); e.isAuthError = true; throw e; }
+      if (!res.ok) throw new Error(json?.error || `抓取失败（${res.status}）`);
+      const d = json?.data || {};
+      patchStep(si, { video_url: d.url });
+      setMsg({ type: 'ok', text: `外链视频已抓到本地并挂到第 ${si + 1} 步（${fmtSize(d.size)}）` });
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e?.isAuthError ? '登录已失效，请重新登录' : (e?.message || '抓取失败') });
+    } finally {
+      setVideoBusy(false);
     }
   };
 
@@ -253,7 +431,20 @@ export const WpsOpManager: React.FC = () => {
     setMsg(null);
     setInspectNote('');
     try {
-      const d = await uploadFile('/api/teacher/wps-op/inspect', f);
+      const token = getAuthToken();
+      const fd = new FormData();
+      fd.append('file', f);
+      fd.append('full_score', String(spec.full_score || DEFAULT_FULL_SCORE));
+      const res = await fetch(`${API_CONFIG.apiUrl}/api/teacher/wps-op/inspect`, {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: fd,
+      });
+      let json: any = null;
+      try { json = await res.json(); } catch { /* ignore */ }
+      if (res.status === 401) { const e: any = new Error('登录已失效，请重新登录'); e.isAuthError = true; throw e; }
+      if (!res.ok) throw new Error(json?.error || `解析失败（${res.status}）`);
+      const d = json?.data || {};
       const sug = d?.suggested_spec;
       if (!sug || !Array.isArray(sug.steps) || !sug.steps.length) {
         setMsg({ type: 'err', text: '没能从这份文件里识别出可判分的内容（可能表格是空的）' });
@@ -265,7 +456,7 @@ export const WpsOpManager: React.FC = () => {
         `识别到 ${sh?.merges?.length || 0} 个合并区、${(sh?.cells || []).filter((c: any) => c.formula).length} 个公式、`
         + `${sh?.charts?.length || 0} 个图表，已自动生成 ${sug.steps.length} 个步骤 / ${checks} 个评分点`
       );
-      const parsed = parseSpec({ ...sug, full_score: spec.full_score || 10 });
+      const parsed = parseSpec({ ...sug, full_score: spec.full_score || DEFAULT_FULL_SCORE, templates: spec.templates, template: spec.template });
       setSpec(parsed);
       setMsg({ type: 'ok', text: '已用标准答案生成评分点骨架，请核对分值与描述后保存' });
     } catch (e: any) {
@@ -279,9 +470,10 @@ export const WpsOpManager: React.FC = () => {
   // ---------- 校验与保存 ----------
   const validate = async () => {
     try {
+      const token = getAuthToken();
       const res = await fetch(`${API_CONFIG.apiUrl}/api/teacher/wps-op/validate-spec`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(getAuthToken() ? { Authorization: `Bearer ${getAuthToken()}` } : {}) },
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify({ spec, full_score: spec.full_score }),
       });
       const json = await res.json();
@@ -303,12 +495,17 @@ export const WpsOpManager: React.FC = () => {
     setSaving(true);
     setMsg(null);
     try {
+      const clean: SpecDef = {
+        ...spec,
+        templates: (spec.templates || []).map((t) => ({ name: t.name, path: t.path, size: t.size ?? null, kind: t.kind })),
+        template: (spec.templates || [])[0],
+      };
       const payload: any = {
         type: 'wps_op',
         content: content.trim(),
         cluster_id: cluster || null,
         practice_enabled: practiceEnabled ? 1 : 0,
-        wps_spec: spec,
+        wps_spec: clean,
         answers: JSON.stringify({ note: 'WPS 操作题由 wps_spec 判分，answers 列仅占位' }),
       };
       let err: any = null;
@@ -342,20 +539,24 @@ export const WpsOpManager: React.FC = () => {
     }
   };
 
-  // ---------- 列表视图 ----------
-  if (!editing) {
+  const totalCheckScore = spec.steps.reduce((a, st) => a + st.checks.reduce((b, c) => b + (Number(c.score) || 0), 0), 0);
+
+  // ============================================================
+  // 编辑视图（整页）
+  // ============================================================
+  if (editing) {
     return (
       <div className="p-6">
         <div className="mb-4 flex items-center justify-between">
-          <div>
-            <h2 className="text-xl font-bold text-gray-800">WPS 操作题</h2>
-            <p className="mt-1 text-xs text-gray-500">
-              学测操作题（每题 10 分、分步给分）。上传做好的「标准答案表」可自动生成评分点，再改分值与描述即可。
-            </p>
-          </div>
-          <button onClick={startNew} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">
-            <i className="fas fa-plus mr-1" /> 新建操作题
+          <button onClick={() => setEditing(null)} className="text-sm text-gray-500 hover:text-gray-800">
+            <i className="fas fa-arrow-left mr-1" /> 返回列表
           </button>
+          <div className="flex items-center gap-2">
+            <button onClick={validate} className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">校验评分点</button>
+            <button onClick={save} disabled={saving} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:bg-gray-300">
+              {saving ? '保存中…' : '保存'}
+            </button>
+          </div>
         </div>
 
         {msg && (
@@ -364,297 +565,447 @@ export const WpsOpManager: React.FC = () => {
           </div>
         )}
 
-        {loading ? (
-          <div className="py-10 text-center text-sm text-gray-400">加载中…</div>
-        ) : rows.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-gray-300 bg-white py-14 text-center text-sm text-gray-400">
-            还没有操作题。点右上角「新建操作题」，或在编辑页上传标准答案表自动生成评分点。
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {rows.map((r) => {
-              const sp = parseSpec(r.wps_spec);
-              return (
-                <div key={r.id} className="flex items-start justify-between gap-4 rounded-lg border border-gray-200 bg-white p-4">
-                  <div className="min-w-0 flex-1">
-                    <div className="mb-1 flex flex-wrap items-center gap-2">
-                      <span className="rounded bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
-                        {sp.full_score} 分 · {sp.steps.length} 步
-                      </span>
-                      <span className="rounded bg-gray-100 px-2 py-0.5 text-[11px] text-gray-600">
-                        {r.cluster_id || '未分类'}
-                      </span>
-                      <span className={`rounded px-2 py-0.5 text-[11px] ${Number(r.practice_enabled) === 1 ? 'bg-sky-50 text-sky-700' : 'bg-gray-100 text-gray-500'}`}>
-                        {Number(r.practice_enabled) === 1 ? '学生可练' : '已下架'}
-                      </span>
-                      {sp.template?.name && <span className="text-[11px] text-gray-400">模板：{sp.template.name}</span>}
-                    </div>
-                    <div className="line-clamp-2 text-sm text-gray-700">{stripHtml(r.content)}</div>
-                  </div>
-                  <div className="flex flex-none gap-2">
-                    <button onClick={() => startEdit(r)} className="rounded border border-gray-300 px-3 py-1 text-xs text-gray-700 hover:bg-gray-50">编辑</button>
-                    <button onClick={() => remove(r)} className="rounded border border-rose-200 px-3 py-1 text-xs text-rose-600 hover:bg-rose-50">删除</button>
-                  </div>
-                </div>
-              );
-            })}
+        {validation && (
+          <div className={`mb-3 rounded-lg p-3 text-xs ${validation.errors.length ? 'bg-rose-50' : 'bg-sky-50'}`}>
+            <div className="font-medium text-gray-700">评分点合计 {validation.total} 分 / 满分 {spec.full_score} 分</div>
+            {validation.errors.map((e, i) => <div key={'e' + i} className="mt-1 text-rose-700">✗ {e}</div>)}
+            {validation.warnings.map((w, i) => <div key={'w' + i} className="mt-1 text-amber-700">⚠ {w}</div>)}
+            {!validation.errors.length && !validation.warnings.length && <div className="mt-1 text-emerald-700">✓ 一切正常</div>}
           </div>
         )}
+
+        <div className="space-y-4">
+          {/* 基本信息 */}
+          <div className="rounded-lg border border-gray-200 bg-white p-4">
+            <h3 className="mb-3 text-sm font-bold text-gray-800">基本信息</h3>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div className="sm:col-span-3">
+                <label className="mb-1 block text-xs text-gray-500">题干（支持简单 HTML，如 &lt;p&gt;、&lt;strong&gt;）</label>
+                <textarea
+                  value={content}
+                  onChange={(e) => setContent(e.target.value)}
+                  rows={6}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                  placeholder="<p>下载「xxx.xlsx」和「data.txt」，用 WPS 表格完成以下操作并保存：</p><p>1. ...</p>"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs text-gray-500">所属分类（章/小节）</label>
+                <select value={cluster} onChange={(e) => setCluster(e.target.value)} className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm">
+                  <option value="">（未分类）</option>
+                  {clusterOptions.map((o) => (
+                    <option key={o.value} value={o.value}>{o.primary}{o.secondary ? ' / ' + o.secondary : '（整章）'}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="mb-1 block text-xs text-gray-500">满分（默认 100）</label>
+                <input
+                  type="number" min={1} step={1}
+                  value={spec.full_score}
+                  onChange={(e) => setSpec((s) => ({ ...s, full_score: Number(e.target.value) || 0 }))}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                />
+              </div>
+              <div className="flex items-end">
+                <label className="flex items-center gap-2 text-sm text-gray-700">
+                  <input type="checkbox" checked={practiceEnabled} onChange={(e) => setPracticeEnabled(e.target.checked)} />
+                  学生可练
+                </label>
+              </div>
+            </div>
+          </div>
+
+          {/* 模板与自动生成 */}
+          <div className="rounded-lg border border-gray-200 bg-white p-4">
+            <h3 className="mb-3 text-sm font-bold text-gray-800">模板文件与评分点</h3>
+
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                onClick={() => templateRef.current?.click()}
+                disabled={templateBusy}
+                className="rounded-lg bg-sky-600 px-3 py-2 text-xs font-medium text-white hover:bg-sky-700 disabled:bg-gray-300"
+              >
+                <i className="fas fa-upload mr-1" /> {templateBusy ? '上传中…' : '上传模板文件（可多选）'}
+              </button>
+              <input
+                ref={templateRef}
+                type="file"
+                accept=".xlsx,.xlsm,.txt,.csv"
+                multiple
+                className="hidden"
+                onChange={(e) => onTemplatesPicked(e.target.files)}
+              />
+              <span className="text-xs text-gray-500">
+                支持 .xlsx/.xlsm 空白表 <b>和 .txt/.csv 数据源</b>（有些题要求"从 txt 导入数据"），学生端可分别下载
+              </span>
+            </div>
+
+            {/* 模板清单 */}
+            {(spec.templates || []).length > 0 ? (
+              <div className="mt-3 space-y-1.5">
+                {(spec.templates || []).map((t) => (
+                  <div key={t.path} className="flex items-center gap-2 rounded-lg bg-sky-50/60 px-3 py-2">
+                    <i className={`fas ${t.kind === 'text' ? 'fa-file-lines text-amber-600' : 'fa-file-excel text-emerald-600'}`} />
+                    <span className="min-w-0 flex-1 truncate text-xs text-gray-700">{t.name}</span>
+                    {t.size ? <span className="flex-none text-[11px] text-gray-400">{fmtSize(t.size)}</span> : null}
+                    <span className={`flex-none rounded px-1.5 py-0.5 text-[10px] ${t.kind === 'text' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                      {t.kind === 'text' ? '数据源' : '表格'}
+                    </span>
+                    <a
+                      href={`${API_CONFIG.apiUrl}${t.path}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="flex-none text-[11px] text-sky-600 hover:underline"
+                    >预览</a>
+                    <button onClick={() => removeTemplate(t.path)} className="flex-none rounded border border-rose-200 px-1.5 py-0.5 text-[11px] text-rose-600 hover:bg-rose-50">移除</button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="mt-3 rounded-lg border border-dashed border-gray-300 py-3 text-center text-xs text-gray-400">
+                还没有模板文件。学生端会提示"老师尚未上传模板"。
+              </div>
+            )}
+
+            <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-gray-100 pt-3">
+              <button
+                onClick={() => inspectRef.current?.click()}
+                disabled={inspectBusy}
+                className="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-medium text-white hover:bg-indigo-700 disabled:bg-gray-300"
+              >
+                <i className="fas fa-wand-magic-sparkles mr-1" /> {inspectBusy ? '解析中…' : '上传标准答案表 → 自动生成评分点'}
+              </button>
+              <input ref={inspectRef} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(e) => onInspectPicked(e.target.files?.[0] || null)} />
+              <span className="text-xs text-gray-500">
+                把做好的答案表丢进来，合并区/公式/数值/图表/排序/筛选/分类汇总/条件格式会自动识别成评分点
+              </span>
+            </div>
+            {inspectNote && <div className="mt-2 rounded-lg bg-indigo-50 p-2.5 text-xs text-indigo-700">{inspectNote}</div>}
+          </div>
+
+          {/* 步骤与评分点 */}
+          <div className="rounded-lg border border-gray-200 bg-white p-4">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-sm font-bold text-gray-800">
+                操作步骤与评分点
+                <span className={`ml-2 text-xs font-normal ${Math.abs(totalCheckScore - spec.full_score) < 1e-9 ? 'text-emerald-600' : 'text-amber-600'}`}>
+                  评分点合计 {Math.round(totalCheckScore * 100) / 100} 分 / 满分 {spec.full_score} 分
+                </span>
+              </h3>
+              <div className="flex flex-wrap gap-2">
+                <button onClick={recalcScores} className="rounded border border-gray-300 px-2.5 py-1 text-xs text-gray-700 hover:bg-gray-50">按评分点重算步骤分</button>
+                <button onClick={scaleToFull} className="rounded border border-gray-300 px-2.5 py-1 text-xs text-gray-700 hover:bg-gray-50">等比缩放到满分</button>
+                <button onClick={() => setShowJson((v) => !v)} className="rounded border border-gray-300 px-2.5 py-1 text-xs text-gray-700 hover:bg-gray-50">
+                  {showJson ? '收起 JSON' : '直接编辑 JSON'}
+                </button>
+                <button onClick={addStep} className="rounded bg-emerald-600 px-2.5 py-1 text-xs text-white hover:bg-emerald-700">+ 步骤</button>
+              </div>
+            </div>
+
+            {showJson && (
+              <div className="mb-4">
+                <textarea
+                  value={specJson}
+                  onChange={(e) => setSpecJson(e.target.value)}
+                  rows={16}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 font-mono text-xs"
+                />
+                <button
+                  onClick={() => {
+                    try {
+                      const parsed = parseSpec(JSON.parse(specJson));
+                      setSpec(parsed);
+                      setMsg({ type: 'ok', text: 'JSON 已应用' });
+                    } catch (e: any) {
+                      setMsg({ type: 'err', text: 'JSON 格式有误：' + e.message });
+                    }
+                  }}
+                  className="mt-2 rounded bg-gray-800 px-3 py-1.5 text-xs text-white hover:bg-gray-900"
+                >
+                  应用 JSON
+                </button>
+              </div>
+            )}
+
+            <input ref={videoRef} type="file" accept="video/*" className="hidden" onChange={(e) => onVideoPicked(e.target.files?.[0] || null)} />
+
+            <div className="space-y-3">
+              {spec.steps.map((st, si) => (
+                <div key={si} className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                  <div className="mb-2 flex items-center gap-2">
+                    <span className="flex h-5 w-5 flex-none items-center justify-center rounded-full bg-emerald-600 text-[11px] font-bold text-white">{si + 1}</span>
+                    <input
+                      value={st.title}
+                      onChange={(e) => patchStep(si, { title: e.target.value })}
+                      placeholder="步骤标题（学生端显示，如：合并单元格并设置标题格式）"
+                      className="min-w-0 flex-1 rounded border border-gray-300 px-2 py-1 text-sm"
+                    />
+                    <input
+                      type="number" min={0} step={0.5}
+                      value={st.score}
+                      onChange={(e) => patchStep(si, { score: Number(e.target.value) || 0 })}
+                      className="w-20 flex-none rounded border border-gray-300 px-2 py-1 text-sm"
+                      title="步骤分值"
+                    />
+                    <span className="text-xs text-gray-400">分</span>
+                    <button onClick={() => delStep(si)} className="flex-none rounded border border-rose-200 px-2 py-1 text-xs text-rose-600 hover:bg-rose-50">删除步骤</button>
+                  </div>
+
+                  <input
+                    value={st.desc || ''}
+                    onChange={(e) => patchStep(si, { desc: e.target.value })}
+                    placeholder="步骤说明（学生端显示的操作要求，不要在这里写答案）"
+                    className="mb-2 w-full rounded border border-gray-300 px-2 py-1 text-xs"
+                  />
+
+                  {/* 演示视频 */}
+                  <div className="mb-2 rounded border border-gray-200 bg-white p-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-[11px] font-medium text-gray-500">演示视频</span>
+                      <input
+                        value={st.video_url || ''}
+                        onChange={(e) => patchStep(si, { video_url: e.target.value })}
+                        placeholder="视频地址（可留空，或用右侧按钮上传/抓取）"
+                        className="min-w-[180px] flex-1 rounded border border-gray-300 px-2 py-1 text-xs"
+                      />
+                      <button
+                        onClick={() => pickVideo(si)}
+                        disabled={videoBusy}
+                        className="flex-none rounded bg-violet-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-violet-700 disabled:bg-gray-300"
+                      >
+                        <i className="fas fa-upload mr-1" />上传本地视频
+                      </button>
+                      <button
+                        onClick={() => fetchVideo(si)}
+                        disabled={videoBusy}
+                        className="flex-none rounded border border-violet-300 px-2 py-1 text-[11px] font-medium text-violet-700 hover:bg-violet-50 disabled:opacity-50"
+                        title="把外网链接的视频下载到本机，机房断网也能播"
+                      >
+                        <i className="fas fa-cloud-arrow-down mr-1" />抓取外链到本地
+                      </button>
+                      {st.video_url ? (
+                        <a href={st.video_url} target="_blank" rel="noreferrer" className="flex-none text-[11px] text-sky-600 hover:underline">测试播放</a>
+                      ) : null}
+                    </div>
+                    {st.video_url ? (
+                      <div className="mt-1 text-[11px] text-gray-400">
+                        <span className={`mr-1 rounded px-1.5 py-0.5 ${isLocalVideo(st.video_url) ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                          {isLocalVideo(st.video_url) ? '本地（断网可用）' : '外链（需联网）'}
+                        </span>
+                        建议外链抓成本地后再发布，避免机房断网时学生看不到。
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="space-y-1.5">
+                    {st.checks.map((c, ci) => {
+                      const meta = KIND_META[c.kind] || { label: c.kind, fields: [] };
+                      return (
+                        <div key={ci} className="rounded border border-gray-200 bg-white p-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <select
+                              value={c.kind}
+                              onChange={(e) => patchCheck(si, ci, { kind: e.target.value, label: KIND_META[e.target.value]?.label || e.target.value })}
+                              className="rounded border border-gray-300 px-1.5 py-1 text-xs"
+                            >
+                              {Object.keys(KIND_META).map((k) => <option key={k} value={k}>{KIND_META[k].label}</option>)}
+                            </select>
+                            <input
+                              value={c.label || ''}
+                              onChange={(e) => patchCheck(si, ci, { label: e.target.value })}
+                              placeholder="给学生的评分点描述"
+                              className="min-w-[150px] flex-1 rounded border border-gray-300 px-1.5 py-1 text-xs"
+                            />
+                            <input
+                              type="number" min={0} step={0.5}
+                              value={c.score ?? 1}
+                              onChange={(e) => patchCheck(si, ci, { score: Number(e.target.value) || 0 })}
+                              className="w-16 rounded border border-gray-300 px-1.5 py-1 text-xs"
+                              title="该评分点分值"
+                            />
+                            <span className="text-[11px] text-gray-400">分</span>
+                            <button onClick={() => delCheck(si, ci)} className="rounded border border-rose-200 px-1.5 py-0.5 text-[11px] text-rose-600 hover:bg-rose-50">删</button>
+                          </div>
+                          <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                            {meta.fields.map((f) => (
+                              <label key={f.key} className="flex items-center gap-1 text-[11px] text-gray-500">
+                                {f.label}
+                                {f.type === 'bool' ? (
+                                  <input
+                                    type="checkbox"
+                                    checked={!!c[f.key]}
+                                    onChange={(e) => patchCheck(si, ci, { [f.key]: e.target.checked })}
+                                  />
+                                ) : (
+                                  <input
+                                    type={f.type === 'number' ? 'number' : 'text'}
+                                    value={
+                                      f.type === 'json'
+                                        ? (c[f.key] === undefined ? '' : JSON.stringify(c[f.key]))
+                                        : (Array.isArray(c[f.key]) ? c[f.key].join(',') : (c[f.key] ?? ''))
+                                    }
+                                    onChange={(e) => {
+                                      let v: any;
+                                      const raw = e.target.value;
+                                      if (f.type === 'number') v = raw === '' ? undefined : Number(raw);
+                                      else if (f.type === 'csv') v = raw.split(',').map((x) => x.trim()).filter(Boolean);
+                                      else if (f.type === 'json') {
+                                        if (raw.trim() === '') v = undefined;
+                                        else { try { v = JSON.parse(raw); } catch { return; } }
+                                      } else v = raw;
+                                      patchCheck(si, ci, { [f.key]: v });
+                                    }}
+                                    className={f.type === 'json' ? 'w-72 rounded border border-gray-300 px-1.5 py-0.5 font-mono text-[11px]' : 'w-28 rounded border border-gray-300 px-1.5 py-0.5 text-[11px]'}
+                                  />
+                                )}
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    <button onClick={() => addCheck(si)} className="rounded border border-dashed border-gray-300 px-2 py-1 text-[11px] text-gray-600 hover:bg-white">+ 评分点</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
 
-  // ---------- 编辑视图 ----------
-  const totalCheckScore = spec.steps.reduce((a, st) => a + st.checks.reduce((b, c) => b + (Number(c.score) || 0), 0), 0);
-
+  // ============================================================
+  // 列表视图
+  // ============================================================
   return (
     <div className="p-6">
-      <div className="mb-4 flex items-center justify-between">
-        <button onClick={() => setEditing(null)} className="text-sm text-gray-500 hover:text-gray-800">
-          <i className="fas fa-arrow-left mr-1" /> 返回列表
-        </button>
-        <div className="flex items-center gap-2">
-          <button onClick={validate} className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">校验评分点</button>
-          <button onClick={save} disabled={saving} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:bg-gray-300">
-            {saving ? '保存中…' : '保存'}
-          </button>
-        </div>
+      <div className="mb-4">
+        <h2 className="text-xl font-bold text-gray-800">WPS / ACCESS 操作题</h2>
+        <p className="mt-1 text-xs text-gray-500">
+          学测操作题（默认每题 100 分、按评分点分步给分）。上传做好的「标准答案表」可自动生成评分点，再改分值与描述即可。
+        </p>
       </div>
 
-      {msg && (
-        <div className={`mb-3 rounded-lg p-2.5 text-sm ${msg.type === 'ok' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>
-          {msg.text}
+      {/* 一级分段：WPS / Access */}
+      <div className="mb-4 flex gap-1 border-b border-gray-200">
+        {[
+          { k: 'wps', label: 'WPS 操作题', icon: 'fa-file-excel' },
+          { k: 'access', label: 'Access 操作题', icon: 'fa-database' },
+        ].map((t) => (
+          <button
+            key={t.k}
+            onClick={() => setOpKind(t.k as 'wps' | 'access')}
+            className={`-mb-px flex items-center gap-1.5 border-b-2 px-4 py-2 text-sm font-medium transition ${
+              opKind === t.k ? 'border-emerald-600 text-emerald-700' : 'border-transparent text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            <i className={`fas ${t.icon}`} /> {t.label}
+          </button>
+        ))}
+      </div>
+
+      {opKind === 'access' ? (
+        <div className="rounded-xl border border-dashed border-gray-300 bg-white px-6 py-16 text-center">
+          <i className="fas fa-database mb-3 text-3xl text-gray-300" />
+          <div className="text-base font-semibold text-gray-700">Access 操作题（占位）</div>
+          <p className="mx-auto mt-2 max-w-xl text-xs leading-relaxed text-gray-500">
+            本模块已预留，用于承载 Access 数据库操作题（建表 / 查询 / 窗体 / 报表）。
+            目前尚未实现判分与作答流程，先占位以便后续扩展时不再新开菜单。
+            现在可以使用上方的「WPS 操作题」。
+          </p>
         </div>
-      )}
-
-      {validation && (
-        <div className={`mb-3 rounded-lg p-3 text-xs ${validation.errors.length ? 'bg-rose-50' : 'bg-sky-50'}`}>
-          <div className="font-medium text-gray-700">评分点合计 {validation.total} 分 / 满分 {spec.full_score} 分</div>
-          {validation.errors.map((e, i) => <div key={'e' + i} className="mt-1 text-rose-700">✗ {e}</div>)}
-          {validation.warnings.map((w, i) => <div key={'w' + i} className="mt-1 text-amber-700">⚠ {w}</div>)}
-          {!validation.errors.length && !validation.warnings.length && <div className="mt-1 text-emerald-700">✓ 一切正常</div>}
-        </div>
-      )}
-
-      <div className="space-y-4">
-        {/* 基本信息 */}
-        <div className="rounded-lg border border-gray-200 bg-white p-4">
-          <h3 className="mb-3 text-sm font-bold text-gray-800">基本信息</h3>
-          <div className="grid gap-3 sm:grid-cols-3">
-            <div className="sm:col-span-3">
-              <label className="mb-1 block text-xs text-gray-500">题干（支持简单 HTML，如 &lt;p&gt;、&lt;strong&gt;）</label>
-              <textarea
-                value={content}
-                onChange={(e) => setContent(e.target.value)}
-                rows={6}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
-                placeholder="<p>下载「xxx.xlsx」，用 WPS 表格完成以下操作并保存：</p><p>1. ...</p>"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs text-gray-500">所属分类（章/小节）</label>
-              <select value={cluster} onChange={(e) => setCluster(e.target.value)} className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm">
-                <option value="">（未分类）</option>
-                {clusterOptions.map((o) => (
-                  <option key={o.value} value={o.value}>{o.primary}{o.secondary ? ' / ' + o.secondary : '（整章）'}</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="mb-1 block text-xs text-gray-500">满分</label>
-              <input
-                type="number" min={1} step={0.5}
-                value={spec.full_score}
-                onChange={(e) => setSpec((s) => ({ ...s, full_score: Number(e.target.value) || 0 }))}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
-              />
-            </div>
-            <div className="flex items-end">
-              <label className="flex items-center gap-2 text-sm text-gray-700">
-                <input type="checkbox" checked={practiceEnabled} onChange={(e) => setPracticeEnabled(e.target.checked)} />
-                学生可练
-              </label>
-            </div>
-          </div>
-        </div>
-
-        {/* 模板与自动生成 */}
-        <div className="rounded-lg border border-gray-200 bg-white p-4">
-          <h3 className="mb-3 text-sm font-bold text-gray-800">模板与评分点</h3>
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              onClick={() => templateRef.current?.click()}
-              disabled={templateBusy}
-              className="rounded-lg bg-sky-600 px-3 py-2 text-xs font-medium text-white hover:bg-sky-700 disabled:bg-gray-300"
-            >
-              <i className="fas fa-upload mr-1" /> {templateBusy ? '上传中…' : '上传模板文件'}
-            </button>
-            <span className="text-xs text-gray-500">
-              {spec.template?.name ? <>当前模板：<b>{spec.template.name}</b>（学生端可下载）</> : '还没有模板文件'}
-            </span>
-            <input ref={templateRef} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(e) => onTemplatePicked(e.target.files?.[0] || null)} />
-          </div>
-
-          <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-gray-100 pt-3">
-            <button
-              onClick={() => inspectRef.current?.click()}
-              disabled={inspectBusy}
-              className="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-medium text-white hover:bg-indigo-700 disabled:bg-gray-300"
-            >
-              <i className="fas fa-wand-magic-sparkles mr-1" /> {inspectBusy ? '解析中…' : '上传标准答案表 → 自动生成评分点'}
-            </button>
-            <input ref={inspectRef} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(e) => onInspectPicked(e.target.files?.[0] || null)} />
-            <span className="text-xs text-gray-500">把做好的答案表丢进来，合并区/公式/数值/图表会自动识别成评分点</span>
-          </div>
-          {inspectNote && <div className="mt-2 rounded-lg bg-indigo-50 p-2.5 text-xs text-indigo-700">{inspectNote}</div>}
-        </div>
-
-        {/* 步骤与评分点 */}
-        <div className="rounded-lg border border-gray-200 bg-white p-4">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-sm font-bold text-gray-800">
-              操作步骤与评分点
-              <span className={`ml-2 text-xs font-normal ${Math.abs(totalCheckScore - spec.full_score) < 1e-9 ? 'text-emerald-600' : 'text-amber-600'}`}>
-                评分点合计 {Math.round(totalCheckScore * 100) / 100} 分 / 满分 {spec.full_score} 分
-              </span>
-            </h3>
-            <div className="flex gap-2">
-              <button onClick={recalcScores} className="rounded border border-gray-300 px-2.5 py-1 text-xs text-gray-700 hover:bg-gray-50">按评分点重算步骤分</button>
-              <button onClick={scaleToFull} className="rounded border border-gray-300 px-2.5 py-1 text-xs text-gray-700 hover:bg-gray-50">等比缩放到满分</button>
-              <button onClick={() => setShowJson((v) => !v)} className="rounded border border-gray-300 px-2.5 py-1 text-xs text-gray-700 hover:bg-gray-50">
-                {showJson ? '收起 JSON' : '直接编辑 JSON'}
-              </button>
-              <button onClick={addStep} className="rounded bg-emerald-600 px-2.5 py-1 text-xs text-white hover:bg-emerald-700">+ 步骤</button>
-            </div>
-          </div>
-
-          {showJson && (
-            <div className="mb-4">
-              <textarea
-                value={specJson}
-                onChange={(e) => setSpecJson(e.target.value)}
-                rows={16}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 font-mono text-xs"
-              />
+      ) : (
+        <>
+          {/* 二级分段：题库管理 / 练习情况 */}
+          <div className="mb-4 flex flex-wrap items-center gap-2">
+            {[
+              { k: 'bank', label: '题库管理', icon: 'fa-list-check' },
+              { k: 'analytics', label: '练习情况', icon: 'fa-chart-column' },
+            ].map((t) => (
               <button
-                onClick={() => {
-                  try {
-                    const parsed = parseSpec(JSON.parse(specJson));
-                    setSpec(parsed);
-                    setMsg({ type: 'ok', text: 'JSON 已应用' });
-                  } catch (e: any) {
-                    setMsg({ type: 'err', text: 'JSON 格式有误：' + e.message });
-                  }
-                }}
-                className="mt-2 rounded bg-gray-800 px-3 py-1.5 text-xs text-white hover:bg-gray-900"
+                key={t.k}
+                onClick={() => setWpsTab(t.k as 'bank' | 'analytics')}
+                className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                  wpsTab === t.k ? 'bg-emerald-600 text-white' : 'border border-gray-300 text-gray-600 hover:bg-gray-50'
+                }`}
               >
-                应用 JSON
+                <i className={`fas ${t.icon} mr-1`} /> {t.label}
               </button>
+            ))}
+            {wpsTab === 'bank' && (
+              <button onClick={startNew} className="ml-auto rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">
+                <i className="fas fa-plus mr-1" /> 新建操作题
+              </button>
+            )}
+          </div>
+
+          {msg && (
+            <div className={`mb-3 rounded-lg p-2.5 text-sm ${msg.type === 'ok' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>
+              {msg.text}
             </div>
           )}
 
-          <div className="space-y-3">
-            {spec.steps.map((st, si) => (
-              <div key={si} className="rounded-lg border border-gray-200 bg-gray-50 p-3">
-                <div className="mb-2 flex items-center gap-2">
-                  <span className="flex h-5 w-5 flex-none items-center justify-center rounded-full bg-emerald-600 text-[11px] font-bold text-white">{si + 1}</span>
-                  <input
-                    value={st.title}
-                    onChange={(e) => patchStep(si, { title: e.target.value })}
-                    placeholder="步骤标题（学生端显示，如：合并单元格并设置标题格式）"
-                    className="min-w-0 flex-1 rounded border border-gray-300 px-2 py-1 text-sm"
-                  />
-                  <input
-                    type="number" min={0} step={0.5}
-                    value={st.score}
-                    onChange={(e) => patchStep(si, { score: Number(e.target.value) || 0 })}
-                    className="w-20 flex-none rounded border border-gray-300 px-2 py-1 text-sm"
-                    title="步骤分值"
-                  />
-                  <span className="text-xs text-gray-400">分</span>
-                  <button onClick={() => delStep(si)} className="flex-none rounded border border-rose-200 px-2 py-1 text-xs text-rose-600 hover:bg-rose-50">删除步骤</button>
-                </div>
-
-                <input
-                  value={st.desc || ''}
-                  onChange={(e) => patchStep(si, { desc: e.target.value })}
-                  placeholder="步骤说明（学生端显示的操作要求，不要在这里写答案）"
-                  className="mb-2 w-full rounded border border-gray-300 px-2 py-1 text-xs"
-                />
-                <input
-                  value={st.video_url || ''}
-                  onChange={(e) => patchStep(si, { video_url: e.target.value })}
-                  placeholder="这一步的演示视频链接（可留空，后期再补）"
-                  className="mb-2 w-full rounded border border-gray-300 px-2 py-1 text-xs"
-                />
-
-                <div className="space-y-1.5">
-                  {st.checks.map((c, ci) => {
-                    const meta = KIND_META[c.kind] || { label: c.kind, fields: [] };
-                    return (
-                      <div key={ci} className="rounded border border-gray-200 bg-white p-2">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <select
-                            value={c.kind}
-                            onChange={(e) => patchCheck(si, ci, { kind: e.target.value, label: KIND_META[e.target.value]?.label || e.target.value })}
-                            className="rounded border border-gray-300 px-1.5 py-1 text-xs"
-                          >
-                            {Object.keys(KIND_META).map((k) => <option key={k} value={k}>{KIND_META[k].label}</option>)}
-                          </select>
-                          <input
-                            value={c.label || ''}
-                            onChange={(e) => patchCheck(si, ci, { label: e.target.value })}
-                            placeholder="给学生的评分点描述"
-                            className="min-w-[150px] flex-1 rounded border border-gray-300 px-1.5 py-1 text-xs"
-                          />
-                          <input
-                            type="number" min={0} step={0.5}
-                            value={c.score ?? 1}
-                            onChange={(e) => patchCheck(si, ci, { score: Number(e.target.value) || 0 })}
-                            className="w-16 rounded border border-gray-300 px-1.5 py-1 text-xs"
-                            title="该评分点分值"
-                          />
-                          <span className="text-[11px] text-gray-400">分</span>
-                          <button onClick={() => delCheck(si, ci)} className="rounded border border-rose-200 px-1.5 py-0.5 text-[11px] text-rose-600 hover:bg-rose-50">删</button>
-                        </div>
-                        <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                          {meta.fields.map((f) => (
-                            <label key={f.key} className="flex items-center gap-1 text-[11px] text-gray-500">
-                              {f.label}
-                              {f.type === 'bool' ? (
-                                <input
-                                  type="checkbox"
-                                  checked={!!c[f.key]}
-                                  onChange={(e) => patchCheck(si, ci, { [f.key]: e.target.checked })}
-                                />
-                              ) : (
-                                <input
-                                  type={f.type === 'number' ? 'number' : 'text'}
-                                  value={Array.isArray(c[f.key]) ? c[f.key].join(',') : (c[f.key] ?? '')}
-                                  onChange={(e) => {
-                                    const v = f.type === 'number'
-                                      ? (e.target.value === '' ? undefined : Number(e.target.value))
-                                      : (f.type === 'csv'
-                                        ? e.target.value.split(',').map((x) => x.trim()).filter(Boolean)
-                                        : e.target.value);
-                                    patchCheck(si, ci, { [f.key]: v });
-                                  }}
-                                  className="w-28 rounded border border-gray-300 px-1.5 py-0.5 text-[11px]"
-                                />
-                              )}
-                            </label>
+          {wpsTab === 'analytics' ? (
+            <WpsOpAnalytics />
+          ) : loading ? (
+            <div className="py-10 text-center text-sm text-gray-400">加载中…</div>
+          ) : rows.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-gray-300 bg-white py-14 text-center text-sm text-gray-400">
+              还没有操作题。点右上角「新建操作题」，或在编辑页上传标准答案表自动生成评分点。
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {rows.map((r) => {
+                const sp = parseSpec(r.wps_spec);
+                const tpls = sp.templates || [];
+                const videos = sp.steps.filter((s) => s.video_url).length;
+                return (
+                  <div key={r.id} className="flex items-start justify-between gap-4 rounded-lg border border-gray-200 bg-white p-4">
+                    <div className="min-w-0 flex-1">
+                      <div className="mb-1 flex flex-wrap items-center gap-2">
+                        <span className="rounded bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
+                          {sp.full_score} 分 · {sp.steps.length} 步
+                        </span>
+                        <span className="rounded bg-gray-100 px-2 py-0.5 text-[11px] text-gray-600">
+                          {r.cluster_id || '未分类'}
+                        </span>
+                        <span className={`rounded px-2 py-0.5 text-[11px] ${Number(r.practice_enabled) === 1 ? 'bg-sky-50 text-sky-700' : 'bg-gray-100 text-gray-500'}`}>
+                          {Number(r.practice_enabled) === 1 ? '学生可练' : '已下架'}
+                        </span>
+                        <span className="rounded bg-sky-50 px-2 py-0.5 text-[11px] text-sky-700">
+                          模板 {tpls.length}
+                        </span>
+                        <span className={`rounded px-2 py-0.5 text-[11px] ${videos ? 'bg-violet-50 text-violet-700' : 'bg-gray-100 text-gray-500'}`}>
+                          视频 {videos}/{sp.steps.length}
+                        </span>
+                      </div>
+                      <div className="line-clamp-2 text-sm text-gray-700">{stripHtml(r.content)}</div>
+                      {tpls.length > 0 && (
+                        <div className="mt-1 flex flex-wrap gap-1.5">
+                          {tpls.map((t) => (
+                            <span key={t.path} className="inline-flex items-center gap-1 rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500">
+                              <i className={`fas ${t.kind === 'text' ? 'fa-file-lines text-amber-600' : 'fa-file-excel text-emerald-600'}`} />
+                              {t.name}
+                            </span>
                           ))}
                         </div>
-                      </div>
-                    );
-                  })}
-                  <button onClick={() => addCheck(si)} className="rounded border border-dashed border-gray-300 px-2 py-1 text-[11px] text-gray-600 hover:bg-white">+ 评分点</button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
+                      )}
+                    </div>
+                    <div className="flex flex-none gap-2">
+                      <button onClick={() => startEdit(r)} className="rounded border border-gray-300 px-3 py-1 text-xs text-gray-700 hover:bg-gray-50">编辑</button>
+                      <button onClick={() => remove(r)} className="rounded border border-rose-200 px-3 py-1 text-xs text-rose-600 hover:bg-rose-50">删除</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 };
+
+export default WpsOpManager;

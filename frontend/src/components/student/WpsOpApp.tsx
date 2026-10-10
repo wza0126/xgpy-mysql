@@ -1,13 +1,15 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { backendClient } from '../../api/backendClient';
 import { API_CONFIG } from '../../api/config';
 import { getAuthToken } from '../../utils/authToken';
 import { sanitizeHtml } from '../../utils/htmlUtils';
 
 /**
- * 学测 WPS 操作题（一期）
+ * 学测「操作题」
  * ============================================================
- * 形态：下载模板 → 用真 WPS 表格做题 → 上传 .xlsx → 服务端逐评分点判分 → 回执。
+ * 一个入口承载两类操作题：
+ *   ┌ WPS 操作题 ── 下载模板（可多个：表格 + txt 数据源）→ 真 WPS 做题 → 上传 .xlsx → 服务端判分
+ *   └ Access 操作题（占位，后续开放）
  *
  * ⛔ 前端拿不到评分点（答案）：后端下发的 spec 已被剥离 checks，
  *    回执里的逐评分点明细是「判完之后」才返回的，属正常作答反馈。
@@ -23,9 +25,17 @@ interface StepView {
   check_count: number;
 }
 
+interface TemplateItem {
+  name: string;
+  path: string;
+  size?: number | null;
+  kind?: string;
+}
+
 interface SpecView {
   full_score: number;
-  template: { name: string; path: string; size?: number } | null;
+  templates: TemplateItem[];
+  template: TemplateItem | null;
   steps: StepView[];
 }
 
@@ -37,6 +47,7 @@ interface QuestionItem {
   full_score: number;
   step_count: number;
   template_name: string;
+  template_count: number;
   best_score: number | null;
   tries: number;
 }
@@ -106,7 +117,56 @@ const fmtTime = (v: string | null) => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 };
 
+const fmtSize = (n?: number | null) => {
+  if (!n || n <= 0) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1048576).toFixed(1) + ' MB';
+};
+
+/** 本地上传/抓取的视频（相对路径）可内嵌播放；外链在新窗口打开（机房断网时可能打不开） */
+const isLocalVideo = (u: string) => /^\/uploads\//.test(u) || /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//i.test(u);
+
+const VideoBlock: React.FC<{ url: string; compact?: boolean }> = ({ url, compact }) => {
+  const [open, setOpen] = React.useState(false);
+  if (!url) return null;
+  if (!isLocalVideo(url)) {
+    return (
+      <a
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        className="mt-1 inline-flex items-center gap-1 text-[11px] text-sky-600 hover:underline"
+        title="外链视频，需要联网才能播放"
+      >
+        <i className="fas fa-circle-play" /> 演示视频（外链，需联网）
+      </a>
+    );
+  }
+  return (
+    <div className="mt-1">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="inline-flex items-center gap-1 text-[11px] text-sky-600 hover:underline"
+      >
+        <i className={`fas ${open ? 'fa-circle-pause' : 'fa-circle-play'}`} /> {open ? '收起演示视频' : '看这一步的演示视频'}
+      </button>
+      {open && (
+        // eslint-disable-next-line jsx-a11y/media-has-caption
+        <video
+          src={`${API_CONFIG.apiUrl}${url}`}
+          controls
+          preload="metadata"
+          className={`mt-2 w-full rounded-lg border border-gray-200 bg-black ${compact ? 'max-w-sm' : 'max-w-lg'}`}
+        />
+      )}
+    </div>
+  );
+};
+
 export const WpsOpApp: React.FC = () => {
+  const [opKind, setOpKind] = useState<'wps' | 'access'>('wps');
+
   const [list, setList] = useState<QuestionItem[]>([]);
   const [loadingList, setLoadingList] = useState(true);
   const [listError, setListError] = useState('');
@@ -122,7 +182,7 @@ export const WpsOpApp: React.FC = () => {
   const [result, setResult] = useState<GradeResult | null>(null);
   const [submitError, setSubmitError] = useState('');
   const [openSteps, setOpenSteps] = useState<Record<string, boolean>>({});
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   const loadList = useCallback(async () => {
     setLoadingList(true);
@@ -207,28 +267,70 @@ export const WpsOpApp: React.FC = () => {
     }
   };
 
-  const downloadTemplate = () => {
-    if (!spec?.template?.path) return;
+  const downloadTemplate = (t: TemplateItem) => {
+    if (!t?.path) return;
     const a = document.createElement('a');
-    a.href = `${API_CONFIG.apiUrl}${spec.template.path}`;
-    a.download = spec.template.name || '模板.xlsx';
+    a.href = `${API_CONFIG.apiUrl}${t.path}`;
+    a.download = t.name || '模板';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
   };
 
   const plainContent = useMemo(() => sanitizeHtml(content || ''), [content]);
+  const templates = useMemo<TemplateItem[]>(() => {
+    if (!spec) return [];
+    if (Array.isArray(spec.templates) && spec.templates.length) return spec.templates;
+    return spec.template ? [spec.template] : [];
+  }, [spec]);
+
+  // ---------------- 一级分段：WPS / Access ----------------
+  const kindTabs = (
+    <div className="mb-4 flex gap-1 border-b border-gray-200">
+      {[
+        { k: 'wps', label: 'WPS 操作题', icon: 'fa-file-excel' },
+        { k: 'access', label: 'Access 操作题', icon: 'fa-database' },
+      ].map((t) => (
+        <button
+          key={t.k}
+          onClick={() => { setOpKind(t.k as 'wps' | 'access'); setCurrent(null); }}
+          className={`-mb-px flex items-center gap-1.5 border-b-2 px-4 py-2 text-sm font-medium transition ${
+            opKind === t.k ? 'border-emerald-600 text-emerald-700' : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <i className={`fas ${t.icon}`} /> {t.label}
+        </button>
+      ))}
+    </div>
+  );
+
+  if (opKind === 'access') {
+    return (
+      <div className="h-full overflow-auto bg-gray-50 p-5">
+        {kindTabs}
+        <div className="rounded-xl border border-dashed border-gray-300 bg-white px-6 py-16 text-center">
+          <i className="fas fa-database mb-3 text-3xl text-gray-300" />
+          <div className="text-base font-semibold text-gray-700">Access 操作题</div>
+          <p className="mx-auto mt-2 max-w-md text-xs leading-relaxed text-gray-500">
+            这一部分还在准备中，老师开放后就能在这里练习数据库操作题。
+            现在可以先做「WPS 操作题」。
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   // ---------------- 列表 ----------------
   if (!current) {
     return (
       <div className="h-full overflow-auto bg-gray-50 p-5">
+        {kindTabs}
         <div className="mb-1 flex items-center gap-2">
           <i className="fas fa-file-excel text-emerald-600" />
-          <h2 className="text-lg font-bold text-gray-800">学测 WPS 操作题</h2>
+          <h2 className="text-lg font-bold text-gray-800">WPS 操作题</h2>
         </div>
         <p className="mb-4 text-xs text-gray-500">
-          下载模板 → 用 WPS 表格完成操作 → 另存为 .xlsx → 上传作答。系统按步骤逐项判分，满分 10 分。
+          下载模板（可能同时有表格和数据源文件）→ 用 WPS 表格完成操作 → 另存为 .xlsx → 上传作答。系统按步骤逐项判分。
         </p>
 
         {loadingList && <div className="py-10 text-center text-sm text-gray-400">加载中…</div>}
@@ -254,6 +356,7 @@ export const WpsOpApp: React.FC = () => {
               <div className="mb-2 flex items-center justify-between">
                 <span className="rounded bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
                   {it.full_score} 分 · {it.step_count} 步
+                  {it.template_count > 1 ? ` · ${it.template_count} 个模板` : ''}
                 </span>
                 {it.best_score !== null && (
                   <span className={`text-sm font-bold ${scoreColor(it.best_score, it.full_score)}`}>
@@ -319,16 +422,7 @@ export const WpsOpApp: React.FC = () => {
                       <span className="flex-none text-xs font-semibold text-emerald-700">{s.score} 分</span>
                     </div>
                     {s.desc && <p className="mt-0.5 text-xs text-gray-500">{s.desc}</p>}
-                    {s.video_url ? (
-                      <a
-                        href={s.video_url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="mt-1 inline-flex items-center gap-1 text-[11px] text-sky-600 hover:underline"
-                      >
-                        <i className="fas fa-circle-play" /> 看这一步的演示视频
-                      </a>
-                    ) : null}
+                    <VideoBlock url={s.video_url} />
                   </div>
                 </li>
               ))}
@@ -339,17 +433,34 @@ export const WpsOpApp: React.FC = () => {
           <div className="rounded-xl border border-gray-200 bg-white p-4">
             <h3 className="mb-3 text-sm font-bold text-gray-800">作答</h3>
 
-            <div className="mb-3 flex flex-wrap items-center gap-2">
-              <button
-                onClick={downloadTemplate}
-                disabled={!spec.template?.path}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-gray-300"
-              >
-                <i className="fas fa-download" /> 下载模板
-                {spec.template?.name ? <span className="opacity-80">（{spec.template.name}）</span> : null}
-              </button>
-              <span className="text-[11px] text-gray-400">用 WPS 表格打开，做完后「另存为 .xlsx」</span>
+            <div className="mb-3">
+              <div className="mb-1.5 text-xs font-medium text-gray-600">第 1 步：下载模板文件</div>
+              {templates.length > 0 ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  {templates.map((t) => (
+                    <button
+                      key={t.path}
+                      onClick={() => downloadTemplate(t)}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700"
+                    >
+                      <i className={`fas ${t.kind === 'text' ? 'fa-file-lines' : 'fa-download'}`} />
+                      下载 {t.name}
+                      {t.size ? <span className="opacity-80">（{fmtSize(t.size)}）</span> : null}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-400">老师尚未上传模板文件</div>
+              )}
+              {templates.length > 1 && (
+                <div className="mt-1.5 text-[11px] text-gray-400">
+                  本题有多个文件：表格模板用来做题，数据源文件（txt/csv）里的数据需要按题目要求导入表格。
+                </div>
+              )}
+              <div className="mt-1 text-[11px] text-gray-400">用 WPS 表格打开，做完后「另存为 .xlsx」</div>
             </div>
+
+            <div className="mb-1.5 text-xs font-medium text-gray-600">第 2 步：上传做好的 .xlsx</div>
 
             <input
               ref={fileInputRef}
@@ -446,11 +557,7 @@ export const WpsOpApp: React.FC = () => {
                               </div>
                             </div>
                           ))}
-                          {s.video_url ? (
-                            <a href={s.video_url} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 text-[11px] text-sky-600 hover:underline">
-                              <i className="fas fa-circle-play" /> 看演示视频
-                            </a>
-                          ) : null}
+                          <VideoBlock url={s.video_url} compact />
                         </div>
                       )}
                     </div>
@@ -488,3 +595,5 @@ export const WpsOpApp: React.FC = () => {
     </div>
   );
 };
+
+export default WpsOpApp;

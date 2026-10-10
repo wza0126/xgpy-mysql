@@ -1,16 +1,18 @@
 /**
- * WPS 操作题一期 · 界面截图（CDP 真浏览器）
+ * WPS/ACCESS 操作题 · 界面截图（CDP 真浏览器）
  * 前置：后端 3101 + 前端 dev 3266 + 样例题已 seed。
  * 用法：node backend/scripts/debug/shoot_wps_op_ui.cjs
  *
  * 产出（backend/scripts/debug/shots/）：
- *   wpsop_1_student_desktop.png  学生桌面（「操作题」图标位置）
- *   wpsop_2_student_list.png     学生端操作题列表
- *   wpsop_3_student_detail.png   题目详情（步骤/分值/下载模板/上传区）
- *   wpsop_4_student_result.png   判分回执（逐评分点明细）
- *   wpsop_5_teacher_menu.png     教师端左侧菜单（WPS操作题位置）
- *   wpsop_6_teacher_list.png     教师端操作题列表
- *   wpsop_7_teacher_editor.png   出题编辑器（模板 + 评分点 + 演示视频位）
+ *   wpsop_1_student_desktop.png   学生桌面（「操作题」图标位置）
+ *   wpsop_2_student_list.png      学生端列表（WPS/Access 分段 + 100 分 + 多模板）
+ *   wpsop_3_student_access.png    学生端 Access 占位
+ *   wpsop_4_student_detail.png    题目详情（多个模板可分别下载）
+ *   wpsop_5_student_result.png    判分回执（100 / 100，逐评分点明细）
+ *   wpsop_6_teacher_bank.png      教师端题库管理（模板数/视频数标注）
+ *   wpsop_7_teacher_analytics.png 练习情况（最高分矩阵 + 总分 + 每题平均）
+ *   wpsop_8_teacher_access.png    教师端 Access 占位
+ *   wpsop_9_teacher_editor.png    出题编辑器（多模板上传 + 每步视频上传/抓取）
  *
  * ⛔ 不留痕：跑完删掉本次产生的提交记录与上传文件。
  */
@@ -45,7 +47,7 @@ async function shot(b, name) {
 /** 把包含指定文字的最小元素滚到视口居中，便于截图 */
 async function scrollToText(b, text) {
   return b.evalJs(`(() => {
-    const all = Array.from(document.querySelectorAll('div,section,h3,h4,button'));
+    const all = Array.from(document.querySelectorAll('div,section,h3,h4,button,table'));
     let best = null;
     for (const e of all) {
       if (!(e.textContent || '').includes(${JSON.stringify(text)})) continue;
@@ -111,6 +113,28 @@ async function openDesktopApp(b, title) {
   })()`);
 }
 
+/** 只点主内容区的按钮（排除深色侧边栏，避免点到同名的左侧菜单） */
+async function clickMainButton(b, text) {
+  return b.evalJs(`(() => {
+    const els = Array.from(document.querySelectorAll('button'));
+    const t = els.find(e => e.textContent.trim() === ${JSON.stringify(text)} && !e.closest('[class*="bg-gray-900"]'));
+    if (!t) return 'not-found';
+    t.click();
+    return 'clicked';
+  })()`);
+}
+
+/** 点任意位置的元素（含左侧菜单） */
+async function clickAny(b, text) {
+  return b.evalJs(`(() => {
+    const els = Array.from(document.querySelectorAll('button, a, div, span'));
+    const t = els.find(e => e.textContent.trim() === ${JSON.stringify(text)} && e.children.length <= 1);
+    if (!t) return 'not-found';
+    t.click();
+    return 'clicked';
+  })()`);
+}
+
 (async () => {
   const mysql = require('../../node_modules/mysql2/promise');
   const conn = await mysql.createConnection({ host: '127.0.0.1', port: 3306, user: 'root', password: '122201', database: 'xgpy' });
@@ -137,17 +161,26 @@ async function openDesktopApp(b, title) {
     await sleep(500);
     await shot(b, 'wpsop_1_student_desktop.png');
 
-    // 2. 打开操作题 → 列表
+    // 2. 打开操作题 → 列表（含 WPS/Access 分段）
     await openDesktopApp(b, '操作题');
-    await sleep(2000);
+    await sleep(2200);
     await shot(b, 'wpsop_2_student_list.png');
 
-    // 3. 详情
+    // 3. Access 占位
+    await clickAny(b, 'Access 操作题');
+    await sleep(900);
+    await shot(b, 'wpsop_3_student_access.png');
+    await clickAny(b, 'WPS 操作题');
+    await sleep(900);
+
+    // 4. 题目详情（多个模板可分别下载）
     await b.evalJs(`(() => { const c = document.querySelector('button.group'); if (c) c.click(); return !!c; })()`);
     await sleep(1800);
-    await shot(b, 'wpsop_3_student_detail.png');
+    await scrollToText(b, '第 1 步：下载模板文件');
+    await sleep(500);
+    await shot(b, 'wpsop_4_student_detail.png');
 
-    // 4. 上传 + 提交 → 判分回执
+    // 5. 上传 + 提交 → 判分回执
     const doc = await b.ws.send('DOM.getDocument', { depth: -1 });
     const q = await b.ws.send('DOM.querySelector', { nodeId: doc.root.nodeId, selector: 'input[type=file]' });
     if (q.nodeId) {
@@ -171,7 +204,7 @@ async function openDesktopApp(b, title) {
       await sleep(700);
       await scrollToText(b, '判分结果');
       await sleep(600);
-      await shot(b, 'wpsop_4_student_result.png');
+      await shot(b, 'wpsop_5_student_result.png');
     } else {
       console.log('  ⚠️ 未找到 file input，跳过回执截图');
     }
@@ -182,29 +215,40 @@ async function openDesktopApp(b, title) {
     if (tLogin !== 'submitted') throw new Error('教师登录失败：' + tLogin);
     await sleep(2200);
 
-    // 5. 左侧菜单（滚到 WPS操作题 可见）
-    await scrollToText(b, 'WPS操作题');
-    await sleep(700);
-    await shot(b, 'wpsop_5_teacher_menu.png');
-
-    // 6. 进入管理页
-    await b.evalJs(`(() => {
-      const els = Array.from(document.querySelectorAll('button, a, div, span'));
-      const t = els.find(e => e.textContent.trim() === 'WPS操作题' && e.children.length <= 1);
-      if (t) { t.click(); return true; } return false;
-    })()`);
+    // 6. 进入 WPS/ACCESS 管理页（题库管理）
+    await clickAny(b, 'WPS/ACCESS');
     await sleep(1600);
-    await shot(b, 'wpsop_6_teacher_list.png');
+    await scrollToText(b, '模板 2');
+    await sleep(600);
+    await shot(b, 'wpsop_6_teacher_bank.png');
 
-    // 7. 编辑器
+    // 7. 练习情况
+    await clickMainButton(b, '练习情况');
+    for (let i = 0; i < 20; i++) {
+      await sleep(600);
+      if (await b.evalJs(`/全卷满分/.test(document.body.innerText)`) === true) break;
+    }
+    await sleep(700);
+    await shot(b, 'wpsop_7_teacher_analytics.png');
+
+    // 8. Access 占位
+    await clickMainButton(b, 'Access 操作题');
+    await sleep(900);
+    await shot(b, 'wpsop_8_teacher_access.png');
+
+    // 9. 编辑器（回 WPS 题库管理 → 新建）
+    await clickMainButton(b, 'WPS 操作题');
+    await sleep(900);
+    await clickMainButton(b, '题库管理');
+    await sleep(900);
     await b.evalJs(`(() => {
       const btn = Array.from(document.querySelectorAll('button')).find(x => (x.textContent||'').includes('新建操作题'));
       if (btn) { btn.click(); return true; } return false;
     })()`);
     await sleep(1200);
-    await scrollToText(b, '模板与评分点');
-    await sleep(600);
-    await shot(b, 'wpsop_7_teacher_editor.png');
+    await scrollToText(b, '模板文件与评分点');
+    await sleep(700);
+    await shot(b, 'wpsop_9_teacher_editor.png');
 
     console.log('\nJS 错误：', b.jsErrors.length ? b.jsErrors.slice(0, 3) : '无');
   } catch (e) {

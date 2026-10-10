@@ -1,70 +1,70 @@
 {
   "version": 1,
-  "full_score": 10,
+  "full_score": 100,
   "grader": { "sheet": "Sheet1" },
-  "template": {
-    "name": "人口密度数据分析表.xlsx",
-    "path": ""
-  },
+  "templates": [
+    { "name": "人口密度数据分析表.xlsx", "path": "", "kind": "xlsx" },
+    { "name": "人口数据源.txt", "path": "", "kind": "text" }
+  ],
   "steps": [
     {
       "id": "s1",
       "title": "合并单元格并设置标题格式",
       "desc": "将单元格区域 A1:D1 合并及居中，并输入标题「w市人口密度数据分析表」，设置字体为隶书、加粗、字号 17。",
-      "score": 3,
+      "score": 30,
       "video_url": "",
       "checks": [
-        { "kind": "merged", "range": "A1:D1", "score": 1, "label": "A1:D1 合并" },
-        { "kind": "cell_text", "ref": "A1", "text": "w市人口密度数据分析表", "score": 1, "label": "标题文字正确" },
-        { "kind": "font", "ref": "A1", "name": "隶书", "bold": true, "size": 17, "score": 0.5, "label": "字体 隶书 加粗 17 磅" },
-        { "kind": "align", "ref": "A1", "horizontal": "center", "score": 0.5, "label": "标题居中" }
+        { "kind": "merged", "range": "A1:D1", "score": 10, "label": "A1:D1 合并" },
+        { "kind": "cell_text", "ref": "A1", "text": "w市人口密度数据分析表", "score": 10, "label": "标题文字正确" },
+        { "kind": "font", "ref": "A1", "name": "隶书", "bold": true, "size": 17, "score": 5, "label": "字体 隶书 加粗 17 磅" },
+        { "kind": "align", "ref": "A1", "horizontal": "center", "score": 5, "label": "标题居中" }
       ]
     },
     {
       "id": "s2",
       "title": "用公式计算各地区人口密度",
       "desc": "在单元格区域 D3:D13 中，利用公式计算每个地区的常住人口密度（常住人口密度 = 常住人口 × 10000 ÷ 土地面积），结果设为数值型，不保留小数。",
-      "score": 3,
+      "score": 30,
       "video_url": "",
       "checks": [
-        { "kind": "range_formula", "range": "D3:D13", "score": 1, "label": "D3:D13 全部使用公式" },
+        { "kind": "range_formula", "range": "D3:D13", "score": 10, "label": "D3:D13 全部使用公式" },
         {
           "kind": "range_values",
           "range": "D3:D13",
           "values": [7130, 15089, 6439, 17736, 1286, 2498, 4600, 1232, 644, 462, 543],
           "tol": 0.5,
-          "score": 1,
+          "score": 10,
           "label": "密度计算结果正确"
         },
-        { "kind": "range_integer_display", "range": "D3:D13", "score": 1, "label": "结果不保留小数" }
+        { "kind": "range_integer_display", "range": "D3:D13", "score": 10, "label": "结果不保留小数" }
       ]
     },
     {
       "id": "s3",
       "title": "用函数求总土地面积与总常住人口",
       "desc": "利用函数求出 w 市的总土地面积和总常住人口数，结果设为数值型、不保留小数，分别存放在单元格 B14 和 C14 中。",
-      "score": 2,
+      "score": 20,
       "video_url": "",
       "checks": [
-        { "kind": "sum_range", "ref": "B14", "range": "B3:B13", "score": 1, "label": "B14 用 SUM 求总土地面积" },
-        { "kind": "sum_range", "ref": "C14", "range": "C3:C13", "score": 1, "label": "C14 用 SUM 求总常住人口" }
+        { "kind": "sum_range", "ref": "B14", "range": "B3:B13", "score": 10, "label": "B14 用 SUM 求总土地面积" },
+        { "kind": "sum_range", "ref": "C14", "range": "C3:C13", "score": 10, "label": "C14 用 SUM 求总常住人口" }
       ]
     },
     {
       "id": "s4",
       "title": "插入簇状柱形图",
       "desc": "同时选中 A2:A13 和 D2:D13 生成簇状柱形图，图表标题设置为「w市各地区人口密度」，作为其中对象插入到 Sheet1 中。",
-      "score": 2,
+      "score": 20,
       "video_url": "",
       "checks": [
-        { "kind": "chart", "index": 0, "chartType": "bar", "barDir": "col", "score": 1, "label": "插入簇状柱形图" },
+        { "kind": "chart", "index": 0, "chartType": "bar", "barDir": "col", "score": 10, "label": "插入簇状柱形图" },
         {
           "kind": "chart",
           "index": 0,
           "title": "w市各地区人口密度",
           "catRange": "A2:A13",
           "valRange": "D2:D13",
-          "score": 1,
+          "score": 10,
           "label": "图表标题与数据源正确"
         }
       ]

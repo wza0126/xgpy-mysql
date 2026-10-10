@@ -1852,11 +1852,11 @@ ${isChoice ? `5. 对于选择题，answers字段必须填写选项字母（A、B
                     <div className="flex gap-2 justify-end">
                       {question.type === 'wps_op' ? (
                         // ⛔ WPS 操作题带评分点 spec（wps_spec），本页的普通编辑器改不了它，
-                        //    硬开编辑器会把 content/answers 覆盖成普通题格式 → 只能去「WPS操作题」菜单里编辑。
+                        //    硬开编辑器会把 content/answers 覆盖成普通题格式 → 只能去「WPS/ACCESS」菜单里编辑。
                         <button
                           type="button"
                           disabled
-                          title="WPS 操作题请到左侧菜单「WPS操作题」中编辑"
+                          title="WPS 操作题请到左侧菜单「WPS/ACCESS」中编辑"
                           className="text-gray-300 px-2 py-1 rounded cursor-not-allowed"
                         >
                           <i className="fa-solid fa-edit"></i>

@@ -27,28 +27,31 @@ function eq(a, b, label) { ok(a === b, label, `期望 ${JSON.stringify(b)}，实
 
 (async () => {
   console.log('\n=== A. 规格自检 validateSpec ===');
-  const v = g.validateSpec(SPEC, 10);
+  // 学测操作题默认满分 100（评分点很细，10 分不够分）
+  const FULL = Number(SPEC.full_score);
+  eq(FULL, 100, 'A0 本例满分 = 100（学测口径）');
+  const v = g.validateSpec(SPEC, FULL);
   ok(v.ok, 'A1 规格无错误', v.errors.join('；'));
-  eq(v.total, 10, 'A2 评分点总分 = 10');
+  eq(v.total, FULL, 'A2 评分点总分 = 100');
   eq(v.warnings.length, 0, 'A3 无警告');
 
   const bad = g.validateSpec({ full_score: 10, steps: [{ title: 'x', score: 5, checks: [{ kind: 'nope', score: 5 }] }] }, 10);
   ok(!bad.ok, 'A4 未知检查类型被拦截');
   ok(bad.warnings.length >= 1, 'A5 总分不一致有警告');
 
-  console.log('\n=== B. 全对卷：应得满分 10 ===');
+  console.log('\n=== B. 全对卷：应得满分 100 ===');
   const rA = await g.gradeFile(path.join(FIX, 'wps_popshen_correct.xlsx'), SPEC);
-  eq(rA.score, 10, 'B1 总分 = 10');
-  eq(rA.full_score, 10, 'B2 满分 = 10');
+  eq(rA.score, 100, 'B1 总分 = 100');
+  eq(rA.full_score, 100, 'B2 满分 = 100');
   eq(rA.percent, 100, 'B3 得分率 100%');
   ok(rA.passed, 'B4 passed = true');
   rA.steps.forEach((s, i) => ok(s.pass, `B5.${i + 1} 步骤${i + 1}「${s.title}」满分`));
   ok(rA.steps.every((s) => s.checks.every((c) => c.pass)), 'B6 所有评分点均通过');
   ok(!!rA.sha256 && rA.sha256.length === 64, 'B7 产出 sha256');
 
-  console.log('\n=== C. 缺图表卷：只应丢第 4 步 2 分 ===');
+  console.log('\n=== C. 缺图表卷：只应丢第 4 步 20 分 ===');
   const rB = await g.gradeFile(path.join(FIX, 'wps_popshen_nochart.xlsx'), SPEC);
-  eq(rB.score, 8, 'C1 总分 = 8');
+  eq(rB.score, 80, 'C1 总分 = 80');
   eq(rB.steps[3].obtained, 0, 'C2 步骤4 得 0 分');
   eq(rB.steps[3].checks.length, 2, 'C3 步骤4 有 2 个评分点');
   ok(rB.steps[3].checks.every((c) => !c.pass), 'C4 图表评分点全部未通过');
@@ -57,17 +60,17 @@ function eq(a, b, label) { ok(a === b, label, `期望 ${JSON.stringify(b)}，实
 
   console.log('\n=== D. 手填数字卷（没用公式）：丢步骤2的公式分 + 步骤3的求和分 ===');
   const rC = await g.gradeFile(path.join(FIX, 'wps_popshen_hardcode.xlsx'), SPEC);
-  eq(rC.score, 7, 'D1 总分 = 7');
+  eq(rC.score, 70, 'D1 总分 = 70');
   ok(!rC.steps[1].checks[0].pass, 'D2 "全部使用公式"未通过');
   ok(rC.steps[1].checks[0].got.includes('纯值'), 'D3 指出是纯值而非公式', rC.steps[1].checks[0].got);
   ok(rC.steps[1].checks[1].pass, 'D4 数值本身仍判对（容差生效）');
   ok(!rC.steps[2].checks[0].pass, 'D5 B14 求和公式未通过');
   eq(rC.steps[2].obtained, 0, 'D6 步骤3 得 0 分');
 
-  console.log('\n=== E. 只写公式不设小数位：应丢"不保留小数"那 1 分 ===');
+  console.log('\n=== E. 只写公式不设小数位：应丢"不保留小数"那 10 分 ===');
   const rD = await g.gradeFile(path.join(FIX, 'wps_popshen_rawdecimal.xlsx'), SPEC);
-  eq(rD.score, 9, 'E1 总分 = 9');
-  eq(rD.steps[1].obtained, 2, 'E2 步骤2 得 2 分');
+  eq(rD.score, 90, 'E1 总分 = 90');
+  eq(rD.steps[1].obtained, 20, 'E2 步骤2 得 20 分');
   ok(rD.steps[1].checks[0].pass, 'E3 公式检查通过');
   ok(rD.steps[1].checks[1].pass, 'E4 数值检查通过（容差 0.5 兜住 7129.6 vs 7130）');
   ok(!rD.steps[1].checks[2].pass, 'E5 "不保留小数"未通过');
@@ -76,7 +79,7 @@ function eq(a, b, label) { ok(a === b, label, `期望 ${JSON.stringify(b)}，实
   console.log('\n=== F. 未作答的原始模板：应得 0 分 ===');
   const rE = await g.gradeFile(TEMPLATE, SPEC);
   eq(rE.score, 0, 'F1 总分 = 0');
-  eq(rE.full_score, 10, 'F2 满分仍为 10');
+  eq(rE.full_score, 100, 'F2 满分仍为 100');
   ok(rE.steps.every((s) => s.obtained === 0), 'F3 每一步均为 0 分');
   ok(rE.sheets.join(',') === 'Sheet1,Sheet2,Sheet3', 'F4 识别出 3 个工作表');
 
@@ -112,7 +115,8 @@ function eq(a, b, label) { ok(a === b, label, `期望 ${JSON.stringify(b)}，实
   const kinds = sug.steps.flatMap((s) => s.checks.map((c) => c.kind));
   ok(kinds.includes('merged'), 'I2 生成合并检查');
   ok(kinds.includes('chart'), 'I3 生成图表检查');
-  const sugV = g.validateSpec(sug, 10);
+  eq(sug.full_score, 100, 'I3b 生成的骨架默认 100 分制');
+  const sugV = g.validateSpec(sug, sug.full_score);
   ok(sugV.ok, 'I4 生成的骨架无错误', sugV.errors.join('；'));
   const sugChart = sug.steps.flatMap((s) => s.checks).find((c) => c.kind === 'chart');
   eq(sugChart.chartType, 'bar', 'I5 骨架里的图表类型自动填好');

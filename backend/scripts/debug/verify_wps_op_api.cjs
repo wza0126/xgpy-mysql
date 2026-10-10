@@ -1,10 +1,13 @@
 /**
- * WPS 操作题一期端到端验证（真后端 + 真上传 + 真判分 + 真落库）
+ * WPS 操作题端到端验证（真后端 + 真上传 + 真判分 + 真落库）
  * 前置：后端跑在 3101，且已执行 seed_wps_op_sample.cjs 灌入样例题。
  * 用法：node backend/scripts/debug/verify_wps_op_api.cjs
  *
+ * 覆盖：满分 100 口径 / 多模板（xlsx+txt）/ 演示视频（本地上传 + 外链抓取）/
+ *       逐评分点明细 / 幂等 / 隔离（wps_op 不进普通练习池）/ 教师端练习情况统计。
+ *
  * ⛔ 不留痕铁律：
- *   - 脚本产生的提交记录 / 答题记录 / 上传文件全部记录 id，在 finally 中删除；
+ *   - 脚本产生的提交记录 / 答题记录 / 上传文件（含视频）全部记录 id/路径，在 finally 中删除；
  *   - 末尾断言「跑完之后 wps_op_submissions 的行数 == 跑之前」，防止悄悄污染。
  */
 
@@ -17,6 +20,7 @@ const mysql = require('../../node_modules/mysql2/promise');
 const BASE = process.env.XGPY_BASE || 'http://127.0.0.1:3101';
 const QUESTION_ID = 'wps_op_demo_popshen';
 const FIX = path.join(__dirname, 'fixtures');
+const FULL = 100;
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -36,11 +40,11 @@ async function api(method, p, { token, body } = {}) {
   return { status: res.status, body: json };
 }
 
-async function upload(p, filePath, { token, fields = {} } = {}) {
+async function upload(p, filePath, { token, fields = {}, mime } = {}) {
   const buf = fs.readFileSync(filePath);
   const fd = new FormData();
   for (const [k, v] of Object.entries(fields)) fd.append(k, String(v));
-  fd.append('file', new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), path.basename(filePath));
+  fd.append('file', new Blob([buf], { type: mime || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), path.basename(filePath));
   const res = await fetch(BASE + p, {
     method: 'POST',
     headers: token ? { Authorization: 'Bearer ' + token } : {},
@@ -72,9 +76,10 @@ async function login(username, password) {
     // 比只按 id 列表删更稳（异常路径下 id 可能没被记录到）。
     const [bRows] = await conn.query("SELECT id FROM student_answers WHERE question_id = ? AND answer LIKE '[WPS操作题]%'", [QUESTION_ID]);
     baselineAnswerIds = new Set(bRows.map((r) => r.id));
-    const [stuRows] = await conn.query("SELECT id FROM profiles WHERE username = 'a' LIMIT 1");
+    const [stuRows] = await conn.query("SELECT id, class_id FROM profiles WHERE username = 'a' LIMIT 1");
     if (!stuRows.length) throw new Error('找不到学生 a');
     stuId = stuRows[0].id;
+    const stuClassId = stuRows[0].class_id;
 
     section('A. 登录');
     teacherToken = await login('teacher', 'xgpy666');
@@ -83,15 +88,16 @@ async function login(username, password) {
     ok('学生 a 登录成功', !!stuToken);
     if (!teacherToken || !stuToken) throw new Error('登录失败');
 
-    section('B. 学生取题列表');
+    section('B. 学生取题列表（满分 100 + 多模板计数）');
     const list = await api('GET', '/api/student/wps-op/questions', { token: stuToken });
     ok('列表接口 200', list.status === 200, 'status=' + list.status);
     const item = (list.body?.data || []).find((x) => x.id === QUESTION_ID);
     ok('列表包含样例操作题', !!item);
     if (item) {
-      ok('列表返回满分 10', item.full_score === 10, 'full_score=' + item.full_score);
+      ok('列表返回满分 100（10 分不够用已改默认）', item.full_score === FULL, 'full_score=' + item.full_score);
       ok('列表返回 4 个步骤', item.step_count === 4, 'step_count=' + item.step_count);
       ok('列表返回模板名', !!item.template_name, item.template_name);
+      ok('列表返回模板数量 = 2（表格 + txt 数据源）', item.template_count === 2, 'template_count=' + item.template_count);
       ok('列表不含评分点字段', !('wps_spec' in item) && !('checks' in item));
     }
 
@@ -106,7 +112,26 @@ async function login(username, password) {
     ok('⛔ 响应体不含 checks 字段', !raw.includes('"checks"'));
     ok('⛔ 响应体不含 range_values 答案值', !raw.includes('15089') && !raw.includes('17736'));
     ok('⛔ 响应体不含 grader 口径', !raw.includes('"grader"'));
-    ok('下发模板下载路径', !!spec.template?.path, spec.template?.path);
+
+    section('C2. 多模板：xlsx 模板 + txt 数据源可分别下载');
+    const tpls = spec.templates || [];
+    ok('详情下发 templates 数组（2 个）', Array.isArray(tpls) && tpls.length === 2, 'n=' + tpls.length);
+    ok('兼容字段 template = 第 1 个', !!spec.template?.path && spec.template.path === tpls[0]?.path, spec.template?.path);
+    const xlsxTpl = tpls.find((t) => String(t.name).toLowerCase().endsWith('.xlsx'));
+    const txtTpl = tpls.find((t) => /\.(txt|csv)$/i.test(String(t.name)));
+    ok('含一个 xlsx 模板', !!xlsxTpl, xlsxTpl?.name);
+    ok('含一个 txt 数据源（有些题要从 txt 导入数据）', !!txtTpl, txtTpl?.name);
+    ok('模板带 kind 标记', xlsxTpl?.kind === 'xlsx' && txtTpl?.kind === 'text', `${xlsxTpl?.kind}/${txtTpl?.kind}`);
+    if (txtTpl) {
+      const res = await fetch(BASE + txtTpl.path);
+      const text = await res.text();
+      ok('txt 数据源可下载 200', res.status === 200, 'status=' + res.status);
+      ok('txt 内容确实是表格数据（含制表符）', text.includes('\t') && text.length > 50, `len=${text.length}`);
+    }
+    if (xlsxTpl) {
+      const res = await fetch(BASE + xlsxTpl.path);
+      ok('xlsx 模板可下载 200', res.status === 200, 'status=' + res.status + ' type=' + res.headers.get('content-type'));
+    }
 
     section('D. ⛔ 通用表接口对学生同样不得泄露 wps_spec');
     const tbl = await api('GET', '/api/tables/questions?filters=' + encodeURIComponent(JSON.stringify({ id: QUESTION_ID })), { token: stuToken });
@@ -117,11 +142,11 @@ async function login(username, password) {
     const teachTbl = await api('GET', '/api/tables/questions?filters=' + encodeURIComponent(JSON.stringify({ id: QUESTION_ID })), { token: teacherToken });
     ok('教师侧仍能看到 wps_spec（用于编辑）', !!(teachTbl.body?.data || [])[0]?.wps_spec);
 
-    section('E. 提交全对卷 → 应得 10 分');
+    section('E. 提交全对卷 → 应得满分 100');
     const r1 = await upload(`/api/student/wps-op/${QUESTION_ID}/submit`, path.join(FIX, 'wps_popshen_correct.xlsx'), { token: stuToken });
     ok('提交接口 200', r1.status === 200, 'status=' + r1.status + ' ' + JSON.stringify(r1.body?.error || ''));
     const d1 = r1.body?.data || {};
-    ok('得分 10 / 10', d1.score === 10 && d1.full_score === 10, `${d1.score}/${d1.full_score}`);
+    ok('得分 100 / 100', d1.score === FULL && d1.full_score === FULL, `${d1.score}/${d1.full_score}`);
     ok('passed = true', d1.passed === true);
     ok('duplicate = false', d1.duplicate === false);
     if (d1.submission_id) createdSubmissionIds.push(d1.submission_id);
@@ -136,8 +161,8 @@ async function login(username, password) {
     const [subRows] = await conn.query('SELECT id, score_obtained, full_score, file_sha256, file_path FROM wps_op_submissions WHERE question_id = ? ORDER BY created_at DESC LIMIT 1', [QUESTION_ID]);
     ok('wps_op_submissions 已写入', subRows.length === 1);
     if (subRows.length) {
-      ok('落库分数 = 10', Number(subRows[0].score_obtained) === 10);
-      ok('落库满分 = 10', Number(subRows[0].full_score) === 10);
+      ok('落库分数 = 100', Number(subRows[0].score_obtained) === FULL, 'score=' + subRows[0].score_obtained);
+      ok('落库满分 = 100', Number(subRows[0].full_score) === FULL, 'full=' + subRows[0].full_score);
       ok('落库 sha256 非空', !!subRows[0].file_sha256 && subRows[0].file_sha256.length === 64);
       const abs = path.join(__dirname, '../..', subRows[0].file_path.replace(/^\/uploads\//, 'uploads/'));
       ok('落库文件确实存在', fs.existsSync(abs), abs);
@@ -147,7 +172,7 @@ async function login(username, password) {
     ok('student_answers 已写入（进入掌握口径）', ansRows.length === 1);
     if (ansRows.length) {
       ok('满分 → is_correct = 1', Number(ansRows[0].is_correct) === 1);
-      ok('score_obtained = 10', Number(ansRows[0].score_obtained) === 10);
+      ok('score_obtained = 100', Number(ansRows[0].score_obtained) === FULL);
       createdAnswerIds.push(ansRows[0].id);
     }
 
@@ -156,15 +181,15 @@ async function login(username, password) {
     const r2 = await upload(`/api/student/wps-op/${QUESTION_ID}/submit`, path.join(FIX, 'wps_popshen_correct.xlsx'), { token: stuToken });
     ok('重复提交 200', r2.status === 200);
     ok('duplicate = true', r2.body?.data?.duplicate === true);
-    ok('仍返回上次分数 10', r2.body?.data?.score === 10);
+    ok('仍返回上次分数 100', r2.body?.data?.score === FULL);
     const after = (await conn.query('SELECT COUNT(*) AS n FROM wps_op_submissions'))[0][0].n;
     ok('⛔ 提交记录行数未增加', after === before, `${before} → ${after}`);
 
-    section('H. 缺图表卷 → 只丢第 4 步 2 分');
+    section('H. 缺图表卷 → 只丢第 4 步 20 分');
     const r3 = await upload(`/api/student/wps-op/${QUESTION_ID}/submit`, path.join(FIX, 'wps_popshen_nochart.xlsx'), { token: stuToken });
     const d3 = r3.body?.data || {};
     ok('提交 200', r3.status === 200);
-    ok('得分 8 / 10', d3.score === 8, `${d3.score}/${d3.full_score}`);
+    ok('得分 80 / 100', d3.score === 80, `${d3.score}/${d3.full_score}`);
     ok('步骤 4 得 0 分', d3.detail?.steps?.[3]?.obtained === 0);
     ok('失败原因可读', /未在/.test(d3.detail?.steps?.[3]?.checks?.[0]?.got || ''), d3.detail?.steps?.[3]?.checks?.[0]?.got);
     if (d3.submission_id) createdSubmissionIds.push(d3.submission_id);
@@ -175,11 +200,14 @@ async function login(username, password) {
     const r4 = await upload(`/api/student/wps-op/${QUESTION_ID}/submit`, path.join(FIX, 'wps_popshen_hardcode.xlsx'), { token: stuToken });
     const d4 = r4.body?.data || {};
     ok('提交 200', r4.status === 200);
-    ok('得分 7 / 10', d4.score === 7, `${d4.score}/${d4.full_score}`);
+    ok('得分 70 / 100', d4.score === 70, `${d4.score}/${d4.full_score}`);
     const c4 = d4.detail?.steps?.[1]?.checks?.[0] || {};
     ok('指出"没用公式"', /纯值/.test(c4.got || ''), c4.got);
     if (d4.submission_id) createdSubmissionIds.push(d4.submission_id);
-    const [a4] = await conn.query('SELECT id, is_correct FROM student_answers WHERE student_id = ? AND question_id = ? ORDER BY created_at DESC LIMIT 1', [stuId, QUESTION_ID]);
+    // ⚠️ 不要用「最新一条」来取：E/H/I 三次提交都在同一秒内，created_at 相同时排序不稳定。
+    //    按分数（70 分那次）精确取，才稳定。
+    const [a4] = await conn.query('SELECT id, is_correct FROM student_answers WHERE student_id = ? AND question_id = ? AND score_obtained = 70 ORDER BY created_at DESC LIMIT 1', [stuId, QUESTION_ID]);
+    ok('落库了 70 分那次答题记录', a4.length === 1);
     if (a4.length) { createdAnswerIds.push(a4[0].id); ok('未满分 → is_correct = 0', Number(a4[0].is_correct) === 0); }
 
     section('J. 学生查历史结果');
@@ -215,42 +243,116 @@ async function login(username, password) {
 
     const kinds = await api('GET', '/api/teacher/wps-op/check-kinds', { token: teacherToken });
     ok('评分点类型清单 200', kinds.status === 200);
-    ok('清单含 chart 与 range_values', (kinds.body?.data?.kinds || []).includes('chart') && (kinds.body?.data?.kinds || []).includes('range_values'));
+    const kindList = kinds.body?.data?.kinds || [];
+    ok('清单含 chart 与 range_values', kindList.includes('chart') && kindList.includes('range_values'));
+    ok('清单含新增四类（排序/筛选/分类汇总/条件格式）',
+      ['sorted_range', 'auto_filter', 'subtotal', 'cond_format'].every((k) => kindList.includes(k)), 'n=' + kindList.length);
+    ok('清单共 20 种检查器', kindList.length === 20, 'n=' + kindList.length);
+    ok('清单下发视频大小上限（前端提示用）', (kinds.body?.data?.video_max_mb || 0) > 0, 'max=' + kinds.body?.data?.video_max_mb);
 
     const insp = await upload('/api/teacher/wps-op/inspect', path.join(FIX, 'wps_popshen_correct.xlsx'), { token: teacherToken });
     ok('标准答案解析 200', insp.status === 200, 'status=' + insp.status);
     const sug = insp.body?.data?.suggested_spec;
     ok('返回自动生成的评分点骨架', !!sug && (sug.steps || []).length >= 3, 'steps=' + (sug?.steps || []).length);
+    ok('骨架默认满分 100', Number(sug?.full_score) === FULL, 'full_score=' + sug?.full_score);
     ok('骨架识别出图表评分点', JSON.stringify(sug || {}).includes('"chart"'));
     ok('骨架识别出合并检查', JSON.stringify(sug || {}).includes('"merged"'));
     const sum = insp.body?.data?.summary;
     ok('结构摘要识别出图表', (sum?.sheets?.[0]?.charts || []).length === 1);
     ok('结构摘要识别出 D3 公式', (sum?.sheets?.[0]?.cells || []).some((c) => c.ref === 'D3' && /C3\*10000\/B3/.test(c.formula || '')));
 
-    const val = await api('POST', '/api/teacher/wps-op/validate-spec', { token: teacherToken, body: { spec: sug, full_score: 10 } });
+    const val = await api('POST', '/api/teacher/wps-op/validate-spec', { token: teacherToken, body: { spec: sug, full_score: FULL } });
     ok('规格校验接口 200', val.status === 200);
     ok('骨架可通过校验', val.body?.data?.ok === true, JSON.stringify(val.body?.data?.errors || []));
 
-    const tpl = await upload('/api/teacher/wps-op/template', path.join(FIX, 'wps_popshen_correct.xlsx'), { token: teacherToken });
-    ok('模板上传 200', tpl.status === 200, 'status=' + tpl.status);
-    ok('返回模板路径', !!tpl.body?.data?.path, tpl.body?.data?.path);
-    if (tpl.body?.data?.path) {
-      createdFiles.push(path.join(__dirname, '../..', tpl.body.data.path.replace(/^\/uploads\//, 'uploads/')));
+    section('L2. 演示视频：本地上传 / 外链抓取（机房断网兜底）');
+    const fakeVideo = path.join(FIX, '_tmp_demo.mp4');
+    fs.writeFileSync(fakeVideo, Buffer.alloc(4096, 7));
+    const vUp = await upload('/api/teacher/wps-op/video', fakeVideo, { token: teacherToken, mime: 'video/mp4' });
+    ok('本地视频上传 200', vUp.status === 200, 'status=' + vUp.status + ' ' + JSON.stringify(vUp.body?.error || ''));
+    ok('返回可播放地址', /^\/uploads\/wps-op\/videos\//.test(vUp.body?.data?.url || ''), vUp.body?.data?.url);
+    ok('标记来源为本地', vUp.body?.data?.source === 'local', vUp.body?.data?.source);
+    if (vUp.body?.data?.stored_name) {
+      const p = path.join(__dirname, '../../uploads/wps-op/videos', vUp.body.data.stored_name);
+      createdFiles.push(p);
+      ok('视频确实落盘', fs.existsSync(p), p);
+    }
+    fs.unlinkSync(fakeVideo);
+
+    const badVideo = path.join(FIX, '_tmp_demo.txt');
+    fs.writeFileSync(badVideo, 'not a video');
+    const vBad = await upload('/api/teacher/wps-op/video', badVideo, { token: teacherToken, mime: 'text/plain' });
+    ok('非视频格式被拒 400', vBad.status === 400, 'status=' + vBad.status);
+    ok('拒绝提示说明支持格式', /mp4|webm/i.test(vBad.body?.error || ''), vBad.body?.error);
+    fs.unlinkSync(badVideo);
+
+    const vScheme = await api('POST', '/api/teacher/wps-op/video/fetch', { token: teacherToken, body: { url: 'ftp://example.com/a.mp4' } });
+    ok('非 http(s) 链接被拒 400', vScheme.status === 400, 'status=' + vScheme.status);
+    ok('提示要用 http/https', /http/i.test(vScheme.body?.error || ''), vScheme.body?.error);
+
+    const VID_DIR_CHECK = path.join(__dirname, '../../uploads/wps-op/videos');
+    const vidBefore = fs.existsSync(VID_DIR_CHECK) ? fs.readdirSync(VID_DIR_CHECK) : [];
+    // 用一个必然连不上的端口模拟"外网不可达"，验证能给出「改用本地上传」的兜底提示
+    const vFetch = await api('POST', '/api/teacher/wps-op/video/fetch', { token: teacherToken, body: { url: 'http://127.0.0.1:1/none.mp4' } });
+    ok('外链抓取失败回退为 400', vFetch.status === 400, 'status=' + vFetch.status);
+    ok('失败时提示改用本地上传', /本地视频|本地上传/.test(vFetch.body?.error || ''), vFetch.body?.error);
+    const vidAfter = fs.existsSync(VID_DIR_CHECK) ? fs.readdirSync(VID_DIR_CHECK) : [];
+    ok('⛔ 抓取失败不留下半截文件', vidAfter.length === vidBefore.length, `${vidBefore.length} → ${vidAfter.length}`);
+
+    section('M. 教师端 · WPS 练习情况（最高分 + 总分）');
+    const an = await api('GET', '/api/teacher/wps-op/analytics', { token: teacherToken });
+    ok('练习情况接口 200', an.status === 200, 'status=' + an.status + ' ' + JSON.stringify(an.body?.error || ''));
+    const ad = an.body?.data || {};
+    ok('返回班级列表', Array.isArray(ad.classes), 'n=' + (ad.classes || []).length);
+    ok('返回操作题清单', Array.isArray(ad.questions) && ad.questions.length >= 1, 'n=' + (ad.questions || []).length);
+    const aq = (ad.questions || []).find((q) => q.id === QUESTION_ID);
+    ok('操作题清单含样例并带满分 100', !!aq && Number(aq.full_score) === FULL, 'full=' + aq?.full_score);
+    ok('全卷满分 = 100', Number(ad.full_mark) === FULL, 'full_mark=' + ad.full_mark);
+
+    const aStu = (ad.students || []).find((s) => s.id === stuId);
+    ok('返回学生名单且含学生 a', !!aStu, 'student_count=' + ad.student_count);
+    if (aStu) {
+      ok('学生 a 的总分口径 = 各题最高分之和', Number(aStu.total) === FULL, 'total=' + aStu.total);
+      ok('该题最高分 = 100（不是最近一次的 70）', Number(aStu.scores?.[QUESTION_ID]?.best) === FULL,
+        'best=' + aStu.scores?.[QUESTION_ID]?.best);
+      ok('记录提交次数 >= 3', Number(aStu.scores?.[QUESTION_ID]?.tries) >= 3, 'tries=' + aStu.scores?.[QUESTION_ID]?.tries);
+      ok('已做题数 >= 1', Number(aStu.done_count) >= 1, 'done=' + aStu.done_count);
+      ok('带班级名/账号（表格可直接显示）', 'class_name' in aStu && 'username' in aStu);
+    }
+    const aq2 = (ad.per_question || []).find((p) => p.question_id === QUESTION_ID);
+    ok('每题统计存在', !!aq2);
+    if (aq2) {
+      ok('该题提交人数 >= 1', Number(aq2.submitted) >= 1, 'submitted=' + aq2.submitted);
+      ok('该题最高分 = 100', Number(aq2.max) === FULL, 'max=' + aq2.max);
     }
 
-    section('M. 权限');
+    if (stuClassId) {
+      const an2 = await api('GET', `/api/teacher/wps-op/analytics?classId=${encodeURIComponent(stuClassId)}`, { token: teacherToken });
+      const ad2 = an2.body?.data || {};
+      ok('按班级筛选 200', an2.status === 200, 'status=' + an2.status);
+      ok('筛选后学生都属于该班', (ad2.students || []).length > 0 && (ad2.students || []).every((s) => String(s.class_id) === String(stuClassId)),
+        'n=' + (ad2.students || []).length);
+      ok('筛选后仍能找到学生 a', (ad2.students || []).some((s) => s.id === stuId));
+    }
+
+    section('N. 权限');
     const noAuth = await api('GET', `/api/student/wps-op/${QUESTION_ID}`);
     ok('未登录访问详情被拒', noAuth.status === 401 || noAuth.status === 403, 'status=' + noAuth.status);
     const stuAsTeacher = await api('GET', '/api/teacher/wps-op/submissions', { token: stuToken });
     ok('学生访问教师接口被拒', stuAsTeacher.status === 403, 'status=' + stuAsTeacher.status);
+    const stuAsAnalytics = await api('GET', '/api/teacher/wps-op/analytics', { token: stuToken });
+    ok('学生访问练习情况接口被拒', stuAsAnalytics.status === 403, 'status=' + stuAsAnalytics.status);
     const teacherAsStu = await upload(`/api/student/wps-op/${QUESTION_ID}/submit`, path.join(FIX, 'wps_popshen_correct.xlsx'), { token: teacherToken });
     ok('⛔ 教师不能调作答接口（否则教师 id 会写进答题记录、污染学生统计）', teacherAsStu.status === 403, 'status=' + teacherAsStu.status);
+    const teacherVideo = await upload('/api/teacher/wps-op/video', path.join(FIX, 'wps_popshen_correct.xlsx'), { token: stuToken, mime: 'video/mp4' });
+    ok('学生不能上传演示视频', teacherVideo.status === 403, 'status=' + teacherVideo.status);
+
     // ---------------------------------------------------------------
     // ⛔ 隔离断言：WPS 操作题是「独立入口」，绝不能混进普通练习/测试池，
     //    也不能计入「可练习题量」「章节题量」口径 —— 否则学生会在练习里
     //    拿到一道没有 options/answers 的空白题，页面上显示的题量也会虚高。
     //    对应实现：index.js 的 SQL_NOT_WPS_OP + PracticeModule/TestModule 的 neq 过滤。
-    section('N. ⛔ 练习题池 / 计数口径隔离（wps_op 不得混进普通练习与测试）');
+    section('O. ⛔ 练习题池 / 计数口径隔离（wps_op 不得混进普通练习与测试）');
     const [[wpsPrac]] = await conn.query("SELECT COUNT(*) AS n FROM questions WHERE practice_enabled = 1 AND type = 'wps_op'");
     ok('样例操作题处于练习可用态（否则下面几条断言是空转）', Number(wpsPrac.n) > 0, 'n=' + wpsPrac.n);
 
@@ -305,7 +407,7 @@ async function login(username, password) {
     console.error('\n脚本异常：', e);
   } finally {
     // ---------- 不留痕 ----------
-    console.log('\n=== O. 清理与不留痕断言 ===');
+    console.log('\n=== P. 清理与不留痕断言 ===');
     try {
       if (createdSubmissionIds.length) {
         const [r] = await conn.query('DELETE FROM wps_op_submissions WHERE id IN (?)', [createdSubmissionIds]);
@@ -343,6 +445,16 @@ async function login(username, password) {
         }
       }
       if (swept) console.log(`  兜底清理孤儿提交文件 ${swept} 个`);
+
+      // 兜底：清掉本次跑出来的演示视频（库里没有任何表引用视频，只按本次记录 + 时间兜底）
+      const VID_DIR = path.join(__dirname, '../../uploads/wps-op/videos');
+      let vSwept = 0;
+      if (fs.existsSync(VID_DIR)) {
+        for (const name of fs.readdirSync(VID_DIR)) {
+          if (/^vid-url-/.test(name)) { try { fs.unlinkSync(path.join(VID_DIR, name)); vSwept++; } catch { /* ignore */ } }
+        }
+      }
+      if (vSwept) console.log(`  兜底清理抓取失败残留视频 ${vSwept} 个`);
 
       const [[b2]] = await conn.query('SELECT COUNT(*) AS n FROM wps_op_submissions');
       const [[b3]] = await conn.query("SELECT COUNT(*) AS n FROM student_answers WHERE question_id = ? AND answer LIKE '[WPS操作题]%'", [QUESTION_ID]);

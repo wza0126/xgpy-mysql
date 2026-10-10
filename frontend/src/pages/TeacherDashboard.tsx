@@ -52,7 +52,7 @@ const menuItems = [
   { id: 'classes', title: '班级管理', icon: 'fa-users' },
   { id: 'students', title: '学生管理', icon: 'fa-user-graduate' },
   { id: 'questions', title: '题库管理', icon: 'fa-book' },
-  { id: 'wpsOp', title: 'WPS操作题', icon: 'fa-file-excel' },
+  { id: 'wpsOp', title: 'WPS/ACCESS', icon: 'fa-file-excel' },
   { id: 'knowledgeBase', title: '答疑库管理', icon: 'fa-graduation-cap' },
   { id: 'tests', title: '考试管理', icon: 'fa-clipboard-check' },
   { id: 'python', title: 'Python编程', icon: 'fa-code' },

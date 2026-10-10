@@ -323,7 +323,7 @@ function decimalsFromFormat(code) {
 }
 
 function parseStyles(xml) {
-  const styles = { fonts: [], cellXfs: [], numFmts: Object.assign({}, BUILTIN_NUMFMT) };
+  const styles = { fonts: [], cellXfs: [], numFmts: Object.assign({}, BUILTIN_NUMFMT), dxfs: [] };
   if (!xml) return styles;
   const root = parseXml(xml);
 
@@ -373,6 +373,36 @@ function parseStyles(xml) {
           wrapText: /^(1|true)$/i.test(String(al.attrs.wrapText || '')),
         } : null,
       });
+    }
+  }
+
+  // 条件格式引用的差异样式（dxf）：评分点主要靠它取「填充色 / 字体色 / 加粗」。
+  // 实测样本：<dxfs count="1"><dxf><fill><patternFill><bgColor rgb="FFFF0000"/>
+  const dxfsNode = findFirst(root, 'dxfs');
+  if (dxfsNode) {
+    for (const d of dxfsNode.children) {
+      if (d.local !== 'dxf') continue;
+      const fill = childNode(d, 'fill') || findFirst(d, 'fill');
+      let fillColor = null;
+      let patternType = null;
+      if (fill) {
+        const pf = childNode(fill, 'patternFill') || findFirst(fill, 'patternFill');
+        if (pf) {
+          patternType = pf.attrs.patternType || null;
+          const bg = childNode(pf, 'bgColor') || findFirst(pf, 'bgColor');
+          const fg = childNode(pf, 'fgColor') || findFirst(pf, 'fgColor');
+          fillColor = (bg && bg.attrs.rgb) || (fg && fg.attrs.rgb) || null;
+        }
+      }
+      const fnt = childNode(d, 'font') || findFirst(d, 'font');
+      let fontColor = null;
+      let fontBold = false;
+      if (fnt) {
+        const c = childNode(fnt, 'color') || findFirst(fnt, 'color');
+        fontColor = c ? (c.attrs.rgb || null) : null;
+        fontBold = !!(childNode(fnt, 'b') || findFirst(fnt, 'b'));
+      }
+      styles.dxfs.push({ fillColor, patternType, fontColor, fontBold });
     }
   }
   return styles;
@@ -466,11 +496,24 @@ function parseSheet(files, sheetPath, ctx) {
     drawings: 0,
     styles: ctx.styles,
     sharedStrings: ctx.sharedStrings,
+    rowMeta: new Map(),      // 行号 → { hidden, outlineLevel }（筛选隐藏行 / 分类汇总分组）
+    autoFilter: null,        // { ref, columns }
+    condFormats: [],         // [{ sqref, rules }]
+    sortState: null,         // { ref, conditions }
+    filterMode: false,
+    outlineLevelRow: 0,
   };
 
   const sd = childNode(root, 'sheetData') || findFirst(root, 'sheetData');
   if (sd) {
     for (const row of findAll(sd, 'row')) {
+      // 行属性：筛选会写 hidden="1"；分类汇总会写 outlineLevel（数据行 2 / 汇总行 1）
+      const rNum = parseInt(row.attrs.r, 10);
+      if (!isNaN(rNum)) {
+        const hidden = /^(1|true)$/i.test(String(row.attrs.hidden || ''));
+        const ol = row.attrs.outlineLevel !== undefined ? parseInt(row.attrs.outlineLevel, 10) : 0;
+        if (hidden || (ol && ol > 0)) sheet.rowMeta.set(rNum, { hidden, outlineLevel: ol || 0 });
+      }
       for (const c of row.children) {
         if (c.local !== 'c') continue;
         const ref = normRef(c.attrs.r);
@@ -512,6 +555,84 @@ function parseSheet(files, sheetPath, ctx) {
   if (mc) for (const m of findAll(mc, 'mergeCell')) {
     const r = normRef(m.attrs.ref);
     if (r && r.includes(':')) sheet.merges.push(r);
+  }
+
+  // ---- 自动筛选 ----
+  // 实测（Excel 2016 产物）：
+  //   <sheetPr filterMode="1"/><autoFilter ref="A1:D7">
+  //     <filterColumn colId="3"><customFilters><customFilter operator="greaterThan" val="45000"/></customFilters></filterColumn>
+  //     <filterColumn colId="0"><filters><filter val="城东区"/></filters></filterColumn>
+  const afNode = findFirst(root, 'autoFilter');
+  if (afNode) {
+    const columns = [];
+    for (const fc of findAll(afNode, 'filterColumn')) {
+      const colId = parseInt(fc.attrs.colId, 10);
+      const custom = [];
+      const cfs = findFirst(fc, 'customFilters');
+      if (cfs) for (const cf of findAll(cfs, 'customFilter')) {
+        custom.push({
+          operator: cf.attrs.operator || 'equal',
+          val: cf.attrs.val !== undefined ? String(cf.attrs.val) : '',
+        });
+      }
+      const values = [];
+      const fts = findFirst(fc, 'filters');
+      if (fts) for (const f of findAll(fts, 'filter')) {
+        if (f.attrs.val !== undefined) values.push(String(f.attrs.val));
+      }
+      const top10 = findFirst(fc, 'top10');
+      const dyn = findFirst(fc, 'dynamicFilter');
+      columns.push({
+        colId: isNaN(colId) ? null : colId,
+        custom,
+        values,
+        top10: top10 ? { val: top10.attrs.val, top: top10.attrs.top, percent: top10.attrs.percent } : null,
+        dynamic: dyn ? { type: dyn.attrs.type, val: dyn.attrs.val } : null,
+      });
+    }
+    sheet.autoFilter = { ref: normRange(afNode.attrs.ref), columns };
+  }
+
+  // ---- 条件格式 ----
+  // <conditionalFormatting sqref="D2:D7"><cfRule type="cellIs" dxfId="0" operator="greaterThan"><formula>4000</formula></cfRule>
+  for (const cfn of findAll(root, 'conditionalFormatting')) {
+    const rules = [];
+    for (const r of findAll(cfn, 'cfRule')) {
+      // 数据条 / 色阶 / 图标集 没有 formula 与 operator，用 cfvo 描述阈值
+      const cfvo = findAll(r, 'cfvo').map((v) => ({
+        type: v.attrs.type, val: v.attrs.val, gte: v.attrs.gte,
+      }));
+      rules.push({
+        type: r.attrs.type || '',
+        operator: r.attrs.operator || '',
+        dxfId: r.attrs.dxfId !== undefined ? parseInt(r.attrs.dxfId, 10) : null,
+        priority: r.attrs.priority,
+        text: r.attrs.text,
+        formulas: findAll(r, 'formula').map((x) => String(x.text || '')),
+        cfvo,
+      });
+    }
+    if (rules.length) sheet.condFormats.push({ sqref: normRange(cfn.attrs.sqref), rules });
+  }
+
+  // ---- 工作表属性 / 排序状态 ----
+  const prNode = childNode(root, 'sheetPr') || findFirst(root, 'sheetPr');
+  sheet.filterMode = !!(prNode && /^(1|true)$/i.test(String(prNode.attrs.filterMode || '')));
+
+  const fmtPr = childNode(root, 'sheetFormatPr') || findFirst(root, 'sheetFormatPr');
+  sheet.outlineLevelRow = fmtPr && fmtPr.attrs.outlineLevelRow !== undefined
+    ? parseInt(fmtPr.attrs.outlineLevelRow, 10) : 0;
+
+  const ssNode = findFirst(root, 'sortState');
+  if (ssNode) {
+    sheet.sortState = {
+      ref: normRange(ssNode.attrs.ref),
+      conditions: findAll(ssNode, 'sortCondition').map((c) => ({
+        ref: normRange(c.attrs.ref),
+        descending: /^(1|true)$/i.test(String(c.attrs.descending || '')),
+        sortBy: c.attrs.sortBy || 'value',
+      })),
+    };
   }
 
   const dNode = childNode(root, 'drawing') || findFirst(root, 'drawing');
@@ -859,7 +980,291 @@ const CHECKERS = {
       note: problems.join('；'),
     };
   },
+
+  // ==========================================================
+  // 以下四类由「真实 Excel 2016 产物」实测校准（见
+  // backend/scripts/debug/make_wps_feature_samples.ps1 + dump_xlsx_xml.cjs）
+  // ==========================================================
+
+  /**
+   * 自动筛选。OML 实测结构：
+   *   <sheetPr filterMode="1"/><autoFilter ref="A1:D7">
+   *     <filterColumn colId="3"><customFilters><customFilter operator="greaterThan" val="45000"/></customFilters></filterColumn>
+   *     <filterColumn colId="0"><filters><filter val="城东区"/></filters></filterColumn>
+   * ⚠️ colId 是 0-based；配置里用 1-based 的 col（A=1）更好懂。
+   * ⚠️ 只判「筛选条件」，不强制校验隐藏行：COM/部分 WPS 版本只写条件不写 hidden。
+   */
+  auto_filter({ sheet, check }) {
+    const af = sheet.autoFilter;
+    if (!af) return { pass: false, got: '未设置自动筛选', want: '设置自动筛选' };
+    const problems = [];
+    if (check.range) {
+      const wantR = normRange(check.range);
+      if (af.ref !== wantR) problems.push(`筛选区域应为 ${wantR}（实为 ${af.ref || '无'}）`);
+    }
+    if (check.minColumns !== undefined && af.columns.length < Number(check.minColumns)) {
+      problems.push(`至少需要 ${check.minColumns} 列筛选条件（实为 ${af.columns.length} 列）`);
+    }
+    for (const want of (check.columns || [])) {
+      const colId = Number(want.col) - 1;
+      const col = af.columns.find((c) => c.colId === colId);
+      if (!col) { problems.push(`第 ${want.col} 列未设置筛选条件`); continue; }
+      if (want.op) {
+        const hit = col.custom.some((c) => normFilterOp(c.operator) === normFilterOp(want.op)
+          && (want.value === undefined || String(c.val) === String(want.value)));
+        if (!hit) {
+          problems.push(`第 ${want.col} 列条件应为「${want.op}${want.value === undefined ? '' : ' ' + want.value}」，实为 ${describeCol(col)}`);
+        }
+      }
+      if (want.values && want.values.length) {
+        const missing = want.values.filter((v) => !col.values.includes(String(v)));
+        if (missing.length) problems.push(`第 ${want.col} 列应筛出「${missing.join('、')}」，实为 ${col.values.join('、') || '无'}`);
+      }
+    }
+    return {
+      pass: problems.length === 0,
+      got: describeFilter(af),
+      want: check.range
+        ? `${normRange(check.range)}${check.columns && check.columns.length ? ` 共 ${check.columns.length} 列条件` : ''}`
+        : '已设置自动筛选',
+      note: problems.join('；'),
+    };
+  },
+
+  /**
+   * 区域按某列有序。以「实际值顺序」为准，手动重排也能判对。
+   * check: { range:'D2:D13', col:4, order:'desc' }
+   */
+  sorted_range({ sheet, check }) {
+    const range = normRange(check.range);
+    const cells = rangeCells(range);
+    if (!cells.length) return { pass: false, got: '(区域为空)', want: check.range };
+    const col = check.col !== undefined ? Number(check.col) : parseRef(cells[0]).col;
+    const ordered = cells
+      .map((ref) => ({ ref, p: parseRef(ref) }))
+      .filter((x) => x.p.col === col)
+      .sort((a, b) => a.p.r - b.p.r);
+    const vals = ordered.map(({ ref }) => {
+      const { cell } = locateCell(sheet, ref);
+      if (!cell) return null;
+      if (typeof cell.value === 'number') return cell.value;
+      const n = num(cell.value);
+      return n !== null ? n : cell.value;
+    });
+    const dir = (check.order === 'desc' || check.desc === true) ? 'desc' : 'asc';
+    // 边界：区域里根本不包含该列时，空数组会"假通过"，必须显式判错
+    if (ordered.length < 2) {
+      return {
+        pass: false,
+        got: `区域内第 ${col} 列只有 ${ordered.length} 行`,
+        want: `第 ${col} 列${dir === 'asc' ? '升序' : '降序'}`,
+        note: '区域与列不匹配',
+      };
+    }
+    let badAt = -1;
+    for (let i = 1; i < vals.length; i++) {
+      if (vals[i] === null || vals[i - 1] === null) continue;
+      const cmp = compareVals(vals[i - 1], vals[i]);
+      if (dir === 'asc' ? cmp > 0 : cmp < 0) { badAt = i; break; }
+    }
+    return {
+      pass: badAt < 0,
+      got: vals.map((v) => (v === null ? '空' : v)).slice(0, 10).join(', ') + (vals.length > 10 ? ' …' : ''),
+      want: `第 ${col} 列${dir === 'asc' ? '升序' : '降序'}`,
+      note: badAt >= 0 ? `第 ${ordered[badAt].ref} 处顺序不符` : '',
+    };
+  },
+
+  /**
+   * 分类汇总。实测结构：汇总格 =SUBTOTAL(9,B2:B3)，数据行 outlineLevel="2"、汇总行 outlineLevel="1"。
+   * check: { range:'A1:D11', fn:'sum', minCount:3 }
+   */
+  subtotal({ sheet, check }) {
+    const fnKey = String(check.fn || 'sum').toLowerCase();
+    const fnCode = SUBTOTAL_FN[fnKey] !== undefined ? SUBTOTAL_FN[fnKey] : 9;
+    const pool = check.range ? rangeCells(normRange(check.range)) : Array.from(sheet.cells.keys());
+    const hits = [];
+    for (const ref of pool) {
+      const cell = sheet.cells.get(ref);
+      if (!cell || !cell.formula) continue;
+      const m = /^SUBTOTAL\((\d+),/.exec(normFormula(cell.formula));
+      if (!m) continue;
+      if (Number(m[1]) % 100 === fnCode) hits.push(ref);
+    }
+    const outlined = Array.from(sheet.rowMeta.values()).filter((r) => r.outlineLevel > 0).length;
+    const problems = [];
+    const min = check.minCount !== undefined ? Number(check.minCount) : 1;
+    if (hits.length < min) problems.push(`汇总公式至少 ${min} 个（实为 ${hits.length} 个）`);
+    if (check.requireOutline !== false && outlined === 0) problems.push('未发现分组大纲（分类汇总应产生行分组）');
+    return {
+      pass: problems.length === 0,
+      got: `${hits.length} 个 SUBTOTAL(${fnCode})${outlined ? `，${outlined} 行带大纲` : '，无行大纲'}`,
+      want: `${check.fn || '求和'}方式分类汇总`,
+      note: problems.join('；'),
+    };
+  },
+
+  /**
+   * 条件格式。实测结构：
+   *   <conditionalFormatting sqref="D2:D7"><cfRule type="cellIs" dxfId="0" operator="greaterThan"><formula>4000</formula>
+   *   填充色在 styles.xml 的 <dxfs><dxf><fill><patternFill><bgColor rgb="FFFF0000"/>
+   * check: { range:'D2:D13', type:'cellIs', operator:'greaterThan', value:4000, fillColor:'red' }
+   */
+  cond_format({ sheet, check }) {
+    const list = sheet.condFormats || [];
+    if (!list.length) return { pass: false, got: '未设置条件格式', want: '设置条件格式' };
+    const wantRange = check.range ? normRange(check.range) : null;
+    const wantCells = wantRange ? rangeCells(wantRange) : null;
+    const cands = [];
+    for (const cf of list) {
+      const cfCells = rangeCells(cf.sqref);
+      const covered = wantCells ? wantCells.every((c) => cfCells.includes(c)) : true;
+      if (!covered) continue;
+      for (const r of cf.rules) cands.push({ sqref: cf.sqref, rule: r });
+    }
+    if (!cands.length) {
+      return {
+        pass: false,
+        got: `已设条件格式，但未覆盖 ${wantRange}（现有 ${list.map((x) => x.sqref).join('、')}）`,
+        want: `${wantRange} 上设置条件格式`,
+      };
+    }
+    const tried = [];
+    for (const c of cands) {
+      const r = c.rule;
+      const ps = [];
+      if (check.type && r.type !== check.type) ps.push(`类型应为 ${check.type}（实为 ${r.type}）`);
+      if (check.operator && normCondOp(r.operator) !== normCondOp(check.operator)) {
+        ps.push(`条件应为 ${check.operator}（实为 ${r.operator || '无'}）`);
+      }
+      if (check.value !== undefined) {
+        const f0 = r.formulas[0];
+        if (normText(f0) !== normText(check.value)) ps.push(`阈值应为 ${check.value}（实为 ${f0 || '无'}）`);
+      }
+      if (check.fillColor) {
+        const dxf = r.dxfId !== null && r.dxfId !== undefined ? (sheet.styles.dxfs || [])[r.dxfId] : null;
+        const gotColor = dxf ? dxf.fillColor : null;
+        if (!colorMatches(gotColor, check.fillColor)) {
+          ps.push(`填充色应为 ${check.fillColor}（实为 ${gotColor || '无'}）`);
+        }
+      }
+      if (!ps.length) {
+        return {
+          pass: true,
+          got: `${c.sqref} ${r.type}${r.operator ? ' ' + r.operator : ''}${r.formulas[0] ? ' ' + r.formulas[0] : ''}`,
+          want: [check.type, check.operator, check.value].filter((x) => x !== undefined && x !== '').join(' '),
+        };
+      }
+      tried.push(ps.join('、'));
+    }
+    const best = cands[cands.length - 1].rule;
+    return {
+      pass: false,
+      got: `${cands[0].sqref} ${best.type}${best.operator ? ' ' + best.operator : ''}${best.formulas[0] ? ' ' + best.formulas[0] : ''}`,
+      want: [check.type, check.operator, check.value, check.fillColor].filter((x) => x !== undefined && x !== '').join(' '),
+      note: tried[tried.length - 1],
+    };
+  },
 };
+
+// ============================================================
+// 六·B、新增检查器的辅助（排序 / 筛选 / 分类汇总 / 条件格式）
+// ============================================================
+
+// SUBTOTAL 函数代码（109 = 9 + 100，表示"忽略手动隐藏行"，两者等价）
+const SUBTOTAL_FN = {
+  average: 1, count: 2, counta: 3, max: 4, min: 5, product: 6,
+  stdev: 7, stdevp: 8, sum: 9, var: 10, varp: 11,
+};
+
+const FILTER_OP_ALIAS = {
+  greaterthan: 'greaterThan', '>': 'greaterThan',
+  greaterthanorequal: 'greaterThanOrEqual', '>=': 'greaterThanOrEqual',
+  lessthan: 'lessThan', '<': 'lessThan',
+  lessthanorequal: 'lessThanOrEqual', '<=': 'lessThanOrEqual',
+  equal: 'equal', '=': 'equal', '==': 'equal',
+  notequal: 'notEqual', '<>': 'notEqual',
+  contains: 'contains', notcontains: 'notContains',
+  beginswith: 'beginsWith', endswith: 'endsWith',
+};
+
+function normFilterOp(op) {
+  const k = String(op === undefined || op === null ? '' : op).toLowerCase().replace(/[\s_]/g, '');
+  return FILTER_OP_ALIAS[k] || String(op || '');
+}
+
+const COND_OP_ALIAS = {
+  greaterthan: 'greaterThan', '>': 'greaterThan',
+  greaterthanorequal: 'greaterThanOrEqual', '>=': 'greaterThanOrEqual',
+  lessthan: 'lessThan', '<': 'lessThan',
+  lessthanorequal: 'lessThanOrEqual', '<=': 'lessThanOrEqual',
+  equal: 'equal', '=': 'equal',
+  notequal: 'notEqual', '<>': 'notEqual',
+  between: 'between', notbetween: 'notBetween',
+  containstext: 'containsText', notcontainstext: 'notContainsText',
+  beginswith: 'beginsWith', endswith: 'endsWith',
+  duplicatevalues: 'duplicateValues', uniquevalues: 'uniqueValues',
+  aboveaverage: 'aboveAverage', belowaverage: 'belowAverage',
+};
+
+function normCondOp(op) {
+  const k = String(op === undefined || op === null ? '' : op).toLowerCase().replace(/[\s_]/g, '');
+  return COND_OP_ALIAS[k] || String(op || '');
+}
+
+// 常用颜色 → ARGB（OOXML 里 rgb="FFFF0000" 是 ARGB，AI 通道在前）
+const COLOR_ALIAS = {
+  red: 'FFFF0000', '红': 'FFFF0000', '红色': 'FFFF0000',
+  orange: 'FFFFC000', '橙': 'FFFFC000', '橙色': 'FFFFC000',
+  yellow: 'FFFFFF00', '黄': 'FFFFFF00', '黄色': 'FFFFFF00',
+  green: 'FF00FF00', '绿': 'FF00FF00', '绿色': 'FF00FF00',
+  blue: 'FF0000FF', '蓝': 'FF0000FF', '蓝色': 'FF0000FF',
+  purple: 'FF800080', '紫': 'FF800080', '紫色': 'FF800080',
+  black: 'FF000000', '黑': 'FF000000', '黑色': 'FF000000',
+  white: 'FFFFFFFF', '白': 'FFFFFFFF', '白色': 'FFFFFFFF',
+  gray: 'FF808080', grey: 'FF808080', '灰': 'FF808080', '灰色': 'FF808080',
+  lightred: 'FFFFC7CE', '浅红': 'FFFFC7CE', '浅红色': 'FFFFC7CE',
+  lightyellow: 'FFFFEB9C', '浅黄': 'FFFFEB9C', '浅黄色': 'FFFFEB9C',
+  lightgreen: 'FFC6EFCE', '浅绿': 'FFC6EFCE', '浅绿色': 'FFC6EFCE',
+};
+
+function normColor(c) {
+  if (c === undefined || c === null || c === '') return '';
+  const raw = String(c).trim();
+  const alias = COLOR_ALIAS[raw.toLowerCase()] || COLOR_ALIAS[raw];
+  let s = String(alias || raw).toUpperCase().replace(/^#/, '');
+  if (/^[0-9A-F]{6}$/.test(s)) s = 'FF' + s;
+  return s;
+}
+
+function colorMatches(got, want) {
+  const a = normColor(got);
+  const b = normColor(want);
+  return !!a && !!b && a === b;
+}
+
+function describeCol(col) {
+  const parts = [];
+  if (col.custom && col.custom.length) parts.push(col.custom.map((c) => `${c.operator} ${c.val}`).join(' 且 '));
+  if (col.values && col.values.length) parts.push('∈{' + col.values.join(',') + '}');
+  if (col.top10) parts.push('前 ' + col.top10.val + ' 项');
+  if (col.dynamic) parts.push('动态筛选 ' + col.dynamic.type);
+  return parts.join(' ') || '(无条件)';
+}
+
+function describeFilter(af) {
+  const cols = (af.columns || []).map((c) => `第${(c.colId || 0) + 1}列 ${describeCol(c)}`);
+  return `${af.ref || ''}${cols.length ? ' — ' + cols.join('；') : '（仅开启筛选，未设条件）'}`;
+}
+
+function compareVals(a, b) {
+  const na = typeof a === 'number' ? a : num(a);
+  const nb = typeof b === 'number' ? b : num(b);
+  if (na !== null && nb !== null) return na === nb ? 0 : (na < nb ? -1 : 1);
+  const sa = String(a === null || a === undefined ? '' : a);
+  const sb = String(b === null || b === undefined ? '' : b);
+  return sa.localeCompare(sb, 'zh-CN');
+}
 
 function runCheck(check, model, sheet) {
   const fn = CHECKERS[check.kind];
@@ -1000,7 +1405,7 @@ async function inspectFile(input) {
 function suggestSpecFromModel(model, opts = {}) {
   const sheetName = opts.sheet || (model.sheets[0] ? model.sheets[0].name : 'Sheet1');
   const sheet = model.sheets.find((s) => s.name === sheetName) || model.sheets[0];
-  if (!sheet) return { version: 1, full_score: 10, grader: { sheet: sheetName }, steps: [] };
+  if (!sheet) return { version: 1, full_score: Number(opts.full_score) || 100, grader: { sheet: sheetName }, steps: [] };
 
   const steps = [];
   const mergesMulti = sheet.merges.filter((m) => rangeCells(m).length > 1);
@@ -1063,9 +1468,9 @@ function suggestSpecFromModel(model, opts = {}) {
       title: '插入图表',
       desc: '',
       video_url: '',
-      score: 3,
+      score: 15,
       checks: [{
-        kind: 'chart', index: 0, score: 3, label: '图表',
+        kind: 'chart', index: 0, score: 15, label: '图表',
         chartType: chart.chartType || undefined,
         barDir: chart.chartType === 'bar' ? (chart.barDir || undefined) : undefined,
         title: chart.title || undefined,
@@ -1075,9 +1480,154 @@ function suggestSpecFromModel(model, opts = {}) {
     });
   }
 
+  // 步骤四：排序（优先信 sortState；没有就启发式找"严格有序的数值列"）
+  const sortChecks = [];
+  if (sheet.sortState && sheet.sortState.conditions.length) {
+    const refRange = sheet.sortState.ref ? normRange(sheet.sortState.ref) : null;
+    for (const c0 of sheet.sortState.conditions) {
+      const col = parseRef(c0.ref).col;
+      let colRange = null;
+      if (refRange) {
+        const cs = rangeCells(refRange).filter((r) => parseRef(r).col === col);
+        if (cs.length > 1) colRange = `${cs[0]}:${cs[cs.length - 1]}`;
+      }
+      if (!colRange) continue;
+      sortChecks.push({
+        kind: 'sorted_range', score: 10, colRange,
+        label: `按第 ${col} 列${c0.descending ? '降' : '升'}序排序`,
+        range: colRange, col, order: c0.descending ? 'desc' : 'asc',
+      });
+    }
+  } else {
+    // 启发式：找 ≥4 行、严格有序的数值列（跳过第 1 列，避免误判序号/文本列）
+    const used = new Set();
+    for (const c of sheet.cells.values()) {
+      if (c.type !== 'n' || c.formula) continue;
+      const p = parseRef(c.ref);
+      if (p.col === 1 || used.has(p.col)) continue;
+      const colCells = Array.from(sheet.cells.values())
+        .filter((x) => parseRef(x.ref).col === p.col && x.type === 'n')
+        .sort((a, b) => parseRef(a.ref).r - parseRef(b.ref).r);
+      if (colCells.length < 4) continue;
+      const vs = colCells.map((x) => Number(x.value));
+      const asc = vs.every((v, i) => i === 0 || v > vs[i - 1]);
+      const desc = vs.every((v, i) => i === 0 || v < vs[i - 1]);
+      if (!asc && !desc) continue;
+      used.add(p.col);
+      const colRange = `${colCells[0].ref}:${colCells[colCells.length - 1].ref}`;
+      sortChecks.push({
+        kind: 'sorted_range', score: 10,
+        label: `第 ${p.col} 列${desc ? '降' : '升'}序（疑似排序，请确认）`,
+        range: colRange, col: p.col, order: desc ? 'desc' : 'asc',
+      });
+    }
+  }
+  if (sortChecks.length) {
+    steps.push({
+      id: 's' + (steps.length + 1),
+      title: '数据排序',
+      desc: '',
+      video_url: '',
+      score: sortChecks.reduce((a, c) => a + c.score, 0),
+      checks: sortChecks.map((c) => ({ ...c, colRange: undefined })),
+    });
+  }
+
+  // 步骤五：自动筛选
+  if (sheet.autoFilter) {
+    const af = sheet.autoFilter;
+    const cols = (af.columns || []).map((c) => {
+      const o = { col: (c.colId || 0) + 1 };
+      if (c.custom && c.custom.length) { o.op = c.custom[0].operator; o.value = c.custom[0].val; }
+      if (c.values && c.values.length) o.values = c.values;
+      return o;
+    });
+    const hasCond = cols.length > 0;
+    steps.push({
+      id: 's' + (steps.length + 1),
+      title: '自动筛选',
+      desc: '',
+      video_url: '',
+      score: hasCond ? 10 : 5,
+      checks: [{
+        kind: 'auto_filter',
+        score: hasCond ? 10 : 5,
+        label: hasCond ? '按条件筛选' : '开启自动筛选',
+        range: af.ref || undefined,
+        columns: hasCond ? cols : undefined,
+      }],
+    });
+  }
+
+  // 步骤六：分类汇总
+  const subCells = [];
+  for (const c of sheet.cells.values()) {
+    if (c.formula && /^SUBTOTAL\((\d+),/i.test(normFormula(c.formula))) subCells.push(c);
+  }
+  if (subCells.length) {
+    const code = Number(/^SUBTOTAL\((\d+),/i.exec(normFormula(subCells[0].formula))[1]) % 100;
+    const fnName = Object.keys(SUBTOTAL_FN).find((k) => SUBTOTAL_FN[k] === code) || 'sum';
+    steps.push({
+      id: 's' + (steps.length + 1),
+      title: '分类汇总',
+      desc: '',
+      video_url: '',
+      score: 10,
+      checks: [{
+        kind: 'subtotal', score: 10,
+        label: `${fnName === 'sum' ? '求和' : fnName}分类汇总`,
+        fn: fnName,
+        minCount: Math.max(1, subCells.length - 1),
+        requireOutline: true,
+      }],
+    });
+  }
+
+  // 步骤七：条件格式（每条规则一个评分点）
+  for (const cf of (sheet.condFormats || [])) {
+    for (const r of cf.rules) {
+      const dxf = (r.dxfId !== null && r.dxfId !== undefined) ? (model.styles.dxfs || [])[r.dxfId] : null;
+      const chk = {
+        kind: 'cond_format', score: 10,
+        label: `条件格式 ${cf.sqref}${r.operator ? ' ' + r.operator : ''}`,
+        range: cf.sqref,
+      };
+      if (r.type) chk.type = r.type;
+      if (r.operator) chk.operator = r.operator;
+      if (r.formulas && r.formulas[0] !== undefined) chk.value = r.formulas[0];
+      if (dxf && dxf.fillColor) chk.fillColor = dxf.fillColor;
+      steps.push({
+        id: 's' + (steps.length + 1),
+        title: '条件格式',
+        desc: '',
+        video_url: '',
+        score: 10,
+        checks: [chk],
+      });
+    }
+  }
+
+  // 按 100 分制输出：先给每类一个基础分，再整体等比缩放到目标满分
+  const FULL = Number(opts.full_score) || 100;
+  const sum = steps.reduce((a, s) => a + s.checks.reduce((x, c) => x + (Number(c.score) || 0), 0), 0);
+  if (sum > 0 && Math.abs(sum - FULL) > 0.01) {
+    const k = FULL / sum;
+    const all = steps.flatMap((s) => s.checks);
+    let acc = 0;
+    all.forEach((c, i) => {
+      if (i === all.length - 1) {
+        c.score = round2(FULL - acc);
+      } else {
+        c.score = round2((Number(c.score) || 0) * k);
+        acc += c.score;
+      }
+    });
+    for (const s of steps) s.score = round2(s.checks.reduce((a, c) => a + c.score, 0));
+  }
+
   return {
     version: 1,
-    full_score: 10,
+    full_score: FULL,
     grader: { sheet: sheetName },
     template: opts.template || undefined,
     steps,
@@ -1119,12 +1669,23 @@ function validateSpec(spec, expectFull) {
   return { ok: errors.length === 0, errors, warnings, total: round2(sum), full_score: full };
 }
 
+/**
+ * 读取 xlsx → { files, model }。
+ * 脚本/接口想直接拿模型做分析（而不是走完整判分）时用。
+ */
+async function loadModel(input) {
+  const buffer = Buffer.isBuffer(input) ? input : fs.readFileSync(input);
+  const files = await readZip(buffer);
+  return { files, model: buildModel(files) };
+}
+
 module.exports = {
   gradeFile,
   inspectFile,
   suggestSpec,
   suggestSpecFromModel,
   validateSpec,
+  loadModel,
   parseXml,
   buildModel,
   parseStyles,

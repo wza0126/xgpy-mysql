@@ -1,10 +1,12 @@
 /**
- * WPS 操作题一期 · 真浏览器 UI 验证（CDP）
+ * WPS 操作题 · 真浏览器 UI 验证（CDP）
  * 前置：后端 3101 + 前端 dev 3266（vite proxy）+ 样例题已 seed。
  * 用法：node backend/scripts/debug/verify_wps_op_ui.cjs
  *
- * 覆盖：学生端「操作题」桌面入口 → 列表 → 题目详情（步骤/模板/上传区）→ 模板可下载；
- *       教师端「WPS操作题」菜单 → 列表 → 新建编辑器（题干/模板/评分点面板）。
+ * 覆盖：学生端「操作题」桌面入口 → WPS/Access 分段 → 列表（满分 100 + 多模板）
+ *       → 题目详情（步骤/多模板下载/上传区）→ 真上传判分 → 逐评分点明细；
+ *       教师端「WPS/ACCESS」菜单 → 题库管理 / 练习情况 / Access 占位
+ *       → 新建编辑器（题干/多模板上传/评分点面板/每步视频上传）。
  */
 
 'use strict';
@@ -93,6 +95,17 @@ async function openDesktopApp(b, title) {
   })()`);
 }
 
+/** 点一个文本精确匹配的按钮/元素 */
+async function clickByText(b, text) {
+  return b.evalJs(`(() => {
+    const els = Array.from(document.querySelectorAll('button, a, div, span'));
+    const target = els.find(e => e.textContent.trim() === ${JSON.stringify(text)} && e.children.length <= 1);
+    if (!target) return 'not-found';
+    target.click();
+    return 'clicked';
+  })()`);
+}
+
 (async () => {
   // ⛔ 不留痕：UI 上传会真写 wps_op_submissions / student_answers，跑完必须清掉
   const mysql = require('../../node_modules/mysql2/promise');
@@ -121,14 +134,26 @@ async function openDesktopApp(b, title) {
     ok('双击图标已派发', opened === 'clicked', String(opened));
     await sleep(1600);
     const openedText = await b.evalJs(`document.body.innerText`);
-    ok('★ 操作题窗口已打开', /学测 WPS 操作题/.test(openedText), openedText.slice(0, 120).replace(/\n/g, ' '));
+    ok('★ 操作题窗口已打开', /WPS 操作题/.test(openedText), openedText.slice(0, 120).replace(/\n/g, ' '));
     ok('窗口标题为「操作题」', /操作题/.test(openedText));
+
+    section('B2. ★ 学生端 WPS / Access 分段');
+    ok('★ 有「WPS 操作题」分段', /WPS 操作题/.test(openedText));
+    ok('★ 有「Access 操作题」分段（占位）', /Access 操作题/.test(openedText));
+    const accClick = await clickByText(b, 'Access 操作题');
+    ok('可切到 Access 分段', accClick === 'clicked', String(accClick));
+    await sleep(700);
+    const accText = await b.evalJs(`document.body.innerText`);
+    ok('★ Access 段显示占位说明（不空白）', /Access 操作题/.test(accText) && /准备中|开放/.test(accText), accText.slice(0, 160).replace(/\n/g, ' '));
+    await clickByText(b, 'WPS 操作题');
+    await sleep(700);
 
     section('C. 题目列表');
     const cards = await b.evalJs(`document.querySelectorAll('button.group').length`);
     ok('★ 列表渲染出题目卡片', cards >= 1, 'count=' + cards);
-    const hasScoreBadge = await b.evalJs(`/10 分 · 4 步/.test(document.body.innerText)`);
-    ok('★ 卡片显示「10 分 · 4 步」', hasScoreBadge === true);
+    const listText = await b.evalJs(`document.body.innerText`);
+    ok('★ 卡片显示「100 分 · 4 步」（满分已改 100）', /100 分 · 4 步/.test(listText), listText.slice(0, 200).replace(/\n/g, ' '));
+    ok('★ 卡片标注模板数量（多模板）', /2 个模板/.test(listText));
 
     section('D. 进入题目详情');
     await b.evalJs(`(() => {
@@ -140,24 +165,25 @@ async function openDesktopApp(b, title) {
     await sleep(1800);
     const detailText = await b.evalJs(`document.body.innerText`);
     ok('★ 显示操作步骤区', /操作步骤与分值/.test(detailText));
-    ok('★ 4 个步骤都列出', (detailText.match(/第 ?\d+ ?步/g) || []).length >= 0 && /合并单元格并设置标题格式/.test(detailText));
-    ok('★ 显示「下载模板」按钮', /下载模板/.test(detailText));
+    ok('★ 4 个步骤都列出', /合并单元格并设置标题格式/.test(detailText));
+    ok('★ 显示「下载模板文件」步骤', /第 1 步：下载模板文件/.test(detailText));
     ok('★ 显示上传区提示', /点击选择要上传的 \.xlsx 作答文件/.test(detailText));
     ok('★ 显示「提交判分」按钮', /提交判分/.test(detailText));
     ok('⛔ 页面不显示评分点答案（期望值）', !/15089/.test(detailText) && !/17736/.test(detailText));
 
-    section('E. 模板文件可下载');
-    const tplHref = await b.evalJs(`(() => {
-      const a = Array.from(document.querySelectorAll('a')).find(x => (x.textContent||'').includes('下载模板'));
-      const btn = Array.from(document.querySelectorAll('button')).find(x => (x.textContent||'').includes('下载模板'));
-      return btn ? 'button-ok' : (a ? 'a-ok' : 'none');
+    section('E. 多模板文件可分别下载');
+    const tplButtons = await b.evalJs(`(() => {
+      const btns = Array.from(document.querySelectorAll('button')).filter(x => (x.textContent||'').includes('下载 '));
+      return btns.map(x => x.textContent.trim());
     })()`);
-    ok('模板下载按钮存在且可用', tplHref === 'button-ok', String(tplHref));
+    ok('★ 有两个模板下载按钮（xlsx + txt）', Array.isArray(tplButtons) && tplButtons.length === 2, JSON.stringify(tplButtons));
+    ok('★ 含 xlsx 模板下载按钮', /人口密度数据分析表\.xlsx/.test(String(tplButtons)), JSON.stringify(tplButtons));
+    ok('★ 含 txt 数据源下载按钮（有些题要从 txt 导入数据）', /人口数据源\.txt/.test(String(tplButtons)), JSON.stringify(tplButtons));
 
-    // 直接请求模板地址，确认后端真给了文件
-    const tplPath = '/uploads/wps-op/templates/tpl_wps_popshen_template.xlsx';
-    const tplResp = await b.evalJs(`fetch(${JSON.stringify(tplPath)}, { method: 'HEAD' }).then(r => r.status + ':' + r.headers.get('content-length'))`);
-    ok('★ 模板文件 HTTP 可达', /^200:/.test(String(tplResp)), String(tplResp));
+    const tplResp = await b.evalJs(`fetch('/uploads/wps-op/templates/tpl_wps_popshen_template.xlsx', { method: 'HEAD' }).then(r => r.status + ':' + r.headers.get('content-length'))`);
+    ok('★ xlsx 模板文件 HTTP 可达', /^200:/.test(String(tplResp)), String(tplResp));
+    const txtResp = await b.evalJs(`fetch('/uploads/wps-op/templates/tpl_wps_popshen_data.txt', { method: 'HEAD' }).then(r => r.status + ':' + r.headers.get('content-length'))`);
+    ok('★ txt 数据源 HTTP 可达', /^200:/.test(String(txtResp)), String(txtResp));
 
     section('E2. ★ 真浏览器上传作答 → 判分回执');
     // 用 CDP 把文件塞进隐藏的 file input（等价于用户点选文件）
@@ -184,7 +210,7 @@ async function openDesktopApp(b, title) {
     }
     ok('★ 上传后得到判分回执', graded === true);
     const rText = await b.evalJs(`document.body.innerText`);
-    ok('★ 回执显示满分 10 / 10', /10\s*\/\s*10/.test(rText.replace(/\n/g, ' ')), rText.match(/\d+\s*\/\s*\d+/g)?.slice(0, 3).join(' , '));
+    ok('★ 回执显示满分 100 / 100', /100\s*\/\s*100/.test(rText.replace(/\n/g, ' ')), rText.match(/\d+\s*\/\s*\d+/g)?.slice(0, 3).join(' , '));
     ok('★ 回执显示满分通过提示', /满分通过/.test(rText));
 
     // 展开第 1 步看逐评分点明细
@@ -217,26 +243,60 @@ async function openDesktopApp(b, title) {
     ok('无资源加载失败', badRes.length === 0, badRes.slice(0, 3).join(' | ') || '无');
 
     // ================= 教师端 =================
-    section('G. 教师登录并进入 WPS 操作题管理');
+    section('G. 教师登录并进入 WPS/ACCESS 管理');
     const tLogin = await loginAs(b, 'teacher', 'xgpy666');
     ok('教师登录表单已提交', tLogin === 'submitted', String(tLogin));
     const tText0 = await b.evalJs(`document.body.innerText`);
     ok('进入教师端', /题库管理/.test(tText0));
 
-    const menuClicked = await b.evalJs(`(() => {
-      const els = Array.from(document.querySelectorAll('button, a, div, span'));
-      const target = els.find(e => e.textContent.trim() === 'WPS操作题' && e.children.length <= 1);
-      if (!target) return 'menu-not-found';
-      target.click();
-      return 'clicked';
-    })()`);
-    ok('找到并点击「WPS操作题」菜单', menuClicked === 'clicked', String(menuClicked));
+    const menuClicked = await clickByText(b, 'WPS/ACCESS');
+    ok('★ 左侧菜单名已改为「WPS/ACCESS」并点击成功', menuClicked === 'clicked', String(menuClicked));
     await sleep(1400);
 
     const tText = await b.evalJs(`document.body.innerText`);
-    ok('★ 进入操作题管理页', /WPS 操作题/.test(tText) && /新建操作题/.test(tText));
-    ok('★ 列表显示样例题（10 分 · 4 步）', /10 分 · 4 步/.test(tText));
+    ok('★ 进入操作题管理页', /WPS \/ ACCESS 操作题/.test(tText) && /新建操作题/.test(tText));
+    ok('★ 有 WPS / Access 一级分段', /WPS 操作题/.test(tText) && /Access 操作题/.test(tText));
+    ok('★ 有「题库管理」「练习情况」二级页签', /题库管理/.test(tText) && /练习情况/.test(tText));
+    ok('★ 列表显示样例题（100 分 · 4 步）', /100 分 · 4 步/.test(tText), '');
+    ok('★ 列表显示模板数/视频数标注', /模板 2/.test(tText) && /视频 \d+\/4/.test(tText));
     ok('★ 显示所属分类', /数据获取与表达/.test(tText), '');
+
+    section('G2. ★ 教师端 Access 占位分段');
+    const tAccClick = await clickByText(b, 'Access 操作题');
+    ok('可切到 Access 分段', tAccClick === 'clicked', String(tAccClick));
+    await sleep(700);
+    const tAccText = await b.evalJs(`document.body.innerText`);
+    ok('★ 教师端 Access 段显示占位说明', /Access 操作题（占位）/.test(tAccText), tAccText.slice(0, 200).replace(/\n/g, ' '));
+    await clickByText(b, 'WPS 操作题');
+    await sleep(900);
+
+    section('G3. ★ 练习情况页签（最高分矩阵 + 总分）');
+    const anaClick = await clickByText(b, '练习情况');
+    ok('可切到「练习情况」', anaClick === 'clicked', String(anaClick));
+    let anaText = '';
+    for (let i = 0; i < 20; i++) {
+      await sleep(600);
+      anaText = await b.evalJs(`document.body.innerText`);
+      if (/全卷满分/.test(anaText) || /练习情况/.test(anaText)) break;
+    }
+    ok('★ 练习情况页渲染', /全卷满分/.test(anaText), anaText.slice(0, 200).replace(/\n/g, ' '));
+    ok('★ 说明口径「每题取该生最高分」', /每题取该生最高分/.test(anaText));
+    ok('★ 表头含 账号 姓名 / 总分 / 已做', /账号 姓名/.test(anaText) && /总分/.test(anaText) && /已做/.test(anaText));
+    ok('★ 表尾含「每题平均」统计行', /每题平均/.test(anaText));
+    const anaRows = await b.evalJs(`document.querySelectorAll('table tbody tr').length`);
+    ok('★ 学生名单有数据行', anaRows >= 1, 'rows=' + anaRows);
+    ok('★ 有班级筛选下拉', /全部班级/.test(anaText));
+    // 回到题库管理（⚠️ 左侧边栏也有「题库管理」，必须排除深色侧边栏那一项，
+    //                否则会点到侧边栏 → 直接跳去 QuestionBank 页，编辑器根本不会出现）
+    const backBank = await b.evalJs(`(() => {
+      const els = Array.from(document.querySelectorAll('button'));
+      const target = els.find(e => e.textContent.trim() === '题库管理' && !e.closest('[class*="bg-gray-900"]'));
+      if (!target) return 'not-found';
+      target.click();
+      return 'clicked';
+    })()`);
+    ok('可切回「题库管理」', backBank === 'clicked', String(backBank));
+    await sleep(900);
 
     section('H. 新建编辑器');
     await b.evalJs(`(() => {
@@ -246,19 +306,56 @@ async function openDesktopApp(b, title) {
     await sleep(900);
     const eText = await b.evalJs(`document.body.innerText`);
     ok('★ 编辑器渲染：基本信息', /基本信息/.test(eText) && /题干/.test(eText));
-    ok('★ 编辑器渲染：模板与评分点', /模板与评分点/.test(eText));
+    ok('★ 编辑器渲染：模板文件与评分点', /模板文件与评分点/.test(eText));
+    ok('★ 提供「上传模板文件（可多选）」', /上传模板文件（可多选）/.test(eText));
+    ok('★ 提示支持 txt 数据源', /数据源/.test(eText) && /txt/.test(eText));
     ok('★ 提供「上传标准答案表 → 自动生成评分点」', /自动生成评分点/.test(eText));
     ok('★ 编辑器渲染：评分点面板', /操作步骤与评分点/.test(eText) && /合并单元格/.test(eText));
     ok('★ 提供 JSON 直编入口', /直接编辑 JSON|收起 JSON/.test(eText));
     ok('★ 提供分值辅助按钮', /按评分点重算步骤分/.test(eText) && /等比缩放到满分/.test(eText));
-    // ⚠️ placeholder 不会出现在 innerText 里，必须查属性
-    const videoInputs = await b.evalJs(`document.querySelectorAll('input[placeholder*="演示视频"]').length`);
-    ok('★ 每个步骤预留演示视频输入', videoInputs >= 1, 'count=' + videoInputs);
+
+    // 满分默认 100
+    const fullScoreVal = await b.evalJs(`(() => {
+      const lab = Array.from(document.querySelectorAll('label')).find(l => (l.textContent||'').includes('满分（默认 100）'));
+      if (!lab) return 'no-label';
+      const box = lab.parentElement.querySelector('input[type=number]');
+      return box ? String(box.value) : 'no-input';
+    })()`);
+    ok('★ 新建时默认满分 100', fullScoreVal === '100', String(fullScoreVal));
+
+    // 每步视频：输入框 + 本地上传/外链抓取两个按钮
+    const videoInputs = await b.evalJs(`document.querySelectorAll('input[placeholder*="视频地址"]').length`);
+    ok('★ 每个步骤有演示视频输入框', videoInputs >= 1, 'count=' + videoInputs);
+    const videoUpBtns = await b.evalJs(`Array.from(document.querySelectorAll('button')).filter(x => (x.textContent||'').includes('上传本地视频')).length`);
+    ok('★ 提供「上传本地视频」按钮（机房断网兜底）', videoUpBtns >= 1, 'count=' + videoUpBtns);
+    const videoFetchBtns = await b.evalJs(`Array.from(document.querySelectorAll('button')).filter(x => (x.textContent||'').includes('抓取外链到本地')).length`);
+    ok('★ 提供「抓取外链到本地」按钮', videoFetchBtns >= 1, 'count=' + videoFetchBtns);
+    const videoInputAccept = await b.evalJs(`(() => { const i = Array.from(document.querySelectorAll('input[type=file]')).find(x => (x.accept||'').startsWith('video')); return i ? i.accept : 'none'; })()`);
+    ok('★ 视频文件选择框只收视频', String(videoInputAccept).startsWith('video'), String(videoInputAccept));
+    const tplInputAccept = await b.evalJs(`(() => { const i = Array.from(document.querySelectorAll('input[type=file]')).find(x => (x.accept||'').includes('.txt')); return i ? (i.accept + '|multiple=' + i.multiple) : 'none'; })()`);
+    ok('★ 模板文件选择框支持 txt 且可多选', /\.txt/.test(String(tplInputAccept)) && /multiple=true/.test(String(tplInputAccept)), String(tplInputAccept));
+
     const descInputs = await b.evalJs(`document.querySelectorAll('input[placeholder*="步骤说明"]').length`);
     ok('每个步骤有说明输入框', descInputs >= 1, 'count=' + descInputs);
 
     const stepInputs = await b.evalJs(`document.querySelectorAll('input[placeholder*="步骤标题"]').length`);
     ok('新建时默认有 1 个步骤可编辑', stepInputs === 1, 'count=' + stepInputs);
+
+    // 评分点类型下拉里必须能选到新增四类
+    // ⚠️ 编辑器里第一个 <select> 是「所属分类」（章节），评分点那个要按选项内容找
+    const kindOptions = await b.evalJs(`(() => {
+      const sels = Array.from(document.querySelectorAll('select'));
+      const sel = sels.find(s => Array.from(s.options).some(o => o.textContent.trim() === '合并单元格'));
+      if (!sel) return { found: false, all: sels.map(s => Array.from(s.options).map(o => o.textContent.trim()).join('/')) };
+      return { found: true, options: Array.from(sel.options).map(o => o.textContent.trim()) };
+    })()`);
+    const kindText = JSON.stringify(kindOptions.options || kindOptions.all || []);
+    ok('★ 找到评分点类型下拉', kindOptions.found === true, JSON.stringify(kindOptions).slice(0, 200));
+    ok('★ 评分点类型含「排序」', /排序/.test(kindText), kindText.slice(0, 160));
+    ok('★ 评分点类型含「自动筛选」', /自动筛选/.test(kindText));
+    ok('★ 评分点类型含「分类汇总」', /分类汇总/.test(kindText));
+    ok('★ 评分点类型含「条件格式」', /条件格式/.test(kindText));
+    ok('★ 评分点类型共 20 种', (kindOptions.options || []).length === 20, 'n=' + (kindOptions.options || []).length);
 
     section('I. 教师端无 JS 异常');
     ok('无 JS 运行时错误', b.jsErrors.length === 0, b.jsErrors.slice(0, 3).join(' | ') || '无');
