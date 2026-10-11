@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>成就系统 · 交互原型（任务二期）</title>
+<style>
+:root{
+  --bg:#eceff5; --card:#ffffff; --line:#e6e9ef; --line2:#d7dbe3;
+  --text:#1f2937; --muted:#64748b; --faint:#9aa4b2;
+  --brand:#4f46e5; --brandbg:#eef2ff; --branddk:#3730a3;
+  --amber:#f59e0b; --amberbg:#fdf2dc; --ambertx:#b45309;
+  --green:#22c55e; --greentx:#15803d; --greenbg:#eafaf0;
+  --blue:#2563eb; --bluebg:#e8f0fe;
+  --purple:#9333ea; --purplebg:#f6ecfe;
+  --gold1:#f7d572; --gold2:#e9a61c; --gold3:#b5761a;
+  --red:#ef4444;
+  --r:14px;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{
+  background:var(--bg); color:var(--text); font-size:14px; line-height:1.6;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+button{font-family:inherit;cursor:pointer;}
+h1,h2,h3,p{margin:0;}
+
+.pbar{
+  display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;
+  padding:14px 24px;background:#fff;border-bottom:1px solid var(--line);
+  position:sticky;top:0;z-index:50;
+}
+.brand{display:flex;align-items:center;gap:10px;font-size:14px;}
+.brand .mk{width:22px;height:22px;border-radius:7px;background:linear-gradient(135deg,#f7d572,#e9a61c);}
+.brand b{font-weight:600;}
+.brand span{color:var(--faint);font-size:12px;}
+.nav{display:flex;gap:6px;background:#f2f4f8;padding:4px;border-radius:11px;}
+.nav button{
+  border:0;background:transparent;color:var(--muted);font-size:13px;
+  padding:7px 15px;border-radius:8px;transition:.15s;
+}
+.nav button.on{background:#fff;color:var(--brand);font-weight:600;box-shadow:0 1px 3px rgba(15,23,42,.08);}
+
+.wrap{max-width:1160px;margin:0 auto;padding:24px;}
+.view{display:none;}
+.view.on{display:block;animation:fade .25s ease;}
+@keyframes fade{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:none;}}
+
+.hint{
+  display:flex;align-items:flex-start;gap:9px;font-size:12.5px;color:var(--muted);
+  background:var(--brandbg);border:1px solid #dfe3ff;border-radius:10px;
+  padding:10px 14px;margin-bottom:18px;line-height:1.7;
+}
+.hint i{width:6px;height:6px;border-radius:50%;background:var(--brand);margin-top:7px;flex-shrink:0;}
+
+/* ===== 虚拟桌面入口条 ===== */
+.dtbar{
+  display:flex;align-items:center;justify-content:space-between;gap:14px;
+  background:#111827;border-radius:14px;padding:12px 18px;margin-bottom:16px;flex-wrap:wrap;
+}
+.dtleft{display:flex;align-items:center;gap:11px;color:#e5e7eb;font-size:13px;}
+.dtleft .av{width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,#6366f1,#a855f7);display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;font-weight:600;}
+.dticons{display:flex;gap:10px;flex-wrap:wrap;}
+.dticon{
+  position:relative;display:flex;flex-direction:column;align-items:center;gap:5px;
+  padding:9px 12px;border-radius:11px;background:rgba(255,255,255,.06);cursor:default;
+}
+.dticon .bx{width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;color:#fff;}
+.dticon .nm{font-size:11px;color:#cbd5e1;}
+.dticon .bx span,.wicon span,.toolbar h3 span{display:flex;align-items:center;justify-content:center;}
+.dticon .bx svg{width:19px;height:19px;}
+.toolbar h3 svg{width:17px;height:17px;}
+.badge{
+  position:absolute;top:-5px;right:-3px;min-width:19px;height:19px;padding:0 5px;
+  border-radius:10px;background:var(--red);color:#fff;font-size:11px;font-weight:600;
+  display:flex;align-items:center;justify-content:center;border:2.5px solid #111827;
+}
+.badge.zero{background:#475569;}
+
+/* ===== 成就殿堂 ===== */
+.win{background:var(--card);border-radius:18px;border:1px solid var(--line);overflow:hidden;box-shadow:0 2px 18px rgba(15,23,42,.05);}
+.winhead{display:flex;align-items:center;gap:14px;padding:20px 24px;border-bottom:1px solid var(--line);}
+.wicon{width:46px;height:46px;border-radius:13px;background:linear-gradient(135deg,#f7d572,#e9a61c);display:flex;align-items:center;justify-content:center;color:#fff;flex-shrink:0;}
+.wicon svg{width:24px;height:24px;}
+.winhead h1{font-size:18px;font-weight:600;}
+.winhead p{font-size:12.5px;color:var(--faint);}
+.body{padding:20px 24px 26px;}
+
+.halltop{display:grid;grid-template-columns:150px 1fr;gap:16px;align-items:center;margin-bottom:20px;}
+.ringbox{display:flex;flex-direction:column;align-items:center;gap:6px;}
+.ringtxt{position:relative;}
+.ringtxt .num{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;}
+.ringtxt .num b{font-size:23px;font-weight:700;letter-spacing:-.5px;}
+.ringtxt .num span{font-size:11px;color:var(--faint);}
+.statrow{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;}
+.stat{background:#f6f8fb;border-radius:12px;padding:13px 16px;}
+.stat span{font-size:12.5px;color:var(--muted);display:block;}
+.stat b{font-size:22px;font-weight:600;letter-spacing:-.5px;}
+.stat b i{font-size:12.5px;font-weight:400;color:var(--faint);font-style:normal;}
+.stat b.hot{color:var(--red);}
+.stat b.gold{color:var(--ambertx);}
+
+.seriesbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;}
+.schip{
+  border:1px solid var(--line2);background:#fff;color:var(--muted);
+  font-size:12.5px;padding:6px 14px;border-radius:20px;display:flex;align-items:center;gap:6px;transition:.15s;
+}
+.schip:hover{border-color:#c7cbd6;}
+.schip.on{background:var(--brand);color:#fff;border-color:var(--brand);font-weight:600;}
+.schip em{font-style:normal;font-size:11px;opacity:.75;}
+
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(242px,1fr));gap:14px;}
+
+.ach{
+  position:relative;border:1px solid var(--line);border-radius:16px;background:#fff;
+  padding:18px 16px 16px;display:flex;flex-direction:column;align-items:center;text-align:center;
+  transition:.18s;cursor:pointer;
+}
+.ach:hover{transform:translateY(-2px);box-shadow:0 8px 22px rgba(15,23,42,.08);}
+.ach.locked{opacity:.72;}
+.ach.locked .medal{background:#eef1f6;color:#b3bac6;}
+.ach.locked .medal .ring{stroke:#d7dbe3;}
+.ach.ready{border:1.5px solid #f0b056;background:linear-gradient(180deg,#fffcf4,#fff);}
+.ach.got{border:1px solid #f0d79a;background:linear-gradient(180deg,#fffdf7,#fff);}
+
+.medal{
+  position:relative;width:74px;height:74px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;margin-bottom:11px;flex-shrink:0;
+}
+.medal svg{width:32px;height:32px;position:relative;z-index:1;}
+.medal .disc{position:absolute;inset:7px;border-radius:50%;display:flex;align-items:center;justify-content:center;}
+.ach.got .medal .disc{background:linear-gradient(135deg,var(--gold1),var(--gold2));color:#5b3d05;box-shadow:0 4px 12px rgba(233,166,28,.35);}
+.ach.ready .medal .disc{background:linear-gradient(135deg,#ffe3a3,#f5b53d);color:#7a4b05;box-shadow:0 0 0 4px rgba(245,181,61,.18);}
+.ach.locked .medal .disc{background:#f1f4f8;color:#b3bac6;}
+.medal .ring{position:absolute;inset:0;width:74px;height:74px;transform:rotate(-90deg);}
+.medal .ring .track{fill:none;stroke:#eef1f6;stroke-width:4;}
+.medal .ring .prog{fill:none;stroke:var(--brand);stroke-width:4;stroke-linecap:round;transition:stroke-dashoffset .6s ease;}
+.ach.got .medal .ring .prog{stroke:var(--gold2);}
+.ach.ready .medal .ring .prog{stroke:#f0b056;}
+.medal .crown{position:absolute;top:-9px;left:50%;transform:translateX(-50%);font-size:15px;}
+
+.aname{font-size:14px;font-weight:600;line-height:1.35;}
+.adesc{font-size:11.5px;color:var(--muted);margin-top:4px;min-height:32px;}
+.abar{width:100%;height:6px;border-radius:3px;background:#eef1f6;overflow:hidden;margin-top:9px;}
+.abar>div{height:100%;border-radius:3px;transition:width .5s ease;}
+.anum{font-size:11px;color:var(--muted);margin-top:5px;font-variant-numeric:tabular-nums;}
+.anum.ok{color:var(--greentx);font-weight:600;}
+.arw{font-size:11.5px;color:var(--ambertx);margin-top:7px;font-weight:500;}
+.astate{
+  margin-top:10px;width:100%;font-size:12px;padding:6px 0;border-radius:9px;border:0;
+  display:flex;align-items:center;justify-content:center;gap:5px;
+}
+.astate.claim{background:linear-gradient(135deg,#f7b733,#e59a12);color:#fff;font-weight:600;}
+.astate.claim:hover{filter:brightness(1.06);}
+.astate.done{background:var(--greenbg);color:var(--greentx);font-weight:600;}
+.astate.wait{background:#f4f6fa;color:var(--faint);border:1px solid var(--line);}
+.ripple{position:absolute;inset:-5px;border-radius:22px;border:2px solid #f0b056;animation:rip 1.9s ease-out infinite;pointer-events:none;}
+@keyframes rip{0%{opacity:.7;transform:scale(.99);}100%{opacity:0;transform:scale(1.06);}}
+
+.empty{padding:40px;text-align:center;color:var(--faint);}
+
+/* ===== 教师端 ===== */
+.toolbar{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:18px;flex-wrap:wrap;}
+.toolbar h3{font-size:17px;font-weight:700;display:flex;align-items:center;gap:8px;}
+.toolbar p{font-size:12.5px;color:var(--faint);margin-top:3px;}
+.gbtn{
+  border:0;background:var(--brand);color:#fff;font-size:13px;padding:9px 16px;border-radius:10px;
+  display:inline-flex;align-items:center;gap:7px;font-weight:500;
+}
+.gbtn:hover{background:var(--branddk);}
+.gbtn.ghost{background:#fff;color:var(--muted);border:1px solid var(--line2);}
+
+.tbl{width:100%;border-collapse:collapse;font-size:13px;}
+.tbl thead th{background:#f6f8fb;color:var(--muted);font-weight:600;text-align:left;padding:10px 12px;font-size:12.5px;}
+.tbl tbody td{padding:11px 12px;border-top:1px solid var(--line);vertical-align:top;}
+.tbl tbody tr:hover{background:#fafbff;}
+.tcell{display:flex;align-items:center;gap:10px;}
+.tmini{width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+.tmini svg{width:15px;height:15px;}
+.sname{font-weight:600;}
+.sdesc{font-size:11.5px;color:var(--faint);}
+.tag{font-size:11px;padding:1.5px 8px;border-radius:20px;display:inline-block;white-space:nowrap;}
+.tag.ser{background:var(--purplebg);color:var(--purple);}
+.sw{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);}
+.dot{width:7px;height:7px;border-radius:50%;}
+.dot.on{background:var(--green);}
+.dot.off{background:#cbd5e1;}
+.lnk{color:var(--blue);font-size:12.5px;margin-right:12px;}
+.lnk.del{color:var(--red);}
+
+.form{margin-top:20px;border:1px solid #ddd6fe;background:#faf8ff;border-radius:14px;padding:20px 22px;}
+.form h4{font-size:15px;font-weight:700;color:var(--branddk);margin-bottom:16px;}
+.fgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px 18px;margin-bottom:14px;}
+.fld label{display:block;font-size:12.5px;font-weight:600;color:#374151;margin-bottom:5px;}
+.fld input,.fld select{
+  width:100%;padding:8px 11px;border:1px solid var(--line2);border-radius:9px;font-size:13px;font-family:inherit;
+  background:#fff;color:var(--text);
+}
+.fld input:focus,.fld select:focus{outline:2px solid #c7d2fe;border-color:#a5b4fc;}
+.fhint{font-size:11.5px;color:var(--faint);margin-top:5px;}
+.seg{display:flex;gap:8px;flex-wrap:wrap;}
+.seg button{flex:1;border:1px solid var(--line2);background:#fff;color:var(--muted);font-size:12.5px;padding:8px 10px;border-radius:9px;}
+.seg button.on{border-color:#a5b4fc;background:#fff;color:var(--branddk);font-weight:600;}
+.rwrow{display:flex;align-items:center;gap:8px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin-bottom:8px;}
+.rwrow select,.rwrow input{padding:7px 9px;border:1px solid var(--line2);border-radius:8px;font-size:12.5px;font-family:inherit;}
+.rwrow .x{color:var(--red);background:transparent;border:0;font-size:14px;padding:0 4px;}
+.clsrow{display:flex;gap:8px;flex-wrap:wrap;}
+.clsbtn{border:1px solid var(--line2);background:#fff;color:var(--muted);font-size:12.5px;padding:7px 13px;border-radius:9px;}
+.clsbtn.on{background:var(--brand);color:#fff;border-color:var(--brand);font-weight:600;}
+
+/* ===== 弹窗 ===== */
+.modal{position:fixed;inset:0;background:rgba(15,23,42,.45);display:none;align-items:center;justify-content:center;z-index:100;padding:20px;}
+.modal.on{display:flex;}
+.mbox{background:#fff;border-radius:20px;width:420px;max-width:100%;overflow:hidden;box-shadow:0 24px 60px rgba(15,23,42,.3);animation:pop2 .22s ease;}
+@keyframes pop2{from{opacity:0;transform:scale(.94) translateY(12px);}to{opacity:1;transform:none;}}
+.mhead{padding:26px 26px 18px;text-align:center;background:linear-gradient(180deg,#fffdf7,#fff);border-bottom:1px solid var(--line);}
+.mhead.locked{background:linear-gradient(180deg,#f7f9fc,#fff);}
+.mbig{width:88px;height:88px;margin:0 auto 12px;position:relative;}
+.mbig .disc{position:absolute;inset:9px;border-radius:50%;display:flex;align-items:center;justify-content:center;}
+.mbig svg{width:38px;height:38px;position:relative;z-index:1;}
+.mbig .ring{position:absolute;inset:0;transform:rotate(-90deg);}
+.mbody{padding:18px 26px 24px;}
+.mcrow{display:flex;justify-content:space-between;font-size:13px;padding:8px 0;border-bottom:1px dashed var(--line);}
+.mcrow:last-of-type{border-bottom:0;}
+.mcrow span{color:var(--faint);}
+.mcrow b{font-weight:600;}
+.mbar{height:8px;border-radius:4px;background:#eef1f6;overflow:hidden;margin:8px 0 4px;}
+.mbar>div{height:100%;border-radius:4px;}
+.mbtn{width:100%;margin-top:18px;padding:11px;border-radius:12px;border:0;font-size:14px;font-weight:600;}
+.mbtn.claim{background:linear-gradient(135deg,#f7b733,#e59a12);color:#fff;}
+.mbtn.close{background:#f1f4f8;color:var(--muted);}
+</style>
+</head>
+<body>
+
+<div class="pbar">
+  <div class="brand"><span class="mk"></span><b>成就系统</b><span>· 任务二期交互原型</span></div>
+  <div class="nav">
+    <button class="on" data-view="student">学生端 · 成就殿堂</button>
+    <button data-view="teacher">教师端 · 成就管理</button>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="hint">
+    <i></i>
+    <div>
+      二期把「一次性成就任务」补成完整的 <b>成就体系</b>：① 新增 <b>累计口径指标</b>（累计做对题数 / 累计掌握 / 累计 PK 胜场 / 宠物等级 / 累计打卡…），
+      与一期「当日口径」指标并存；② 学生端独立出 <b>成就殿堂</b>（勋章墙 + 系列分组 + 三态：未达成 / 可领取 / 已获得）；
+      ③ 教师端在「刷题打怪系统 → 任务系统」里按同一套表单发布，指标下拉自动随「每日 / 一次性」切换口径。
+      <b>不动现有数据表结构</b>，只加指标与界面。
+    </div>
+  </div>
+
+  <!-- ================= 学生端 ================= -->
+  <section class="view on" id="v-student">
+    <div class="dtbar">
+      <div class="dtleft">
+        <span class="av">王</span>
+        <div><b>王小明</b> <span style="color:#94a3b8">· 高一(3)班</span></div>
+      </div>
+      <div class="dticons">
+        <div class="dticon"><div class="bx" style="background:linear-gradient(135deg,#6366f1,#8b5cf6)"><span data-icon="clip"></span></div><span class="nm">任务中心</span><span class="badge" id="dtBadge">3</span></div>
+        <div class="dticon"><div class="bx" style="background:linear-gradient(135deg,#f7d572,#e9a61c)"><span data-icon="medal"></span></div><span class="nm">成就殿堂</span><span class="badge zero">0</span></div>
+        <div class="dticon"><div class="bx" style="background:linear-gradient(135deg,#34d399,#059669)"><span data-icon="paw"></span></div><span class="nm">我的宠物</span></div>
+        <div class="dticon"><div class="bx" style="background:linear-gradient(135deg,#60a5fa,#2563eb)"><span data-icon="bag"></span></div><span class="nm">背包</span></div>
+      </div>
+    </div>
+
+    <div class="win">
+      <div class="winhead">
+        <div class="wicon"><span data-icon="medal"></span></div>
+        <div>
+          <h1>我的成就殿堂</h1>
+          <p>累计达成的里程碑会永久点亮，达成即可领取奖励</p>
+        </div>
+      </div>
+      <div class="body">
+        <div class="halltop">
+          <div class="ringbox">
+            <div class="ringtxt">
+              <svg width="132" height="132" viewBox="0 0 132 132">
+                <circle cx="66" cy="66" r="56" fill="none" stroke="#eef1f6" stroke-width="11"/>
+                <circle id="hallRing" cx="66" cy="66" r="56" fill="none" stroke="url(#gd)" stroke-width="11"
+                        stroke-linecap="round" transform="rotate(-90 66 66)" stroke-dasharray="351.9" stroke-dashoffset="351.9"/>
+                <defs>
+                  <linearGradient id="gd" x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0%" stop-color="#f7d572"/><stop offset="100%" stop-color="#e9a61c"/>
+                  </linearGradient>
+                </defs>
+              </svg>
+              <div class="num"><b id="hallPct">0%</b><span id="hallCnt">0 / 0</span></div>
+            </div>
+            <div style="font-size:12px;color:var(--faint)">成就完成度</div>
+          </div>
+          <div class="statrow">
+            <div class="stat"><span>已点亮成就</span><b class="gold" id="stGot">0</b></div>
+            <div class="stat"><span>可领取奖励</span><b class="hot" id="stReady">0</b></div>
+            <div class="stat"><span>最近点亮</span><b style="font-size:14px;line-height:2.1" id="stLast">—</b></div>
+          </div>
+        </div>
+
+        <div class="seriesbar" id="seriesBar"></div>
+        <div class="grid" id="achGrid"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 教师端 ================= -->
+  <section class="view" id="v-teacher">
+    <div class="win">
+      <div class="winhead">
+        <div class="wicon" style="background:linear-gradient(135deg,#6366f1,#8b5cf6)"><span data-icon="clip"></span></div>
+        <div>
+          <h1>任务系统 · 成就管理</h1>
+          <p>刷题打怪系统 → 任务系统 → 「一次性成就」；与每日任务共用同一张任务表</p>
+        </div>
+      </div>
+      <div class="body">
+        <div class="toolbar">
+          <div>
+            <h3><span data-icon="medal"></span> 已发布成就</h3>
+            <p>共 21 条 · 启用 20 条 · 停用 1 条。学生达成后桌面「任务中心」亮红点，可一键领取。</p>
+          </div>
+          <button class="gbtn">＋ 新建成就</button>
+        </div>
+
+        <div style="border:1px solid var(--line);border-radius:14px;overflow:hidden;">
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th style="width:26%">成就</th>
+                <th>系列</th>
+                <th>达成条件（累计）</th>
+                <th>奖励</th>
+                <th>解锁</th>
+                <th>状态</th>
+                <th style="width:12%">操作</th>
+              </tr>
+            </thead>
+            <tbody id="tTbody"></tbody>
+          </table>
+        </div>
+
+        <div class="form">
+          <h4>新建成就</h4>
+          <div class="fgrid">
+            <div class="fld">
+              <label>成就名称</label>
+              <input value="题海之王" />
+            </div>
+            <div class="fld">
+              <label>展示图标</label>
+              <select><option>🏆 奖杯</option><option>⭐ 星星</option><option>👑 皇冠</option><option>🔥 火焰</option></select>
+            </div>
+          </div>
+          <div class="fld" style="margin-bottom:14px;">
+            <label>成就说明（学生端展示）</label>
+            <input value="累计做对 5000 道题" />
+          </div>
+
+          <div class="fgrid">
+            <div class="fld">
+              <label>任务类型</label>
+              <div class="seg">
+                <button>每日重复</button>
+                <button class="on">一次性成就</button>
+              </div>
+              <div class="fhint">选「一次性成就」时，下方指标只列累计口径，且永不重置。</div>
+            </div>
+            <div class="fld">
+              <label>成就系列（按指标自动归档）</label>
+              <select><option>答题达人</option><option>掌握大师</option><option>对战王者</option><option>勤学坚持</option><option>操作题</option><option>财富积累</option><option>宠物养成</option></select>
+              <div class="fhint">系列 = 该成就所属指标的分组，用于学生端分组展示。</div>
+            </div>
+          </div>
+
+          <div class="fgrid">
+            <div class="fld">
+              <label>累计指标</label>
+              <select>
+                <option>累计做对题数</option>
+                <option>累计作答题数</option>
+                <option>累计掌握题数</option>
+                <option>累计达成十连对次数</option>
+                <option>累计 PK 胜场</option>
+                <option>累计操作题得分</option>
+                <option>累计获得积分</option>
+                <option>累计勤学好问打卡</option>
+                <option>宠物等级</option>
+                <option>PK 段位</option>
+              </select>
+              <div class="fhint">累计做对题数：历史答对总题数（跨练习/测试/考试）。</div>
+            </div>
+            <div class="fld">
+              <label>达成目标值</label>
+              <input type="number" value="5000" />
+              <div class="fhint">单位：题</div>
+            </div>
+          </div>
+
+          <div class="fld" style="margin-bottom:14px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;">
+              <label style="margin:0">奖励（可组合）</label>
+              <button class="lnk" style="background:transparent;border:0;">＋ 添加奖励</button>
+            </div>
+            <div class="rwrow">
+              <select style="width:120px;"><option>积分</option><option>上网码</option><option>应用解锁</option><option>装备</option></select>
+              <input type="number" value="300" style="width:90px;" />
+              <button class="x">✕</button>
+            </div>
+            <div class="rwrow">
+              <select style="width:120px;"><option>装备</option><option>积分</option><option>上网码</option><option>应用解锁</option></select>
+              <input type="number" value="1" style="width:90px;" />
+              <select style="flex:1;"><option>⚔️ 王者之剑</option><option>🛡️ 龙鳞护盾</option></select>
+              <button class="x">✕</button>
+            </div>
+          </div>
+
+          <div class="fld" style="margin-bottom:14px;">
+            <label>适用班级（不选 = 全部班级）</label>
+            <div class="clsrow">
+              <button class="clsbtn on">高一(1)班</button>
+              <button class="clsbtn">高一(2)班</button>
+              <button class="clsbtn on">高一(3)班</button>
+              <button class="clsbtn">高一(4)班</button>
+            </div>
+          </div>
+
+          <div class="fld" style="margin-bottom:18px;">
+            <label style="display:flex;align-items:center;gap:8px;font-weight:400;">
+              <input type="checkbox" checked style="width:auto;" /> 立即启用（启用后学生端可见）
+            </label>
+          </div>
+
+          <div style="display:flex;justify-content:flex-end;gap:10px;">
+            <button class="gbtn ghost">取消</button>
+            <button class="gbtn">保存并发布</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- 成就详情弹窗 -->
+<div class="modal" id="modal">
+  <div class="mbox">
+    <div class="mhead" id="mHead">
+      <div class="mbig">
+        <svg class="ring" viewBox="0 0 88 88">
+          <circle cx="44" cy="44" r="38" fill="none" stroke="#eef1f6" stroke-width="6"/>
+          <circle id="mProg" cx="44" cy="44" r="38" fill="none" stroke="#e9a61c" stroke-width="6" stroke-linecap="round"
+                  stroke-dasharray="238.8" stroke-dashoffset="238.8" transform="rotate(-90 44 44)"/>
+        </svg>
+        <div class="disc" id="mDisc"></div>
+      </div>
+      <h2 id="mName" style="font-size:17px;font-weight:700;"></h2>
+      <p id="mDesc" style="font-size:12.5px;color:var(--muted);margin-top:4px;"></p>
+    </div>
+    <div class="mbody">
+      <div class="mcrow"><span>所属系列</span><b id="mSeries"></b></div>
+      <div class="mcrow"><span>达成条件</span><b id="mCond"></b></div>
+      <div class="mcrow" style="flex-direction:column;gap:4px;">
+        <div style="display:flex;justify-content:space-between;"><span>当前进度</span><b id="mProgTx"></b></div>
+        <div class="mbar"><div id="mBar"></div></div>
+      </div>
+      <div class="mcrow"><span>成就奖励</span><b id="mReward" style="color:var(--ambertx)"></b></div>
+      <button class="mbtn" id="mBtn"></button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ---------- 图标 ---------- */
+const ICON = {
+  star:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.9 6.2 6.6.9-4.8 4.6 1.2 6.6L12 17.8 6.1 20.3l1.2-6.6L2.5 9.1l6.6-.9z"/></svg>',
+  book:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 4h7a3 3 0 013 3v13a3 3 0 00-3-3H4zM20 4h-7a3 3 0 00-3 3v13a3 3 0 013-3h7z" opacity=".9"/></svg>',
+  sword:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M14.5 3l6.5 6.5-9 9-2.6-2.6zM6.9 15.6l1.5 1.5-2.6 2.6-1.5-1.5zM3 21l1.5-1.5 1.5 1.5z"/></svg>',
+  fire:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2c1 4-3 5-3 9a3 3 0 006 0c0-1-.5-1.8-1-2.5 3 1 5 3.5 5 6.5a7 7 0 11-14 0C5 10 11 8 12 2z"/></svg>',
+  code:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 8l-4 4 4 4M15 8l4 4-4 4"/></svg>',
+  coin:'<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="9" opacity=".35"/><path d="M12 6a6 6 0 100 12 6 6 0 000-12zm1 9.5h-2v-2h2zm0-3.2h-2c0-1.6 2-1.7 2-3 0-.5-.4-.9-1-.9s-1 .4-1 .9H9c0-1.6 1.3-2.6 3-2.6s3 1 3 2.3c0 1.7-2 2-2 3.3z"/></svg>',
+  paw:'<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="7" cy="9" r="2.2"/><circle cx="12" cy="6.5" r="2.2"/><circle cx="17" cy="9" r="2.2"/><path d="M12 11c-2.6 0-5 2.3-5 4.6 0 1.6 1.2 2.6 2.8 2.4 1.4-.2 2.8-.2 4.4 0 1.6.2 2.8-.8 2.8-2.4C17 13.3 14.6 11 12 11z"/></svg>',
+  medal:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 2l2.2 4.4a6 6 0 014.6 0L16 2l2 3.5-3.4 2.2A6 6 0 1112 21a6 6 0 01-3.6-11.3L5 7.5z"/><circle cx="12" cy="15" r="2.2" fill="#fff" opacity=".5"/></svg>',
+  crown:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 7l4 4 5-7 5 7 4-4v11H3z"/></svg>',
+  target:'<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="9" opacity=".3"/><circle cx="12" cy="12" r="5.5" opacity=".5"/><circle cx="12" cy="12" r="2.2"/></svg>',
+  bolt:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M13 2L4 14h6l-1 8 9-12h-6z"/></svg>',
+  clip:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 2h6a2 2 0 012 2v1h2a2 2 0 012 2v13a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2V4a2 2 0 012-2zm0 4h6V4H9zM8 12h8v1.6H8zm0 4h5v1.6H8z"/></svg>',
+  bag:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 6a3 3 0 016 0v1h3a1 1 0 011 1v12a1 1 0 01-1 1H6a1 1 0 01-1-1V8a1 1 0 011-1h3zm1 1h4a2 2 0 10-4 0z"/></svg>',
+};
+
+/* ---------- 系列 ---------- */
+const SERIES = [
+  {id:'all',   name:'全部',     icon:'star'},
+  {id:'answer',name:'答题达人', icon:'star',   color:'#4f46e5'},
+  {id:'master',name:'掌握大师', icon:'book',   color:'#0ea5e9'},
+  {id:'pk',    name:'对战王者', icon:'sword',  color:'#e11d48'},
+  {id:'streak',name:'勤学坚持', icon:'fire',   color:'#f97316'},
+  {id:'op',    name:'操作题',   icon:'code',   color:'#0891b2'},
+  {id:'wealth',name:'财富积累', icon:'coin',   color:'#e9a61c'},
+  {id:'pet',   name:'宠物养成', icon:'paw',    color:'#059669'},
+];
+
+/* ---------- 成就数据（示例，含三种状态） ---------- */
+const ACH = [
+  // 答题达人
+  {id:'a1',name:'初出茅庐',desc:'累计做对 100 道题',icon:'star',series:'answer',metric:'累计做对题数',target:100,unit:'题',cur:100,status:'got',at:'2026-09-18',rewards:[{t:'积分',v:50}]},
+  {id:'a2',name:'崭露头角',desc:'累计做对 500 道题',icon:'star',series:'answer',metric:'累计做对题数',target:500,unit:'题',cur:412,status:'locked',rewards:[{t:'积分',v:100}]},
+  {id:'a3',name:'百炼成钢',desc:'累计做对 1000 道题',icon:'star',series:'answer',metric:'累计做对题数',target:1000,unit:'题',cur:412,status:'locked',rewards:[{t:'上网码',v:1}]},
+  {id:'a4',name:'十连对',desc:'累计达成十连对 1 次',icon:'bolt',series:'answer',metric:'累计十连对次数',target:1,unit:'次',cur:1,status:'ready',rewards:[{t:'积分',v:30}]},
+  {id:'a5',name:'题海之王',desc:'累计做对 5000 道题',icon:'crown',series:'answer',metric:'累计做对题数',target:5000,unit:'题',cur:412,status:'locked',rewards:[{t:'积分',v:300},{t:'装备',v:1}]},
+  // 掌握大师
+  {id:'b1',name:'小有所成',desc:'累计掌握 50 道题',icon:'book',series:'master',metric:'累计掌握题数',target:50,unit:'题',cur:50,status:'got',at:'2026-10-02',rewards:[{t:'积分',v:60}]},
+  {id:'b2',name:'融会贯通',desc:'累计掌握 200 道题',icon:'book',series:'master',metric:'累计掌握题数',target:200,unit:'题',cur:126,status:'locked',rewards:[{t:'积分',v:150}]},
+  {id:'b3',name:'登峰造极',desc:'累计掌握 500 道题',icon:'crown',series:'master',metric:'累计掌握题数',target:500,unit:'题',cur:126,status:'locked',rewards:[{t:'上网码',v:1},{t:'积分',v:200}]},
+  // 对战王者
+  {id:'c1',name:'首战告捷',desc:'累计 PK 获胜 1 局',icon:'sword',series:'pk',metric:'累计 PK 胜场',target:1,unit:'局',cur:7,status:'got',at:'2026-09-25',rewards:[{t:'积分',v:20}]},
+  {id:'c2',name:'常胜将军',desc:'累计 PK 获胜 20 局',icon:'sword',series:'pk',metric:'累计 PK 胜场',target:20,unit:'局',cur:7,status:'locked',rewards:[{t:'积分',v:80}]},
+  {id:'c3',name:'百战之王',desc:'累计 PK 获胜 100 局',icon:'crown',series:'pk',metric:'累计 PK 胜场',target:100,unit:'局',cur:7,status:'locked',rewards:[{t:'积分',v:300},{t:'应用解锁',v:1}]},
+  {id:'c4',name:'段位晋升',desc:'PK 段位达到「高中生」',icon:'medal',series:'pk',metric:'PK 段位',target:2,unit:'段',cur:2,status:'ready',rewards:[{t:'积分',v:100}]},
+  // 勤学坚持
+  {id:'d1',name:'勤学之星',desc:'累计勤学好问打卡 10 次',icon:'fire',series:'streak',metric:'累计打卡次数',target:10,unit:'次',cur:10,status:'got',at:'2026-10-08',rewards:[{t:'积分',v:40}]},
+  {id:'d2',name:'持之以恒',desc:'累计勤学好问打卡 50 次',icon:'fire',series:'streak',metric:'累计打卡次数',target:50,unit:'次',cur:14,status:'locked',rewards:[{t:'积分',v:150}]},
+  {id:'d3',name:'学而不厌',desc:'累计活跃 30 天',icon:'target',series:'streak',metric:'累计活跃天数',target:30,unit:'天',cur:30,status:'ready',rewards:[{t:'积分',v:100}]},
+  // 操作题
+  {id:'e1',name:'操作新秀',desc:'累计操作题得分 300',icon:'code',series:'op',metric:'累计操作题得分',target:300,unit:'分',cur:0,status:'locked',rewards:[{t:'积分',v:40}]},
+  {id:'e2',name:'操作能手',desc:'累计操作题得分 1000',icon:'code',series:'op',metric:'累计操作题得分',target:1000,unit:'分',cur:0,status:'locked',rewards:[{t:'积分',v:120}]},
+  // 财富
+  {id:'f1',name:'小有积蓄',desc:'累计获得 1000 积分',icon:'coin',series:'wealth',metric:'累计获得积分',target:1000,unit:'分',cur:1000,status:'ready',rewards:[{t:'装备',v:1}]},
+  {id:'f2',name:'富甲一方',desc:'累计获得 5000 积分',icon:'coin',series:'wealth',metric:'累计获得积分',target:5000,unit:'分',cur:1240,status:'locked',rewards:[{t:'积分',v:200}]},
+  // 宠物
+  {id:'g1',name:'悉心照料',desc:'宠物等级达到 5 级',icon:'paw',series:'pet',metric:'宠物等级',target:5,unit:'级',cur:5,status:'got',at:'2026-09-30',rewards:[{t:'积分',v:50}]},
+  {id:'g2',name:'培养大师',desc:'宠物等级达到 15 级',icon:'paw',series:'pet',metric:'宠物等级',target:15,unit:'级',cur:6,status:'locked',rewards:[{t:'积分',v:150}]},
+];
+
+/* ---------- 教师端表格数据 ---------- */
+const T_ROWS = [
+  {n:'初出茅庐',d:'累计做对 100 道题',icon:'star',ser:'答题达人',cond:'累计做对题数 ≥ 100 题',rw:'+50 积分',got:38,on:1},
+  {n:'崭露头角',d:'累计做对 500 道题',icon:'star',ser:'答题达人',cond:'累计做对题数 ≥ 500 题',rw:'+100 积分',got:12,on:1},
+  {n:'百炼成钢',d:'累计做对 1000 道题',icon:'star',ser:'答题达人',cond:'累计做对题数 ≥ 1000 题',rw:'上网码 ×1',got:4,on:1},
+  {n:'十连对',d:'累计达成十连对 1 次',icon:'bolt',ser:'答题达人',cond:'累计十连对次数 ≥ 1 次',rw:'+30 积分',got:21,on:1},
+  {n:'小有所成',d:'累计掌握 50 道题',icon:'book',ser:'掌握大师',cond:'累计掌握题数 ≥ 50 题',rw:'+60 积分',got:17,on:1},
+  {n:'首战告捷',d:'累计 PK 获胜 1 局',icon:'sword',ser:'对战王者',cond:'累计 PK 胜场 ≥ 1 局',rw:'+20 积分',got:26,on:1},
+  {n:'百战之王',d:'累计 PK 获胜 100 局',icon:'crown',ser:'对战王者',cond:'累计 PK 胜场 ≥ 100 局',rw:'+300 积分 · 应用解锁',got:0,on:1},
+  {n:'勤学之星',d:'累计打卡 10 次',icon:'fire',ser:'勤学坚持',cond:'累计打卡次数 ≥ 10 次',rw:'+40 积分',got:15,on:1},
+  {n:'学而不厌',d:'累计活跃 30 天',icon:'target',ser:'勤学坚持',cond:'累计活跃天数 ≥ 30 天',rw:'+100 积分',got:3,on:1},
+  {n:'操作能手',d:'累计操作题得分 1000',icon:'code',ser:'操作题',cond:'累计操作题得分 ≥ 1000 分',rw:'+120 积分',got:0,on:1},
+  {n:'富甲一方',d:'累计获得 5000 积分',icon:'coin',ser:'财富积累',cond:'累计获得积分 ≥ 5000 分',rw:'+200 积分',got:1,on:1},
+  {n:'培养大师',d:'宠物等级达到 15 级',icon:'paw',ser:'宠物养成',cond:'宠物等级 ≥ 15 级',rw:'+150 积分',got:0,on:0},
+];
+const SER_COLOR = {答题达人:'#4f46e5',掌握大师:'#0ea5e9',对战王者:'#e11d48',勤学坚持:'#f97316',操作题:'#0891b2',财富积累:'#e9a61c',宠物养成:'#059669'};
+
+/* ---------- 渲染：学生端 ---------- */
+let curSeries = 'all';
+
+function seriesOf(id){ return SERIES.find(s => s.id === id); }
+
+function renderSeriesBar(){
+  const bar = document.getElementById('seriesBar');
+  bar.innerHTML = SERIES.map(s => {
+    const list = s.id === 'all' ? ACH : ACH.filter(a => a.series === s.id);
+    const got = list.filter(a => a.status === 'got').length;
+    return '<button class="schip' + (curSeries === s.id ? ' on' : '') + '" data-s="' + s.id + '">'
+      + s.name + ' <em>' + got + '/' + list.length + '</em></button>';
+  }).join('');
+  bar.querySelectorAll('.schip').forEach(b => b.onclick = () => { curSeries = b.dataset.s; renderAll(); });
+}
+
+function renderGrid(){
+  const grid = document.getElementById('achGrid');
+  const list = curSeries === 'all' ? ACH : ACH.filter(a => a.series === curSeries);
+  if(!list.length){ grid.innerHTML = '<div class="empty">该系列暂无成就</div>'; return; }
+  grid.innerHTML = list.map(a => {
+    const ser = seriesOf(a.series);
+    const pct = Math.min(100, Math.round(a.cur / a.target * 100));
+    const C = 2 * Math.PI * 35; // r=35
+    const off = C * (1 - pct / 100);
+    const st = a.status;
+    const barColor = st === 'locked' ? (ser ? ser.color : '#6366f1') : '#22c55e';
+    const stBtn = st === 'got'
+      ? '<div class="astate done">✓ 已点亮' + (a.at ? ' · ' + a.at.slice(5) : '') + '</div>'
+      : st === 'ready'
+        ? '<button class="astate claim">🎁 领取奖励</button>'
+        : '<div class="astate wait">进行中 ' + pct + '%</div>';
+    return '<div class="ach ' + (st === 'locked' ? 'locked' : st) + '" data-id="' + a.id + '">'
+      + (st === 'ready' ? '<span class="ripple"></span>' : '')
+      + (st === 'got' ? '<span class="crown">👑</span>' : '')
+      + '<div class="medal">'
+      + '<svg class="ring" viewBox="0 0 74 74"><circle class="track" cx="37" cy="37" r="35"/><circle class="prog" cx="37" cy="37" r="35" stroke-dasharray="' + C.toFixed(1) + '" stroke-dashoffset="' + off.toFixed(1) + '"/></svg>'
+      + '<div class="disc">' + ICON[a.icon] + '</div></div>'
+      + '<div class="aname">' + a.name + '</div>'
+      + '<div class="adesc">' + a.desc + '</div>'
+      + '<div class="abar"><div style="width:' + pct + '%;background:' + barColor + '"></div></div>'
+      + '<div class="anum' + (pct >= 100 ? ' ok' : '') + '">' + a.cur + ' / ' + a.target + ' ' + a.unit + (pct >= 100 ? ' ✓' : '') + '</div>'
+      + '<div class="arw">🎁 ' + a.rewards.map(r => '+' + r.v + ' ' + r.t).join(' · ') + '</div>'
+      + stBtn
+      + '</div>';
+  }).join('');
+  grid.querySelectorAll('.ach').forEach(el => el.onclick = () => openModal(el.dataset.id));
+}
+
+function renderStats(){
+  const got = ACH.filter(a => a.status === 'got').length;
+  const ready = ACH.filter(a => a.status === 'ready').length;
+  const total = ACH.length;
+  const pct = Math.round(got / total * 100);
+  const C = 2 * Math.PI * 56;
+  document.getElementById('hallRing').setAttribute('stroke-dashoffset', (C * (1 - pct / 100)).toFixed(1));
+  document.getElementById('hallPct').textContent = pct + '%';
+  document.getElementById('hallCnt').textContent = got + ' / ' + total;
+  document.getElementById('stGot').textContent = got;
+  document.getElementById('stReady').textContent = ready;
+  document.getElementById('stLast').textContent = '学而不厌';
+  document.getElementById('dtBadge').textContent = ready + 1; // +1 每日任务
+}
+
+function renderAll(){ renderSeriesBar(); renderGrid(); renderStats(); }
+
+/* ---------- 弹窗 ---------- */
+function openModal(id){
+  const a = ACH.find(x => x.id === id);
+  if(!a) return;
+  const ser = seriesOf(a.series);
+  const pct = Math.min(100, Math.round(a.cur / a.target * 100));
+  const C = 2 * Math.PI * 38;
+  const m = document.getElementById('modal');
+  document.getElementById('mName').textContent = a.name;
+  document.getElementById('mDesc').textContent = a.desc;
+  document.getElementById('mSeries').textContent = ser ? ser.name : '—';
+  document.getElementById('mCond').textContent = a.metric + ' ≥ ' + a.target + ' ' + a.unit;
+  document.getElementById('mProgTx').textContent = a.cur + ' / ' + a.target + ' ' + a.unit;
+  document.getElementById('mReward').textContent = a.rewards.map(r => '+' + r.v + ' ' + r.t).join(' · ');
+  document.getElementById('mProg').setAttribute('stroke-dashoffset', (C * (1 - pct / 100)).toFixed(1));
+  document.getElementById('mBar').style.width = pct + '%';
+  document.getElementById('mBar').style.background = a.status === 'locked' ? (ser ? ser.color : '#6366f1') : '#22c55e';
+  const disc = document.getElementById('mDisc');
+  disc.innerHTML = ICON[a.icon];
+  const head = document.getElementById('mHead');
+  const btn = document.getElementById('mBtn');
+  if(a.status === 'got'){
+    head.classList.remove('locked');
+    disc.style.background = 'linear-gradient(135deg,var(--gold1),var(--gold2))';
+    disc.style.color = '#5b3d05';
+    btn.className = 'mbtn close';
+    btn.textContent = '已点亮 · ' + (a.at || '');
+  } else if(a.status === 'ready'){
+    head.classList.remove('locked');
+    disc.style.background = 'linear-gradient(135deg,#ffe3a3,#f5b53d)';
+    disc.style.color = '#7a4b05';
+    btn.className = 'mbtn claim';
+    btn.textContent = '🎁 领取奖励';
+  } else {
+    head.classList.add('locked');
+    disc.style.background = '#f1f4f8';
+    disc.style.color = '#b3bac6';
+    btn.className = 'mbtn close';
+    btn.textContent = '继续努力（还差 ' + Math.max(0, a.target - a.cur) + ' ' + a.unit + '）';
+  }
+  m.classList.add('on');
+}
+document.getElementById('modal').onclick = (e) => { if(e.target.id === 'modal') document.getElementById('modal').classList.remove('on'); };
+document.getElementById('mBtn').onclick = () => document.getElementById('modal').classList.remove('on');
+
+/* ---------- 渲染：教师端 ---------- */
+function renderTeacher(){
+  document.getElementById('tTbody').innerHTML = T_ROWS.map(r => {
+    const c = SER_COLOR[r.ser] || '#4f46e5';
+    return '<tr>'
+      + '<td><div class="tcell"><span class="tmini" style="background:' + c + '1a;color:' + c + '">' + ICON[r.icon] + '</span>'
+      + '<div><div class="sname">' + r.n + '</div><div class="sdesc">' + r.d + '</div></div></div></td>'
+      + '<td><span class="tag ser">' + r.ser + '</span></td>'
+      + '<td style="color:#475569">' + r.cond + '</td>'
+      + '<td style="color:#b45309">' + r.rw + '</td>'
+      + '<td style="color:#475569">' + r.got + ' 人</td>'
+      + '<td><span class="sw"><span class="dot ' + (r.on ? 'on' : 'off') + '"></span>' + (r.on ? '启用中' : '已停用') + '</span></td>'
+      + '<td><span class="lnk">编辑</span><span class="lnk del">删除</span></td>'
+      + '</tr>';
+  }).join('');
+}
+
+/* ---------- 视图切换 ---------- */
+document.querySelectorAll('.nav button').forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll('.nav button').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('on'));
+    document.getElementById('v-' + b.dataset.view).classList.add('on');
+  };
+});
+
+renderAll();
+renderTeacher();
+
+/* ---------- 静态图标注入 ---------- */
+document.querySelectorAll('[data-icon]').forEach(el => { el.innerHTML = ICON[el.dataset.icon] || ''; });
+</script>
+</body>
+</html>

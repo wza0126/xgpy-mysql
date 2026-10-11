@@ -1,13 +1,16 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
+import { useTaskStore } from '../../store/taskStore';
 
 /**
  * 学生端「每日任务」面板
  * ------------------------------------------------------------
- * 与「课堂任务」并列，挂在任务中心（taskCenter）内。
- * 数据来自 GET /api/student/daily-tasks，进度由服务端按指标实时统计；
- * 达标即亮「领取」按钮（桌面入口同时显示红点，计数来自 pending-count）。
+ * 与「课堂任务」「成就殿堂」并列，挂在任务中心（taskCenter）内。
+ * 数据来自 GET /api/student/daily-tasks?type=daily，进度由服务端按**当日口径**指标实时统计；
+ * 达标即亮「领取」按钮（桌面入口同时显示红点，计数来自 pending-count，已含成就）。
+ *
+ * 说明：成就（一次性任务）自二期起独立成「成就殿堂」页，本面板只展示每日任务。
  */
 
 const ICON_MAP: Record<string, string> = {
@@ -19,6 +22,12 @@ const ICON_MAP: Record<string, string> = {
   target: 'fa-bullseye',
   sword: 'fa-khanda',
   clock: 'fa-clock',
+  crown: 'fa-crown',
+  coin: 'fa-coins',
+  fire: 'fa-fire',
+  code: 'fa-code',
+  paw: 'fa-paw',
+  medal: 'fa-medal',
 };
 
 interface RewardItem {
@@ -63,7 +72,6 @@ export const DailyTasks: React.FC = () => {
   const [items, setItems] = useState<DailyTaskItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<'daily' | 'once'>('daily');
   const [claiming, setClaiming] = useState<string | null>(null);
   const [reward, setReward] = useState<{ name: string; granted: RewardItem[] } | null>(null);
 
@@ -71,7 +79,7 @@ export const DailyTasks: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const r = await backendClient.get('/api/student/daily-tasks?type=all');
+      const r = await backendClient.get('/api/student/daily-tasks?type=daily');
       setItems((r.data as DailyTaskItem[]) || []);
     } catch (e: any) {
       if (e?.isAuthError || e?.status === 401) setError('登录已失效，请重新登录后再试');
@@ -92,6 +100,7 @@ export const DailyTasks: React.FC = () => {
       const granted = ((r.data && r.data.granted) || []) as RewardItem[];
       setReward({ name: t.name, granted });
       await load();
+      useTaskStore.getState().fetchPendingCount();
     } catch (e: any) {
       if (e?.isAuthError || e?.status === 401) alert('登录已失效，请重新登录后再试');
       else alert(e?.message || '领取失败，请稍后重试');
@@ -99,11 +108,10 @@ export const DailyTasks: React.FC = () => {
     setClaiming(null);
   };
 
-  const daily = items.filter((i) => i.task_type === 'daily');
-  const achieve = items.filter((i) => i.task_type === 'once');
-  const list = tab === 'daily' ? daily : achieve;
-  const readyCount = items.filter((i) => i.can_claim).length;
+  const daily = items;
+  const readyCount = daily.filter((i) => i.can_claim).length;
   const doneCount = daily.filter((i) => i.claimed || i.progress.value >= i.target_value).length;
+  const claimedCount = daily.filter((i) => i.claimed).length;
 
   if (loading) {
     return (
@@ -143,36 +151,21 @@ export const DailyTasks: React.FC = () => {
           </div>
         </div>
         <div className="bg-white rounded-xl border border-gray-100 p-4">
-          <div className="text-xs text-gray-400">我的成就</div>
+          <div className="text-xs text-gray-400">今日已领取</div>
           <div className="text-2xl font-bold text-gray-800">
-            {achieve.filter((a) => a.claimed).length} <span className="text-sm font-normal text-gray-300">/ {achieve.length}</span>
+            {claimedCount} <span className="text-sm font-normal text-gray-300">个</span>
           </div>
         </div>
       </div>
 
-      <div className="flex gap-2 mb-4">
-        <button
-          onClick={() => setTab('daily')}
-          className={`px-4 py-2 rounded-lg text-sm transition-colors ${tab === 'daily' ? 'bg-indigo-50 text-indigo-600 font-medium' : 'text-gray-500 hover:text-gray-700'}`}
-        >
-          每日任务
-        </button>
-        <button
-          onClick={() => setTab('once')}
-          className={`px-4 py-2 rounded-lg text-sm transition-colors ${tab === 'once' ? 'bg-indigo-50 text-indigo-600 font-medium' : 'text-gray-500 hover:text-gray-700'}`}
-        >
-          我的成就
-        </button>
-      </div>
-
-      {list.length === 0 ? (
+      {daily.length === 0 ? (
         <div className="bg-white rounded-2xl border border-gray-100 p-12 text-center">
           <i className="fa-solid fa-clipboard-list text-3xl text-gray-300 mb-3"></i>
-          <p className="text-gray-500">{tab === 'daily' ? '暂无每日任务' : '暂无成就任务'}</p>
+          <p className="text-gray-500">暂无每日任务</p>
         </div>
       ) : (
         <div className="grid gap-3">
-          {list.map((t, idx) => {
+          {daily.map((t, idx) => {
             const ok = t.progress.value >= t.target_value;
             const pct = Math.min(100, Math.round((t.progress.value / (t.target_value || 1)) * 100));
             const barColor = t.claimed || ok ? '#22c55e' : '#6366f1';
@@ -197,9 +190,7 @@ export const DailyTasks: React.FC = () => {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-medium text-gray-800">{t.name}</span>
-                    <span className={`text-[11px] px-2 py-0.5 rounded-full ${t.task_type === 'daily' ? 'bg-indigo-50 text-indigo-500' : 'bg-amber-50 text-amber-600'}`}>
-                      {t.task_type === 'daily' ? '每日' : '成就'}
-                    </span>
+                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-500">每日</span>
                   </div>
                   {t.description && <div className="text-xs text-gray-500 mt-0.5">{t.description}</div>}
                   <div className="flex items-center gap-2 mt-2">

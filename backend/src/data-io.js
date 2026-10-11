@@ -29,7 +29,10 @@ const DOMAIN_DEFS = [
   { id: 'tasks', name: '课堂任务', tables: ['task_resource', 'task_question', 'task_class', 'task_study_log', 'notes', 'game_tasks', 'student_task_claims'] },
   { id: 'learning', name: '学习活动', tables: ['word_list', 'student_word_progress', 'learn_visited_records', 'studious_checkins', 'keyboard_lesson_progress', 'typing_rooms', 'typing_scores', 'typing_duel_records', 'roll_call_layout', 'roll_call_seating', 'roll_call_attendance'] },
   { id: 'ai', name: 'AI与编程', tables: ['ai_qa_history', 'ai_qa_knowledge_base', 'ai_works', 'ai_workshop_config', 'ai_work_purchases', 'ai_work_ratings', 'ai_work_reviews', 'ai_work_versions', 'python_tasks', 'python_submissions', 'python_drafts', 'python_gradings', 'python_wrong_problems', 'python_magic_progress', 'code_realm_progress', 'code_snippets'] },
-  { id: 'pk', name: 'PK对战', tables: ['pk_rooms', 'pk_room_players', 'pk_match_answers', 'pk_battle_configs', 'pk_battle_config_class_visibility', 'pk_rank_history'] },
+  // ⛔ pk_daily_rewards 必须归域：PK 每日奖励领取记录（有真实数据）。
+  //    未登记会落「其他」域且 defaultOff → 教师默认备份静默漏掉这张表。
+  //    （question_cluster_tasks 故意不归域：它只是聚类任务的临时作业状态，有自动清理逻辑。）
+  { id: 'pk', name: 'PK对战', tables: ['pk_rooms', 'pk_room_players', 'pk_match_answers', 'pk_battle_configs', 'pk_battle_config_class_visibility', 'pk_rank_history', 'pk_daily_rewards'] },
   { id: 'system', name: '系统配置', tables: ['system_config', 'apps', 'app_reviews', 'app_visibility', 'desktop_backgrounds', 'proxy_sites', 'proxy_pending_domains', 'notifications', 'notification_recipients', 'security_settings', 'backup_records'] },
   // 学生消息体系（v2.7.0）：设置/屏蔽词/快捷短语属于「配置」，与消息流水分域，
   // 便于教师只导出流水、或只搬配置到新机器。
@@ -154,7 +157,12 @@ async function writeBackup(pool, uploadsDir, appBaseDir, opts, target) {
     domains: [],
     files: [],
   };
-  const [migRows] = await pool.query('SELECT MAX(id) AS maxv FROM schema_migrations').catch(() => [[{ maxv: null }]]);
+  // ⚠️ schema_migrations 只有 version/checksum/applied_at 三列，**没有 id**。
+  //    原写法 `SELECT MAX(id)` 必然报错、被 catch 吞掉 → schema_migrations_max 恒为 null。
+  //    改为取版本号（形如 093_game_task_system.sql）的数字前缀最大值。
+  const [migRows] = await pool.query(
+    "SELECT MAX(CAST(SUBSTRING_INDEX(version, '_', 1) AS UNSIGNED)) AS maxv FROM schema_migrations"
+  ).catch(() => [[{ maxv: null }]]);
   manifest.schema_migrations_max = migRows[0]?.maxv ?? null;
 
   for (const d of selectedDomains) {

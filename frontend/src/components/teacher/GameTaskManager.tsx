@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { backendClient } from '../../api/backendClient';
 
 /**
@@ -20,6 +20,12 @@ const ICON_MAP: Record<string, string> = {
   target: 'fa-bullseye',
   sword: 'fa-khanda',
   clock: 'fa-clock',
+  crown: 'fa-crown',
+  coin: 'fa-coins',
+  fire: 'fa-fire',
+  code: 'fa-code',
+  paw: 'fa-paw',
+  medal: 'fa-medal',
 };
 
 const REWARD_LABEL: Record<string, string> = {
@@ -41,7 +47,15 @@ interface MetricDef {
   label: string;
   unit: string;
   hint: string;
+  scope: 'daily' | 'total';
+  series: string;
   params: MetricParam[];
+}
+interface SeriesDef {
+  id: string;
+  name: string;
+  icon: string;
+  color: string;
 }
 interface RewardItem {
   type: string;
@@ -65,6 +79,7 @@ interface GameTask {
 }
 interface Meta {
   metrics: MetricDef[];
+  series: SeriesDef[];
   rewardTypes: { type: string; label: string }[];
   classes: { id: string; name: string }[];
   apps: { id: string; name: string }[];
@@ -96,6 +111,10 @@ export const GameTaskManager: React.FC = () => {
   const [showForm, setShowForm] = useState(false);
   const [isEdit, setIsEdit] = useState(false);
   const [form, setForm] = useState<GameTask>(emptyForm);
+  // 多选与批量操作
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [batchWorking, setBatchWorking] = useState(false);
+  const headCbRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -118,9 +137,53 @@ export const GameTaskManager: React.FC = () => {
     load();
   }, [load]);
 
+  // 任务列表刷新后，剔除已不存在的选中项（保持选择稳定）
+  useEffect(() => {
+    setSelected((prev) => {
+      if (!prev.size) return prev;
+      const alive = new Set(tasks.map((t) => t.id));
+      const next = new Set([...prev].filter((id) => alive.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [tasks]);
+
+  const allSelected = tasks.length > 0 && tasks.every((t) => selected.has(t.id));
+  const someSelected = selected.size > 0 && !allSelected;
+
+  // 全选框的「半选」态只能用 DOM 属性设置
+  useEffect(() => {
+    if (headCbRef.current) headCbRef.current.indeterminate = someSelected;
+  }, [someSelected]);
+
+  const toggleOne = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+
+  const toggleAll = () =>
+    setSelected(() => (allSelected ? new Set<string>() : new Set(tasks.map((t) => t.id))));
+
+  const clearSelection = () => setSelected(new Set<string>());
+
   const metricDef = (key: string): MetricDef | undefined => {
     if (!meta) return undefined;
     return meta.metrics.find((m) => m.key === key);
+  };
+
+  /** 某任务类型可选的指标（每日→当日口径 / 一次性→累计口径） */
+  const metricsForType = (tt: 'daily' | 'once'): MetricDef[] => {
+    if (!meta) return [];
+    const want = tt === 'once' ? 'total' : 'daily';
+    return meta.metrics.filter((m) => m.scope === want);
+  };
+
+  /** 指标归属的系列（由指标派生） */
+  const seriesOf = (metricKey: string): SeriesDef | undefined => {
+    const def = metricDef(metricKey);
+    if (!def || !meta) return undefined;
+    return meta.series.find((s) => s.id === def.series);
   };
 
   const condText = (t: GameTask): string => {
@@ -175,6 +238,23 @@ export const GameTaskManager: React.FC = () => {
       }
       // 保留已填的 kind 等参数（切换指标时按新指标默认值重置）
       return { ...f, metric: key, unit: def ? def.unit : f.unit, metric_params: params };
+    });
+  };
+
+  /** 切换「每日 / 一次性」时，若当前指标口径不匹配，自动切到该类型的第一个指标 */
+  const onTypeChange = (tt: 'daily' | 'once') => {
+    setForm((f) => {
+      const def = metricDef(f.metric);
+      const want = tt === 'once' ? 'total' : 'daily';
+      if (def && def.scope === want) return { ...f, task_type: tt };
+      const first = metricsForType(tt)[0];
+      if (!first) return { ...f, task_type: tt };
+      let params: any = null;
+      if (first.params.length) {
+        params = {};
+        first.params.forEach((p) => { params[p.key] = p.default; });
+      }
+      return { ...f, task_type: tt, metric: first.key, unit: first.unit, metric_params: params };
     });
   };
 
@@ -252,6 +332,38 @@ export const GameTaskManager: React.FC = () => {
     }
   };
 
+  const handleBatchToggle = async (isActive: boolean) => {
+    const ids = [...selected];
+    if (!ids.length) return;
+    setBatchWorking(true);
+    try {
+      const r: any = await backendClient.post('/api/teacher/game-tasks/batch-update', { ids, is_active: isActive });
+      await load();
+      clearSelection();
+      alert(`已${isActive ? '启用' : '停用'} ${(r?.data && r.data.affected) ?? ids.length} 个任务`);
+    } catch (e: any) {
+      alert('批量操作失败：' + (e?.message || e));
+    }
+    setBatchWorking(false);
+  };
+
+  const handleBatchDelete = async () => {
+    const ids = [...selected];
+    if (!ids.length) return;
+    const names = tasks.filter((t) => selected.has(t.id)).map((t) => `「${t.name}」`).join('、');
+    if (!confirm(`确定删除选中的 ${ids.length} 个任务吗？\n${names}\n\n其历史领取记录也会一并清除。\n如果只是暂时不想发布，建议改用「批量停用」。`)) return;
+    setBatchWorking(true);
+    try {
+      const r: any = await backendClient.post('/api/teacher/game-tasks/batch-delete', { ids });
+      await load();
+      clearSelection();
+      alert(`已删除 ${(r?.data && r.data.affected) ?? ids.length} 个任务`);
+    } catch (e: any) {
+      alert('批量删除失败：' + (e?.message || e));
+    }
+    setBatchWorking(false);
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-16">
@@ -281,6 +393,44 @@ export const GameTaskManager: React.FC = () => {
         </button>
       </div>
 
+      {selected.size > 0 && (
+        <div className="flex items-center gap-2 mb-3 px-4 py-2.5 bg-purple-50 border border-purple-200 rounded-lg flex-wrap">
+          <span className="text-sm text-purple-800 mr-1">
+            已选 <b>{selected.size}</b> 个任务
+          </span>
+          <button
+            onClick={() => handleBatchToggle(true)}
+            disabled={batchWorking}
+            className="px-3 py-1.5 text-sm rounded-lg bg-green-500 text-white hover:bg-green-600 disabled:opacity-50"
+          >
+            <i className="fa-solid fa-circle-check mr-1"></i>批量启用
+          </button>
+          <button
+            onClick={() => handleBatchToggle(false)}
+            disabled={batchWorking}
+            className="px-3 py-1.5 text-sm rounded-lg bg-gray-500 text-white hover:bg-gray-600 disabled:opacity-50"
+          >
+            <i className="fa-solid fa-circle-pause mr-1"></i>批量停用
+          </button>
+          <button
+            onClick={handleBatchDelete}
+            disabled={batchWorking}
+            className="px-3 py-1.5 text-sm rounded-lg bg-red-500 text-white hover:bg-red-600 disabled:opacity-50"
+          >
+            <i className="fa-solid fa-trash mr-1"></i>批量删除
+          </button>
+          <div className="flex-1"></div>
+          <button
+            onClick={clearSelection}
+            disabled={batchWorking}
+            className="px-3 py-1.5 text-sm rounded-lg text-gray-600 hover:text-gray-800 disabled:opacity-50"
+          >
+            取消选择
+          </button>
+          {batchWorking && <i className="fa-solid fa-circle-notch fa-spin text-purple-500"></i>}
+        </div>
+      )}
+
       {tasks.length === 0 ? (
         <div className="text-center py-12 text-gray-400 bg-gray-50 rounded-lg border border-dashed border-gray-200">
           <i className="fa-solid fa-clipboard-list text-3xl mb-2"></i>
@@ -291,8 +441,19 @@ export const GameTaskManager: React.FC = () => {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 text-gray-600">
               <tr>
+                <th className="px-3 py-2 w-10">
+                  <input
+                    ref={headCbRef}
+                    type="checkbox"
+                    checked={allSelected}
+                    onChange={toggleAll}
+                    className="cursor-pointer align-middle"
+                    title={allSelected ? '取消全选' : '全选'}
+                  />
+                </th>
                 <th className="px-3 py-2 text-left">任务</th>
                 <th className="px-3 py-2 text-left">类型</th>
+                <th className="px-3 py-2 text-left">系列</th>
                 <th className="px-3 py-2 text-left">达成条件</th>
                 <th className="px-3 py-2 text-left">奖励</th>
                 <th className="px-3 py-2 text-left">适用班级</th>
@@ -303,7 +464,15 @@ export const GameTaskManager: React.FC = () => {
             </thead>
             <tbody>
               {tasks.map((t) => (
-                <tr key={t.id} className="border-t border-gray-100 align-top">
+                <tr key={t.id} className={`border-t border-gray-100 align-top ${selected.has(t.id) ? 'bg-purple-50/50' : ''}`}>
+                  <td className="px-3 py-3">
+                    <input
+                      type="checkbox"
+                      checked={selected.has(t.id)}
+                      onChange={() => toggleOne(t.id)}
+                      className="cursor-pointer align-middle"
+                    />
+                  </td>
                   <td className="px-3 py-3">
                     <div className="flex items-center gap-2">
                       <span className="w-7 h-7 rounded-lg bg-purple-50 text-purple-600 flex items-center justify-center flex-shrink-0">
@@ -319,6 +488,14 @@ export const GameTaskManager: React.FC = () => {
                     <span className={`px-2 py-0.5 text-xs rounded ${t.task_type === 'daily' ? 'bg-blue-50 text-blue-600' : 'bg-amber-50 text-amber-600'}`}>
                       {t.task_type === 'daily' ? '每日' : '一次性'}
                     </span>
+                  </td>
+                  <td className="px-3 py-3">
+                    {(() => {
+                      const s = seriesOf(t.metric);
+                      return s
+                        ? <span className="px-2 py-0.5 text-xs rounded whitespace-nowrap" style={{ background: s.color + '1a', color: s.color }}>{s.name}</span>
+                        : <span className="text-xs text-gray-300">—</span>;
+                    })()}
                   </td>
                   <td className="px-3 py-3 text-gray-600">{condText(t)}</td>
                   <td className="px-3 py-3">
@@ -408,11 +585,16 @@ export const GameTaskManager: React.FC = () => {
               <div className="flex gap-2">
                 {(['daily', 'once'] as const).map((tt) => (
                   <label key={tt} className={`flex-1 flex items-center gap-2 px-3 py-2 border rounded-lg cursor-pointer text-sm ${form.task_type === tt ? 'border-purple-400 bg-white text-purple-700 font-medium' : 'border-gray-300 text-gray-600'}`}>
-                    <input type="radio" checked={form.task_type === tt} onChange={() => setForm({ ...form, task_type: tt })} />
-                    {tt === 'daily' ? '每日重复（0 点重置）' : '一次性成就'}
+                    <input type="radio" checked={form.task_type === tt} onChange={() => onTypeChange(tt)} />
+                    {tt === 'daily' ? '每日重复（0 点重置）' : '一次性成就（永不重置）'}
                   </label>
                 ))}
               </div>
+              <p className="text-xs text-gray-500 mt-1">
+                {form.task_type === 'once'
+                  ? '成就用「累计口径」指标，达成后永久点亮。'
+                  : '每日任务用「当日口径」指标，0 点重置。'}
+              </p>
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">排序（小的靠前）</label>
@@ -427,13 +609,21 @@ export const GameTaskManager: React.FC = () => {
 
           <div className="grid grid-cols-2 gap-4 mb-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">统计指标</label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-sm font-medium text-gray-700">统计指标</label>
+                {(() => {
+                  const s = seriesOf(form.metric);
+                  return s
+                    ? <span className="px-2 py-0.5 text-xs rounded" style={{ background: s.color + '1a', color: s.color }}>系列：{s.name}</span>
+                    : null;
+                })()}
+              </div>
               <select
                 value={form.metric}
                 onChange={(e) => onMetricChange(e.target.value)}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
               >
-                {(meta?.metrics || []).map((m) => (
+                {metricsForType(form.task_type).map((m) => (
                   <option key={m.key} value={m.key}>{m.label}</option>
                 ))}
               </select>

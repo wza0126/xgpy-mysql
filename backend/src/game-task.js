@@ -4,7 +4,7 @@
  * 游戏化任务系统 · 后端路由
  * ============================================================
  * 教师端：「刷题打怪系统 → 任务系统」页的任务 CRUD（可编辑 / 启停 / 设适用班级）
- * 学生端：桌面「任务中心 → 每日任务」的列表+进度、领取、红点计数
+ * 学生端：桌面「任务中心 → 每日任务 / 成就殿堂」的列表+进度、领取、红点计数
  *
  * ⛔ 铁律
  *   1) 奖励发放全程**服务端**执行，前端传来的任何金额/奖励概不采信。
@@ -15,6 +15,7 @@
  *   4) 积分走原子 UPDATE（与全站一致），绝不前端读-改-写。
  *
  * 指标统计在 game-task-metrics.js，本文件只负责"判定 + 发奖 + 记账"。
+ * 「系列」由指标派生（metrics.getSeriesOfMetric），不落库、不加列。
  */
 
 const { v4: uuidv4 } = require('uuid');
@@ -22,8 +23,15 @@ const metrics = require('./game-task-metrics');
 
 const REWARD_TYPES = ['points', 'internet_code', 'app', 'equipment'];
 const MAX_REWARD_ITEMS = 6;
+const MAX_BATCH = 500; // 单次批量操作上限
 
 // ---------------- 工具 ----------------
+
+/** 批量操作的 id 列表清洗：去重、去空、限长 */
+function normalizeIdList(v) {
+  if (!Array.isArray(v)) return [];
+  return Array.from(new Set(v.map((x) => String(x).trim()).filter(Boolean)));
+}
 
 function safeJson(v, fallback) {
   if (v === null || v === undefined) return fallback;
@@ -178,20 +186,42 @@ async function loadVisibleTasks(pool, studentId, type) {
     });
 }
 
-/** 本期已领取的 task_id 集合（daily 看今天，once 看永久） */
-async function loadClaimedTaskIds(pool, studentId) {
+/**
+ * 领取记录映射：task_id -> { cycle_key, claimed_at }
+ * daily 看今天、once 看永久；一个任务只会是其一，故同一 task_id 至多一行。
+ */
+async function loadClaimMap(pool, studentId) {
   const [rows] = await pool.query(
-    "SELECT task_id FROM student_task_claims WHERE student_id = ? " +
-    "AND cycle_key = DATE_FORMAT(CURDATE(), '%Y-%m-%d')",
+    'SELECT task_id, cycle_key, claimed_at FROM student_task_claims WHERE student_id = ? ' +
+    "AND (cycle_key = 'once' OR cycle_key = DATE_FORMAT(CURDATE(), '%Y-%m-%d'))",
     [studentId]
   );
-  const set = new Set(rows.map((r) => r.task_id));
-  const [onceRows] = await pool.query(
-    "SELECT task_id FROM student_task_claims WHERE student_id = ? AND cycle_key = 'once'",
-    [studentId]
-  );
-  onceRows.forEach((r) => set.add(r.task_id));
-  return set;
+  const map = new Map();
+  rows.forEach((r) => map.set(r.task_id, { cycle_key: r.cycle_key, claimed_at: r.claimed_at }));
+  return map;
+}
+
+/**
+ * 学生端任务项的统一形状（含由指标派生的 series，供成就殿堂分组）
+ */
+function buildStudentItem(task, progress, claim) {
+  const p = progress || { value: 0, text: '' };
+  const claimed = !!claim;
+  return {
+    id: task.id,
+    name: task.name,
+    description: task.description,
+    icon: task.icon,
+    task_type: task.task_type,
+    unit: task.unit,
+    target_value: task.target_value,
+    rewards: task.rewards,
+    series: metrics.getSeriesOfMetric(task.metric),
+    progress: { value: p.value, text: p.text || '', error: p.error || null },
+    can_claim: !claimed && !p.error && p.value >= task.target_value,
+    claimed,
+    claimed_at: claim ? claim.claimed_at : null,
+  };
 }
 
 // ---------------- 注册 ----------------
@@ -201,7 +231,7 @@ function registerGameTasks(app, deps) {
 
   // ============ 教师端 ============
 
-  // 元数据：可选指标 + 奖励可选项（班级 / 应用 / 装备）
+  // 元数据：可选指标 + 奖励可选项（班级 / 应用 / 装备）+ 系列清单
   // ⚠️ 必须注册在 /:id 之前，否则被 :id 吃掉
   app.get('/api/teacher/game-tasks/meta', authenticate, requireTeacher, async (req, res) => {
     try {
@@ -211,6 +241,7 @@ function registerGameTasks(app, deps) {
       res.json({
         data: {
           metrics: metrics.listMetrics(),
+          series: metrics.listSeries(),
           rewardTypes: [
             { type: 'points', label: '积分' },
             { type: 'internet_code', label: '上网码' },
@@ -386,25 +417,73 @@ function registerGameTasks(app, deps) {
     }
   });
 
+  // 批量启用 / 停用（教师端多选后一次操作）
+  app.post('/api/teacher/game-tasks/batch-update', authenticate, requireTeacher, async (req, res) => {
+    try {
+      const ids = normalizeIdList(req.body && req.body.ids);
+      if (!ids.length) return res.status(400).json({ data: null, error: '未选择任何任务' });
+      if (ids.length > MAX_BATCH) return res.status(400).json({ data: null, error: `一次最多操作 ${MAX_BATCH} 个任务` });
+      const isActive = !!(req.body && req.body.is_active);
+      const ph = ids.map(() => '?').join(',');
+      const [r] = await pool.query(
+        `UPDATE game_tasks SET is_active = ? WHERE id IN (${ph})`,
+        [isActive ? 1 : 0, ...ids]
+      );
+      res.json({ data: { affected: r.affectedRows, is_active: isActive } });
+    } catch (e) {
+      res.status(500).json({ data: null, error: e.message });
+    }
+  });
+
+  // 批量删除（连带清理这些任务的领取记录，避免悬空）
+  app.post('/api/teacher/game-tasks/batch-delete', authenticate, requireTeacher, async (req, res) => {
+    try {
+      const ids = normalizeIdList(req.body && req.body.ids);
+      if (!ids.length) return res.status(400).json({ data: null, error: '未选择任何任务' });
+      if (ids.length > MAX_BATCH) return res.status(400).json({ data: null, error: `一次最多删除 ${MAX_BATCH} 个任务` });
+      const ph = ids.map(() => '?').join(',');
+      const conn = await pool.getConnection();
+      try {
+        await conn.beginTransaction();
+        const [r] = await conn.query(`DELETE FROM game_tasks WHERE id IN (${ph})`, ids);
+        await conn.query(`DELETE FROM student_task_claims WHERE task_id IN (${ph})`, ids);
+        await conn.commit();
+        res.json({ data: { affected: r.affectedRows } });
+      } catch (e) {
+        try { await conn.rollback(); } catch { /* ignore */ }
+        throw e;
+      } finally {
+        conn.release();
+      }
+    } catch (e) {
+      res.status(500).json({ data: null, error: e.message });
+    }
+  });
+
   // ============ 学生端 ============
 
-  // 红点计数：已达成且本期未领取的任务数
-  // ⚠️ 必须注册在 /:id/claim 之前（路径含 pending-count 不会被 :id 吃，但顺序更清晰）
+  // 红点计数：已达成且本期未领取的任务数（**每日 + 成就一并统计**）
+  // ⚠️ 必须注册在 /:id/claim 之前
   app.get('/api/student/daily-tasks/pending-count', authenticate, requireStudent, async (req, res) => {
     try {
       const studentId = req.user.userId;
-      const tasks = await loadVisibleTasks(pool, studentId, 'daily');
-      if (!tasks.length) return res.json({ data: { count: 0 } });
+      const tasks = await loadVisibleTasks(pool, studentId, null);
+      if (!tasks.length) return res.json({ data: { count: 0, daily: 0, once: 0 } });
 
       const progressMap = await metrics.getProgressBatch(pool, tasks, studentId);
-      const claimed = await loadClaimedTaskIds(pool, studentId);
+      const claimMap = await loadClaimMap(pool, studentId);
 
-      let count = 0;
+      // 拆分口径：daily（每日任务）/ once（成就殿堂）；count = 两者之和（桌面入口总红点）
+      let daily = 0;
+      let once = 0;
       for (const t of tasks) {
         const p = progressMap[t.id];
-        if (p && !p.error && p.value >= t.target_value && !claimed.has(t.id)) count++;
+        if (p && !p.error && p.value >= t.target_value && !claimMap.has(t.id)) {
+          if (t.task_type === 'once') once++;
+          else daily++;
+        }
       }
-      res.json({ data: { count } });
+      res.json({ data: { count: daily + once, daily, once } });
     } catch (e) {
       res.status(500).json({ data: null, error: e.message });
     }
@@ -417,26 +496,47 @@ function registerGameTasks(app, deps) {
       const type = req.query.type === 'once' ? 'once' : (req.query.type === 'all' ? null : 'daily');
       const tasks = await loadVisibleTasks(pool, studentId, type);
       const progressMap = await metrics.getProgressBatch(pool, tasks, studentId);
-      const claimed = await loadClaimedTaskIds(pool, studentId);
+      const claimMap = await loadClaimMap(pool, studentId);
 
-      const list = tasks.map((t) => {
-        const p = progressMap[t.id] || { value: 0, text: '' };
-        const isClaimed = claimed.has(t.id);
-        return {
-          id: t.id,
-          name: t.name,
-          description: t.description,
-          icon: t.icon,
-          task_type: t.task_type,
-          unit: t.unit,
-          target_value: t.target_value,
-          rewards: t.rewards,
-          progress: { value: p.value, text: p.text || '', error: p.error || null },
-          can_claim: !isClaimed && !p.error && p.value >= t.target_value,
-          claimed: isClaimed,
-        };
-      });
+      const list = tasks.map((t) => buildStudentItem(t, progressMap[t.id], claimMap.get(t.id)));
       res.json({ data: list });
+    } catch (e) {
+      res.status(500).json({ data: null, error: e.message });
+    }
+  });
+
+  // 我的成就殿堂（仅一次性成就；含系列清单与概览）
+  app.get('/api/student/achievements', authenticate, requireStudent, async (req, res) => {
+    try {
+      const studentId = req.user.userId;
+      const tasks = await loadVisibleTasks(pool, studentId, 'once');
+      const progressMap = await metrics.getProgressBatch(pool, tasks, studentId);
+      const claimMap = await loadClaimMap(pool, studentId);
+
+      const items = tasks.map((t) => buildStudentItem(t, progressMap[t.id], claimMap.get(t.id)));
+      const got = items.filter((i) => i.claimed).length;
+      const ready = items.filter((i) => i.can_claim).length;
+
+      // 最近点亮（once 领取记录里最新的一条）
+      let last = null;
+      try {
+        const [lr] = await pool.query(
+          'SELECT g.name, c.claimed_at FROM student_task_claims c ' +
+          'JOIN game_tasks g ON g.id = c.task_id ' +
+          "WHERE c.student_id = ? AND c.cycle_key = 'once' " +
+          'ORDER BY c.claimed_at DESC LIMIT 1',
+          [studentId]
+        );
+        if (lr.length) last = { name: lr[0].name, claimed_at: lr[0].claimed_at };
+      } catch { /* ignore */ }
+
+      res.json({
+        data: {
+          items,
+          series: metrics.listSeries(),
+          summary: { total: items.length, got, ready, last },
+        },
+      });
     } catch (e) {
       res.status(500).json({ data: null, error: e.message });
     }

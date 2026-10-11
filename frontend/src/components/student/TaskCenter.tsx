@@ -6,6 +6,9 @@ import { useDesktopStore } from '../../store/desktopStore';
 import { useAuth } from '../../hooks/useAuth';
 import { getAuthToken } from '../../utils/authToken';
 import { DailyTasks } from './DailyTasks';
+import { AchievementHall } from './AchievementHall';
+import { useTaskStore } from '../../store/taskStore';
+import { CountPill } from '../common/TaskBadge';
 
 // ============ 类型定义 ============
 
@@ -1538,8 +1541,17 @@ const LeaveWarningModal: React.FC<{ visible: boolean; leaveCount: number; onClos
 // ============ 主组件 ============
 
 export const TaskCenter: React.FC = () => {
-  // 顶层分栏：课堂任务（教师布置） / 每日任务（游戏化，自动统计进度）
-  const [tab, setTab] = useState<'class' | 'daily'>('class');
+  // 顶层分栏：课堂任务（教师布置） / 每日任务（游戏化，当日口径） / 成就殿堂（一次性成就，累计口径）
+  const [tab, setTab] = useState<'class' | 'daily' | 'achieve'>('class');
+
+  // Tab 角标计数（可领取数）：每日任务 / 成就殿堂
+  const dailyCount = useTaskStore((s) => s.dailyCount);
+  const achieveCount = useTaskStore((s) => s.achieveCount);
+
+  // 进入任务中心时即时拉一次，避免依赖桌面 30 秒轮询的延迟
+  useEffect(() => {
+    useTaskStore.getState().fetchPendingCount();
+  }, []);
   const [view, setView] = useState<'list' | 'detail'>('list');
   const [tasks, setTasks] = useState<TaskListItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1614,12 +1626,24 @@ export const TaskCenter: React.FC = () => {
             }`}
           >
             <i className="fa-solid fa-clipboard-list mr-1.5"></i>每日任务
+            <CountPill count={dailyCount} />
+          </button>
+          <button
+            onClick={() => setTab('achieve')}
+            className={`px-4 py-2 rounded-lg text-sm transition-colors ${
+              tab === 'achieve' ? 'bg-amber-50 text-amber-600 font-medium' : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            <i className="fa-solid fa-medal mr-1.5"></i>成就殿堂
+            <CountPill count={achieveCount} />
           </button>
         </div>
       </div>
 
       {tab === 'daily' ? (
         <DailyTasks />
+      ) : tab === 'achieve' ? (
+        <AchievementHall />
       ) : (
         <>
           <AnimatePresence mode="wait">
