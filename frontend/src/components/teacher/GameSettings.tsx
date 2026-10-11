@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
 import { LicenseGuard } from '../common/LicenseGuard';
+import { GameTaskManager } from './GameTaskManager';
 
 export const GameSettings: React.FC = () => {
   const defaultConfigs: Record<string, any> = {
@@ -38,6 +39,7 @@ export const GameSettings: React.FC = () => {
   const tabs = [
     { id: 'points', label: '积分规则', icon: 'fa-coins' },
     { id: 'game', label: '打怪系统', icon: 'fa-swords' },
+    { id: 'tasks', label: '任务系统', icon: 'fa-clipboard-list' },
   ];
 
   useEffect(() => {
@@ -614,27 +616,41 @@ export const GameSettings: React.FC = () => {
               </div>
             </motion.div>
           )}
+
+          {activeTab === 'tasks' && (
+            <motion.div
+              key="tasks"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2 }}
+            >
+              <GameTaskManager />
+            </motion.div>
+          )}
         </AnimatePresence>
 
-        <div className="flex justify-end mt-8 pt-6 border-t border-gray-200">
-          <button
-            onClick={handleSaveConfigs}
-            disabled={saving}
-            className="px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 transition-colors"
-          >
-            {saving ? (
-              <span className="flex items-center gap-2">
-                <i className="fa-solid fa-spinner fa-spin"></i>
-                保存中...
-              </span>
-            ) : (
-              <span className="flex items-center gap-2">
-                <i className="fa-solid fa-save"></i>
-                保存设置
-              </span>
-            )}
-          </button>
-        </div>
+        {activeTab !== 'tasks' && (
+          <div className="flex justify-end mt-8 pt-6 border-t border-gray-200">
+            <button
+              onClick={handleSaveConfigs}
+              disabled={saving}
+              className="px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 transition-colors"
+            >
+              {saving ? (
+                <span className="flex items-center gap-2">
+                  <i className="fa-solid fa-spinner fa-spin"></i>
+                  保存中...
+                </span>
+              ) : (
+                <span className="flex items-center gap-2">
+                  <i className="fa-solid fa-save"></i>
+                  保存设置
+                </span>
+              )}
+            </button>
+          </div>
+        )}
       </div>
     </div>
     </LicenseGuard>

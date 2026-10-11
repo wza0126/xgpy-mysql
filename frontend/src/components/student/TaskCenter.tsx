@@ -5,6 +5,7 @@ import { sanitizeHtml } from '../../utils/htmlUtils';
 import { useDesktopStore } from '../../store/desktopStore';
 import { useAuth } from '../../hooks/useAuth';
 import { getAuthToken } from '../../utils/authToken';
+import { DailyTasks } from './DailyTasks';
 
 // ============ 类型定义 ============
 
@@ -1537,6 +1538,8 @@ const LeaveWarningModal: React.FC<{ visible: boolean; leaveCount: number; onClos
 // ============ 主组件 ============
 
 export const TaskCenter: React.FC = () => {
+  // 顶层分栏：课堂任务（教师布置） / 每日任务（游戏化，自动统计进度）
+  const [tab, setTab] = useState<'class' | 'daily'>('class');
   const [view, setView] = useState<'list' | 'detail'>('list');
   const [tasks, setTasks] = useState<TaskListItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1593,46 +1596,74 @@ export const TaskCenter: React.FC = () => {
 
   return (
     <div className="h-full overflow-y-auto bg-gray-50">
-      <AnimatePresence mode="wait">
-        {view === 'list' ? (
-          <motion.div
-            key="list"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.2 }}
+      {/* 顶层分栏：课堂任务 / 每日任务 */}
+      <div className="sticky top-0 z-10 bg-gray-50/95 backdrop-blur px-6 pt-5 pb-3">
+        <div className="max-w-5xl mx-auto inline-flex gap-1 bg-white rounded-xl p-1 border border-gray-100">
+          <button
+            onClick={() => setTab('class')}
+            className={`px-4 py-2 rounded-lg text-sm transition-colors ${
+              tab === 'class' ? 'bg-indigo-50 text-indigo-600 font-medium' : 'text-gray-500 hover:text-gray-700'
+            }`}
           >
-            <TaskListView
-              tasks={tasks}
-              loading={loading}
-              error={error}
-              onRetry={loadTasks}
-              onSelectTask={handleSelectTask}
-            />
-          </motion.div>
-        ) : (
-          <motion.div
-            key="detail"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.2 }}
+            <i className="fa-solid fa-chalkboard-user mr-1.5"></i>课堂任务
+          </button>
+          <button
+            onClick={() => setTab('daily')}
+            className={`px-4 py-2 rounded-lg text-sm transition-colors ${
+              tab === 'daily' ? 'bg-indigo-50 text-indigo-600 font-medium' : 'text-gray-500 hover:text-gray-700'
+            }`}
           >
-            {currentTaskId && (
-              <TaskDetailView
-                taskId={currentTaskId}
-                onBack={handleBack}
-              />
-            )}
-          </motion.div>
-        )}
-      </AnimatePresence>
+            <i className="fa-solid fa-clipboard-list mr-1.5"></i>每日任务
+          </button>
+        </div>
+      </div>
 
-      <LeaveWarningModal
-        visible={showLeaveWarning}
-        leaveCount={leaveCount}
-        onClose={() => setShowLeaveWarning(false)}
-      />
+      {tab === 'daily' ? (
+        <DailyTasks />
+      ) : (
+        <>
+          <AnimatePresence mode="wait">
+            {view === 'list' ? (
+              <motion.div
+                key="list"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.2 }}
+              >
+                <TaskListView
+                  tasks={tasks}
+                  loading={loading}
+                  error={error}
+                  onRetry={loadTasks}
+                  onSelectTask={handleSelectTask}
+                />
+              </motion.div>
+            ) : (
+              <motion.div
+                key="detail"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.2 }}
+              >
+                {currentTaskId && (
+                  <TaskDetailView
+                    taskId={currentTaskId}
+                    onBack={handleBack}
+                  />
+                )}
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          <LeaveWarningModal
+            visible={showLeaveWarning}
+            leaveCount={leaveCount}
+            onClose={() => setShowLeaveWarning(false)}
+          />
+        </>
+      )}
     </div>
   );
 };

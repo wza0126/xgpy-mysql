@@ -89,7 +89,7 @@ async function login(username, password) {
     section('B. 教师端 · 检查器清单');
     const kinds = await api('GET', '/api/teacher/access-op/check-kinds', { token: teacherToken });
     eq(kinds.status, 200, 'B1 HTTP 200');
-    eq(kinds.body?.data?.kinds?.length, 9, 'B2 共 9 种检查器');
+    eq(kinds.body?.data?.kinds?.length, 13, 'B2 共 13 种检查器（一期 9 + 二期 4）');
     ok(!!kinds.body?.data?.doc?.accdb_primary_key, 'B3 附带字段说明文档');
 
     section('C. 教师端 · 答案解析 + 自动骨架');
@@ -154,6 +154,25 @@ async function login(username, password) {
     ok(sub2.body?.data?.duplicate === true, 'G2 duplicate = true（未重复记分）');
     eq(sub2.body?.data?.submission_id, d1?.submission_id, 'G3 回放同一条提交记录');
 
+    section('H2. 二期 · 提交带导出附件（extras 上传与落库）');
+    {
+      const fd = new FormData();
+      fd.append('file', new Blob([fs.readFileSync(ANSWER_WRONG)], { type: 'application/octet-stream' }), 'answer.accdb');
+      fd.append('extras', new Blob([Buffer.from('国家,金牌,银牌\n挪威,16,8\n')], { type: 'text/plain' }), 'tmp_acc_export.txt');
+      fd.append('extras', new Blob([fs.readFileSync(path.join(FIX, 'access_winter_medals.xlsx'))], { type: 'application/octet-stream' }), 'tmp_acc_medals.xlsx');
+      const res = await fetch(BASE + `/api/student/access-op/${QUESTION_ID}/submit`, { method: 'POST', headers: { Authorization: 'Bearer ' + stuToken }, body: fd });
+      const j = await res.json().catch(() => null);
+      eq(res.status, 200, 'H2-1 HTTP 200');
+      eq(j?.data?.duplicate, false, 'H2-2 不触发幂等重放（错卷主文件 + 新附件组合）');
+      if (j?.data?.submission_id) createdSubmissionIds.push(j.data.submission_id);
+      const [efRows] = await conn.query('SELECT extra_files, score_obtained FROM wps_op_submissions WHERE id = ?', [j?.data?.submission_id || 'x']);
+      let ef = [];
+      try { ef = JSON.parse(efRows[0]?.extra_files || '[]'); } catch { /* ignore */ }
+      eq(ef.length, 2, 'H2-3 extra_files 记录 2 个附件');
+      ok('H2-4 附件落在 extras 目录', ef.length > 0 && ef.every((x) => /^\/uploads\/access-op\/extras\//.test(String(x.path))));
+      ok('H2-5 附件类型识别正确', ef.some((x) => x.kind === 'xlsx') && ef.some((x) => x.kind === 'text'));
+      eq(Number(efRows[0]?.score_obtained), 0, 'H2-6 错卷主文件判分不受附件影响（0 分）');
+    }
     section('H. 学生端 · 错卷只丢对应分');
     const sub3 = await upload(`/api/student/access-op/${QUESTION_ID}/submit`, ANSWER_WRONG, { token: stuToken });
     eq(sub3.status, 200, 'H1 HTTP 200');
@@ -162,6 +181,7 @@ async function login(username, password) {
     if (sub3.body?.data?.submission_id) createdSubmissionIds.push(sub3.body.data.submission_id);
     const step1 = sub3.body?.data?.detail?.steps?.[0];
     ok(step1 && step1.checks && step1.checks[0] && step1.checks[0].pass === false, 'H4 表存在评分点不通过');
+
 
     section('I. 判分结果查询');
     const res1 = await api('GET', `/api/student/access-op/${QUESTION_ID}/result`, { token: stuToken });
@@ -240,6 +260,26 @@ async function login(username, password) {
           } catch { /* ignore */ }
         }
         if (removed) console.log(`  已删除孤儿作答文件 ${removed} 个`);
+      }
+      // extras 目录：只删「库里已无引用」且落盘超过 10 秒的孤儿附件（口径同上）
+      const extrasDir = path.join(__dirname, '../../uploads/access-op/extras');
+      if (fs.existsSync(extrasDir)) {
+        const [liveRows3] = await conn.query("SELECT extra_files FROM wps_op_submissions WHERE kind='access' AND extra_files IS NOT NULL");
+        const liveExtra = new Set();
+        for (const r of liveRows3) {
+          try { (JSON.parse(r.extra_files) || []).forEach((x) => liveExtra.add(path.basename(String(x.path || '')))); } catch { /* ignore */ }
+        }
+        let removedX = 0;
+        for (const f of fs.readdirSync(extrasDir)) {
+          try {
+            if (liveExtra.has(f)) continue;
+            const fp = path.join(extrasDir, f);
+            if (Date.now() - fs.statSync(fp).mtimeMs < 10 * 1000) continue;
+            fs.unlinkSync(fp);
+            removedX++;
+          } catch { /* ignore */ }
+        }
+        if (removedX) console.log(`  已删除孤儿附件 ${removedX} 个`);
       }
       // ⚠️ 差集语义（学生 a 也是日常账号，不能要求绝对 0）：只断言「本次新产生的行」已清干净
       const [[as]] = await conn.query("SELECT COUNT(*) n FROM wps_op_submissions WHERE kind = 'access' AND question_id = ? AND student_id = (SELECT id FROM profiles WHERE username='a' LIMIT 1) AND id NOT IN (?)", [QUESTION_ID, baselineMySubIds.size ? [...baselineMySubIds] : ['x']]);

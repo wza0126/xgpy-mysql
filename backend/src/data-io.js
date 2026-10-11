@@ -26,7 +26,7 @@ const DOMAIN_DEFS = [
   //    操作题提交与判分明细属于答题记录，与 student_answers 同域。
   { id: 'answers', name: '答题记录', tables: ['student_answers', 'wps_op_submissions', 'wrong_questions', 'question_explained_marks'] },
   { id: 'points', name: '积分与游戏化', tables: ['point_transactions', 'pets', 'pet_config', 'pet_foods', 'student_pets', 'student_equipments', 'student_skins', 'student_buffs', 'equipments', 'prizes', 'prize_class_visibility', 'exchange_records', 'pet_tips', 'internet_codes'] },
-  { id: 'tasks', name: '课堂任务', tables: ['task_resource', 'task_question', 'task_class', 'task_study_log', 'notes'] },
+  { id: 'tasks', name: '课堂任务', tables: ['task_resource', 'task_question', 'task_class', 'task_study_log', 'notes', 'game_tasks', 'student_task_claims'] },
   { id: 'learning', name: '学习活动', tables: ['word_list', 'student_word_progress', 'learn_visited_records', 'studious_checkins', 'keyboard_lesson_progress', 'typing_rooms', 'typing_scores', 'typing_duel_records', 'roll_call_layout', 'roll_call_seating', 'roll_call_attendance'] },
   { id: 'ai', name: 'AI与编程', tables: ['ai_qa_history', 'ai_qa_knowledge_base', 'ai_works', 'ai_workshop_config', 'ai_work_purchases', 'ai_work_ratings', 'ai_work_reviews', 'ai_work_versions', 'python_tasks', 'python_submissions', 'python_drafts', 'python_gradings', 'python_wrong_problems', 'python_magic_progress', 'code_realm_progress', 'code_snippets'] },
   { id: 'pk', name: 'PK对战', tables: ['pk_rooms', 'pk_room_players', 'pk_match_answers', 'pk_battle_configs', 'pk_battle_config_class_visibility', 'pk_rank_history'] },

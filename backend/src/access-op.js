@@ -83,6 +83,16 @@ function registerAccessOp(app, deps) {
     if (DB_EXT.test(original)) return cb(null, true);
     cb(new Error('作答文件只支持 .accdb / .mdb。请在 Access 中「文件 → 保存」后再上传。'));
   };
+  // 二期：提交接口主文件(file)=.accdb，导出附件(extras)=txt/csv/xlsx —— 同一个 multer 实例按字段名分流
+  const submitFileFilter = (req, file, cb) => {
+    const original = fixUtf8Name(file.originalname);
+    if (file.fieldname === 'extras') {
+      if (EXTRA_EXT.test(original)) return cb(null, true);
+      return cb(new Error('导出附件只支持 .txt / .csv / .xlsx / .xlsm。'));
+    }
+    if (DB_EXT.test(original)) return cb(null, true);
+    cb(new Error('作答文件只支持 .accdb / .mdb。请在 Access 中「文件 → 保存」后再上传。'));
+  };
   const templateFileFilter = (req, file, cb) => {
     const original = fixUtf8Name(file.originalname);
     if (TEMPLATE_EXT.test(original)) return cb(null, true);
@@ -101,7 +111,15 @@ function registerAccessOp(app, deps) {
 
   const LIMIT = 60 * 1024 * 1024; // .accdb 里可能有 OLE 附件，给到 60MB
   const templateUpload = multer({ storage: makeStorage(templateDir, 'tpl', '.accdb'), limits: { fileSize: LIMIT }, fileFilter: templateFileFilter });
-  const submissionUpload = multer({ storage: makeStorage(submissionDir, 'sub', '.accdb'), limits: { fileSize: LIMIT }, fileFilter: dbFileFilter });
+  // 二期：提交接口专用 storage —— extras 落 extras 目录，主文件落 submissions 目录
+  const submitStorage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, file.fieldname === 'extras' ? extraDir : submissionDir),
+    filename: (req, file, cb) => {
+      const ext = (path.extname(fixUtf8Name(file.originalname)) || '.accdb').toLowerCase();
+      cb(null, (file.fieldname === 'extras' ? 'ext' : 'sub') + '-' + Date.now() + '-' + Math.round(Math.random() * 1e9) + ext);
+    },
+  });
+  const submissionUpload = multer({ storage: submitStorage, limits: { fileSize: LIMIT }, fileFilter: submitFileFilter });
   const extraUpload = multer({ storage: makeStorage(extraDir, 'ext', '.txt'), limits: { fileSize: 20 * 1024 * 1024 }, fileFilter: extraFileFilter });
   const videoUpload = multer({ storage: makeStorage(videoDir, 'vid', '.mp4'), limits: { fileSize: VIDEO_MAX_MB * 1024 * 1024 }, fileFilter: videoFileFilter });
 
@@ -563,7 +581,15 @@ function registerAccessOp(app, deps) {
 
         let result;
         try {
-          result = await grader.gradeFile(main.path, spec);
+          // 二期：导出题附件一并送判（accdb_export 检查器按 type/match 匹配附件）
+          const extraPayload = [];
+          for (const f of extras) {
+            try {
+              const name = fixUtf8Name(f.originalname);
+              extraPayload.push({ name, kind: guessKind(name), buffer: fs.readFileSync(f.path) });
+            } catch (e) { /* 读不到的附件按"没有"处理 */ }
+          }
+          result = await grader.gradeFile(main.path, spec, extraPayload);
         } catch (gradeErr) {
           cleanup(main); extras.forEach(cleanup);
           return res.status(400).json({

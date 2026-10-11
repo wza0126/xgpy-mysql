@@ -374,7 +374,9 @@ async function setFileInput(b, acceptIncludes, absPath) {
     ok('★ 含「记录字段值（改记录）」', /记录字段值/.test(akText));
     ok('★ 含「排序」/「筛选」', /排序/.test(akText) && /筛选/.test(akText));
     ok('★ 含「对象存在（查询 / 窗体 / 报表…）」', /对象存在/.test(akText));
-    ok('★ Access 评分点共 9 种', (accKinds.options || []).length === 9, 'n=' + (accKinds.options || []).length);
+    ok('★ Access 评分点共 13 种（一期 9 + 二期 4）', (accKinds.options || []).length === 13, 'n=' + (accKinds.options || []).length);
+    const kindLabels = (accKinds.options || []).map((o) => String(o.value ?? o.label ?? o));
+    ok('★ 二期检查器已进下拉（查询/关系/格式/导出）', ['查询', '表间关系', '字段格式', '导出附件'].every((w) => kindLabels.some((l) => l.includes(w))), JSON.stringify(kindLabels).slice(0, 150));
     ok('⛔ Access 编辑器里不应出现 WPS 评分点类型', !/合并单元格/.test(akText));
 
     const tplAcceptAcc = await b.evalJs(`(() => { const i = Array.from(document.querySelectorAll('input[type=file]')).find(x => (x.accept||'').includes('.accdb') && x.multiple); return i ? (i.accept + '|multiple=' + i.multiple) : 'none'; })()`);

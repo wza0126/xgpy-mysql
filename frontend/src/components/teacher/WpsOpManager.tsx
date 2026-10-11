@@ -88,7 +88,7 @@ interface KindMeta {
 // ------------------------------------------------------------------
 // 评分点类型字典 —— 与后端判分引擎的 CHECKERS 一一对应
 //   · wps-grader.js    → 25 种（OOXML）
-//   · access-grader.js →  9 种（.accdb）
+//   · access-grader.js → 13 种（.accdb；二期含查询/关系/字段格式/导出附件）
 // 改后端检查器必须同步这里，否则教师端下拉里选不到。
 // ------------------------------------------------------------------
 
@@ -304,6 +304,47 @@ const ACCESS_KIND_META: Record<string, KindMeta> = {
       { key: 'name', label: '对象名', type: 'text' },
       { key: 'object_type', label: '类型(table/query/form/report/macro/module)', type: 'text' },
       { key: 'absent', label: '要求不存在', type: 'bool' },
+    ],
+  },
+  // ---- 二期四类（查询 / 关系 / 字段格式 / 导出附件）----
+  accdb_query: {
+    label: '查询（存在/数据源/输出列/条件/排序）',
+    fields: [
+      { key: 'name', label: '查询名', type: 'text' },
+      { key: 'absent', label: '要求不存在', type: 'bool' },
+      { key: 'from', label: '数据源表名', type: 'text' },
+      { key: 'select', label: '应输出的列（逗号分隔）', type: 'csv' },
+      { key: 'where_contains', label: '条件须包含（逗号分隔）', type: 'csv' },
+      { key: 'group_by_contains', label: '分组须包含（逗号分隔）', type: 'csv' },
+      { key: 'order_by_contains', label: '排序须包含（逗号分隔）', type: 'csv' },
+    ],
+  },
+  accdb_relation: {
+    label: '表间关系',
+    fields: [
+      { key: 'table', label: '表 A', type: 'text' },
+      { key: 'column', label: '字段 A（可留空）', type: 'text' },
+      { key: 'ref_table', label: '表 B（相关表）', type: 'text' },
+      { key: 'ref_column', label: '字段 B（可留空）', type: 'text' },
+      { key: 'strict_direction', label: '限定方向（默认双向匹配）', type: 'bool' },
+      { key: 'absent', label: '要求无该关系', type: 'bool' },
+    ],
+  },
+  accdb_field_format: {
+    label: '字段格式（实验性，慎用）',
+    fields: [
+      { key: 'table', label: '表名', type: 'text' },
+      { key: 'format', label: '格式(currency货币/fixed固定/percent百分比…)', type: 'text' },
+    ],
+  },
+  accdb_export: {
+    label: '导出附件（txt/csv/xlsx）',
+    fields: [
+      { key: 'type', label: '附件类型(txt/csv/xlsx)', type: 'text' },
+      { key: 'match', label: '文件名包含（可留空）', type: 'text' },
+      { key: 'line_count', label: '行数（xlsx=非空单元格数）', type: 'number' },
+      { key: 'contains', label: '内容须包含（逗号分隔）', type: 'csv' },
+      { key: 'absent', label: '内容不得包含（逗号分隔）', type: 'csv' },
     ],
   },
 };

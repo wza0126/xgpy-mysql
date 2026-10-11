@@ -30,8 +30,9 @@ function eq(a, b, label) { ok(a === b, label, `期望 ${JSON.stringify(b)}，实
 
 (async () => {
   console.log('\n=== A. 检查器注册表 ===');
-  eq(g.CHECK_KINDS.length, 9, 'A1 共 9 种检查器');
-  ['accdb_table', 'accdb_columns', 'accdb_column_type', 'accdb_primary_key', 'accdb_rows', 'accdb_row_update', 'accdb_sort', 'accdb_filter', 'accdb_object'].forEach((k) => ok(g.CHECK_KINDS.includes(k), 'A2 含检查器 ' + k));
+  eq(g.CHECK_KINDS.length, 13, 'A1 共 13 种检查器（一期 9 + 二期 4）');
+  ['accdb_table', 'accdb_columns', 'accdb_column_type', 'accdb_primary_key', 'accdb_rows', 'accdb_row_update', 'accdb_sort', 'accdb_filter', 'accdb_object',
+   'accdb_query', 'accdb_relation', 'accdb_field_format', 'accdb_export'].forEach((k) => ok(g.CHECK_KINDS.includes(k), 'A2 含检查器 ' + k));
 
   console.log('\n=== B. 类型归一化 ===');
   eq(g.normType('短文本'), 'text', 'B1 短文本 → text');
@@ -178,6 +179,94 @@ function eq(a, b, label) { ok(a === b, label, `期望 ${JSON.stringify(b)}，实
   const bad = g.validateSpec({ full_score: 10, steps: [{ title: 'x', score: 5, checks: [{ kind: 'nope', score: 5 }] }] }, 10);
   ok(!bad.ok, 'J1 未知检查类型被拦截');
   ok(bad.warnings.length >= 1, 'J2 总分不一致有警告');
+  const exp = g.validateSpec({ full_score: 10, steps: [{ title: 'y', score: 10, checks: [{ kind: 'accdb_field_format', table: 'T', format: 'currency', score: 10 }] }] }, 10);
+  ok(exp.ok && exp.warnings.some((w) => w.includes('实验性')), 'J3 accdb_field_format 触发实验性警告');
+
+  console.log('\n=== K. 二期 · 查询检查器（pk_sample 内置 3 个真实查询） ===');
+  const mQ = g.buildModel(fs.readFileSync(PK_DB));
+  eq(mQ.queries.length, 3, 'K1 解析出 3 个用户查询（~sq_ 隐藏查询被排除）');
+  const q1 = mQ.queryByName.get('qrycomputerhardwareinownerorder');
+  ok(!!q1, 'K2 大小写不敏感取查询');
+  eq(q1.tables.join(','), 'Asset Items', 'K3 数据源 = Asset Items');
+  eq(q1.select.length, 6, 'K4 输出 6 列');
+  ok(q1.where.length === 1 && q1.where[0].includes('Computer Hardware'), 'K5 WHERE 条件解析');
+  ok(q1.orderBy.length === 1 && q1.orderBy[0].includes('Owner'), 'K6 ORDER BY 解析');
+  const specQ = { steps: [
+    { title: '存在', score: 2, checks: [{ kind: 'accdb_query', name: 'qryComputerHardwareInOwnerOrder', score: 2 }] },
+    { title: '数据源+列', score: 3, checks: [{ kind: 'accdb_query', name: 'qryComputerHardwareInOwnerOrder', from: 'Asset Items', select: ['Asset No', 'Owner'], score: 3 }] },
+    { title: '条件', score: 2, checks: [{ kind: 'accdb_query', name: 'qryComputerHardwareInOwnerOrder', where_contains: ['"Computer Hardware"'], score: 2 }] },
+    { title: '排序', score: 2, checks: [{ kind: 'accdb_query', name: 'qryComputerHardwareInOwnerOrder', order_by_contains: ['Owner'], score: 2 }] },
+    { title: '汇总', score: 3, checks: [{ kind: 'accdb_query', name: 'qryCostsSummedByOwner', select: ['SumOfCost'], group_by_contains: ['Owner'], score: 3 }] },
+    { title: '隐藏不算', score: 2, checks: [{ kind: 'accdb_query', name: '~sq_rrptAssetsGroupedByOwners', score: 2 }] },
+    { title: '应不存在', score: 2, checks: [{ kind: 'accdb_query', name: '查询xyz', absent: true, score: 2 }] },
+    { title: '错列', score: 3, checks: [{ kind: 'accdb_query', name: 'qryCostsSummedByOwner', select: ['不存在列'], score: 3 }] },
+  ] };
+  const rQ = await g.gradeFile(PK_DB, specQ);
+  eq(rQ.score, 14, 'K7 得 14/19（隐藏查询步 + 错列步共丢 5 分）');
+  eq(rQ.steps[7].checks[0].pass, false, 'K8 错误输出列只丢该步');
+  ok(rQ.steps[7].checks[0].note.includes('不存在列'), 'K9 丢分原因可读');
+  ok(rQ.steps[5].checks[0].pass === false, 'K9b 隐藏 ~sq_ 查询判"不存在"（无法被学生命中）');
+  const rQn = await g.gradeFile(PK_DB, { steps: specQ.steps.filter((_, i) => i !== 5 && i !== 7) });
+  ok(rQn.score === rQn.full_score, 'K10 正确卷满分（含 absent / 隐藏查询排除）');
+
+  console.log('\n=== L. 二期 · 关系检查器（夹具无用户关系：验证系统关系过滤 + 判负路径） ===');
+  eq(mQ.relations.length, 0, 'L1 系统关系被过滤（库里原有 MSysAccessStorage/NavPane 关系）');
+  const specR = { steps: [
+    { title: '应无关系', score: 2, checks: [{ kind: 'accdb_relation', table: 'A', ref_table: 'B', absent: true, score: 2 }] },
+    { title: '有关系', score: 2, checks: [{ kind: 'accdb_relation', table: 'A', ref_table: 'B', column: 'x', ref_column: 'y', score: 2 }] },
+  ] };
+  const rR = await g.gradeFile(PK_DB, specR);
+  ok(rR.steps[0].checks[0].pass === true, 'L2 absent:true → 无关系时通过');
+  ok(rR.steps[1].checks[0].pass === false, 'L3 无用户关系 → 要求有关系时判负');
+  ok((rR.steps[1].checks[0].got || '').includes('没有用户关系') || rR.steps[1].checks[0].got === '无', 'L4 got 文案可读');
+  const specR2 = { steps: [{ title: '参数缺失', score: 2, checks: [{ kind: 'accdb_relation', score: 2 }] }] };
+  const rR2 = await g.gradeFile(PK_DB, specR2);
+  ok(rR2.steps[0].checks[0].pass === false && rR2.steps[0].checks[0].got.includes('参数缺失'), 'L5 缺参数不抛错、判负');
+
+  console.log('\n=== M. 二期 · 字段格式（实验性） ===');
+  const specFmt = { steps: [
+    { title: '未知格式不误报', score: 2, checks: [{ kind: 'accdb_field_format', table: 'Asset Items', format: 'currency', score: 2 }] },
+    { title: '表不存在', score: 2, checks: [{ kind: 'accdb_field_format', table: '没有的表', format: 'fixed', score: 2 }] },
+  ] };
+  const rFmt = await g.gradeFile(PK_DB, specFmt);
+  ok(rFmt.steps[0].checks[0].pass === false, 'M1 夹具无 currency 格式 → 判负（不得误报）');
+  ok(rFmt.steps[0].checks[0].note.includes('人工复核'), 'M2 判负注明实验性/人工复核');
+  ok(rFmt.steps[1].checks[0].got.includes('表不存在'), 'M3 表不存在正常报');
+
+  console.log('\n=== N. 二期 · 导出附件 ===');
+  const xlsxBuf = fs.readFileSync(path.join(FIX, 'access_winter_medals.xlsx'));
+  const txtBuf = Buffer.from('国家,金牌,银牌,铜牌\n挪威,16,8,13\n德国,12,10,5\n中国,9,4,2\r\n', 'utf8');
+  const gbkBuf = Buffer.from([0xB9, 0xFA, 0xBC, 0xD2, 0x2C, 0xBD, 0xF0, 0xC5, 0xC6, 0x0D, 0x0A]); // '国家,金牌' GBK
+  const extras = [
+    { name: '奖牌榜导出.txt', kind: 'text', buffer: txtBuf },
+    { name: '奖牌榜.xlsx', kind: 'xlsx', buffer: xlsxBuf },
+    { name: 'gbk.txt', kind: 'text', buffer: gbkBuf },
+  ];
+  const specE = { steps: [
+    { title: 'txt行数', score: 2, checks: [{ kind: 'accdb_export', type: 'txt', line_count: 4, score: 2 }] },
+    { title: 'txt内容含/不含', score: 3, checks: [{ kind: 'accdb_export', type: 'txt', contains: ['挪威', '中国,9'], absent: ['美国'], score: 3 }] },
+    { title: 'xlsx单元格', score: 2, checks: [{ kind: 'accdb_export', type: 'xlsx', contains: ['奖牌'], score: 2 }] },
+    { title: 'GBK解码', score: 2, checks: [{ kind: 'accdb_export', type: 'txt', match: 'gbk', contains: ['金牌'], score: 2 }] },
+    { title: 'match未命中', score: 2, checks: [{ kind: 'accdb_export', type: 'txt', match: '成绩单', score: 2 }] },
+    { title: '类型过滤后无附件', score: 2, checks: [{ kind: 'accdb_export', type: 'xlsx', match: '导出', score: 2 }] },
+    { title: '完全没附件', score: 2, checks: [{ kind: 'accdb_export', type: 'txt', score: 2 }] },
+  ] };
+  const rExp = await g.gradeFile(PK_DB, specE, extras);
+  eq(rExp.score, 9, 'N1 前四步全对 9 分（match未命中/类型过滤/空条件 三步判负）');
+  ok(rExp.extras.length === 3 && rExp.extras.every((x) => !x.error), 'N2 三个附件全部解析成功');
+  eq(rExp.extras.find((x) => x.name === '奖牌榜.xlsx').lines, 66, 'N3 xlsx 拆出 66 个非空单元格');
+  ok(rExp.steps[4].checks[0].note.includes('文件名'), 'N4 match 未命中提示文件名');
+  const rExp2 = await g.gradeFile(PK_DB, specE);
+  ok(rExp.steps[6].checks[0].pass === false && rExp.steps[6].checks[0].note.includes('未配置判定条件'), 'N5 空条件不得"交了就给分"');
+  eq(rExp2.score, 0, 'N6 不传 extras 时全判负（0 分）');
+
+  console.log('\n=== O. suggestSpec 覆盖查询与关系 ===');
+  const sug = await g.suggestSpec(PK_DB, { full_score: 30 });
+  ok(sug.steps.some((s) => s.id.startsWith('query_')), 'O1 自动生成查询步骤');
+  ok(sug.steps.some((s) => s.id.startsWith('query_') && s.checks.some((c) => c.kind === 'accdb_query' && c.select)), 'O2 查询步骤含输出列检查');
+  eq(sug.steps.filter((s) => s.id.startsWith('rel_')).length, 0, 'O3 无用户关系 → 不生成关系步骤');
+  const vs = g.validateSpec(sug, 30);
+  ok(vs.ok, 'O4 生成的规格通过校验');
 
   console.log('\n========================================');
   console.log(`结果：${pass} 通过 / ${fail} 失败`);

@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>游戏化任务系统 · 交互原型</title>
+<style>
+:root{
+  --bg:#eceff5; --card:#ffffff; --line:#e6e9ef; --line2:#d7dbe3;
+  --text:#1f2937; --muted:#64748b; --faint:#9aa4b2;
+  --brand:#4f46e5; --brandbg:#eef2ff; --branddk:#3730a3;
+  --amber:#f59e0b; --amberbg:#fdf2dc; --ambertx:#b45309;
+  --green:#22c55e; --greentx:#15803d;
+  --blue:#2563eb; --bluebg:#e8f0fe;
+  --red:#ef4444;
+  --r:14px;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{
+  background:var(--bg); color:var(--text); font-size:14px; line-height:1.6;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+button{font-family:inherit;cursor:pointer;}
+h1,h2,h3,p{margin:0;}
+
+.pbar{
+  display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;
+  padding:14px 24px;background:#fff;border-bottom:1px solid var(--line);
+  position:sticky;top:0;z-index:50;
+}
+.brand{display:flex;align-items:center;gap:10px;font-size:14px;}
+.brand .mk{width:22px;height:22px;border-radius:7px;background:linear-gradient(135deg,#6366f1,#a855f7);}
+.brand b{font-weight:600;}
+.brand span{color:var(--faint);font-size:12px;}
+.nav{display:flex;gap:6px;background:#f2f4f8;padding:4px;border-radius:11px;}
+.nav button{
+  border:0;background:transparent;color:var(--muted);font-size:13px;
+  padding:7px 15px;border-radius:8px;transition:.15s;
+}
+.nav button.on{background:#fff;color:var(--brand);font-weight:600;box-shadow:0 1px 3px rgba(15,23,42,.08);}
+
+.wrap{max-width:1160px;margin:0 auto;padding:24px;}
+.view{display:none;}
+.view.on{display:block;animation:fade .25s ease;}
+@keyframes fade{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:none;}}
+
+.hint{
+  display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted);
+  background:var(--brandbg);border:1px solid #dfe3ff;border-radius:10px;
+  padding:9px 14px;margin-bottom:18px;
+}
+.hint i{width:6px;height:6px;border-radius:50%;background:var(--brand);}
+
+/* ===== 学生虚拟桌面 ===== */
+.desktop{background:#111827;border-radius:18px;overflow:hidden;box-shadow:0 10px 40px rgba(15,23,42,.18);}
+.dtbar{display:flex;align-items:center;justify-content:space-between;padding:14px 22px;border-bottom:1px solid rgba(255,255,255,.08);}
+.dtleft{display:flex;align-items:center;gap:11px;color:#e5e7eb;font-size:13.5px;}
+.dtleft .av{width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,#6366f1,#a855f7);display:flex;align-items:center;justify-content:center;color:#fff;font-size:13px;font-weight:600;}
+.dtright{display:flex;gap:8px;}
+.dtchip{background:rgba(255,255,255,.09);color:#cbd5e1;font-size:12.5px;padding:6px 13px;border-radius:9px;}
+.dtgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(126px,1fr));gap:14px;padding:28px 22px 34px;}
+.dicon{
+  display:flex;flex-direction:column;align-items:center;gap:9px;padding:16px 8px;border-radius:14px;
+  cursor:pointer;transition:.16s;border:1px solid transparent;
+}
+.dicon:hover{background:rgba(255,255,255,.07);border-color:rgba(255,255,255,.1);}
+.dicon .box{
+  width:54px;height:54px;border-radius:15px;display:flex;align-items:center;justify-content:center;
+  position:relative;
+}
+.dicon .nm{font-size:12.5px;color:#e2e8f0;}
+.dicon.off{opacity:.45;cursor:default;}
+.dicon.off:hover{background:transparent;border-color:transparent;}
+.badge{
+  position:absolute;top:-6px;right:-6px;min-width:20px;height:20px;padding:0 6px;
+  border-radius:10px;background:var(--red);color:#fff;font-size:11.5px;font-weight:600;
+  display:flex;align-items:center;justify-content:center;border:2.5px solid #111827;
+  animation:pop .3s ease;
+}
+@keyframes pop{0%{transform:scale(.4);}60%{transform:scale(1.18);}100%{transform:scale(1);}}
+.pulse{position:absolute;inset:0;border-radius:15px;border:2px solid var(--red);animation:ripple 1.8s ease-out infinite;}
+@keyframes ripple{0%{opacity:.65;transform:scale(1);}100%{opacity:0;transform:scale(1.35);}}
+
+/* ===== 任务中心 ===== */
+.win{background:var(--card);border-radius:18px;border:1px solid var(--line);overflow:hidden;box-shadow:0 2px 18px rgba(15,23,42,.05);}
+.winhead{display:flex;align-items:center;gap:14px;padding:20px 24px;border-bottom:1px solid var(--line);}
+.wicon{width:46px;height:46px;border-radius:13px;background:linear-gradient(135deg,#6366f1,#8b5cf6);display:flex;align-items:center;justify-content:center;color:#fff;}
+.winhead h1{font-size:18px;font-weight:600;}
+.winhead p{font-size:12.5px;color:var(--faint);}
+.body{padding:20px 24px 26px;}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px;}
+.stat{background:#f6f8fb;border-radius:12px;padding:13px 16px;}
+.stat span{font-size:12.5px;color:var(--muted);display:block;}
+.stat b{font-size:22px;font-weight:600;letter-spacing:-.5px;}
+.stat b i{font-size:12.5px;font-weight:400;color:var(--faint);font-style:normal;}
+.stat b.hot{color:var(--red);}
+.tabs{display:flex;gap:8px;margin-bottom:16px;}
+.tab{border:0;background:transparent;color:var(--muted);font-size:13.5px;padding:7px 16px;border-radius:9px;display:flex;align-items:center;gap:7px;}
+.tab em{font-style:normal;font-size:11.5px;background:#eef1f6;color:var(--faint);padding:1px 7px;border-radius:20px;}
+.tab.on{background:var(--brandbg);color:var(--brand);font-weight:600;}
+.tab.on em{background:#dfe4ff;color:var(--branddk);}
+.tasks{display:flex;flex-direction:column;gap:11px;}
+
+.card{
+  display:flex;gap:14px;align-items:center;padding:15px 17px;border-radius:14px;
+  border:1px solid var(--line);background:#fff;transition:.16s;
+}
+.card.ready{border:1.5px solid #f0b056;background:#fffcf4;}
+.card.done{background:#fafbfc;}
+.cicn{width:44px;height:44px;border-radius:13px;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+.cicn svg{width:21px;height:21px;}
+.cmain{flex:1;min-width:0;}
+.ctop{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.cname{font-size:14.5px;font-weight:600;}
+.tag{font-size:11px;padding:1.5px 8px;border-radius:20px;}
+.tag.daily{background:var(--brandbg);color:var(--brand);}
+.tag.ach{background:var(--amberbg);color:var(--ambertx);}
+.cdesc{font-size:12.5px;color:var(--muted);margin-top:2px;}
+.prow{margin-top:9px;display:flex;align-items:center;gap:10px;}
+.pbar{flex:1;height:6px;border-radius:3px;background:#eef1f6;overflow:hidden;max-width:340px;}
+.pbar>div{height:100%;border-radius:3px;transition:width .5s ease;}
+.pnum{font-size:11.5px;color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums;}
+.pnum.ok{color:var(--greentx);font-weight:600;}
+.cside{text-align:right;flex-shrink:0;min-width:96px;}
+.rw{font-size:12.5px;font-weight:500;}
+.rw.pt{color:var(--ambertx);}
+.rw.code{color:var(--blue);}
+.btn{
+  margin-top:7px;font-size:12.5px;padding:6px 18px;border-radius:9px;border:1px solid var(--line2);
+  background:#fff;color:var(--faint);width:100%;
+}
+.btn.ready{background:var(--amber);border-color:var(--amber);color:#fff;font-weight:600;box-shadow:0 2px 8px rgba(245,158,11,.32);}
+.btn.ready:hover{background:#e08c07;}
+.btn.got{background:#f4f6f9;border-color:transparent;color:var(--faint);display:flex;align-items:center;justify-content:center;gap:5px;}
+
+/* ===== 教师端 ===== */
+.tstats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:18px;}
+.tstat{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px;}
+.tstat span{font-size:12.5px;color:var(--muted);display:block;}
+.tstat b{font-size:21px;font-weight:600;}
+.tstat b i{font-size:12px;font-weight:400;color:var(--faint);font-style:normal;}
+.tbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;}
+.tbar h2{font-size:16px;font-weight:600;}
+.pri{background:var(--brand);color:#fff;border:0;padding:9px 18px;border-radius:10px;font-size:13.5px;font-weight:500;}
+.pri:hover{background:var(--branddk);}
+table{width:100%;border-collapse:collapse;background:#fff;border-radius:14px;overflow:hidden;border:1px solid var(--line);}
+th,td{text-align:left;padding:12px 15px;font-size:13px;border-bottom:1px solid var(--line);}
+th{background:#f7f9fc;color:var(--muted);font-weight:500;font-size:12.5px;}
+tr:last-child td{border-bottom:0;}
+td .nm{font-weight:500;}
+.pill{font-size:11.5px;padding:2px 9px;border-radius:20px;}
+.pill.daily{background:var(--brandbg);color:var(--brand);}
+.pill.ach{background:var(--amberbg);color:var(--ambertx);}
+.pill.on{background:#e7f7ee;color:var(--greentx);}
+.pill.off{background:#f1f3f7;color:var(--faint);}
+.mut{color:var(--faint);font-size:12px;}
+.form{display:none;margin-top:18px;background:#fff;border:1px solid var(--line);border-radius:14px;padding:22px 24px;}
+.form.on{display:block;animation:fade .2s ease;}
+.form h3{font-size:15px;font-weight:600;margin-bottom:16px;}
+.frow{display:grid;grid-template-columns:repeat(2,1fr);gap:14px 18px;margin-bottom:14px;}
+.fld{display:flex;flex-direction:column;gap:6px;}
+.fld label{font-size:12.5px;color:var(--muted);}
+.fld input,.fld select{
+  border:1px solid var(--line2);border-radius:9px;padding:9px 12px;font-size:13px;
+  font-family:inherit;color:var(--text);background:#fff;outline:none;
+}
+.fld input:focus,.fld select:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(79,70,229,.1);}
+.seg{display:flex;gap:8px;}
+.seg label{flex:1;border:1px solid var(--line2);border-radius:9px;padding:9px 12px;font-size:13px;cursor:pointer;display:flex;align-items:center;gap:8px;color:var(--muted);}
+.seg input{accent-color:var(--brand);}
+.seg label:has(input:checked){border-color:var(--brand);background:var(--brandbg);color:var(--branddk);font-weight:500;}
+.fnote{font-size:12px;color:var(--faint);background:#f7f9fc;border-radius:9px;padding:10px 13px;margin-bottom:16px;}
+.fact{display:flex;justify-content:flex-end;gap:10px;}
+.fact button{border-radius:9px;font-size:13px;padding:9px 20px;}
+.fact .ghost{background:#fff;border:1px solid var(--line2);color:var(--muted);}
+.fact .ok{background:var(--brand);border:0;color:#fff;font-weight:500;}
+
+/* ===== 弹窗 ===== */
+.modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:99;}
+.modal.on{display:flex;}
+.mbg{position:absolute;inset:0;background:rgba(15,23,42,.45);animation:fade .2s;}
+.mcard{position:relative;background:#fff;border-radius:22px;padding:34px 40px 30px;text-align:center;width:340px;box-shadow:0 24px 60px rgba(15,23,42,.28);animation:up .34s cubic-bezier(.2,1.3,.5,1);}
+@keyframes up{from{opacity:0;transform:translateY(26px) scale(.94);}to{opacity:1;transform:none;}}
+.mglow{width:88px;height:88px;margin:0 auto 18px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle,#fef3c7,#fdf0d5);border:2px solid #fcd34d;}
+.mglow svg{width:40px;height:40px;}
+.mcard h2{font-size:19px;font-weight:600;margin-bottom:6px;}
+.mcard p{font-size:13.5px;color:var(--muted);}
+.mbig{font-size:30px;font-weight:700;color:var(--amber);letter-spacing:-1px;margin:12px 0 4px;}
+.mnote{font-size:12px;color:var(--faint);margin-top:14px;}
+.mcard button{
+  margin-top:22px;width:100%;border:0;background:var(--brand);color:#fff;
+  font-size:14px;font-weight:600;padding:12px;border-radius:11px;
+}
+.mcard button:hover{background:var(--branddk);}
+.confetti{position:absolute;width:8px;height:8px;border-radius:2px;pointer-events:none;}
+</style>
+</head>
+<body>
+
+<header class="pbar">
+  <div class="brand">
+    <span class="mk"></span>
+    <div><b>游戏化任务系统</b> <span>· 交互原型（非最终实现）</span></div>
+  </div>
+  <nav class="nav" id="nav">
+    <button class="on" data-v="desktop">学生虚拟桌面</button>
+    <button data-v="center">学生任务中心</button>
+    <button data-v="teacher">教师端 · 任务管理</button>
+  </nav>
+</header>
+
+<div class="wrap">
+
+  <!-- ============ 视图一：学生虚拟桌面 ============ -->
+  <section class="view on" id="v-desktop">
+    <div class="hint"><i></i>点击桌面上带红点的「任务中心」图标，体验"红点提示 → 进入 → 一键领取"的完整流程</div>
+    <div class="desktop">
+      <div class="dtbar">
+        <div class="dtleft"><span class="av">李</span><span>李思远 · 高一(3)班</span></div>
+        <div class="dtright">
+          <span class="dtchip">积分 1,280</span>
+          <span class="dtchip">连续签到 7 天</span>
+          <span class="dtchip">战力 3,420</span>
+        </div>
+      </div>
+      <div class="dtgrid" id="dtgrid"></div>
+    </div>
+  </section>
+
+  <!-- ============ 视图二：学生任务中心 ============ -->
+  <section class="view" id="v-center">
+    <div class="win">
+      <div class="winhead">
+        <div class="wicon">
+          <svg width="24" height="24" viewBox="0 0 24 24"><path d="M6 3h12a1 1 0 011 1v16a1 1 0 01-1 1H6a1 1 0 01-1-1V4a1 1 0 011-1zm2 4v2h8V7H8zm0 4v2h8v-2H8zm0 4v2h5v-2H8z" fill="#fff"/></svg>
+        </div>
+        <div>
+          <h1>任务中心</h1>
+          <p>完成每日任务与成就挑战，领取积分与上网码奖励</p>
+        </div>
+      </div>
+      <div class="body">
+        <div class="stats">
+          <div class="stat"><span>今日任务完成</span><b id="stDone">3 <i>/ 6</i></b></div>
+          <div class="stat"><span>待领取奖励</span><b class="hot" id="stReady">2 <i>个</i></b></div>
+          <div class="stat"><span>连续打卡</span><b>7 <i>天</i></b></div>
+        </div>
+        <div class="tabs" id="tabs">
+          <button class="tab on" data-tab="daily">每日任务 <em>6</em></button>
+          <button class="tab" data-tab="achieve">我的成就 <em>8</em></button>
+        </div>
+        <div class="tasks" id="taskList"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 视图三：教师端任务管理 ============ -->
+  <section class="view" id="v-teacher">
+    <div class="tstats">
+      <div class="tstat"><span>已发布任务</span><b>7 <i>个</i></b></div>
+      <div class="tstat"><span>今日学生领取</span><b>56 <i>次</i></b></div>
+      <div class="tstat"><span>今日发放积分</span><b>8,450</b></div>
+      <div class="tstat"><span>今日发放上网码</span><b>4 <i>张</i></b></div>
+    </div>
+
+    <div class="tbar">
+      <h2>任务管理</h2>
+      <button class="pri" id="btnNew">+ 新建任务</button>
+    </div>
+
+    <table>
+      <thead>
+        <tr><th style="width:19%">任务名称</th><th style="width:9%">类型</th><th style="width:24%">达成条件</th><th style="width:14%">奖励</th><th style="width:9%">状态</th><th style="width:17%">今日完成</th><th style="width:8%">操作</th></tr>
+      </thead>
+      <tbody id="ttbody"></tbody>
+    </table>
+
+    <div class="form" id="newForm">
+      <h3>新建任务</h3>
+      <div class="frow">
+        <div class="fld"><label>任务名称</label><input value="每日百题达人" /></div>
+        <div class="fld"><label>展示图标</label>
+          <select><option>星章</option><option>闪电</option><option>奖杯</option><option>书本</option><option>时钟</option></select>
+        </div>
+      </div>
+      <div class="frow">
+        <div class="fld" style="grid-column:1/-1"><label>任务类型</label>
+          <div class="seg">
+            <label><input type="radio" name="cyc" checked />每日重复任务（每天 0 点自动重置）</label>
+            <label><input type="radio" name="cyc" />一次性成就任务（达成后永久保留）</label>
+          </div>
+        </div>
+      </div>
+      <div class="frow">
+        <div class="fld"><label>统计指标</label>
+          <select>
+            <option>做对题数</option><option>作答次数</option><option>WPS 操作题得分</option>
+            <option>Access 操作题得分</option><option>操作题提交次数</option><option>测试及格次数</option>
+            <option>PK 对战胜利场次</option><option>勤学好问打卡</option><option>获得积分总量</option><option>累计学习时长（分钟）</option>
+          </select>
+        </div>
+        <div class="fld"><label>达成目标值</label><input value="100" /></div>
+      </div>
+      <div class="frow">
+        <div class="fld"><label>奖励类型</label>
+          <select><option>积分</option><option>上网码</option><option>应用解锁</option><option>皮肤 / 装备</option></select>
+        </div>
+        <div class="fld"><label>奖励数量</label><input value="50" /></div>
+      </div>
+      <div class="frow">
+        <div class="fld"><label>适用班级</label><select><option>高一(3)班</option><option>全部班级</option></select></div>
+        <div class="fld"><label>启用状态</label><select><option>立即启用</option><option>保存为停用</option></select></div>
+      </div>
+      <div class="fnote">系统会按所选指标自动统计每个学生的进度，达标后在学生桌面「任务中心」亮起红点，学生点击即可领取奖励。奖励发放为原子操作，重复领取会被幂等拦截。</div>
+      <div class="fact">
+        <button class="ghost" id="btnCancel">取消</button>
+        <button class="ok" id="btnSave">保存并发布</button>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<div class="modal" id="modal">
+  <div class="mbg"></div>
+  <div class="mcard">
+    <div class="mglow" id="mIcon"></div>
+    <h2 id="mTitle">领取成功</h2>
+    <p id="mSub">奖励已发放到你的账户</p>
+    <div class="mbig" id="mBig">+50 积分</div>
+    <div class="mnote" id="mNote"></div>
+    <button id="mOk">开心收下</button>
+  </div>
+</div>
+
+<script>
+const ICONS = {
+  star:'<path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14l-5-4.87 6.91-1.01z"/>',
+  bolt:'<path d="M13 2L4 14h6l-1 8 9-12h-6z"/>',
+  check:'<path d="M4.5 12.5l5 5 10-11" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>',
+  book:'<path d="M4 4h7v16H4zM13 4h7v16h-7z"/>',
+  clock:'<path d="M12 3a9 9 0 100 18 9 9 0 000-18zm1 5v4.4l3.3 2-1 1.7L11 13.5V8z"/>',
+  trophy:'<path d="M7 3h10v3h2a2 2 0 010 4h-1a6 6 0 01-11 0H6a2 2 0 010-4h1zm-1 5a1 1 0 000-2H6zM8 14h8v3H8zm-2 4h12v3H6z"/>',
+  target:'<path d="M12 2a10 10 0 100 20 10 10 0 000-20zm0 4a6 6 0 110 12 6 6 0 010-12zm0 4a2 2 0 100 4 2 2 0 000-4z"/>',
+  sword:'<path d="M14.5 2L21 8.5l-3 3-6.5-6.5zM6 13l5 5-6 1 1-6zm4-4l5 5-2 2-5-5z"/>',
+  pdf:'<path d="M6 2h8l4 4v16H6zm7 1v4h4zM8 12h8v1.6H8zm0 3.4h8v1.6H8z"/>',
+  pet:'<path d="M12 2a10 10 0 100 20 10 10 0 000-20zm-3.5 7a1.5 1.5 0 110 3 1.5 1.5 0 010-3zm7 0a1.5 1.5 0 110 3 1.5 1.5 0 010-3zM12 13c2.2 0 3.5 1.4 3.5 2.6 0 1-.8 1.9-1.9 1.9h-3.2c-1.1 0-1.9-.9-1.9-1.9C8.5 14.4 9.8 13 12 13z"/>',
+  chart:'<path d="M4 20h16v2H4zM6 10h3v8H6zm5-6h3v14h-3zm5 3h3v11h-3z"/>',
+  user:'<path d="M12 3a4.5 4.5 0 110 9 4.5 4.5 0 010-9zm0 11c4 0 7 2.2 7 5v2H5v-2c0-2.8 3-5 7-5z"/>'
+};
+
+const DT = [
+  {k:'task',  n:'任务中心', c:'#ef4444', bgg:'linear-gradient(135deg,#6366f1,#a855f7)', ic:'star', hot:true},
+  {k:'op',    n:'操作题',   c:'#f59e0b', bgg:'linear-gradient(135deg,#f59e0b,#ef8f0a)', ic:'pdf'},
+  {k:'prac',  n:'练习中心', c:'#22c55e', bgg:'linear-gradient(135deg,#22c55e,#16a34a)', ic:'target'},
+  {k:'test',  n:'测试中心', c:'#3b82f6', bgg:'linear-gradient(135deg,#3b82f6,#2563eb)', ic:'check'},
+  {k:'pk',    n:'PK 对战',  c:'#a855f7', bgg:'linear-gradient(135deg,#a855f7,#7c3aed)', ic:'sword'},
+  {k:'pet',   n:'宠物乐园', c:'#ec4899', bgg:'linear-gradient(135deg,#ec4899,#db2777)', ic:'pet'},
+  {k:'ana',   n:'学情分析', c:'#0ea5e9', bgg:'linear-gradient(135deg,#0ea5e9,#0284c7)', ic:'chart', off:true},
+  {k:'me',    n:'个人中心', c:'#64748b', bgg:'linear-gradient(135deg,#94a3b8,#64748b)', ic:'user'}
+];
+
+let TASKS = [
+  {id:'d1', cyc:'daily', name:'每日百题达人', desc:'今日做对 100 道题', cur:68, target:100, unit:'题', ic:'star', c:'#6366f1', bg:'#eef2ff', rw:{t:'pt',v:50}, claimed:false},
+  {id:'d2', cyc:'daily', name:'WPS 操作题挑战', desc:'今日 WPS / Access 操作题得分满 500', cur:500, target:500, unit:'分', ic:'bolt', c:'#ba7517', bg:'#fdf2dc', rw:{t:'pt',v:80}, claimed:false},
+  {id:'d3', cyc:'daily', name:'勤学好问', desc:'完成今日勤学好问打卡', cur:1, target:1, unit:'次', ic:'check', c:'#1d9e75', bg:'#e1f5ee', rw:{t:'pt',v:5}, claimed:false},
+  {id:'d4', cyc:'daily', name:'稳扎稳打', desc:'今日作答正确率不低于 90%（至少 10 题）', cur:0, target:1, unit:'', ic:'target', c:'#2563eb', bg:'#e8f0fe', rw:{t:'pt',v:30}, claimed:false},
+  {id:'d5', cyc:'daily', name:'对战时刻', desc:'今日 PK 对战胜利 2 局', cur:1, target:2, unit:'局', ic:'sword', c:'#a855f7', bg:'#f3e8ff', rw:{t:'pt',v:20}, claimed:false},
+  {id:'d6', cyc:'daily', name:'错题清零', desc:'订正今日错题 5 道', cur:5, target:5, unit:'道', ic:'book', c:'#0ea5e9', bg:'#e0f2fe', rw:{t:'pt',v:15}, claimed:true},
+  {id:'a1', cyc:'achieve', name:'千题斩', desc:'累计做对 1000 道题', cur:1240, target:1000, unit:'题', ic:'trophy', c:'#ba7517', bg:'#fdf2dc', rw:{t:'pt',v:500}, claimed:true},
+  {id:'a2', cyc:'achieve', name:'操作题大师', desc:'WPS 操作题累计获得 5000 分', cur:3200, target:5000, unit:'分', ic:'star', c:'#ba7517', bg:'#fdf2dc', rw:{t:'code',v:2}, claimed:false},
+  {id:'a3', cyc:'achieve', name:'首战告捷', desc:'首次单元测试及格', cur:1, target:1, unit:'次', ic:'check', c:'#1d9e75', bg:'#e1f5ee', rw:{t:'pt',v:50}, claimed:true},
+  {id:'a4', cyc:'achieve', name:'学海无涯', desc:'累计学习时长满 100 小时', cur:62, target:100, unit:'小时', ic:'clock', c:'#6366f1', bg:'#eef2ff', rw:{t:'code',v:5}, claimed:false},
+  {id:'a5', cyc:'achieve', name:'完美主义', desc:'单次单元测试取得满分', cur:0, target:1, unit:'', ic:'trophy', c:'#ef4444', bg:'#fee2e2', rw:{t:'pt',v:100}, claimed:false}
+];
+
+const TEACHER_ROWS = [
+  ['每日百题达人','daily','做对题数 ≥ 100','50 积分','on','12 / 45 人'],
+  ['WPS 操作题挑战','daily','操作题得分 ≥ 500','80 积分','on','8 / 45 人'],
+  ['勤学好问','daily','完成打卡 1 次','5 积分','on','31 / 45 人'],
+  ['对战时刻','daily','PK 胜利 ≥ 2 局','20 积分','on','5 / 45 人'],
+  ['稳扎稳打','daily','正确率 ≥ 90% 且 ≥ 10 题','30 积分','on','9 / 45 人'],
+  ['千题斩','achieve','累计做对 ≥ 1000 题','500 积分','on','18 人已达成'],
+  ['操作题大师','achieve','操作题累计 ≥ 5000 分','上网码 ×2','on','6 人已达成'],
+  ['学海无涯','achieve','累计学习时长 ≥ 100 小时','上网码 ×5','off','—']
+];
+
+const ready = () => TASKS.filter(t => !t.claimed && t.cur >= t.target);
+const svg = (n, c) => '<svg viewBox="0 0 24 24" fill="' + c + '">' + ICONS[n] + '</svg>';
+
+function renderDesktop() {
+  const n = ready().length;
+  document.getElementById('dtgrid').innerHTML = DT.map(d => {
+    const isTask = d.k === 'task';
+    const hot = isTask && n > 0;
+    return '<div class="dicon' + (d.off ? ' off' : '') + '"' + (isTask ? ' id="icTask"' : '') + '>'
+      + '<div class="box" style="background:' + d.bgg + '">'
+      + (hot ? '<span class="pulse"></span>' : '')
+      + svg(d.ic, '#fff')
+      + (hot ? '<span class="badge">' + n + '</span>' : '')
+      + '</div><span class="nm">' + d.n + '</span></div>';
+  }).join('');
+  const t = document.getElementById('icTask');
+  if (t) t.onclick = () => go('center');
+}
+
+function renderTasks() {
+  const tab = document.querySelector('#tabs .tab.on').dataset.tab;
+  const list = TASKS.filter(t => t.cyc === tab);
+  document.getElementById('taskList').innerHTML = list.map(t => {
+    const ok = t.cur >= t.target;
+    const pct = Math.min(100, Math.round(t.cur / t.target * 100));
+    const cls = t.claimed ? 'done' : (ok ? 'ready' : '');
+    const bar = t.claimed || ok ? '#22c55e' : t.c;
+    let btn;
+    if (t.claimed) btn = '<div class="btn got">' + svg('check', '#9aa4b2').replace('<svg', '<svg style="width:13px;height:13px"') + ' 已领取</div>';
+    else if (ok) btn = '<button class="btn ready" data-claim="' + t.id + '">领 取</button>';
+    else btn = '<div class="btn">继续努力</div>';
+    const rwCls = t.rw.t === 'pt' ? 'pt' : 'code';
+    const rwTxt = t.rw.t === 'pt' ? '+' + t.rw.v + ' 积分' : '上网码 ×' + t.rw.v;
+    return '<div class="card ' + cls + '">'
+      + '<div class="cicn" style="background:' + t.bg + '">' + svg(t.claimed ? 'check' : t.ic, t.claimed ? '#22c55e' : t.c) + '</div>'
+      + '<div class="cmain"><div class="ctop"><span class="cname">' + t.name + '</span>'
+      + '<span class="tag ' + (t.cyc === 'daily' ? 'daily' : 'ach') + '">' + (t.cyc === 'daily' ? '每日' : '成就') + '</span></div>'
+      + '<div class="cdesc">' + t.desc + '</div>'
+      + '<div class="prow"><div class="pbar"><div style="width:' + pct + '%;background:' + bar + '"></div></div>'
+      + '<span class="pnum' + (ok ? ' ok' : '') + '">' + t.cur + ' / ' + t.target + (ok ? ' ✓' : '') + '</span></div></div>'
+      + '<div class="cside"><div class="rw ' + rwCls + '">' + rwTxt + '</div>' + btn + '</div>'
+      + '</div>';
+  }).join('');
+
+  document.querySelectorAll('[data-claim]').forEach(b => b.onclick = () => claim(b.dataset.claim));
+
+  const daily = TASKS.filter(t => t.cyc === 'daily');
+  const doneN = daily.filter(t => t.claimed || t.cur >= t.target).length;
+  document.getElementById('stDone').innerHTML = doneN + ' <i>/ ' + daily.length + '</i>';
+  const rn = ready().length;
+  document.getElementById('stReady').innerHTML = rn + ' <i>个</i>';
+}
+
+function claim(id) {
+  const t = TASKS.find(x => x.id === id);
+  if (!t || t.claimed) return;
+  t.claimed = true;
+  document.getElementById('mIcon').innerHTML = svg(t.ic, '#b45309');
+  document.getElementById('mTitle').textContent = '领取成功';
+  document.getElementById('mSub').textContent = '「' + t.name + '」奖励已发放';
+  document.getElementById('mBig').textContent = t.rw.t === 'pt' ? '+' + t.rw.v + ' 积分' : '上网码 ×' + t.rw.v;
+  document.getElementById('mNote').textContent = t.rw.t === 'pt'
+    ? '积分已计入个人中心，可用于兑换奖品或应用'
+    : '上网码已存入「我的奖品」，可在个人中心查看并复制';
+  document.getElementById('modal').classList.add('on');
+  renderTasks(); renderDesktop();
+}
+
+function go(v) {
+  document.querySelectorAll('.view').forEach(s => s.classList.toggle('on', s.id === 'v-' + v));
+  document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('on', b.dataset.v === v));
+  if (v === 'desktop') renderDesktop();
+  if (v === 'center') renderTasks();
+}
+
+function renderTable() {
+  document.getElementById('ttbody').innerHTML = TEACHER_ROWS.map(r =>
+    '<tr><td class="nm">' + r[0] + '</td>'
+    + '<td><span class="pill ' + (r[1] === 'daily' ? 'daily' : 'ach') + '">' + (r[1] === 'daily' ? '每日' : '一次性') + '</span></td>'
+    + '<td>' + r[2] + '</td>'
+    + '<td>' + (r[3].indexOf('上网码') === 0 ? '<span class="rw code" style="font-size:12.5px">' + r[3] + '</span>' : r[3]) + '</td>'
+    + '<td><span class="pill ' + (r[4] === 'on' ? 'on' : 'off') + '">' + (r[4] === 'on' ? '启用' : '停用') + '</span></td>'
+    + '<td class="mut">' + r[5] + '</td>'
+    + '<td><span class="mut" style="cursor:pointer">编辑</span></td></tr>'
+  ).join('');
+}
+
+document.getElementById('nav').onclick = e => {
+  const b = e.target.closest('button');
+  if (b) go(b.dataset.v);
+};
+document.getElementById('tabs').onclick = e => {
+  const b = e.target.closest('.tab');
+  if (!b) return;
+  document.querySelectorAll('#tabs .tab').forEach(x => x.classList.remove('on'));
+  b.classList.add('on');
+  renderTasks();
+};
+document.getElementById('mOk').onclick = () => document.getElementById('modal').classList.remove('on');
+document.querySelector('#modal .mbg').onclick = () => document.getElementById('modal').classList.remove('on');
+document.getElementById('btnNew').onclick = () => document.getElementById('newForm').classList.add('on');
+document.getElementById('btnCancel').onclick = () => document.getElementById('newForm').classList.remove('on');
+document.getElementById('btnSave').onclick = () => {
+  document.getElementById('newForm').classList.remove('on');
+  alert('原型演示：任务「每日百题达人」已发布，全体学生桌面任务中心将亮起红点提示。');
+};
+
+renderDesktop();
+renderTasks();
+renderTable();
+</script>
+</body>
+</html>

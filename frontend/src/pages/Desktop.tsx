@@ -4,6 +4,8 @@ import { useSiteConfig } from '../hooks/useSiteConfig';
 import { getAuthToken } from '../utils/authToken';
 import { useDesktopStore, desktopIcons } from '../store/desktopStore';
 import { useNotificationStore } from '../store/notificationStore';
+import { useTaskStore } from '../store/taskStore';
+import { TaskBadge } from '../components/common/TaskBadge';
 import { DesktopIcon } from '../components/common/DesktopIcon';
 import { WindowFrame } from '../components/common/WindowFrame';
 import { Taskbar } from '../components/common/Taskbar';
@@ -443,9 +445,12 @@ export const Desktop: React.FC = () => {
   useEffect(() => {
     if (effectiveProfile?.role === 'student') {
       checkForNewNotifications(effectiveProfile.id);
+      // 任务中心红点（有奖励可领的数量），与通知红点同一轮询节奏
+      useTaskStore.getState().fetchPendingCount();
 
       const notificationInterval = setInterval(() => {
         checkForNewNotifications(effectiveProfile.id);
+        useTaskStore.getState().fetchPendingCount();
       }, 30000);
 
       return () => clearInterval(notificationInterval);
@@ -861,26 +866,27 @@ export const Desktop: React.FC = () => {
         <button
           onClick={() => {
             if (isPaidFeature('taskCenter') && !canUseFeature('taskCenter')) {
-              alert('课堂任务功能需要系统授权后才能使用，请联系管理员激活授权。');
+              alert('任务中心功能需要系统授权后才能使用，请联系管理员激活授权。');
               return;
             }
             openWindow({
               id: 'taskCenter',
-              title: '课堂任务',
-              icon: 'fa-chalkboard-user',
+              title: '任务中心',
+              icon: 'fa-clipboard-list',
               isMinimized: false,
               isMaximized: false,
               component: moduleComponents['taskCenter'],
             });
           }}
-          className="bg-gray-800/80 hover:bg-gray-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors"
-          title={licenseLoaded && isPaidFeature('taskCenter') && !canUseFeature('taskCenter') ? '课堂任务（需授权）' : '课堂任务'}
+          className="relative bg-gray-800/80 hover:bg-gray-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors"
+          title={licenseLoaded && isPaidFeature('taskCenter') && !canUseFeature('taskCenter') ? '任务中心（需授权）' : '任务中心'}
         >
-          <i className={`fa-solid fa-chalkboard-user ${licenseLoaded && isPaidFeature('taskCenter') && !canUseFeature('taskCenter') ? 'text-gray-500' : ''}`}></i>
-          课堂任务
+          <i className={`fa-solid fa-clipboard-list ${licenseLoaded && isPaidFeature('taskCenter') && !canUseFeature('taskCenter') ? 'text-gray-500' : ''}`}></i>
+          任务中心
           {licenseLoaded && isPaidFeature('taskCenter') && !canUseFeature('taskCenter') && (
             <i className="fa-solid fa-lock text-[10px] text-amber-400 ml-1"></i>
           )}
+          <TaskBadge />
         </button>
         {effectiveProfile?.role === 'teacher' && (
           <button

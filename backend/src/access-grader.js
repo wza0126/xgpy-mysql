@@ -7,10 +7,13 @@
  * 底层读库用 `./vendor/mdb-reader.cjs`（mdb-reader 的 CJS 打包产物，见 vendor/README.md）。
  * ⛔ 上游 **不解析索引/主键**，主键要自己从表的 TDEF 页里解（学生最爱考的操作就是"设主键"）。
  *
- * 支持范围（一期 9 类检查器）：
- *   accdb_table · accdb_columns · accdb_column_type · accdb_primary_key ·
- *   accdb_rows · accdb_row_update · accdb_sort · accdb_filter · accdb_object
- *
+ * 支持范围（一期 9 类 + 二期 4 类，共 13 类检查器）：
+ *   一期：accdb_table · accdb_columns · accdb_column_type · accdb_primary_key ·
+ *         accdb_rows · accdb_row_update · accdb_sort · accdb_filter · accdb_object
+ *   二期：accdb_query（查询：存在/数据源/输出列/条件/分组/排序）
+ *         accdb_relation（表间关系，过滤系统关系 grbit&0x1000）
+ *         accdb_field_format（字段格式，LvProp 启发式识别，⛔ 实验性）
+ *         accdb_export（导出附件：txt/csv/xlsx，判 extras 文件）
  * ⛔ 判分只认 .accdb 文件本身，不关心是谁产出的（真 Access / WPS / 未来在线编辑都走同一套）。
  */
 
@@ -101,6 +104,24 @@ function rowMatches(row, expect) {
 function describeRow(row, cols) {
   const keys = cols && cols.length ? cols : Object.keys(row).slice(0, 4);
   return keys.map((k) => `${k}=${row[k] === null || row[k] === undefined ? '' : row[k]}`).join('，');
+}
+
+/** MSysQueries.Order 是 4 字节小端 buffer → 序号 */
+function orderOf(b) {
+  if (Buffer.isBuffer(b) && b.length >= 4) return b.readUInt32LE(b.length - 4);
+  return num(b) || 0;
+}
+/** 表达式归一化：去空白 / [] / .（用于"查询里是否含某列"这类宽松匹配） */
+function normExprKey(s) {
+  return normName(s).replace(/[\[\]\s.]/g, '');
+}
+/** 文本附件解码：BOM/UTF-8 优先，非法序列回退 GBK（学测机房默认 GBK 存 txt 很常见） */
+function decodeTextBuffer(buf) {
+  const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+  let s = b.toString('utf8');
+  if (s.charCodeAt(0) === 0xfeff) s = s.slice(1);
+  if (!/\ufffd/.test(s)) return s;
+  try { return new TextDecoder('gbk').decode(b); } catch { return s; }
 }
 
 // ============================================================
@@ -451,10 +472,67 @@ function buildModel(buffer) {
     tables.push(item);
   }
 
+  // —— 查询（二期）：MSysObjects.Type&0x7f===5，定义行在 MSysQueries 里按 ObjectId 分组
+  //     Attribute 语义（实测 + jackcess 口径）：5=FROM 表 · 6=输出列(Expression,别名 Name1) ·
+  //     8=WHERE · 9=GROUP BY · 11=ORDER BY · 3=查询类型标记 · 255=远程库
+  //     ⛔ `~sq_` 开头是向导/控件行来源生成的隐藏查询，不算学生创建的
+  const queries = [];
+  try {
+    const qRows = reader.getTable('MSysQueries').getData({});
+    const byId = new Map();
+    for (const r of qRows) {
+      const id = String(r.ObjectId);
+      if (!byId.has(id)) byId.set(id, []);
+      byId.get(id).push(r);
+    }
+    for (const r of sysRows) {
+      if ((Number(r.Type) & 0x7f) !== 5) continue;
+      const name = normText(r.Name);
+      if (!name || name.startsWith('~sq_')) continue;
+      const rows = byId.get(String(r.Id)) || [];
+      const pick = (attr) => rows
+        .filter((x) => Number(x.Attribute) === attr)
+        .sort((a, b) => orderOf(a.Order) - orderOf(b.Order));
+      queries.push({
+        name,
+        tables: pick(5).map((x) => normText(x.Name1)).filter(Boolean),
+        select: pick(6).map((x) => ({ alias: normText(x.Name1) || '', expr: normText(x.Expression) || '' })),
+        where: pick(8).map((x) => normText(x.Expression) || ''),
+        groupBy: pick(9).map((x) => normText(x.Expression) || ''),
+        orderBy: pick(11).map((x) => normText(x.Expression) || ''),
+        rawCount: rows.length,
+      });
+    }
+  } catch (e) { /* 读不出查询就让检查器报"不存在"，不影响其他判分 */ }
+
+  // —— 表间关系（二期）：MSysRelationships，多列关系按 szRelationship 分组合并
+  //     ⛔ grbit&0x1000 是系统关系（导航窗格 / MSysAccessStorage），必须过滤
+  const relations = [];
+  try {
+    const rRows = reader.getTable('MSysRelationships').getData({});
+    const groups = new Map();
+    for (const r of rRows) {
+      const grbit = Number(r.grbit) || 0;
+      if (grbit & 0x1000) continue;
+      const key = normText(r.szRelationship);
+      if (!key) continue;
+      if (!groups.has(key)) groups.set(key, { name: key, grbit, columns: [] });
+      groups.get(key).columns.push({
+        table: normText(r.szObject),
+        column: normText(r.szColumn),
+        refTable: normText(r.szReferencedObject),
+        refColumn: normText(r.szReferencedColumn),
+      });
+    }
+    relations.push(...groups.values());
+  } catch (e) { /* 同上 */ }
+
   const byName = new Map();
   for (const t of tables) byName.set(normName(t.name), t);
   const objectByName = new Map();
   for (const o of objects) objectByName.set(normName(o.name), o);
+  const queryByName = new Map();
+  for (const q of queries) queryByName.set(normName(q.name), q);
 
   return {
     tables,
@@ -463,6 +541,10 @@ function buildModel(buffer) {
     objects,
     objectByName,
     objectNames: objects.map((o) => o.name),
+    queries,
+    queryNames: queries.map((q) => q.name),
+    queryByName,
+    relations,
     reader,
     db,
   };
@@ -757,16 +839,311 @@ const CHECKERS = {
       note: '',
     };
   },
+
+  // ============================================================
+  // 二期检查器（查询 / 关系 / 字段格式 / 导出附件）
+  // ============================================================
+
+  /**
+   * 查询（二期）。支持项：
+   *   name（查询名，必填）· absent · from（数据源表）· select[]（应输出的列，
+   *   宽松匹配：表达式或别名命中即可）· where_contains[] / group_by_contains[] /
+   *   order_by_contains[]（表达式片段，去空白与括号后包含匹配）
+   */
+  accdb_query({ model, check }) {
+    const name = normText(check.name || check.object);
+    const absent = !!check.absent;
+    const q = model.queryByName.get(normName(name));
+    if (absent) {
+      return {
+        pass: !q,
+        got: q ? '存在' : '不存在',
+        want: `查询「${name}」不存在`,
+        note: model.queryNames.length ? `现有查询：${model.queryNames.join('、')}` : '库中没有用户查询',
+      };
+    }
+    if (!q) {
+      return {
+        pass: false,
+        got: '不存在',
+        want: `查询「${name}」`,
+        note: model.queryNames.length ? `现有查询：${model.queryNames.join('、')}` : '库中没有用户查询（注意：~sq_ 开头的是向导隐藏查询，不算）',
+      };
+    }
+    let pass = true;
+    const notes = [];
+    if (check.from) {
+      if (!q.tables.some((x) => normName(x) === normName(check.from))) { pass = false; notes.push(`数据源应为「${check.from}」，实为 ${q.tables.join('、') || '(无)'}`); }
+    }
+    if (Array.isArray(check.select) && check.select.length) {
+      for (const w of check.select) {
+        const key = normExprKey(w);
+        const hit = q.select.some((s) => normExprKey(s.expr).includes(key) || normName(s.alias) === normName(w));
+        if (!hit) { pass = false; notes.push(`查询应输出「${w}」`); }
+      }
+    }
+    const segMatch = (list, want, label) => {
+      for (const w of [].concat(want)) {
+        const key = normExprKey(w);
+        if (!list.some((e) => normExprKey(e).includes(key))) { pass = false; notes.push(`${label}应包含「${w}」`); }
+      }
+    };
+    if (check.where_contains) segMatch(q.where, check.where_contains, '条件');
+    if (check.group_by_contains) segMatch(q.groupBy, check.group_by_contains, '分组');
+    if (check.order_by_contains) segMatch(q.orderBy, check.order_by_contains, '排序');
+    return {
+      pass,
+      got: `数据源 ${q.tables.join('、') || '(无)'}；输出 ${q.select.map((s) => (s.alias ? `${s.alias}=${s.expr}` : s.expr)).join('、') || '(无)'}`
+        + `${q.where.length ? `；条件 ${q.where.join(' 且 ')}` : ''}${q.groupBy.length ? `；分组 ${q.groupBy.join('、')}` : ''}${q.orderBy.length ? `；排序 ${q.orderBy.join('、')}` : ''}`,
+      want: `查询「${name}」符合题目要求`,
+      note: notes.join('；'),
+    };
+  },
+
+  /**
+   * 表间关系（二期）。table→ref_table（默认不写 strict_direction 时方向可反），
+   * column / ref_column 可选；absent:true 表示不应存在该关系。
+   * ⛔ 系统关系（grbit&0x1000）已在建模阶段过滤。
+   */
+  accdb_relation({ model, check }) {
+    const t1 = normText(check.table);
+    const t2 = normText(check.ref_table);
+    if (!t1 || !t2) return { pass: false, got: '(参数缺失)', want: '需要 table 与 ref_table', note: '' };
+    const strict = !!check.strict_direction;
+    const hitRels = model.relations.filter((rel) => rel.columns.some((c) => {
+      const fwd = normName(c.table) === normName(t1) && normName(c.refTable) === normName(t2);
+      const rev = normName(c.table) === normName(t2) && normName(c.refTable) === normName(t1);
+      return strict ? fwd : (fwd || rev);
+    }));
+    const absent = !!check.absent;
+    if (absent) {
+      const got = hitRels.length ? hitRels.map((rel) => rel.columns.map((c) => `${c.table}.${c.column}→${c.refTable}.${c.refColumn}`).join('；')).join('；') : '无';
+      return { pass: hitRels.length === 0, got, want: `${t1} 与 ${t2} 之间不应有关系`, note: '' };
+    }
+    if (!hitRels.length) {
+      return {
+        pass: false,
+        got: model.relations.length ? model.relations.map((rel) => rel.columns.map((c) => `${c.table}.${c.column}→${c.refTable}.${c.refColumn}`).join('；')).join('；') : '库中没有用户关系',
+        want: `${t1}.${check.column || '*'} 关联 ${t2}.${check.ref_column || '*'}`,
+        note: '',
+      };
+    }
+    let pass = true;
+    const notes = [];
+    if (check.column || check.ref_column) {
+      const colOk = hitRels.some((rel) => rel.columns.some((c) => {
+        const pair = [c, { ...c, table: c.refTable, refTable: c.table, column: c.refColumn, refColumn: c.column }];
+        return pair.some((p) => (!check.column || normName(p.column) === normName(check.column)) && (!check.ref_column || normName(p.refColumn) === normName(check.ref_column)));
+      }));
+      if (!colOk) { pass = false; notes.push('关联字段与要求不符'); }
+    }
+    return {
+      pass,
+      got: hitRels.map((rel) => rel.columns.map((c) => `${c.table}.${c.column}→${c.refTable}.${c.refColumn}`).join('；')).join('；'),
+      want: `${t1}.${check.column || '*'} → ${t2}.${check.ref_column || '*'}`,
+      note: notes.join('；'),
+    };
+  },
+
+  /**
+   * 字段格式（二期 · ⛔ 实验性）。
+   * Access 把字段格式属性存在 LvProp 属性流里，值区编码未公开，目前只能靠
+   * "属性流中是否出现已知格式 token" 做表级识别（一个表内通常只有一个字段带特殊格式）。
+   * 未识别到 → 判失败，并注明实验性。建议教师录题时把该项分值调低，或等样本校准后再用。
+   */
+  accdb_field_format({ model, check }) {
+    const t = findTable(model, check.table);
+    if (!t) return { pass: false, got: '表不存在', want: `表「${check.table}」` };
+    if (check.absent) {
+      return { pass: true, got: '(实验性检查忽略 absent)', want: '', note: '' };
+    }
+    const fmt = normText(check.format);
+    if (!fmt) return { pass: false, got: '(参数缺失)', want: '需要 format', note: '' };
+    const TOKENS = {
+      currency: ['currency', '货币', '¥', '￥'],
+      fixed: ['fixed', '固定'],
+      percent: ['percent', '百分比', '%'],
+      standard: ['standard', '标准'],
+      scientific: ['scientific', '科学'],
+      general_date: ['general date', '常规日期'],
+      short_date: ['short date', '短日期', 'yyyy-mm-dd', 'yyyy/m/d', 'yyyy/mm/dd'],
+      long_date: ['long date', '长日期'],
+      medium_date: ['medium date', '中日期'],
+      short_time: ['short time', '短时间'],
+      long_time: ['long time', '长时间'],
+      yes_no: ['yes/no', '是/否'],
+      true_false: ['true/false', 'true;false'],
+      on_off: ['on/off'],
+    };
+    const tokens = TOKENS[normName(fmt)] || [fmt.toLowerCase()];
+    // ⛔ 精确匹配（属性流里混着 CurrencyLCID 这类属性名，includes 会误命中）
+    const strings = (t.props && t.props.strings) || [];
+    const hit = strings.find((s) => { const ls = s.trim().toLowerCase().replace(/["']/g, ''); return tokens.some((tk) => ls === tk); });
+    return {
+      pass: !!hit,
+      got: hit ? `属性流中检测到「${hit}」` : '属性流中未检测到该格式',
+      want: `「${t.name}」中存在格式为 ${fmt} 的字段`,
+      note: hit ? '实验性判定（LvProp 特征识别）' : '实验性判定未命中：若学生确实设置了该格式，可能是属性流编码未覆盖，请人工复核',
+    };
+  },
+
+  /**
+   * 导出附件（二期）。判学生另交的 extras 文件（access-op 提交接口的字段名 extras[]）。
+   *   type: 'txt' | 'csv' | 'xlsx'（按附件类型过滤）
+   *   match: 文件名需包含的关键字（可选）
+   *   line_count / min_lines / max_lines: 行数（xlsx 按非空单元格数）
+   *   contains[] / absent[]: 内容片段（按行/单元格宽松匹配）
+   * ⚠️ extras 由 gradeFile 预解析：每项 {name, kind, buffer, lines[], error}（xlsx 拆成单元格文本行）。
+   * 多个候选附件时按"任一候选通过"判（导出多文件题可重复配多个检查点，用 match 区分）。
+   */
+  accdb_export({ check, extras }) {
+    const list = (Array.isArray(extras) ? extras : []).filter((x) => !x.error);
+    const type = normText(check.type).toLowerCase();
+    const wantKind = type === 'xlsx' ? 'xlsx' : (type === 'csv' || type === 'txt') ? 'text' : null;
+    let cand = wantKind ? list.filter((x) => x.kind === wantKind) : list.slice();
+    const match = normText(check.match);
+    if (match) {
+      const named = cand.filter((x) => normName(x.name).includes(normName(match)));
+      if (!named.length) {
+        return {
+          pass: false,
+          got: `附件：${list.map((x) => x.name).join('、') || '(无)'}`,
+          want: `文件名含「${match}」的导出文件`,
+          note: '学生传了附件但没有文件名匹配的，可能导出了别的内容',
+        };
+      }
+      cand = named;
+    }
+    if (!cand.length) {
+      const shown = list.length ? `附件：${list.map((x) => x.name).join('、') || '(全部无法读取)'}` : '没有另交附件';
+      return {
+        pass: false,
+        got: shown,
+        want: `${type || '文件'}${match ? ` 文件名含「${match}」` : ''} 的导出文件`,
+        note: '导出题需要学生在提交页「另交附件」里上传导出的文件',
+      };
+    }
+    const notes = [];
+    let anyPass = false;
+    let bestGot = '';
+    for (const f of cand) {
+      const r = matchLines(f.lines || [], check, `${f.name}：${f.lines ? f.lines.length + ' 行' : '(空)'}`);
+      if (r.pass) { anyPass = true; bestGot = r.got; break; }
+      notes.push(`${f.name}：${r.note || '内容不符'}`);
+    }
+    return {
+      pass: anyPass,
+      got: bestGot || notes[0] || '（无法判读附件）',
+      want: checkOneExportWant(check),
+      note: anyPass ? '' : notes.join('；'),
+    };
+  },
 };
 
-function runCheck(check, model) {
+/** accdb_export 的 want 描述 */
+function checkOneExportWant(check) {
+  const parts = [];
+  if (check.line_count !== undefined && check.line_count !== null) parts.push(`行数 = ${check.line_count}`);
+  if (check.min_lines) parts.push(`≥ ${check.min_lines} 行`);
+  if (check.max_lines) parts.push(`≤ ${check.max_lines} 行`);
+  if (Array.isArray(check.contains) && check.contains.length) parts.push(`包含 ${check.contains.join('、')}`);
+  if (Array.isArray(check.absent) && check.absent.length) parts.push(`不含 ${check.absent.join('、')}`);
+  return parts.join(' / ') || '导出内容符合要求';
+}
+
+/** 通用行匹配：行数 + contains/absent（单元格级宽松匹配） */
+function matchLines(lines, check, gotDesc) {
+  // ⛔ 空条件防护：什么判定条件都没配时不能"交了附件就给分"
+  const hasCriteria = (check.line_count !== undefined && check.line_count !== null && check.line_count !== '')
+    || check.min_lines || check.max_lines
+    || (Array.isArray(check.contains) && check.contains.length)
+    || (Array.isArray(check.absent) && check.absent.length);
+  if (!hasCriteria) {
+    return { pass: false, got: gotDesc, note: '未配置判定条件（行数/包含/不含至少配一项）' };
+  }
+  let pass = true;
+  const notes = [];
+  if (check.line_count !== undefined && check.line_count !== null && check.line_count !== '') {
+    const want = num(check.line_count);
+    if (lines.length !== want) { pass = false; notes.push(`行数应为 ${want}，实为 ${lines.length}`); }
+  }
+  if (check.min_lines && lines.length < Number(check.min_lines)) { pass = false; notes.push(`行数少于 ${check.min_lines}`); }
+  if (check.max_lines && lines.length > Number(check.max_lines)) { pass = false; notes.push(`行数多于 ${check.max_lines}`); }
+
+  /** 一行是否"包含"期望片段：按行内拆分（制表符/逗号/分号）后，期望片段逐项命中 */
+  const lineHas = (line, w) => {
+    const lw = normName(w);
+    if (!lw) return true;
+    const whole = normName(line);
+    if (whole.includes(lw)) return true;
+    const cells = String(line).split(/[\t,;，；|]/).map((c) => normName(c));
+    return cells.some((c) => c === lw || (lw.length >= 2 && c.includes(lw)));
+  };
+  if (Array.isArray(check.contains)) {
+    for (const w of check.contains) {
+      if (!lines.some((l) => lineHas(l, w))) { pass = false; notes.push(`内容缺「${w}」`); }
+    }
+  }
+  if (Array.isArray(check.absent)) {
+    for (const w of check.absent) {
+      if (lines.some((l) => lineHas(l, w))) { pass = false; notes.push(`内容多出「${w}」`); }
+    }
+  }
+  const preview = lines.slice(0, 3).join(' | ');
+  return { pass, got: `${gotDesc}${preview ? '：' + preview.slice(0, 80) : ''}`, note: notes.join('；') };
+}
+
+function runCheck(check, model, extras) {
   const fn = CHECKERS[check.kind];
   if (!fn) return { pass: false, got: '(未知检查类型)', want: check.kind, note: `不支持的检查类型：${check.kind}` };
   try {
-    return fn({ model, check });
+    return fn({ model, check, extras });
   } catch (e) {
     return { pass: false, got: '(判分异常)', want: check.kind, note: e.message };
   }
+}
+
+/**
+ * 预解析导出附件：txt/csv 解码分行；xlsx 用 wps-grader 的解析器拆成"单元格文本行"。
+ * 失败不抛错，记 error（accdb_export 会把带 error 的附件排除，判"没有可判的附件"）。
+ */
+async function prepareExtras(extrasRaw) {
+  const out = [];
+  for (const f of Array.isArray(extrasRaw) ? extrasRaw : []) {
+    if (!f) continue;
+    const item = {
+      name: normText(f.name) || '(未命名)',
+      kind: f.kind === 'xlsx' ? 'xlsx' : 'text',
+      buffer: Buffer.isBuffer(f.buffer) ? f.buffer : null,
+      lines: null,
+      error: null,
+    };
+    try {
+      if (!item.buffer) throw new Error('附件内容为空');
+      if (item.kind === 'xlsx') {
+        const wg = require('./wps-grader');
+        const { model } = await wg.loadModel(item.buffer);
+        // ⚠️ wps-grader 的 sheet.cells 是 Map（键 "A1"，值 {ref,type,value,raw}）
+        const cellLines = [];
+        for (const sh of (model.sheets || [])) {
+          const cells = sh.cells instanceof Map ? [...sh.cells.values()] : Object.values(sh.cells || {});
+          for (const c of cells) {
+            const v = c && (c.value !== null && c.value !== undefined && c.value !== '' ? c.value : c.raw);
+            if (v === null || v === undefined || v === '') continue;
+            cellLines.push(String(v));
+          }
+        }
+        item.lines = cellLines;
+      } else {
+        item.lines = decodeTextBuffer(item.buffer).replace(/\r\n?/g, '\n').split('\n')
+          .filter((l, i, arr) => !(i === arr.length - 1 && l === ''));
+      }
+    } catch (e) {
+      item.error = e.message;
+    }
+    out.push(item);
+  }
+  return out;
 }
 
 // ============================================================
@@ -777,17 +1154,22 @@ function runCheck(check, model) {
  * 判分
  * @param {Buffer|string} input  .accdb Buffer 或文件路径
  * @param {object} spec          评分点规格（questions.access_spec 解析后的对象）
+ * @param {Array}  extrasRaw     导出题另交的附件 [{name, kind:'text'|'xlsx', buffer}]
  */
-async function gradeFile(input, spec) {
+async function gradeFile(input, spec, extrasRaw) {
   if (!MDBReader) throw new Error('缺少 mdb-reader 依赖，无法读取 .accdb');
   const buffer = Buffer.isBuffer(input) ? input : fs.readFileSync(input);
   const specObj = typeof spec === 'string' ? JSON.parse(spec || '{}') : (spec || {});
   const model = buildModel(buffer);
+  const extras = await prepareExtras(extrasRaw);
 
   const result = {
     ok: true,
     tables: model.tableNames,
     objects: model.objects.map((o) => o.name),
+    queries: model.queryNames,
+    relations: model.relations.map((r) => r.columns.map((c) => `${c.table}.${c.column}→${c.refTable}.${c.refColumn}`).join('；')),
+    extras: extras.map((x) => ({ name: x.name, kind: x.kind, lines: x.lines ? x.lines.length : 0, error: x.error })),
     sha256: crypto.createHash('sha256').update(buffer).digest('hex'),
     file_size: buffer.length,
     full_score: 0,
@@ -807,7 +1189,7 @@ async function gradeFile(input, spec) {
     let stepEarned = 0;
     const checks = [];
     for (const c of checksIn) {
-      const r = runCheck(c, model);
+      const r = runCheck(c, model, extras);
       const cs = num(c.score) !== null ? num(c.score) : perCheck;
       const gotScore = r.pass ? cs : 0;
       stepEarned += gotScore;
@@ -877,6 +1259,18 @@ async function inspectFile(input) {
       error: t.error || null,
     })),
     objects: model.objects.map((o) => ({ name: o.name, type: o.type })),
+    queries: model.queries.map((q) => ({
+      name: q.name,
+      tables: q.tables,
+      select: q.select.map((s) => (s.alias ? `${s.alias} = ${s.expr}` : s.expr)),
+      where: q.where,
+      group_by: q.groupBy,
+      order_by: q.orderBy,
+    })),
+    relations: model.relations.map((r) => ({
+      name: r.name,
+      columns: r.columns.map((c) => `${c.table}.${c.column} → ${c.refTable}.${c.refColumn}`),
+    })),
   };
 }
 
@@ -959,6 +1353,33 @@ function suggestSpecFromModel(model, opts = {}) {
     }
   }
 
+  // —— 查询（二期）：每个用户查询生成一个步骤
+  for (const q of model.queries) {
+    const checks = [
+      { kind: 'accdb_query', name: q.name, label: `查询「${q.name}」存在`, score: 0 },
+    ];
+    if (q.tables.length === 1) checks.push({ kind: 'accdb_query', name: q.name, from: q.tables[0], label: '数据源正确', score: 0 });
+    if (q.select.length) checks.push({ kind: 'accdb_query', name: q.name, select: q.select.map((s) => (s.alias ? s.alias : s.expr)), label: '输出列正确', score: 0 });
+    if (q.where.length) checks.push({ kind: 'accdb_query', name: q.name, where_contains: q.where, label: '条件正确', score: 0 });
+    if (q.orderBy.length) checks.push({ kind: 'accdb_query', name: q.name, order_by_contains: q.orderBy, label: '排序正确', score: 0 });
+    steps.push({ id: 'query_' + q.name, title: `创建查询「${q.name}」`, desc: `数据源：${q.tables.join('、')}`, video_urls: [], checks });
+  }
+
+  // —— 关系（二期）
+  for (const rel of model.relations) {
+    const c = rel.columns[0];
+    if (!c) continue;
+    steps.push({
+      id: 'rel_' + rel.name,
+      title: `建立表间关系（${c.table} → ${c.refTable}）`,
+      desc: rel.columns.map((x) => `${x.table}.${x.column} → ${x.refTable}.${x.refColumn}`).join('；'),
+      video_urls: [],
+      checks: rel.columns.map((x) => ({
+        kind: 'accdb_relation', table: x.table, column: x.column, ref_table: x.refTable, ref_column: x.refColumn, label: '关系正确', score: 0,
+      })),
+    });
+  }
+
   // 把满分平均分给各步骤与各检查点
   if (steps.length) {
     const perStep = round2(fullScore / steps.length);
@@ -993,6 +1414,9 @@ function validateSpec(spec, expectFull) {
     let inner = 0;
     checks.forEach((c, j) => {
       if (!CHECKERS[c.kind]) errors.push(`步骤 ${i + 1} 第 ${j + 1} 个评分点的类型「${c.kind}」不受支持`);
+      if (c.kind === 'accdb_field_format') {
+        warnings.push(`步骤 ${i + 1}「${st.title || ''}」用了 accdb_field_format（实验性判定，LvProp 值区编码未完全覆盖，可能漏判；建议调低该项分值或人工复核）`);
+      }
       inner += num(c.score) || 0;
     });
     const stepScore = num(st.score);

@@ -8,6 +8,7 @@ const { runMigrations } = require('./migrate');
 const { registerWebProxy, invalidateProxyPerm } = require('./web-proxy');
 const { registerWpsOp } = require('./wps-op');
 const { registerAccessOp } = require('./access-op');
+const { registerGameTasks } = require('./game-task');
 const PythonSandbox = require('./python-sandbox');
 const PythonGrader = require('./python-grader');
 const { v4: uuidv4 } = require('uuid');
@@ -13150,6 +13151,11 @@ registerWpsOp(app, { pool, authenticate, requireTeacher, requireStudent, uploads
 // ===== Access 操作题（与 WPS 同构，判的是 .accdb）=====
 // 全部路由在 access-op.js 内注册；同样必须在中间件定义之后。
 registerAccessOp(app, { pool, authenticate, requireTeacher, requireStudent, uploadsDir });
+
+// ===== 游戏化任务系统（每日任务 / 成就任务）=====
+// 教师端「刷题打怪系统 → 任务系统」的 CRUD + 学生端任务中心的进度/领取/红点计数。
+// 路由全部在 game-task.js 内注册；同样必须在中间件定义之后。
+registerGameTasks(app, { pool, authenticate, requireTeacher, requireStudent });
 
 // ===== 教师端接口 =====
 
