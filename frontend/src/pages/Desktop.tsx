@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import { useSiteConfig } from '../hooks/useSiteConfig';
 import { getAuthToken } from '../utils/authToken';
@@ -33,6 +33,8 @@ import { StudentRollCall } from '../components/student/StudentRollCall';
 import { ProxyBrowser } from '../components/student/ProxyBrowser';
 import { CreativeWorkshop } from '../components/student/CreativeWorkshop';
 import { SimilarPracticeWindow } from '../components/student/SimilarPracticeWindow';
+import { FarmOverlay } from '../components/student/FarmOverlay';
+import type { FarmState } from '../components/student/FarmOverlay';
 import { RollCallApp } from '../components/teacher/RollCallApp';
 import { backendClient } from '../api/backendClient';
 import { API_CONFIG } from '../api/config';
@@ -95,6 +97,9 @@ export const Desktop: React.FC = () => {
   const [isPaintBoardOpen, setIsPaintBoardOpen] = useState(false);
   const [licenseStatus, setLicenseStatus] = useState<{ isValid: boolean; isFreeOpenDay: boolean } | null>(null);
   const [licenseLoaded, setLicenseLoaded] = useState(false);
+  // 代码农场（桌面游戏层）：教师开关打开且本班命中时自动进入
+  const [farmState, setFarmState] = useState<FarmState | null>(null);
+  const [farmDismissed, setFarmDismissed] = useState(false);
 
   // 代理模式下 profile 由 useAuth 直接设置为目标学生
   const effectiveProfile = profile;
@@ -235,6 +240,7 @@ export const Desktop: React.FC = () => {
       checkExchangePermission();
       checkPythonAccessPermission();
       fetchFocusModeConfig();
+      fetchFarmState();
 
       const interval = setInterval(() => {
         if (!isProxyMode) {
@@ -245,6 +251,7 @@ export const Desktop: React.FC = () => {
         checkExchangePermission();
         checkPythonAccessPermission();
         fetchFocusModeConfig();
+        fetchFarmState();
       }, 10000);
 
       return () => clearInterval(interval);
@@ -323,6 +330,32 @@ export const Desktop: React.FC = () => {
       }
     } catch (error) {
       console.error('获取专注模式配置失败:', error);
+    }
+  };
+
+  // ===== 代码农场（桌面游戏层） =====
+  // 教师后台开启 + 本班命中 → 学生桌面自动进入农场态；关闭则立即退出。
+  // 与专注模式同一套 10 秒轮询节奏，不额外增加请求频率。
+  const farmPrevEnabled = useRef(false);
+
+  const fetchFarmState = async () => {
+    if (!effectiveProfile || effectiveProfile.role !== 'student') return;
+    // 代理模式下教师正在远程控制学生桌面，不叠加游戏层，避免遮挡教师视图
+    if (isProxyMode) return;
+    try {
+      const r: any = await backendClient.get('/api/student/farm/state');
+      const d = r?.data;
+      if (d && d.enabled) {
+        // 教师本次「新开启」→ 作废学生之前的收起动作，重新弹出
+        if (!farmPrevEnabled.current) setFarmDismissed(false);
+        farmPrevEnabled.current = true;
+        setFarmState(d as FarmState);
+      } else {
+        farmPrevEnabled.current = false;
+        setFarmState(null);
+      }
+    } catch {
+      // 静默：农场是可选玩法，失败不影响桌面主流程（401 已由 backendClient 统一处理）
     }
   };
 
@@ -789,6 +822,32 @@ export const Desktop: React.FC = () => {
       }}
     >
       <div className="absolute inset-0 bg-black/20"></div>
+
+      {/* ===== 代码农场（桌面即游戏场）=====
+          世界层挂在壁纸之上、桌面图标之下（z-[5]），所以图标仍浮在田野上；
+          编辑器/收起草帽等交互层由 FarmOverlay 内部自行抬到 z-[1200]。 */}
+      {farmState?.enabled && !farmDismissed ? (
+        <FarmOverlay
+          data={farmState}
+          onRefresh={fetchFarmState}
+          onDismiss={() => setFarmDismissed(true)}
+        />
+      ) : null}
+
+      {/* 收起后的小挂件：随时能回到农场 */}
+      {farmState?.enabled && farmDismissed ? (
+        <button
+          onClick={() => setFarmDismissed(false)}
+          className="absolute bottom-20 right-5 z-[9997] flex items-center gap-2 rounded-full border border-emerald-400/40 bg-emerald-600/90 px-4 py-2 text-sm font-medium text-white shadow-lg backdrop-blur transition hover:bg-emerald-500"
+          title="回到代码农场"
+        >
+          <i className="fa-solid fa-seedling" />
+          代码农场
+          <span className="rounded-full bg-white/20 px-1.5 py-0.5 text-[11px]">
+            第 {farmState.world?.day ?? 1} 天
+          </span>
+        </button>
+      ) : null}
 
       <DesktopPet 
         onOpenPetModule={() => {

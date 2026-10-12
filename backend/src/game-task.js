@@ -61,6 +61,107 @@ function normalizeRewards(v) {
     .slice(0, MAX_REWARD_ITEMS);
 }
 
+// ---------------- 奖励发放（条件筛选 + 发奖 + 通知） ----------------
+
+/** 条件运算符白名单 */
+const COND_OPS = ['gte', 'gt', 'lte', 'lt', 'eq'];
+const COND_MAX = 8;          // 一组筛选条件最多 8 条
+const SCOPE_MAX = 1000;      // 单次发放候选学生上限
+
+/** 筛选条件清洗 */
+function normalizeConditions(v) {
+  if (!Array.isArray(v)) return [];
+  return v
+    .map((c) => ({
+      metric: String((c && c.metric) || '').trim(),
+      op: COND_OPS.includes(c && c.op) ? c.op : 'gte',
+      value: Number(c && c.value),
+      params: c && typeof c.params === 'object' && c.params ? c.params : {},
+    }))
+    .filter((c) => c.metric && Number.isFinite(c.value))
+    .slice(0, COND_MAX);
+}
+
+function cmpOp(value, op, target) {
+  switch (op) {
+    case 'gt': return value > target;
+    case 'gte': return value >= target;
+    case 'lt': return value < target;
+    case 'lte': return value <= target;
+    case 'eq': return Math.abs(value - target) < 1e-9;
+    default: return false;
+  }
+}
+
+function opLabel(op) {
+  return { gt: '>', gte: '≥', lt: '<', lte: '≤', eq: '=' }[op] || '≥';
+}
+
+/** 单条条件的可读描述，如「累计掌握题数 ≥ 10题（掌握阈值 2 次）」 */
+function condLabel(c) {
+  const def = metrics.getMetricDef(c.metric);
+  const name = def ? def.label : c.metric;
+  let extra = '';
+  if (c.params && c.params.kind === 'wps') extra = '（WPS）';
+  else if (c.params && c.params.kind === 'access') extra = '（Access）';
+  const unit = def ? (def.unit || '') : '';
+  return `${name}${extra} ${opLabel(c.op)} ${c.value}${unit}`;
+}
+
+/** 按范围取候选学生（班级 / 指定学生，可组合为交集）；未指定范围返回 null */
+async function loadScopeStudents(pool, classIds, studentIds) {
+  if (!classIds.length && !studentIds.length) return null;
+  let sql = "SELECT id, username, real_name, class_id FROM profiles WHERE role = 'student'";
+  const args = [];
+  if (classIds.length) {
+    sql += ` AND class_id IN (${classIds.map(() => '?').join(',')})`;
+    args.push(...classIds);
+  }
+  if (studentIds.length) {
+    sql += ` AND id IN (${studentIds.map(() => '?').join(',')})`;
+    args.push(...studentIds);
+  }
+  sql += ' ORDER BY class_id ASC, username ASC';
+  const [rows] = await pool.query(sql, args);
+  return rows;
+}
+
+/**
+ * 逐个学生评估全部条件；返回命中的学生（附每条条件的实测值与是否通过）
+ * logic='and' 全通过；'or' 至少一条通过；无条件下 = 范围内全部命中。
+ */
+async function evaluateStudents(pool, students, conditions, logic) {
+  const out = [];
+  for (const s of students) {
+    const checks = [];
+    let allPass = true;
+    let anyPass = false;
+    for (const c of conditions) {
+      const p = await metrics.getProgress(pool, c.metric, s.id, c.params);
+      const value = Number(p.value) || 0;
+      const pass = !p.error && cmpOp(value, c.op, c.value);
+      checks.push({ metric: c.metric, op: c.op, target: c.value, value, pass, label: condLabel(c), text: p.text || '', error: p.error || null });
+      if (pass) anyPass = true; else allPass = false;
+    }
+    const matched = conditions.length === 0 ? true : (logic === 'or' ? anyPass : allPass);
+    if (matched) {
+      const reasons = checks.filter((x) => x.pass).map((x) => x.label);
+      out.push({ id: s.id, username: s.username, real_name: s.real_name, class_id: s.class_id, checks, reasons });
+    }
+  }
+  return out;
+}
+
+/** 奖励物项的可读描述（装备名从 map 查） */
+function rewardLine(r, equipMap) {
+  const n = Math.max(1, Math.round(r.value));
+  if (r.type === 'points') return `+${n} 积分`;
+  if (r.type === 'internet_code') return `上网码 ×${n}`;
+  if (r.type === 'equipment') return `${(equipMap && equipMap[r.target_id]) || '装备'} ×${n}`;
+  if (r.type === 'app') return '解锁应用 ×1';
+  return r.type;
+}
+
 function normalizeTaskRow(row) {
   return {
     id: row.id,
@@ -91,7 +192,15 @@ function todayStrSql() {
  * 在既有事务连接内发放奖励。
  * @throws 任一项失败即抛错（调用方 rollback）
  */
-async function grantRewards(conn, { studentId, studentUsername, task, rewards }) {
+async function grantRewards(conn, { studentId, studentUsername, task, rewards, context }) {
+  // context 允许复用本函数做「任务领取」以外场景的发放（如通知管理的奖励发放）：
+  //   sourceType  记账来源（point_transactions.source_type / internet_codes.source），默认 'mission'
+  //   sourceId    记账来源 id，默认 task.id
+  //   pointsReason 积分流水原因，默认 `完成任务「name」`
+  const ctx = context || {};
+  const sourceType = ctx.sourceType || 'mission';
+  const sourceId = ctx.sourceId !== undefined ? ctx.sourceId : (task ? task.id : null);
+  const pointsReason = ctx.pointsReason || (task ? `完成任务「${task.name}」` : '奖励发放');
   const granted = [];
   for (const r of rewards) {
     const n = Math.max(1, Math.round(r.value));
@@ -108,7 +217,7 @@ async function grantRewards(conn, { studentId, studentUsername, task, rewards })
       );
       await conn.query(
         'INSERT INTO point_transactions (student_id, amount, reason, source_type, source_id, created_at) VALUES (?, ?, ?, ?, ?, NOW())',
-        [studentId, n, `完成任务「${task.name}」`, 'mission', task.id]
+        [studentId, n, pointsReason, sourceType, sourceId]
       );
       granted.push({ type: 'points', value: n, label: `+${n} 积分` });
     }
@@ -123,8 +232,8 @@ async function grantRewards(conn, { studentId, studentUsername, task, rewards })
       }
       const ids = codes.map((c) => c.id);
       await conn.query(
-        "UPDATE internet_codes SET is_used = 1, used_by = ?, used_at = NOW(), used_by_username = ?, source = 'mission', source_id = ? WHERE id IN (?)",
-        [studentId, studentUsername || '', task.id, ids]
+        'UPDATE internet_codes SET is_used = 1, used_by = ?, used_at = NOW(), used_by_username = ?, source = ?, source_id = ? WHERE id IN (?)',
+        [studentId, studentUsername || '', sourceType, sourceId, ids]
       );
       granted.push({ type: 'internet_code', value: n, label: `上网码 ×${n}`, codes: codes.map((c) => c.code) });
     }
@@ -449,6 +558,134 @@ function registerGameTasks(app, deps) {
         await conn.query(`DELETE FROM student_task_claims WHERE task_id IN (${ph})`, ids);
         await conn.commit();
         res.json({ data: { affected: r.affectedRows } });
+      } catch (e) {
+        try { await conn.rollback(); } catch { /* ignore */ }
+        throw e;
+      } finally {
+        conn.release();
+      }
+    } catch (e) {
+      res.status(500).json({ data: null, error: e.message });
+    }
+  });
+
+  // ---- 奖励发放：按指标条件筛选学生 → 发奖（积分/上网码/装备）→ 同时发通知 ----
+  // dry_run=true 仅返回命中名单（不写库）；dry_run=false 才真正发放。
+  app.post('/api/teacher/rewards/grant', authenticate, requireTeacher, async (req, res) => {
+    const teacherId = req.user.userId;
+    try {
+      const b = req.body || {};
+      const dryRun = !!b.dry_run;
+      const scope = b.scope || {};
+      const classIds = normalizeIdList(scope.class_ids);
+      const studentIds = normalizeIdList(scope.student_ids);
+      if (!classIds.length && !studentIds.length) {
+        return res.status(400).json({ data: null, error: '请先选择班级或学生' });
+      }
+      if (classIds.length + studentIds.length > SCOPE_MAX) {
+        return res.status(400).json({ data: null, error: `一次最多针对 ${SCOPE_MAX} 个对象发放` });
+      }
+
+      const conditions = normalizeConditions(b.conditions);
+      if (Array.isArray(b.conditions) && b.conditions.length > conditions.length) {
+        return res.status(400).json({ data: null, error: '存在无效的筛选条件（指标或数值不合法）' });
+      }
+      for (const c of conditions) {
+        if (!metrics.getMetricDef(c.metric)) {
+          return res.status(400).json({ data: null, error: `未知统计指标：${c.metric}` });
+        }
+      }
+      const logic = b.logic === 'or' ? 'or' : 'and';
+      const rewards = normalizeRewards(b.rewards);
+      if (!dryRun && !rewards.length) {
+        return res.status(400).json({ data: null, error: '至少配置一项奖励' });
+      }
+
+      const students = await loadScopeStudents(pool, classIds, studentIds);
+      const matched = await evaluateStudents(pool, students, conditions, logic);
+
+      const condText = conditions.length
+        ? conditions.map(condLabel).join(logic === 'or' ? ' 或 ' : ' 且 ')
+        : '（未设筛选条件，按所选范围）';
+
+      if (dryRun) {
+        return res.json({
+          data: {
+            candidates: students.length,
+            matched_count: matched.length,
+            logic,
+            condition_text: condText,
+            matched: matched.slice(0, 1000).map((m) => ({
+              id: m.id, username: m.username, real_name: m.real_name, class_id: m.class_id,
+              reasons: m.reasons,
+              checks: m.checks.map((c) => ({ label: c.label, value: c.value, pass: c.pass, error: c.error })),
+            })),
+          },
+          error: null,
+        });
+      }
+
+      if (!matched.length) {
+        return res.status(400).json({ data: null, error: '没有学生符合条件，未发放任何奖励' });
+      }
+
+      // 装备名映射（奖励文案用）
+      const equipMap = {};
+      const [eqs] = await pool.query('SELECT id, name, icon FROM equipments');
+      eqs.forEach((e) => { equipMap[e.id] = (e.icon || '') + (e.name || ''); });
+
+      // 上网码库存预检查（不足则直接拒绝，避免发到一半回滚）
+      let codeNeed = 0;
+      for (const r of rewards) {
+        if (r.type === 'internet_code') codeNeed += Math.max(1, Math.round(r.value)) * matched.length;
+      }
+      if (codeNeed > 0) {
+        const [[cr]] = await pool.query('SELECT COUNT(*) AS avail FROM internet_codes WHERE is_used = 0');
+        if (Number(cr.avail) < codeNeed) {
+          return res.status(400).json({ data: null, error: `上网码库存不足（共需 ${codeNeed} 个，仅剩 ${cr.avail} 个），请先补充` });
+        }
+      }
+
+      const title = String(b.title || '').trim().slice(0, 255) || '🎁 奖励发放';
+      const rewardLines = rewards.map((r) => rewardLine(r, equipMap));
+      let finalContent = String(b.content || '').trim() || '老师给你发放了奖励，快去看看！';
+      finalContent += `\n\n🎁 奖励物项：${rewardLines.join('、')}`;
+      finalContent += `\n📋 发放条件：${condText}`;
+
+      const pointPerStudent = rewards
+        .filter((r) => r.type === 'points')
+        .reduce((a, r) => a + Math.max(1, Math.round(r.value)), 0);
+
+      const conn = await pool.getConnection();
+      try {
+        await conn.beginTransaction();
+        const [nr] = await conn.query(
+          "INSERT INTO notifications (teacher_id, title, content, notification_type, target_student_ids, published_at) VALUES (?, ?, ?, 'student', ?, NOW())",
+          [teacherId, title, finalContent, JSON.stringify(matched.map((m) => m.id))]
+        );
+        const notificationId = nr.insertId;
+
+        const details = [];
+        for (const st of matched) {
+          const myReason = st.reasons.length ? st.reasons.join('、') : condText;
+          const granted = await grantRewards(conn, {
+            studentId: st.id,
+            studentUsername: st.username,
+            rewards,
+            context: {
+              sourceType: 'notification',
+              sourceId: String(notificationId),
+              pointsReason: `奖励发放：${myReason}`,
+            },
+          });
+          await conn.query(
+            'INSERT INTO notification_recipients (notification_id, student_id, point_change, point_change_reason) VALUES (?, ?, ?, ?)',
+            [notificationId, st.id, pointPerStudent, myReason]
+          );
+          details.push({ student_id: st.id, real_name: st.real_name, granted });
+        }
+        await conn.commit();
+        res.json({ data: { notification_id: notificationId, granted_count: matched.length, granted: details }, error: null });
       } catch (e) {
         try { await conn.rollback(); } catch { /* ignore */ }
         throw e;

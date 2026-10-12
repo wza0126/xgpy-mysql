@@ -4,6 +4,7 @@ import { backendClient } from '../../api/backendClient';
 import { API_CONFIG } from '../../api/config';
 import { useAuth } from '../../hooks/useAuth';
 import { formatDateTime, formatDate } from '../../utils/dateUtils';
+import { RewardGrantModal } from './RewardGrantModal';
 
 // 携带登录凭证的请求头（供直连 fetch 使用；json=true 时附加 Content-Type）
 function authHeaders(json = false): Record<string, string> {
@@ -64,6 +65,7 @@ const ITEMS_PER_PAGE = 20;
 export const NotificationManager: React.FC = () => {
   const { profile } = useAuth();
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showRewardGrant, setShowRewardGrant] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [classes, setClasses] = useState<Class[]>([]);
   const [selectedClass, setSelectedClass] = useState<string | null>(null);
@@ -454,7 +456,7 @@ export const NotificationManager: React.FC = () => {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl font-bold text-gray-800">通知管理</h1>
-          <p className="text-gray-500 mt-1">发送通知、管理积分奖励/扣除</p>
+          <p className="text-gray-500 mt-1">发送通知、批量发放奖励、管理积分奖励/扣除</p>
         </div>
         <div className="flex items-center gap-3">
           {selectedNotifications.length > 0 && (
@@ -478,6 +480,15 @@ export const NotificationManager: React.FC = () => {
               </button>
             </>
           )}
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={() => setShowRewardGrant(true)}
+            className="bg-amber-500 hover:bg-amber-600 text-white px-6 py-3 rounded-lg flex items-center gap-2 shadow-lg"
+          >
+            <i className="fa-solid fa-gift"></i>
+            奖励发放
+          </motion.button>
           <motion.button
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
@@ -623,6 +634,14 @@ export const NotificationManager: React.FC = () => {
           </>
         )}
       </div>
+
+      {/* 奖励发放模态框 */}
+      <RewardGrantModal
+        open={showRewardGrant}
+        onClose={() => setShowRewardGrant(false)}
+        classes={classes}
+        onGranted={fetchNotifications}
+      />
 
       {/* 创建通知模态框 */}
       <AnimatePresence>

@@ -29,6 +29,8 @@ export interface Notification {
   point_change_reason?: string;
   teacher_name?: string;
   target_name?: string;
+  /** 该生在这条通知（奖励发放）下实际领到的上网码，由后端按通知聚合回填 */
+  internet_codes?: string[];
 }
 
 interface NotificationState {

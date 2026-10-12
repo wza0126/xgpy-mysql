@@ -9,6 +9,7 @@ const { registerWebProxy, invalidateProxyPerm } = require('./web-proxy');
 const { registerWpsOp } = require('./wps-op');
 const { registerAccessOp } = require('./access-op');
 const { registerGameTasks } = require('./game-task');
+const { registerFarm } = require('./farm');
 const PythonSandbox = require('./python-sandbox');
 const PythonGrader = require('./python-grader');
 const { v4: uuidv4 } = require('uuid');
@@ -5084,6 +5085,36 @@ app.get('/api/notifications/student/:studentId', authenticate, async (req, res) 
     query += ' ORDER BY n.published_at DESC LIMIT 100';
 
     const [rows] = await pool.query(query, params);
+
+    // 附上"该生在这条通知下实际领到的上网码"。
+    // 奖励发放（通知管理→奖励发放）是异步到账，学生不在领取现场，
+    // 而通知正文是全体共享的一条，没法写入逐人不同的码；
+    // 码本身已落在 internet_codes（source='notification', source_id=通知id, used_by=学生id），
+    // 这里按通知聚合回填，学生打开通知即可看到并可复制。
+    try {
+      const ids = rows.map((r) => r.id).filter((x) => x !== null && x !== undefined);
+      if (ids.length) {
+        const [codeRows] = await pool.query(
+          "SELECT source_id, code FROM internet_codes " +
+          "WHERE source = 'notification' AND used_by = ? AND source_id IN (?) ORDER BY id ASC",
+          [studentId, ids.map((x) => String(x))]
+        );
+        const byNotif = new Map();
+        for (const c of codeRows) {
+          const k = String(c.source_id);
+          if (!byNotif.has(k)) byNotif.set(k, []);
+          byNotif.get(k).push(c.code);
+        }
+        for (const r of rows) {
+          const codes = byNotif.get(String(r.id));
+          if (codes && codes.length) r.internet_codes = codes;
+        }
+      }
+    } catch (e) {
+      // 上网码回填失败不影响通知列表主流程（仅少了码展示）
+      console.error('Error attaching internet codes to notifications:', e.message);
+    }
+
     res.json({ data: rows, error: null });
   } catch (error) {
     console.error('Error getting student notifications:', error);
@@ -13156,6 +13187,11 @@ registerAccessOp(app, { pool, authenticate, requireTeacher, requireStudent, uplo
 // 教师端「刷题打怪系统 → 任务系统」的 CRUD + 学生端任务中心的进度/领取/红点计数。
 // 路由全部在 game-task.js 内注册；同样必须在中间件定义之后。
 registerGameTasks(app, { pool, authenticate, requireTeacher, requireStudent });
+
+// ===== 代码农场（桌面游戏）=====
+// 教师端：开关 / 参数 / 全班地块总览 / 劳作日志；学生端：农场状态（桌面轮询）+ 劳作提交。
+// 学生端代码由前端子集解释器执行，只上交「操作序列」；生长与积分结算全在 farm.js 服务端完成。
+registerFarm(app, { pool, authenticate, requireTeacher, requireStudent });
 
 // ===== 教师端接口 =====
 

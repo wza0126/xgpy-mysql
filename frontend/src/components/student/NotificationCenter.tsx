@@ -385,6 +385,20 @@ export const NotificationCenter: React.FC = () => {
               <p className="text-sm text-gray-600 line-clamp-2">
                 {showNotificationPopup.content}
               </p>
+              {showNotificationPopup.internet_codes && showNotificationPopup.internet_codes.length > 0 ? (
+                <div className="mt-2 p-2 rounded-lg bg-blue-50 border border-blue-100">
+                  <div className="text-[11px] text-blue-600 mb-1">
+                    <i className="fa-solid fa-wifi mr-1"></i>上网码（可选中复制）
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {showNotificationPopup.internet_codes.map((c, i) => (
+                      <span key={i} className="font-mono text-xs text-gray-800 bg-white border border-blue-200 rounded px-1.5 py-0.5 select-all">
+                        {c}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               <p className="text-xs text-gray-400 mt-2">
                 {formatRelativeTime(showNotificationPopup.created_at)}
               </p>
@@ -958,6 +972,28 @@ const NotificationItem: React.FC<{
             <span className="inline-block mt-1 text-[11px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">
               +{notification.point_reward_amount} 积分
             </span>
+          ) : null}
+          {/* 奖励发放附带的上网码（异步到账，学生需在通知里自行查看/复制） */}
+          {notification.internet_codes && notification.internet_codes.length > 0 ? (
+            <div
+              className="mt-2 p-2 rounded-lg bg-blue-50 border border-blue-100"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="text-[11px] text-blue-600 mb-1">
+                <i className="fa-solid fa-wifi mr-1"></i>
+                上网码（可选中复制）
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {notification.internet_codes.map((c, i) => (
+                  <span
+                    key={i}
+                    className="font-mono text-xs text-gray-800 bg-white border border-blue-200 rounded px-1.5 py-0.5 select-all"
+                  >
+                    {c}
+                  </span>
+                ))}
+              </div>
+            </div>
           ) : null}
         </div>
       </div>
