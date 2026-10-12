@@ -662,6 +662,46 @@ async function clickByText(b, text) {
     ok('★ 选「图表」后出现进阶字段（图例位置/数据标签/轴标题/系列方向）',
       /图例位置/.test(panelText) && /数据标签/.test(panelText) && /轴标题/.test(panelText) && /系列产生在行/.test(panelText));
 
+    // ===== H2. 多工作表：自动生成扫描全部表 + 评分点可选工作表（2026-10-12 方案 B）=====
+    section('H2. ★ 多工作表：自动生成扫描全部工作表 + 评分点可选工作表');
+    {
+      const ansXlsx = path.join(__dirname, 'fixtures', 'wps_popshen_correct.xlsx');
+      ok('★ 标准答案 fixture（3 个工作表）存在', fs.existsSync(ansXlsx), ansXlsx);
+      const doc2 = await b.ws.send('DOM.getDocument', { depth: -1 });
+      const q = await b.ws.send('DOM.querySelectorAll', { nodeId: doc2.root.nodeId, selector: 'input[type=file][accept=".xlsx,.xlsm"]' });
+      const insNode = (q.nodeIds || [])[0];
+      ok('★ 编辑器里存在「上传标准答案」文件输入', !!insNode, 'n=' + (q.nodeIds || []).length);
+      if (insNode) {
+        await b.ws.send('DOM.setFileInputFiles', { files: [ansXlsx], nodeId: insNode });
+        await sleep(4500);
+        const t2 = await b.evalJs('document.body.innerText');
+        ok('★ 自动生成提示「扫描 N 个工作表」', /扫描 \d+ 个工作表/.test(t2), (t2.match(/扫描 \d+ 个工作表[^\n]*/) || [''])[0].slice(0, 120));
+        // 步骤标题在 <input value> 里，innerText 取不到，必须读 DOM 属性
+        const stepTitles = await b.evalJs(`JSON.stringify(Array.from(document.querySelectorAll('input[placeholder*="步骤标题"]')).map(i => i.value))`);
+        ok('★ 生成的步骤标题带【表名】前缀（多表区分）', /【Sheet1】/.test(stepTitles), stepTitles.slice(0, 160));
+        ok('★ 顶部提示本题涉及多个工作表', /本题涉及 \d+ 个工作表/.test(t2));
+        const selInfo = await b.evalJs(`(() => {
+          const sels = Array.from(document.querySelectorAll('select'));
+          const withSheetOpt = sels.filter(s => Array.from(s.options).some(o => o.textContent.trim() === '(默认表)'));
+          return JSON.stringify({
+            n: withSheetOpt.length,
+            first: withSheetOpt.length ? Array.from(withSheetOpt[0].options).map(o => o.value) : [],
+          });
+        })()`);
+        ok('★ 评分点行出现「工作表」下拉', /"n":[1-9]/.test(selInfo), selInfo.slice(0, 140));
+        ok('★ 下拉选项来自实际工作表（Sheet1/Sheet2/Sheet3）',
+          /Sheet1/.test(selInfo) && /Sheet3/.test(selInfo), selInfo.slice(0, 200));
+        // 滚到评分点面板再截图，让「工作表」列可见
+        await b.evalJs(`(() => { const h = Array.from(document.querySelectorAll('h3')).find(x => (x.textContent||'').includes('操作步骤与评分点')); if (h) h.scrollIntoView({ block: 'start' }); return !!h; })()`);
+        await sleep(700);
+        const shotM = await b.ws.send('Page.captureScreenshot', { format: 'png' });
+        if (shotM && shotM.data) {
+          fs.writeFileSync(path.join(SHOT_DIR, 'wpsop_teacher_multisheet.png'), Buffer.from(shotM.data, 'base64'));
+          console.log('  （截图已保存：shots/wpsop_teacher_multisheet.png）');
+        }
+      }
+    }
+
     section('I. 教师端无 JS 异常');
     ok('无 JS 运行时错误', b.jsErrors.length === 0, b.jsErrors.slice(0, 3).join(' | ') || '无');
   } catch (e) {

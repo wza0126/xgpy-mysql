@@ -123,6 +123,8 @@ function stripSpecForStudent(spec) {
         video_url: videos[0] || '',   // 兼容只认单视频的旧前端
         video_urls: videos,           // 一个步骤可挂多条演示视频
         check_count: Array.isArray(st.checks) ? st.checks.length : 0,
+        // 多工作表：这一步在哪张工作表上完成（学生端提示"请在「套餐3」表中操作"）
+        sheet: st.sheet || '',
       };
     }),
   };

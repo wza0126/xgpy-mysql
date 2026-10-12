@@ -130,6 +130,81 @@ function eq(a, b, label) { ok(a === b, label, `期望 ${JSON.stringify(b)}，实
   });
   eq(rG.score, 1, 'J1 带 WPS 专有命名空间与坏条件格式的文件仍可判分');
 
+  console.log('\n=== K. sortCondition 的 ref 是"区域"时不得崩（真实脏数据回归）===');
+  {
+    // ⛔ 事故：答案表的第一个工作表带过排序（<sortState>），其 <sortCondition ref="A3:A58"> 是
+    //    「区域」而非单格；老代码 parseRef(区域) 返回 null 后取 .col → TypeError，
+    //    导致 /inspect 整份自动生成失败，教师端只剩默认 1 个占位评分点。
+    const mk = (ref, value) => ({ ref, value, formula: null, type: 'n', styleIndex: 0 });
+    const model = {
+      sheets: [{
+        name: 'S1',
+        merges: [],
+        charts: [],
+        cols: [],
+        rowHeights: new Map(),
+        condFormats: [],
+        autoFilter: null,
+        cells: new Map([['A1', mk('A1', 1)], ['A2', mk('A2', 2)], ['A3', mk('A3', 3)], ['A4', mk('A4', 4)]]),
+        sortState: { ref: 'A1:A4', conditions: [{ ref: 'A1:A4', descending: true, sortBy: 'value' }] },
+      }],
+      styles: { cellXfs: [{}], fonts: [{}], fills: [{}], borders: [{}], numFmts: {}, dxfs: [] },
+      fileList: [],
+    };
+    let threw = null, out = null;
+    try { out = g.suggestSpecFromModel(model, { full_score: 100 }); } catch (e) { threw = e; }
+    ok(!threw, 'K1 sortCondition.ref 为区域时不抛异常', threw && threw.message);
+    const sc = out && out.steps.flatMap((s) => s.checks).find((c) => c.kind === 'sorted_range');
+    ok(!!sc, 'K2 仍能生成 sorted_range 评分点');
+    if (sc) {
+      eq(sc.col, 1, 'K3 列号取自区域左上角 = 1');
+      eq(sc.order, 'desc', 'K4 排序方向 = 降序');
+      eq(sc.range, 'A1:A4', 'K5 排序区域 = A1:A4');
+    }
+  }
+
+  console.log('\n=== L. 多工作表判分：评分点自带 sheet ===');
+  {
+    const fx = path.join(FIX, 'wps_popshen_correct.xlsx');
+    // 默认表设为 Sheet2；两个相同条件：一个不写 sheet（落默认表 Sheet2 → 应失败），
+    // 一个写 sheet:'Sheet1'（应通过）。用来钉死"按 check.sheet 切表"。
+    const rL = await g.gradeFile(fx, {
+      full_score: 2,
+      grader: { sheet: 'Sheet2' },
+      steps: [{
+        id: 's1', title: '跨表', score: 2, checks: [
+          { kind: 'merged', range: 'A1:D1', score: 1, label: '默认表(Sheet2)找 A1:D1' },
+          { kind: 'merged', range: 'A1:D1', score: 1, sheet: 'Sheet1', label: 'Sheet1 找 A1:D1' },
+        ],
+      }],
+    });
+    eq(rL.steps[0].checks[0].pass, false, 'L1 未指定 sheet → 落默认表 Sheet2 → 找不到合并');
+    eq(rL.steps[0].checks[1].pass, true, 'L2 指定 sheet=Sheet1 → 在该表上找到合并 A1:D1');
+    eq(rL.steps[0].checks[1].sheet, 'Sheet1', 'L3 回执标注该评分点判在 Sheet1');
+    eq(rL.score, 1, 'L4 只有指定表的评分点得分');
+
+    // 指定一张不存在的工作表 → 判失败（而不是静默回退到默认表）
+    const rL2 = await g.gradeFile(fx, {
+      full_score: 1,
+      steps: [{ id: 's1', title: 'x', score: 1, checks: [{ kind: 'merged', range: 'A1:D1', score: 1, sheet: '__不存在表__' }] }],
+    });
+    eq(rL2.steps[0].checks[0].pass, false, 'L5 指定不存在的工作表 → 判失败');
+    ok(/没有/.test(rL2.steps[0].checks[0].got || ''), 'L6 提示缺少该工作表', rL2.steps[0].checks[0].got);
+  }
+
+  console.log('\n=== M. 多工作表自动生成骨架（默认扫全部表）===');
+  {
+    const fx = path.join(FIX, 'wps_popshen_correct.xlsx');
+    const all = await g.suggestSpec(fx, { full_score: 100 }); // 不传 sheet → 扫全部
+    ok(Array.isArray(all.sheets) && all.sheets.length === 3, 'M1 默认扫描全部 3 个工作表', JSON.stringify(all.sheets));
+    ok(all.steps.every((s) => !!s.sheet), 'M2 每个步骤都带 sheet 归属');
+    ok(all.steps.flatMap((s) => s.checks).every((c) => !!c.sheet), 'M3 每个评分点都带 sheet 归属');
+    ok(all.steps.some((s) => /^【/.test(s.title)), 'M4 多表时步骤标题带【表名】前缀', all.steps[0] && all.steps[0].title);
+    const only = await g.suggestSpec(fx, { sheet: 'Sheet1', full_score: 100 }); // 指定单表 → 老行为
+    const onlySheets = new Set(only.steps.map((s) => s.sheet));
+    ok(onlySheets.size === 1 && onlySheets.has('Sheet1'), 'M5 指定 sheet 时只扫那一张表', JSON.stringify([...onlySheets]));
+  }
+
   console.log('\n========================================');
   console.log(`结果：${pass} 通过 / ${fail} 失败`);
   if (fail) { console.log('\n失败项：'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }

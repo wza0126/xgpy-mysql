@@ -856,11 +856,18 @@ function normText(s) {
   return String(s === null || s === undefined ? '' : s).replace(/\s+/g, '').trim();
 }
 
+/** 按名字查工作表（忽略大小写与空白）；找不到返回 null */
+function findSheetByName(model, name) {
+  const want = normText(name).toLowerCase();
+  if (!want) return null;
+  return model.sheets.find((s) => normText(s.name).toLowerCase() === want) || null;
+}
+
 /** 每个检查器：(ctx) → { pass, got, want, note } */
 const CHECKERS = {
-  // 工作表存在
+  // 工作表存在（目标表名写在 check.name；兼容老数据放在 check.sheet）
   sheet_exists({ model, check }) {
-    const want = normText(check.sheet || check.name);
+    const want = normText(check.name || check.sheet);
     const names = model.sheets.map((s) => s.name);
     const pass = names.some((n) => normText(n) === want);
     return { pass, got: names.join('/'), want };
@@ -1732,8 +1739,7 @@ async function gradeFile(input, spec) {
 
   const g = specObj.grader || {};
   const wantSheetName = g.sheet || specObj.sheet || 'Sheet1';
-  let sheet = model.sheets.find((s) => normText(s.name).toLowerCase() === normText(wantSheetName).toLowerCase());
-  if (!sheet) sheet = model.sheets[0];
+  let sheet = findSheetByName(model, wantSheetName) || model.sheets[0];
   if (!sheet) throw new Error('工作簿里没有任何工作表');
 
   const stepsIn = Array.isArray(specObj.steps) ? specObj.steps : [];
@@ -1759,7 +1765,16 @@ async function gradeFile(input, spec) {
     let stepEarned = 0;
     const checks = [];
     for (const c of checksIn) {
-      const r = runCheck(c, model, sheet);
+      // 多工作表判分：评分点可自带 sheet = 归属工作表；缺省落在 grader.sheet / 第一个表。
+      // ⚠️ sheet_exists 是"检查某张表是否存在"，它的 sheet 字段是**目标表名**而非归属表，
+      //    所以不参与归属解析（它的目标名已由 CHECKERS.sheet_exists 从 name/sheet 取）。
+      const wantsOwner = c.kind !== 'sheet_exists' && !!c.sheet;
+      const ownerSheet = wantsOwner ? findSheetByName(model, c.sheet) : null;
+      const missSheet = wantsOwner && !ownerSheet;
+      const cSheet = ownerSheet || sheet;
+      const r = missSheet
+        ? { pass: false, got: `(工作簿里没有「${String(c.sheet)}」表)`, want: `工作表「${String(c.sheet)}」`, note: '提交的工作簿缺少该工作表，无法判分' }
+        : runCheck(c, model, cSheet);
       const cs = num(c.score) !== null ? num(c.score) : perCheck;
       const gotScore = r.pass ? cs : 0;
       stepEarned += gotScore;
@@ -1772,6 +1787,7 @@ async function gradeFile(input, spec) {
         got: r.got,
         want: r.want,
         note: r.note || '',
+        sheet: missSheet ? String(c.sheet) : cSheet.name,
       });
     }
     stepEarned = round2(stepEarned);
@@ -1791,6 +1807,8 @@ async function gradeFile(input, spec) {
       desc: st.desc || '',
       video_url: stepVideos[0] || '',
       video_urls: stepVideos,
+      // 该步骤主要判在哪张表：教师写的 st.sheet ＞ 首个评分点的表 ＞ 默认表
+      sheet: st.sheet || (checks.find((c) => c.sheet) || {}).sheet || sheet.name,
       score: round2(stepScore),
       obtained: stepEarned,
       pass: checksIn.length ? stepEarned >= round2(stepScore) - 1e-9 : false,
@@ -1844,11 +1862,10 @@ async function inspectFile(input) {
 // 八、从"标准答案文件"自动生成评分点骨架（录题提效）
 // ============================================================
 
-function suggestSpecFromModel(model, opts = {}) {
-  const sheetName = opts.sheet || (model.sheets[0] ? model.sheets[0].name : 'Sheet1');
-  const sheet = model.sheets.find((s) => s.name === sheetName) || model.sheets[0];
-  if (!sheet) return { version: 1, full_score: Number(opts.full_score) || 100, grader: { sheet: sheetName }, steps: [] };
-
+/**
+ * 为**单张**工作表生成评分点骨架（内部使用，由 suggestSpecFromModel 逐表调用）。
+ */
+function suggestStepsForSheet(model, sheet, opts = {}) {
   const steps = [];
   const mergesMulti = sheet.merges.filter((m) => rangeCells(m).length > 1);
 
@@ -2006,10 +2023,16 @@ function suggestSpecFromModel(model, opts = {}) {
   if (sheet.sortState && sheet.sortState.conditions.length) {
     const refRange = sheet.sortState.ref ? normRange(sheet.sortState.ref) : null;
     for (const c0 of sheet.sortState.conditions) {
-      const col = parseRef(c0.ref).col;
-      let colRange = null;
+      // ⛔ sortCondition 的 ref 在 OOXML 里是「区域」（如 A3:A58），不是单格；
+      //    老代码直接 parseRef(ref).col → parseRef 只认单格会返回 null → TypeError 整个
+      //    suggestSpec 崩掉（症状：教师端"自动生成评分点"整份失败，只剩默认 1 个占位评分点）。
+      const condRange = normRange(c0.ref);
+      const p0 = parseRef(String(condRange).split(':')[0]); // 取区域左上角定列
+      if (!p0) continue;
+      const col = p0.col;
+      let colRange = condRange || null;
       if (refRange) {
-        const cs = rangeCells(refRange).filter((r) => parseRef(r).col === col);
+        const cs = rangeCells(refRange).filter((r) => { const q = parseRef(r); return q && q.col === col; });
         if (cs.length > 1) colRange = `${cs[0]}:${cs[cs.length - 1]}`;
       }
       if (!colRange) continue;
@@ -2128,8 +2151,43 @@ function suggestSpecFromModel(model, opts = {}) {
     }
   }
 
-  // 按 100 分制输出：先给每类一个基础分，再整体等比缩放到目标满分
+  for (const s of steps) s.score = round2(s.checks.reduce((a, c) => a + (Number(c.score) || 0), 0));
+  return steps;
+}
+
+/**
+ * 扫描工作簿生成评分点骨架。
+ * · opts.sheet 指定 → 只扫那一张（老行为，回归脚本在用）
+ * · 未指定        → 扫**全部工作表**，每张表产出一组步骤；步骤与评分点都带 sheet 字段，
+ *   判分时按 sheet 自动切表（支持"步骤 1-3 在套餐3表、步骤 4-6 在营养成分表"这类跨表题）。
+ * 满分为 100 分制：多表评分点合并后整体等比缩放到 full_score。
+ */
+function suggestSpecFromModel(model, opts = {}) {
   const FULL = Number(opts.full_score) || 100;
+  let targets;
+  if (opts.sheet) {
+    const one = model.sheets.find((s) => s.name === opts.sheet);
+    targets = one ? [one] : (model.sheets[0] ? [model.sheets[0]] : []);
+  } else {
+    targets = model.sheets.slice();
+  }
+  if (!targets.length) return { version: 1, full_score: FULL, grader: { sheet: opts.sheet || 'Sheet1' }, steps: [] };
+
+  const multi = targets.length > 1;
+  const steps = [];
+  for (const sheet of targets) {
+    for (const st of suggestStepsForSheet(model, sheet, opts)) {
+      st.sheet = sheet.name;
+      for (const c of st.checks) c.sheet = sheet.name;
+      // 多表时给步骤标题加表名前缀，教师一眼看出这一步在哪张表上做
+      if (multi) st.title = `【${sheet.name}】${st.title}`;
+      steps.push(st);
+    }
+  }
+  // 跨表重编号，避免各表内生成的 s1/s2 撞车
+  steps.forEach((st, i) => { st.id = 's' + (i + 1); });
+
+  // 按 100 分制输出：先给每类一个基础分，再整体等比缩放到目标满分
   const sum = steps.reduce((a, s) => a + s.checks.reduce((x, c) => x + (Number(c.score) || 0), 0), 0);
   if (sum > 0 && Math.abs(sum - FULL) > 0.01) {
     const k = FULL / sum;
@@ -2146,10 +2204,17 @@ function suggestSpecFromModel(model, opts = {}) {
     for (const s of steps) s.score = round2(s.checks.reduce((a, c) => a + c.score, 0));
   }
 
+  const sheetSummary = {};
+  for (const st of steps) {
+    const n = st.sheet || targets[0].name;
+    sheetSummary[n] = (sheetSummary[n] || 0) + st.checks.length;
+  }
   return {
     version: 1,
     full_score: FULL,
-    grader: { sheet: sheetName },
+    grader: { sheet: targets[0].name },
+    sheets: targets.map((s) => s.name),
+    sheet_summary: sheetSummary,
     template: opts.template || undefined,
     steps,
   };

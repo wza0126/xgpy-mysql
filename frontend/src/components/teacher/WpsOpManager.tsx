@@ -36,6 +36,8 @@ interface CheckDef {
   kind: string;
   label?: string;
   score?: number;
+  /** 多工作表：该评分点归属的工作表名（缺省 = grader.sheet / 第一个表） */
+  sheet?: string;
   [k: string]: any;
 }
 
@@ -44,6 +46,8 @@ interface StepDef {
   title: string;
   desc?: string;
   score: number;
+  /** 多工作表：该步骤主要在哪张表上完成（自动生成时写入） */
+  sheet?: string;
   /** 兼容一期单视频字段（后端/前端都会合并进 video_urls） */
   video_url?: string;
   /** 一个步骤可挂多条演示视频（同一操作可能有多个视角/版本） */
@@ -638,6 +642,8 @@ export const WpsOpManager: React.FC = () => {
   const [validation, setValidation] = useState<{ errors: string[]; warnings: string[]; total: number } | null>(null);
   const [inspectBusy, setInspectBusy] = useState(false);
   const [inspectNote, setInspectNote] = useState('');
+  /** 多工作表：本题扫描到的工作表名（自动生成时写入；编辑旧题时从 spec 收集） */
+  const [sheetNames, setSheetNames] = useState<string[]>([]);
   const [templateBusy, setTemplateBusy] = useState(false);
   const [videoBusy, setVideoBusy] = useState(false);
   const [videoTarget, setVideoTarget] = useState<number | null>(null);
@@ -691,6 +697,7 @@ export const WpsOpManager: React.FC = () => {
     setMsg(null);
     setValidation(null);
     setInspectNote('');
+    setSheetNames([]);
     setRows([]);
   };
 
@@ -702,6 +709,7 @@ export const WpsOpManager: React.FC = () => {
     setSpec(defaultSpec(opKind));
     setValidation(null);
     setInspectNote('');
+    setSheetNames([]);
     setMsg(null);
   };
 
@@ -713,6 +721,14 @@ export const WpsOpManager: React.FC = () => {
     setCluster(r.cluster_id || '');
     setPracticeEnabled(Number(r.practice_enabled) === 1);
     setSpec(sp);
+    // 多工作表：从已有 spec 收集工作表名（grader.sheet + 每个步骤 / 评分点带上的 sheet）
+    {
+      const names: string[] = [];
+      const push = (n?: string) => { const v = String(n || '').trim(); if (v && !names.includes(v)) names.push(v); };
+      push(sp.grader?.sheet);
+      sp.steps.forEach((s) => { push(s.sheet); s.checks.forEach((c) => push(c.sheet)); });
+      setSheetNames(names);
+    }
     setValidation(null);
     setInspectNote('');
     setMsg(null);
@@ -1099,10 +1115,17 @@ export const WpsOpManager: React.FC = () => {
           + `${ts.reduce((a: number, t: any) => a + (t.row_count || 0), 0)} 条记录，已自动生成 ${sug.steps.length} 个步骤 / ${checks} 个评分点`
         );
       } else {
-        const sh = d.summary?.sheets?.[0];
+        // 多工作表：一次扫描全部工作表，逐表汇总评分点，并记下工作表名（供评分点下拉选表）
+        const sheets = Array.isArray(d.summary?.sheets) ? d.summary.sheets : [];
+        const names: string[] = (Array.isArray(sug.sheets) && sug.sheets.length ? sug.sheets : sheets.map((s: any) => s.name)).filter(Boolean);
+        setSheetNames(names);
+        const per = names.map((n: string) => `${n}(${(sug.sheet_summary || {})[n] ?? 0})`).join('、');
+        const merges = sheets.reduce((a: number, s: any) => a + (s.merges?.length || 0), 0);
+        const formulas = sheets.reduce((a: number, s: any) => a + (s.cells || []).filter((c: any) => c.formula).length, 0);
+        const charts = sheets.reduce((a: number, s: any) => a + (s.charts?.length || 0), 0);
         setInspectNote(
-          `识别到 ${sh?.merges?.length || 0} 个合并区、${(sh?.cells || []).filter((c: any) => c.formula).length} 个公式、`
-          + `${sh?.charts?.length || 0} 个图表，已自动生成 ${sug.steps.length} 个步骤 / ${checks} 个评分点`
+          `扫描 ${names.length} 个工作表：${per}；共 ${merges} 个合并区、${formulas} 个公式、${charts} 个图表，`
+          + `已自动生成 ${sug.steps.length} 个步骤 / ${checks} 个评分点`
         );
       }
       // ⚠️ 带上 stem_blocks：自动生成评分点只覆盖 steps，别把老师已经挂好的题干视频冲掉
@@ -1546,6 +1569,13 @@ export const WpsOpManager: React.FC = () => {
             <input ref={stemVideoRef} type="file" accept="video/*" className="hidden" onChange={(e) => onStemVideoPicked(e.target.files?.[0] || null)} />
             <input ref={stemImageRef} type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp" className="hidden" onChange={(e) => onStemImagePicked(e.target.files?.[0] || null)} />
 
+            {opKind === 'wps' && sheetNames.length > 1 && (
+              <div className="mb-2 rounded border border-sky-200 bg-sky-50 px-2.5 py-1.5 text-[11px] text-sky-700">
+                <i className="fas fa-table-columns mr-1" />
+                本题涉及 {sheetNames.length} 个工作表：{sheetNames.join('、')}。每个评分点可用「工作表」下拉指定在哪张表上判分（缺省为默认表）。
+              </div>
+            )}
+
             <div className="space-y-3">
               {spec.steps.map((st, si) => (
                 <div key={si} className="rounded-lg border border-gray-200 bg-gray-50 p-3">
@@ -1565,6 +1595,11 @@ export const WpsOpManager: React.FC = () => {
                       title="步骤分值"
                     />
                     <span className="text-xs text-gray-400">分</span>
+                    {opKind === 'wps' && st.sheet && (
+                      <span className="flex-none rounded bg-sky-50 px-1.5 py-0.5 text-[10px] text-sky-700" title="该步骤归属的工作表">
+                        <i className="fas fa-table-columns mr-0.5" />{st.sheet}
+                      </span>
+                    )}
                     <button onClick={() => delStep(si)} className="flex-none rounded border border-rose-200 px-2 py-1 text-xs text-rose-600 hover:bg-rose-50">删除步骤</button>
                   </div>
 
@@ -1637,6 +1672,19 @@ export const WpsOpManager: React.FC = () => {
                             >
                               {Object.keys(kindMeta).map((k) => <option key={k} value={k}>{kindMeta[k].label}</option>)}
                             </select>
+                            {opKind === 'wps' && c.kind !== 'sheet_exists' && (
+                              <select
+                                value={c.sheet || ''}
+                                onChange={(e) => patchCheck(si, ci, { sheet: e.target.value || undefined })}
+                                title="该评分点在哪张工作表上判分（缺省=默认表）"
+                                className="max-w-[140px] rounded border border-gray-300 px-1.5 py-1 text-xs"
+                              >
+                                <option value="">(默认表)</option>
+                                {(c.sheet && !sheetNames.includes(c.sheet) ? [c.sheet, ...sheetNames] : sheetNames).map((n) => (
+                                  <option key={n} value={n}>{n}</option>
+                                ))}
+                              </select>
+                            )}
                             <input
                               value={c.label || ''}
                               onChange={(e) => patchCheck(si, ci, { label: e.target.value })}

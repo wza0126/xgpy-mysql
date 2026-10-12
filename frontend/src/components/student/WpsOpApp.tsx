@@ -29,6 +29,8 @@ interface StepView {
   /** 一个步骤可挂多条演示视频 */
   video_urls?: string[];
   check_count: number;
+  /** 多工作表：这一步在哪张工作表上完成（教师端按表给分时下发） */
+  sheet?: string;
 }
 
 interface TemplateItem {
@@ -82,6 +84,8 @@ interface CheckResult {
   got: string;
   want: string;
   note?: string;
+  /** 多工作表：该评分点判在哪张工作表上 */
+  sheet?: string;
 }
 
 interface StepResult {
@@ -93,6 +97,8 @@ interface StepResult {
   score: number;
   obtained: number;
   pass: boolean;
+  /** 多工作表：该步骤归属的工作表 */
+  sheet?: string;
   checks: CheckResult[];
 }
 
@@ -366,6 +372,11 @@ const ResultDetailView: React.FC<{
                     <i className={`fas ${c.pass ? 'fa-check text-emerald-600' : 'fa-xmark text-rose-500'} mt-0.5`} />
                     <div className="min-w-0 flex-1">
                       <span className="text-gray-700">{c.label}</span>
+                      {c.sheet && (
+                        <span className="ml-1 rounded bg-sky-50 px-1 py-0.5 text-[10px] text-sky-700">
+                          <i className="fas fa-table-columns mr-0.5" />{c.sheet}
+                        </span>
+                      )}
                       <span className="ml-1 text-gray-400">（{c.earned}/{c.score} 分）</span>
                       <div className="mt-0.5 text-[11px] text-gray-500">
                         要求：{c.want}
@@ -725,6 +736,11 @@ export const WpsOpApp: React.FC = () => {
                       <span className="text-sm font-medium text-gray-800">{s.title}</span>
                       <span className="flex-none text-xs font-semibold text-emerald-700">{s.score} 分</span>
                     </div>
+                    {s.sheet && (
+                      <div className="mt-0.5 text-[11px] text-sky-700">
+                        <i className="fas fa-table-columns mr-1" />工作表：{s.sheet}
+                      </div>
+                    )}
                     {s.desc && <p className="mt-0.5 text-xs text-gray-500">{s.desc}</p>}
                     <VideoBlock urls={s.video_urls} url={s.video_url} />
                   </div>
