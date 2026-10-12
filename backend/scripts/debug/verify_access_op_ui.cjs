@@ -271,6 +271,21 @@ async function setFileInput(b, acceptIncludes, absPath) {
     ok('★ 可展开查看逐评分点明细', /要求：/.test(dText));
     ok('★ 明细含判分依据（表/字段名与顺序）', /存在表|字段名与顺序|奖牌榜/.test(dText));
 
+    // ★ 提交记录可点击回看：Access 端同款（两端共用同一学生端组件）
+    const accHisBtn = await b.evalJs(`document.querySelectorAll('button[title="查看这一次判分的详细情况"]').length`);
+    ok('★ Access 提交记录名称可点（回看判分明细）', accHisBtn >= 1, 'count=' + accHisBtn);
+    const accOpen = await b.evalJs(`(() => {
+      const btn = document.querySelector('button[title="查看这一次判分的详细情况"]');
+      if (!btn) return 'not-found';
+      btn.click(); return 'clicked';
+    })()`);
+    await sleep(600);
+    const accModal = await b.evalJs(`(() => { const el = document.querySelector('.fixed.inset-0.z-50'); return el ? el.innerText : ''; })()`);
+    ok('★ Access 点记录名称弹出「这次判分详情」',
+      accOpen === 'clicked' && /这次判分详情/.test(String(accModal)) && /第 1 步/.test(String(accModal)), String(accOpen));
+    await b.evalJs(`(() => { const btn = document.querySelector('.fixed.inset-0.z-50 button[title="关闭"]'); if (btn) btn.click(); return true; })()`);
+    await sleep(400);
+
     try {
       fs.mkdirSync(SHOT_DIR, { recursive: true });
       const shot = await b.ws.send('Page.captureScreenshot', { format: 'png' });

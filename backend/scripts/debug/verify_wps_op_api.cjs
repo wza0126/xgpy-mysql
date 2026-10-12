@@ -247,7 +247,16 @@ async function login(username, password) {
     ok('返回最近一次结果', !!res1.body?.data);
     ok('明细可用', Array.isArray(res1.body?.data?.detail?.steps));
     const det2 = await api('GET', `/api/student/wps-op/${QUESTION_ID}`, { token: stuToken });
-    ok('详情含提交历史', (det2.body?.data?.submissions || []).length >= 3, 'count=' + (det2.body?.data?.submissions || []).length);
+    const hisSubs = det2.body?.data?.submissions || [];
+    ok('详情含提交历史', hisSubs.length >= 3, 'count=' + hisSubs.length);
+    // ★ 每条历史提交都带自己的判分明细 → 学生点记录名称即可回看错在哪（不必趁热记）
+    ok('★ 提交记录带判分明细（可回看错在哪）',
+      Array.isArray(hisSubs[0]?.detail?.steps) && hisSubs[0].detail.steps.length > 0,
+      'steps=' + (hisSubs[0]?.detail?.steps?.length ?? 'null'));
+    ok('★ 历史明细保留「要求 / 实际」字段（定位错误靠它）',
+      'want' in (hisSubs[0]?.detail?.steps?.[0]?.checks?.[0] || {}),
+      JSON.stringify(hisSubs[0]?.detail?.steps?.[0]?.checks?.[0] || {}).slice(0, 90));
+    ok('⛔ 历史明细不含 sha256 内部字段', !('sha256' in (hisSubs[0]?.detail || {})));
 
     section('K. 异常上传');
     const tmpTxt = path.join(FIX, '_tmp_not_xlsx.txt');

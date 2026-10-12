@@ -792,8 +792,10 @@ function registerWpsOp(app, deps) {
            FROM questions WHERE id = ? AND type = 'wps_op' LIMIT 1`, [questionId]);
       if (!rows.length) return res.status(404).json({ data: null, error: '操作题不存在或已下架' });
       const q = rows[0];
+      // 每条历史提交都带上自己的判分明细（score_detail）→ 学生端点历史记录即可复看错在哪。
+      // ⛔ 只回本人提交（WHERE student_id = ?）；明细经 shapeResultForStudent 脱敏。
       const [subs] = await pool.query(
-        `SELECT id, original_filename, score_obtained, full_score, graded_at, created_at
+        `SELECT id, original_filename, score_obtained, full_score, score_detail, graded_at, created_at
            FROM wps_op_submissions WHERE student_id = ? AND question_id = ?
           ORDER BY created_at DESC LIMIT 20`, [studentId, questionId]);
       res.json({
@@ -803,14 +805,18 @@ function registerWpsOp(app, deps) {
           cluster_id: q.cluster_id,
           sub_topic: q.sub_topic,
           spec: stripSpecForStudent(q.wps_spec),
-          submissions: subs.map((s) => ({
-            id: s.id,
-            filename: s.original_filename,
-            score: Number(s.score_obtained),
-            full_score: Number(s.full_score),
-            graded_at: s.graded_at,
-            created_at: s.created_at,
-          })),
+          submissions: subs.map((s) => {
+            const detail = safeJson(s.score_detail, null);
+            return {
+              id: s.id,
+              filename: s.original_filename,
+              score: Number(s.score_obtained),
+              full_score: Number(s.full_score),
+              graded_at: s.graded_at,
+              created_at: s.created_at,
+              detail: detail ? shapeResultForStudent(detail) : null,
+            };
+          }),
         },
         error: null,
       });
@@ -993,4 +999,4 @@ function registerWpsOp(app, deps) {
   return { stripSpecForStudent, normalizeTemplates, normalizeStemBlocks };
 }
 
-module.exports = { registerWpsOp, stripSpecForStudent, normalizeTemplates, normalizeStemBlocks, createOpImageRoutes };
+module.exports = { registerWpsOp, stripSpecForStudent, normalizeTemplates, normalizeStemBlocks, createOpImageRoutes, shapeResultForStudent };

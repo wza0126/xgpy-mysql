@@ -292,6 +292,51 @@ async function clickByText(b, text) {
     ok('★ 可展开查看逐评分点明细', /要求：/.test(dText));
     ok('★ 明细含判分依据（不保留小数/字体等）', /不保留小数|隶书|合并/.test(dText));
 
+    // ★ 提交记录可点击回看：点记录名称 → 弹窗显示这一次的判分明细（不必趁热记，可反复看）
+    const hisBtnCount = await b.evalJs(`document.querySelectorAll('button[title="查看这一次判分的详细情况"]').length`);
+    ok('★ 提交后出现「我的提交记录」，且记录名称可点', hisBtnCount >= 1, 'count=' + hisBtnCount);
+    const openedModal = await b.evalJs(`(() => {
+      const btn = document.querySelector('button[title="查看这一次判分的详细情况"]');
+      if (!btn) return 'not-found';
+      btn.click();
+      return 'clicked';
+    })()`);
+    await sleep(600);
+    const modalText = async () => b.evalJs(`(() => { const el = document.querySelector('.fixed.inset-0.z-50'); return el ? el.innerText : ''; })()`);
+    const mBefore = await modalText();
+    ok('★ 点记录名称弹出「这次判分详情」', openedModal === 'clicked' && /这次判分详情/.test(String(mBefore)) && /第\s*1\s*步/.test(String(mBefore)), String(openedModal));
+    const mStepOpen = await b.evalJs(`(() => {
+      const box = document.querySelector('.fixed.inset-0.z-50');
+      if (!box) return 'no-modal';
+      // ⚠️ 模板字符串里 \s 会被当转义吃掉 → 这里只能用字面空格
+      const btn = Array.from(box.querySelectorAll('button')).find(x => /第 1 步/.test(x.textContent||''));
+      if (!btn) return 'no-step';
+      btn.click(); return 'clicked';
+    })()`);
+    await sleep(500);
+    const mAfter = await modalText();
+    ok('★ 弹窗内可展开逐评分点明细（要求 / 实际）', mStepOpen === 'clicked' && /要求：/.test(String(mAfter)), String(mStepOpen));
+    ok('★ 弹窗内含该次得分', /\d+\s*\/\s*\d+/.test(String(mAfter).replace(/\n/g, ' ')));
+
+    try {
+      require('fs').mkdirSync(SHOT_DIR, { recursive: true });
+      const shot2 = await b.ws.send('Page.captureScreenshot', { format: 'png' });
+      if (shot2 && shot2.data) {
+        require('fs').writeFileSync(path.join(SHOT_DIR, 'wpsop_student_history_modal.png'), Buffer.from(shot2.data, 'base64'));
+        console.log('  （截图已保存：shots/wpsop_student_history_modal.png）');
+      }
+    } catch (e) { console.log('  （弹窗截图失败，跳过：' + e.message + '）'); }
+
+    const closed = await b.evalJs(`(() => {
+      const btn = document.querySelector('.fixed.inset-0.z-50 button[title="关闭"]');
+      if (!btn) return 'not-found';
+      btn.click();
+      return 'clicked';
+    })()`);
+    await sleep(400);
+    const afterClose = await b.evalJs(`(() => { const el = document.querySelector('.fixed.inset-0.z-50'); return el ? el.innerText : ''; })()`);
+    ok('★ 弹窗可关闭（关闭后详情弹窗消失）', closed === 'clicked' && !/这次判分详情/.test(String(afterClose)), String(closed));
+
     try {
       require('fs').mkdirSync(SHOT_DIR, { recursive: true });
       const shot = await b.ws.send('Page.captureScreenshot', { format: 'png' });

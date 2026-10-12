@@ -190,6 +190,15 @@ async function login(username, password) {
     eq(res1.body?.data?.score, 0, 'I3 最近一次是错卷 → 0 分');
     ok(!('sha256' in (res1.body?.data?.detail || {})), 'I4 ⛔ 结果不含 sha256');
 
+    // ★ 列表接口也下发每条提交的判分明细（学生端提交记录可点击回看）
+    const detA = await api('GET', `/api/student/access-op/${QUESTION_ID}`, { token: stuToken });
+    const hisA = detA.body?.data?.submissions || [];
+    eq(detA.status, 200, 'I5 详情 HTTP 200');
+    ok('★ I6 提交记录带判分明细（可回看错在哪）',
+      Array.isArray(hisA[0]?.detail?.steps) && hisA[0].detail.steps.length > 0,
+      'steps=' + (hisA[0]?.detail?.steps?.length ?? 'null'));
+    ok('⛔ I7 历史明细不含 sha256 内部字段', !('sha256' in (hisA[0]?.detail || {})));
+
     section('J. 落库与统计口径');
     const [subs] = await conn.query("SELECT id FROM wps_op_submissions WHERE kind='access' AND question_id=? AND student_id=(SELECT id FROM profiles WHERE username='a' LIMIT 1)", [QUESTION_ID]);
     ok(subs.length >= 1, 'J1 提交记录已落库（kind=access）');

@@ -121,6 +121,8 @@ interface HistoryItem {
   full_score: number;
   graded_at: string | null;
   created_at: string;
+  /** 这一次提交的判分明细：点记录名称即可弹窗回看错在哪 */
+  detail?: GradeResult['detail'] | null;
 }
 
 type OpKind = 'wps' | 'access';
@@ -315,6 +317,80 @@ const ImageBlock: React.FC<{ urls?: string[]; url?: string; label?: string }> = 
   );
 };
 
+/**
+ * 判分明细视图 ——「本次提交结果」与「历史提交回看弹窗」共用同一套渲染，
+ * 保证以后复看时看到的明细和当时提交后看到的完全一致。
+ * defaultOpenIncomplete=true：默认展开「没拿满分」的步骤，复看时一眼看到错在哪。
+ */
+const ResultDetailView: React.FC<{
+  detail?: GradeResult['detail'] | null;
+  defaultOpenIncomplete?: boolean;
+}> = ({ detail, defaultOpenIncomplete }) => {
+  const [open, setOpen] = React.useState<Record<string, boolean>>({});
+  const steps = detail?.steps || [];
+  if (!steps.length) {
+    return (
+      <div className="rounded-lg border border-dashed border-gray-300 p-3 text-center text-xs text-gray-400">
+        这次提交没有留下评分点明细
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      {steps.map((s, i) => {
+        const key = s.id || String(i);
+        const incomplete = !s.pass || Number(s.obtained) < Number(s.score);
+        const isOpen = open[key] ?? (defaultOpenIncomplete ? incomplete : false);
+        return (
+          <div key={key} className={`rounded-lg border p-2.5 ${s.pass ? 'border-emerald-200 bg-emerald-50/50' : 'border-amber-200 bg-amber-50/40'}`}>
+            <button
+              className="flex w-full items-center justify-between gap-2 text-left"
+              onClick={() => setOpen((o) => ({ ...o, [key]: !isOpen }))}
+            >
+              <span className="flex items-center gap-2 text-sm text-gray-800">
+                <i className={`fas ${s.pass ? 'fa-circle-check text-emerald-600' : 'fa-circle-exclamation text-amber-500'}`} />
+                第 {i + 1} 步 {s.title || ''}
+              </span>
+              <span className="flex items-center gap-2">
+                <span className={`text-sm font-bold ${scoreColor(s.obtained, s.score)}`}>
+                  {s.obtained} / {s.score}
+                </span>
+                <i className={`fas fa-chevron-${isOpen ? 'up' : 'down'} text-xs text-gray-400`} />
+              </span>
+            </button>
+
+            {isOpen && (
+              <div className="mt-2 space-y-1.5 border-t border-gray-200/70 pt-2">
+                {(s.checks || []).map((c, j) => (
+                  <div key={j} className="flex items-start gap-2 text-xs">
+                    <i className={`fas ${c.pass ? 'fa-check text-emerald-600' : 'fa-xmark text-rose-500'} mt-0.5`} />
+                    <div className="min-w-0 flex-1">
+                      <span className="text-gray-700">{c.label}</span>
+                      <span className="ml-1 text-gray-400">（{c.earned}/{c.score} 分）</span>
+                      <div className="mt-0.5 text-[11px] text-gray-500">
+                        要求：{c.want}
+                        {c.pass ? '' : `　实际：${c.got}`}
+                        {c.note ? `　${c.note}` : ''}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                <VideoBlock urls={s.video_urls} url={s.video_url} compact />
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {detail?.passed && (
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-2.5 text-xs text-emerald-700">
+          <i className="fas fa-trophy mr-1" /> 满分通过，全部操作都正确！
+        </div>
+      )}
+    </div>
+  );
+};
+
 export const WpsOpApp: React.FC = () => {
   const [opKind, setOpKind] = useState<OpKind>('wps');
   const conf = OP_CONF[opKind];
@@ -334,7 +410,8 @@ export const WpsOpApp: React.FC = () => {
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<GradeResult | null>(null);
   const [submitError, setSubmitError] = useState('');
-  const [openSteps, setOpenSteps] = useState<Record<string, boolean>>({});
+  /** 正在弹窗回看的某次历史提交（点提交记录名称打开） */
+  const [viewingHistory, setViewingHistory] = useState<HistoryItem | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const extrasInputRef = React.useRef<HTMLInputElement>(null);
 
@@ -373,7 +450,7 @@ export const WpsOpApp: React.FC = () => {
     setFile(null);
     setExtras([]);
     setSubmitError('');
-    setOpenSteps({});
+    setViewingHistory(null);
     setLoadingDetail(true);
     try {
       const { data, error } = await backendClient.get(`${conf.base}/${item.id}`);
@@ -792,56 +869,7 @@ export const WpsOpApp: React.FC = () => {
                 </div>
               )}
 
-              <div className="space-y-2">
-                {(result.detail?.steps || []).map((s, i) => {
-                  const open = !!openSteps[s.id || String(i)];
-                  return (
-                    <div key={s.id || i} className={`rounded-lg border p-2.5 ${s.pass ? 'border-emerald-200 bg-emerald-50/50' : 'border-amber-200 bg-amber-50/40'}`}>
-                      <button
-                        className="flex w-full items-center justify-between gap-2 text-left"
-                        onClick={() => setOpenSteps((o) => ({ ...o, [s.id || String(i)]: !open }))}
-                      >
-                        <span className="flex items-center gap-2 text-sm text-gray-800">
-                          <i className={`fas ${s.pass ? 'fa-circle-check text-emerald-600' : 'fa-circle-exclamation text-amber-500'}`} />
-                          第 {i + 1} 步 {s.title || ''}
-                        </span>
-                        <span className="flex items-center gap-2">
-                          <span className={`text-sm font-bold ${scoreColor(s.obtained, s.score)}`}>
-                            {s.obtained} / {s.score}
-                          </span>
-                          <i className={`fas fa-chevron-${open ? 'up' : 'down'} text-xs text-gray-400`} />
-                        </span>
-                      </button>
-
-                      {open && (
-                        <div className="mt-2 space-y-1.5 border-t border-gray-200/70 pt-2">
-                          {s.checks.map((c, j) => (
-                            <div key={j} className="flex items-start gap-2 text-xs">
-                              <i className={`fas ${c.pass ? 'fa-check text-emerald-600' : 'fa-xmark text-rose-500'} mt-0.5`} />
-                              <div className="min-w-0 flex-1">
-                                <span className="text-gray-700">{c.label}</span>
-                                <span className="ml-1 text-gray-400">（{c.earned}/{c.score} 分）</span>
-                                <div className="mt-0.5 text-[11px] text-gray-500">
-                                  要求：{c.want}
-                                  {c.pass ? '' : `　实际：${c.got}`}
-                                  {c.note ? `　${c.note}` : ''}
-                                </div>
-                              </div>
-                            </div>
-                          ))}
-                          <VideoBlock urls={s.video_urls} url={s.video_url} compact />
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-
-              {result.detail?.passed && (
-                <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-2.5 text-xs text-emerald-700">
-                  <i className="fas fa-trophy mr-1" /> 满分通过，全部操作都正确！
-                </div>
-              )}
+              <ResultDetailView detail={result.detail || null} />
             </div>
           )}
 
@@ -850,12 +878,19 @@ export const WpsOpApp: React.FC = () => {
             <div className="rounded-xl border border-gray-200 bg-white p-4">
               <h3 className="text-sm font-bold text-gray-800">我的提交记录</h3>
               <p className="mb-3 mt-0.5 text-[11px] text-gray-400">
-                点「下载」可取回当时提交的文件，在此基础上修改后再次上传即可（取最好成绩）。
+                点<b>记录名称</b>可回看这一次的判分明细（错在哪）；点「下载」可取回当时提交的文件，在此基础上修改后再次上传即可（取最好成绩）。
               </p>
               <div className="space-y-1.5">
                 {history.map((h) => (
                   <div key={h.id} className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2 text-xs">
-                    <span className="truncate text-gray-600">{h.filename || '（未记录文件名）'}</span>
+                    <button
+                      onClick={() => setViewingHistory(h)}
+                      className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-gray-700 hover:text-sky-700 hover:underline"
+                      title="查看这一次判分的详细情况"
+                    >
+                      <i className="fas fa-file-lines flex-none text-gray-400" />
+                      <span className="truncate">{h.filename || '（未记录文件名）'}</span>
+                    </button>
                     <span className="flex flex-none items-center gap-3">
                       <button
                         onClick={() => downloadSubmission(h)}
@@ -871,6 +906,42 @@ export const WpsOpApp: React.FC = () => {
                     </span>
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {/* 历史提交的判分明细弹窗（点记录名称打开，可反复回看） */}
+          {viewingHistory && (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+              onClick={() => setViewingHistory(null)}
+            >
+              <div
+                className="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-xl bg-white p-4 shadow-xl"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="mb-3 flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 className="text-sm font-bold text-gray-800">这次判分详情</h3>
+                    <p className="mt-0.5 truncate text-[11px] text-gray-400">
+                      {viewingHistory.filename || '（未记录文件名）'} · {fmtTime(viewingHistory.created_at)}
+                    </p>
+                  </div>
+                  <div className="flex flex-none items-center gap-2">
+                    <span className={`text-xl font-extrabold ${scoreColor(viewingHistory.score, viewingHistory.full_score)}`}>
+                      {viewingHistory.score}
+                      <span className="text-sm font-normal text-gray-400"> / {viewingHistory.full_score}</span>
+                    </span>
+                    <button
+                      onClick={() => setViewingHistory(null)}
+                      className="rounded-lg px-2 py-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+                      title="关闭"
+                    >
+                      <i className="fas fa-xmark" />
+                    </button>
+                  </div>
+                </div>
+                <ResultDetailView detail={viewingHistory.detail || null} defaultOpenIncomplete />
               </div>
             </div>
           )}

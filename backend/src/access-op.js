@@ -33,7 +33,7 @@ const { Transform, Readable } = require('stream');
 const { pipeline } = require('stream/promises');
 const { v4: uuidv4 } = require('uuid');
 const grader = require('./access-grader');
-const { stripSpecForStudent, normalizeTemplates, createOpImageRoutes } = require('./wps-op');
+const { stripSpecForStudent, normalizeTemplates, createOpImageRoutes, shapeResultForStudent } = require('./wps-op');
 
 const DB_EXT = /\.(accdb|mdb)$/i;                       // 作答文件：必须 Access 库
 const TEMPLATE_EXT = /\.(accdb|mdb|xlsx|xlsm|csv|txt)$/i; // 模板：空白库 + 数据源
@@ -480,8 +480,9 @@ function registerAccessOp(app, deps) {
            FROM questions WHERE id = ? AND type = 'access_op' LIMIT 1`, [questionId]);
       if (!rows.length) return res.status(404).json({ data: null, error: '操作题不存在或已下架' });
       const q = rows[0];
+      // 与 WPS 端同口径：每条历史提交都带自己的判分明细，供学生端点击复看错在哪。
       const [subs] = await pool.query(
-        `SELECT id, original_filename, score_obtained, full_score, graded_at, created_at
+        `SELECT id, original_filename, score_obtained, full_score, score_detail, graded_at, created_at
            FROM wps_op_submissions WHERE kind = 'access' AND student_id = ? AND question_id = ?
           ORDER BY created_at DESC LIMIT 20`, [studentId, questionId]);
       res.json({
@@ -491,14 +492,18 @@ function registerAccessOp(app, deps) {
           cluster_id: q.cluster_id,
           sub_topic: q.sub_topic,
           spec: stripSpecForStudent(q.access_spec),
-          submissions: subs.map((s) => ({
-            id: s.id,
-            filename: s.original_filename,
-            score: Number(s.score_obtained),
-            full_score: Number(s.full_score),
-            graded_at: s.graded_at,
-            created_at: s.created_at,
-          })),
+          submissions: subs.map((s) => {
+            const detail = safeJson(s.score_detail, null);
+            return {
+              id: s.id,
+              filename: s.original_filename,
+              score: Number(s.score_obtained),
+              full_score: Number(s.full_score),
+              graded_at: s.graded_at,
+              created_at: s.created_at,
+              detail: detail ? shapeResultForStudent(detail) : null,
+            };
+          }),
         },
         error: null,
       });
@@ -519,8 +524,8 @@ function registerAccessOp(app, deps) {
       if (!rows.length) return res.json({ data: null, error: null });
       const r = rows[0];
       const detail = safeJson(r.score_detail, null);
-      const shaped = detail ? { ...detail } : null;
-      if (shaped) { delete shaped.sha256; }
+      // 与 WPS 端统一脱敏口径（删 sha256 / fileList / parts），不再各删各的
+      const shaped = detail ? shapeResultForStudent(detail) : null;
       res.json({
         data: {
           submission_id: r.id,
