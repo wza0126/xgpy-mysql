@@ -119,6 +119,8 @@ async function clickByText(b, text) {
   const baselineSubIds = new Set(bSubs.map((r) => r.id));
   const baselineAnsIds = new Set(bAns.map((r) => r.id));
   const baselineMySubs = baselineSubIds.size;
+  /** 题干分块临时改动的备份（非 null 表示库里还挂着临时数据，必须在 finally 还原） */
+  let stemPatchBackup = null;
 
   const b = await launchHeadless({
     userDataDir: path.join(__dirname, '.tmp-chrome-wpsop'),
@@ -153,6 +155,23 @@ async function clickByText(b, text) {
     await clickByText(b, 'WPS 操作题');
     await sleep(700);
 
+    // ★ 题干分块：临时给样例题挂两段题干视频（跑完立刻还原，finally 里还有兜底还原）
+    //    —— 验证学生端题面是按块渲染的、视频能在题干里就地播放
+    {
+      const [[origRow]] = await conn.query('SELECT wps_spec FROM questions WHERE id = ?', [QUESTION_ID]);
+      stemPatchBackup = { raw: origRow.wps_spec };
+      const stemSpec = { ...(JSON.parse(origRow.wps_spec || '{}') || {}) };
+      stemSpec.stem_blocks = [
+        { type: 'text', html: '<p>【题干分块校验】下载模板并完成下列操作：</p>' },
+        { type: 'text', html: '<p>1. 导入外部数据到 A3:D18。</p>' },
+        { type: 'video', title: '第 1 步演示', urls: ['/uploads/wps-op/videos/stem-verify-1.mp4'] },
+        { type: 'text', html: '<p>2. 用公式计算环比增幅。</p>' },
+        { type: 'image', title: '第 2 步图示', urls: ['/uploads/wps-op/images/stem-verify-1.png'] },
+        { type: 'video', urls: ['https://cdn.invalid.example/stem-verify-2.mp4'] },
+      ];
+      await conn.query('UPDATE questions SET wps_spec = ? WHERE id = ?', [JSON.stringify(stemSpec), QUESTION_ID]);
+    }
+
     section('C. 题目列表');
     const cards = await b.evalJs(`document.querySelectorAll('button.group').length`);
     ok('★ 列表渲染出题目卡片', cards >= 1, 'count=' + cards);
@@ -175,6 +194,51 @@ async function clickByText(b, text) {
     ok('★ 显示上传区提示', /点击选择要上传的 \.xlsx 作答文件/.test(detailText));
     ok('★ 显示「提交判分」按钮', /提交判分/.test(detailText));
     ok('⛔ 页面不显示评分点答案（期望值）', !/15089/.test(detailText) && !/17736/.test(detailText));
+
+    section('D2. ★ 题干分块渲染（老师原题每一步的视频就挂在题面上）');
+    ok('★ 题面按「题干分块」渲染（文字块 + 视频块都在）',
+      /【题干分块校验】/.test(detailText) && /第 1 步演示/.test(detailText),
+      detailText.slice(0, 160).replace(/\n/g, ' '));
+    const stemPlayBtns = await b.evalJs(`Array.from(document.querySelectorAll('button')).filter(x => (x.textContent||'').includes('看演示视频')).length`);
+    ok('★ 每个题干视频块给出「看演示视频」按钮', stemPlayBtns >= 2, 'count=' + stemPlayBtns);
+    await b.evalJs(`(() => {
+      const btn = Array.from(document.querySelectorAll('button')).find(x => (x.textContent||'').includes('看演示视频'));
+      if (btn) { btn.click(); return true; } return false;
+    })()`);
+    await sleep(600);
+    const stemVideoInfo = await b.evalJs(`(() => {
+      const v = Array.from(document.querySelectorAll('video')).find(x => /stem-verify-1\\.mp4/.test(x.getAttribute('src')||''));
+      return v ? (v.getAttribute('src') + '|controls=' + v.hasAttribute('controls')) : 'none';
+    })()`);
+    ok('★ 题干视频内嵌 <video>（同源 /uploads，机房断网也能播）',
+      /stem-verify-1\.mp4/.test(String(stemVideoInfo)) && /controls=true/.test(String(stemVideoInfo)),
+      String(stemVideoInfo));
+
+    // ---- 题干图片块：默认收起（点击才显示）→ 展开后内嵌 <img> ----
+    ok('★ 图片块标题显示在题面上（第 2 步图示）', /第 2 步图示/.test(detailText));
+    const stemImgBtns = await b.evalJs(`Array.from(document.querySelectorAll('button')).filter(x => (x.textContent||'').includes('看图示')).length`);
+    ok('★ 每个题干图片块给出「看图示」按钮', stemImgBtns >= 1, 'count=' + stemImgBtns);
+    const imgClosed = await b.evalJs(`Array.from(document.querySelectorAll('img')).filter(x => /stem-verify-1\\.png/.test(x.getAttribute('src')||'')).length`);
+    ok('★ 默认收起：图片块不渲染 <img>（题面不被图撑长）', imgClosed === 0, 'n=' + imgClosed);
+    await b.evalJs(`(() => {
+      const btn = Array.from(document.querySelectorAll('button')).find(x => (x.textContent||'').includes('看图示'));
+      if (btn) { btn.click(); return true; } return false;
+    })()`);
+    await sleep(600);
+    const stemImgInfo = await b.evalJs(`(() => {
+      const im = Array.from(document.querySelectorAll('img')).find(x => /stem-verify-1\\.png/.test(x.getAttribute('src')||''));
+      return im ? im.getAttribute('src') : 'none';
+    })()`);
+    ok('★ 点开后题干图片内嵌显示（同源 /uploads）',
+      /stem-verify-1\.png/.test(String(stemImgInfo)), String(stemImgInfo));
+
+    // 立刻还原（finally 里还有兜底）
+    {
+      await conn.query('UPDATE questions SET wps_spec = ? WHERE id = ?', [stemPatchBackup.raw, QUESTION_ID]);
+      const [[back]] = await conn.query('SELECT wps_spec FROM questions WHERE id = ?', [QUESTION_ID]);
+      ok('⛔ 题干分块临时数据已还原（不留痕）', String(back.wps_spec) === String(stemPatchBackup.raw));
+      stemPatchBackup = null;
+    }
 
     section('E. 多模板文件可分别下载');
     const tplButtons = await b.evalJs(`(() => {
@@ -244,6 +308,10 @@ async function clickByText(b, text) {
     // 没有 token 必然 401，属正常行为，不代表资源加载失败。
     const badRes = b.netFails.filter((x) =>
       !x.includes('favicon') && !x.includes('ERR_ABORTED') && !(x.includes('401') && x.includes('/api/auth/session'))
+      // ★ D2 段故意写的"假视频/假图片路径"：只验证题干里的 <video>/<img> 接线（src/controls），
+      //   仓库里不放真 mp4/png，所以这些 404 是测试自造的，不算缺陷。
+      && !x.includes('stem-verify-1.mp4')
+      && !x.includes('stem-verify-1.png')
     );
     ok('无资源加载失败', badRes.length === 0, badRes.slice(0, 3).join(' | ') || '无');
 
@@ -304,6 +372,100 @@ async function clickByText(b, text) {
     ok('可切回「题库管理」', backBank === 'clicked', String(backBank));
     await sleep(900);
 
+    section('G4. ★ 题干分块：教师端回读 + 保存不得静默丢视频');
+    {
+      // 曾经的 bug：题干视频块用 urls[]/url，编辑器却拿 normalizeVideos()（只认 video_urls/video_url）
+      // 回读 → 视频块被当成"空块"丢掉 → 老师一按保存视频就没了。这里把这条链路钉死。
+      const [[origRow]] = await conn.query('SELECT content, wps_spec FROM questions WHERE id = ?', [QUESTION_ID]);
+      stemPatchBackup = { raw: origRow.wps_spec, content: origRow.content };
+      const spec2 = { ...(JSON.parse(origRow.wps_spec || '{}') || {}) };
+      spec2.stem_blocks = [
+        { type: 'text', html: '<p>【回读校验】下载模板并完成下列操作。</p>' },
+        { type: 'video', title: '第 1 步演示', urls: ['/uploads/wps-op/videos/stem-verify-1.mp4'] },
+        { type: 'text', html: '<p>1. 导入外部数据到 A3:D18。</p>' },
+        { type: 'video', urls: ['/uploads/wps-op/videos/stem-verify-2.mp4'] },
+        { type: 'image', title: '第 2 步图示', urls: ['/uploads/wps-op/images/stem-verify-1.png'] },
+      ];
+      await conn.query('UPDATE questions SET wps_spec = ? WHERE id = ?', [JSON.stringify(spec2), QUESTION_ID]);
+
+      // ⚠️ 左导航里也有同名菜单「题库管理」→ 必须排除 <nav> 内的元素，否则会跳到普通题库页（不是 WPS/ACCESS）
+      await clickByText(b, 'WPS/ACCESS');
+      await sleep(1600);
+      const tabClicked = await b.evalJs(`(() => {
+        const btns = Array.from(document.querySelectorAll('button')).filter(x => x.textContent.trim() === '题库管理' && !x.closest('nav'));
+        if (!btns.length) return 'not-found';
+        btns[0].click();
+        return 'clicked';
+      })()`);
+      ok('回到「题库管理」页签', tabClicked === 'clicked', String(tabClicked));
+      await sleep(800);
+      // ⛔ 必须让列表重新拉一次：直接改库不会刷新已挂载组件的 rows，
+      //    切一次分段（Access → WPS）会触发 load()，否则拿到的是改动前的旧 spec。
+      await clickByText(b, 'Access 操作题');
+      await sleep(1200);
+      await clickByText(b, 'WPS 操作题');
+      await sleep(1500);
+      const editClicked = await b.evalJs(`(() => {
+        const btn = Array.from(document.querySelectorAll('button')).filter(x => x.textContent.trim() === '编辑' && !x.closest('nav'))[0];
+        if (btn) { btn.click(); return 'clicked'; } return 'not-found';
+      })()`);
+      ok('可打开样例题编辑器', editClicked === 'clicked', String(editClicked));
+      await sleep(1800);
+      const gText = await b.evalJs('document.body.innerText');
+      const vBlocks = await b.evalJs(`Array.from(document.querySelectorAll('span')).filter(s => s.textContent.trim() === '视频块').length`);
+      ok('★ 编辑器回读题干视频块（不再被当成空块丢掉）', vBlocks === 2, 'count=' + vBlocks);
+      ok('★ 回读后标注「视频 2 条」', /视频 2 条/.test(gText), (gText.match(/视频 \d+ 条/) || [''])[0]);
+      ok('★ 两条视频地址都列出来了', /stem-verify-1\.mp4/.test(gText) && /stem-verify-2\.mp4/.test(gText));
+      // 标题在 <input> 里，innerText 读不到，必须读 value
+      const titleVals = await b.evalJs(`Array.from(document.querySelectorAll('input')).filter(i => (i.placeholder||'').includes('这块视频的说明')).map(i => i.value)`);
+      ok('★ 视频块标题保留（第 1 步演示）', titleVals.includes('第 1 步演示'), JSON.stringify(titleVals));
+
+      // ---- 题干图片块（与视频块用两组不同键，回读/保存都不能丢） ----
+      const iBlocks = await b.evalJs(`Array.from(document.querySelectorAll('span')).filter(s => s.textContent.trim() === '图片块').length`);
+      ok('★ 编辑器回读题干图片块', iBlocks === 1, 'count=' + iBlocks);
+      ok('★ 回读后标注「图片 1 张」', /图片 1 张/.test(gText), (gText.match(/图片 \d+ 张/) || [''])[0]);
+      // 图片块不显示地址文本（显示的是缩略图），所以断言读 <img src> 而不是 innerText
+      const imgSrcs = await b.evalJs(`Array.from(document.querySelectorAll('img')).map(x => x.getAttribute('src')||'').filter(s => /stem-verify-1\\.png/.test(s))`);
+      ok('★ 图片地址读回来了（编辑器用同源地址渲染缩略图）',
+        Array.isArray(imgSrcs) && imgSrcs.length === 1, JSON.stringify(imgSrcs));
+      const imgTitleVals = await b.evalJs(`Array.from(document.querySelectorAll('input')).filter(i => (i.placeholder||'').includes('这块图的说明')).map(i => i.value)`);
+      ok('★ 图片块标题保留（第 2 步图示）', imgTitleVals.includes('第 2 步图示'), JSON.stringify(imgTitleVals));
+      ok('★ 图片块提供「上传本地图片 / 抓取外链到本地 / 粘贴地址」三件套',
+        /上传本地图片/.test(gText) && /抓取外链到本地/.test(gText) && /粘贴地址/.test(gText));
+      ok('★ 题干区提供「+ 图片块」与「＋图片」快速插入入口',
+        (await b.evalJs(`Array.from(document.querySelectorAll('button')).filter(x => ['图片块','＋图片'].includes((x.textContent||'').trim())).length`)) >= 2);
+
+      await b.evalJs(`(() => {
+        const btn = Array.from(document.querySelectorAll('button')).find(x => x.textContent.trim() === '保存');
+        if (btn) { btn.click(); return true; } return false;
+      })()`);
+      let backToList = false;
+      for (let i = 0; i < 24; i++) {
+        await sleep(500);
+        if (/新建操作题/.test(await b.evalJs('document.body.innerText'))) { backToList = true; break; }
+      }
+      ok('保存后回到题库列表', backToList === true);
+
+      const [[afterSave]] = await conn.query('SELECT wps_spec FROM questions WHERE id = ?', [QUESTION_ID]);
+      const aSpec = JSON.parse(afterSave.wps_spec || '{}');
+      const savedVideos = (aSpec.stem_blocks || []).filter((x) => x.type === 'video')
+        .reduce((n, x) => n + (Array.isArray(x.urls) ? x.urls.length : 0), 0);
+      ok('⛔ 保存后题干视频仍在（不再静默丢视频）', savedVideos === 2, 'videos=' + savedVideos);
+      const savedImages = (aSpec.stem_blocks || []).filter((x) => x.type === 'image')
+        .reduce((n, x) => n + (Array.isArray(x.urls) ? x.urls.length : 0), 0);
+      ok('⛔ 保存后题干图片仍在（视频/图片两组键都不能丢）', savedImages === 1, 'images=' + savedImages);
+      const savedImgTitle = (aSpec.stem_blocks || []).find((x) => x.type === 'image')?.title;
+      ok('⛔ 保存后图片块标题未丢', savedImgTitle === '第 2 步图示', String(savedImgTitle));
+      const savedTexts = (aSpec.stem_blocks || []).filter((x) => x.type === 'text').length;
+      ok('保存后文字块仍在（content 由文字块拼出）', savedTexts === 2, 'texts=' + savedTexts);
+
+      await conn.query('UPDATE questions SET content = ?, wps_spec = ? WHERE id = ?', [stemPatchBackup.content, stemPatchBackup.raw, QUESTION_ID]);
+      const [[bk]] = await conn.query('SELECT content, wps_spec FROM questions WHERE id = ?', [QUESTION_ID]);
+      ok('⛔ 题干分块临时数据已还原（不留痕）',
+        String(bk.wps_spec) === String(stemPatchBackup.raw) && String(bk.content) === String(stemPatchBackup.content));
+      stemPatchBackup = null;
+    }
+
     section('H. 新建编辑器');
     await b.evalJs(`(() => {
       const btn = Array.from(document.querySelectorAll('button')).find(x => (x.textContent||'').includes('新建操作题'));
@@ -319,6 +481,70 @@ async function clickByText(b, text) {
     ok('★ 编辑器渲染：评分点面板', /操作步骤与评分点/.test(eText) && /合并单元格/.test(eText));
     ok('★ 提供 JSON 直编入口', /直接编辑 JSON|收起 JSON/.test(eText));
     ok('★ 提供分值辅助按钮', /按评分点重算步骤分/.test(eText) && /等比缩放到满分/.test(eText));
+
+    // ★ 题干分块：演示视频 / 图示可以挂在「老师原题的每一步」上，而不是只能挂在自动生成的评分步骤上
+    ok('★ 题干改为「分块」编辑（文字块 + 视频块 + 图片块）',
+      /题干分块/.test(eText) && /文字块/.test(eText) && /视频块/.test(eText) && /图片块/.test(eText));
+    ok('★ 题干区提供「+ 图片块」入口（还能在任意块后用「＋图片」插到某一步下面）', /图片块/.test(eText));
+    const stemVideoBtnBefore = await b.evalJs(`Array.from(document.querySelectorAll('button')).filter(x => (x.textContent||'').includes('上传本地视频')).length`);
+    const addStemVideo = await b.evalJs(`(() => {
+      const btn = Array.from(document.querySelectorAll('button')).find(x => (x.textContent||'').trim() === '视频块');
+      if (!btn) return 'not-found';
+      btn.click();
+      return 'clicked';
+    })()`);
+    await sleep(500);
+    const stemVideoBtnAfter = await b.evalJs(`Array.from(document.querySelectorAll('button')).filter(x => (x.textContent||'').includes('上传本地视频')).length`);
+    ok('★ 点「+ 视频块」后多出一个题干视频位（上传/抓取/粘贴三入口齐备）',
+      addStemVideo === 'clicked' && stemVideoBtnAfter === stemVideoBtnBefore + 1,
+      `${stemVideoBtnBefore} → ${stemVideoBtnAfter}`);
+    ok('★ 空视频块提示「保存时会自动丢掉」', /保存时会自动丢掉/.test(await b.evalJs('document.body.innerText')));
+
+    // ---- 图片块：点「+ 图片块」后应出现「上传本地图片 / 抓取外链到本地 / 粘贴地址」三入口 ----
+    const stemImgBtnBefore = await b.evalJs(`Array.from(document.querySelectorAll('button')).filter(x => (x.textContent||'').includes('上传本地图片')).length`);
+    const addStemImage = await b.evalJs(`(() => {
+      const btn = Array.from(document.querySelectorAll('button')).find(x => (x.textContent||'').trim() === '图片块');
+      if (!btn) return 'not-found';
+      btn.click();
+      return 'clicked';
+    })()`);
+    await sleep(500);
+    const hImgText = await b.evalJs('document.body.innerText');
+    const stemImgBtnAfter = await b.evalJs(`Array.from(document.querySelectorAll('button')).filter(x => (x.textContent||'').includes('上传本地图片')).length`);
+    ok('★ 点「+ 图片块」后多出一个题干图片位（上传/抓取/粘贴三入口齐备）',
+      addStemImage === 'clicked' && stemImgBtnAfter === stemImgBtnBefore + 1,
+      `${stemImgBtnBefore} → ${stemImgBtnAfter}`);
+    ok('★ 图片块标注支持格式（png / jpg / gif / webp / bmp）', /支持 png \/ jpg \/ gif \/ webp \/ bmp/.test(hImgText));
+    ok('★ 空图片块提示「学生端点看图示展开 / 保存时会自动丢掉」',
+      /看图示/.test(hImgText) && /保存时会自动丢掉/.test(hImgText));
+
+    const stemTyped = await b.evalJs(`(() => {
+      ${SET_VAL}
+      const ta = Array.from(document.querySelectorAll('textarea')).find(t => (t.placeholder||'').includes('下载'));
+      if (!ta) return 'no-textarea';
+      __setVal(ta, '<p>下载模板，按下列要求操作并保存。</p><p>1. 导入外部数据到 A3:D18。</p><p>2. 用公式计算环比增幅。</p>');
+      return 'set';
+    })()`);
+    ok('★ 题干文字块可粘整段题干（支持简单 HTML）', stemTyped === 'set', String(stemTyped));
+    await sleep(400);
+    const splitClicked = await b.evalJs(`(() => {
+      const btn = Array.from(document.querySelectorAll('button')).find(x => (x.textContent||'').includes('按步骤拆块'));
+      if (!btn) return 'not-found';
+      btn.click();
+      return 'clicked';
+    })()`);
+    await sleep(600);
+    const afterSplit = await b.evalJs(`({
+      text: Array.from(document.querySelectorAll('span')).filter(s => s.textContent.trim() === '文字块').length,
+      video: Array.from(document.querySelectorAll('span')).filter(s => s.textContent.trim() === '视频块').length,
+      order: Array.from(document.querySelectorAll('span')).filter(s => ['文字块','视频块'].includes(s.textContent.trim())).map(s => s.textContent.trim()).join('>'),
+    })`);
+    ok('★ 「按步骤拆块」拆成 说明块 + 每步文字块，并给每一步自动留视频位',
+      splitClicked === 'clicked' && afterSplit.text === 3 && afterSplit.video === 3,
+      JSON.stringify(afterSplit));
+    ok('★ 块顺序即渲染顺序（文字块在前、视频位跟在对应的步骤块后）',
+      String(afterSplit.order).startsWith('文字块>文字块>视频块>文字块>视频块'),
+      String(afterSplit.order));
 
     // 满分默认 100
     const fullScoreVal = await b.evalJs(`(() => {
@@ -401,6 +627,18 @@ async function clickByText(b, text) {
 
     // ---------- 不留痕 ----------
     try {
+      // 题干分块临时数据兜底还原（正常流程在 D2 / G4 段末尾已经还原并把备份置空）
+      if (stemPatchBackup) {
+        await conn.query('UPDATE questions SET wps_spec = ? WHERE id = ?', [stemPatchBackup.raw, QUESTION_ID]);
+        if (stemPatchBackup.content !== undefined) {
+          await conn.query('UPDATE questions SET content = ? WHERE id = ?', [stemPatchBackup.content, QUESTION_ID]);
+        }
+        const [[r2]] = await conn.query('SELECT content, wps_spec FROM questions WHERE id = ?', [QUESTION_ID]);
+        ok('⛔ 不留痕：样例题题干分块临时数据已还原（兜底路径）',
+          String(r2.wps_spec) === String(stemPatchBackup.raw)
+          && (stemPatchBackup.content === undefined || String(r2.content) === String(stemPatchBackup.content)));
+        stemPatchBackup = null;
+      }
       const [curSubs] = await conn.query('SELECT id, student_id, file_path FROM wps_op_submissions WHERE question_id = ?', [QUESTION_ID]);
       const leakedSubs = curSubs.filter((r) => r.student_id === STU_ID && !baselineSubIds.has(r.id));
       if (leakedSubs.length) {

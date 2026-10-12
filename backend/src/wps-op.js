@@ -18,6 +18,10 @@
  *     旧数据里的单个 template 字段继续兼容（normalizeTemplates 会合并）。
  *   · 演示视频：可本地上传（POST /video）或给外网链接自动抓取到本地（POST /video/fetch）。
  *     机房断网时外链用不了，抓成本地文件后就和网络无关了。
+ *   · 题干分块（spec.stem_blocks）：题干可以是"文字块 + 视频块"的顺序列表，教师能对着
+ *     自己原题的每一步插视频 —— 平台上"评分步骤"是按标准答案自动生成的，措辞常与教师
+ *     原题不同，所以视频不能只挂在评分步骤上。questions.content 仍照旧写全文（列表标题 /
+ *     兜底渲染用），两者不冲突。
  *   · 默认满分 100（学测操作题评分点很细，10 分不够用）。
  */
 
@@ -34,9 +38,13 @@ const grader = require('./wps-grader');
 const ALLOWED_EXT = /\.(xlsx|xlsm)$/i;                  // 作答文件：必须 OOXML，判分引擎读它
 const TEMPLATE_EXT = /\.(xlsx|xlsm|txt|csv)$/i;         // 模板：含 txt/csv 数据源
 const VIDEO_EXT = /\.(mp4|webm|ogg|ogv|mov|m4v)$/i;     // 演示视频
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp)$/i;       // 题干图片（刻意不收 svg：同源直出会带 XSS 风险）
 const DEFAULT_FULL_SCORE = 100;
 const VIDEO_MAX_MB = Number(process.env.WPS_VIDEO_MAX_MB || 200);
 const VIDEO_FETCH_TIMEOUT_MS = Number(process.env.WPS_VIDEO_FETCH_TIMEOUT_MS || 60000);
+// 题干图片比视频小得多，上限单独给；WPS 与 Access 共用同一个环境变量
+const IMAGE_MAX_MB = Number(process.env.OP_IMAGE_MAX_MB || 20);
+const IMAGE_FETCH_TIMEOUT_MS = Number(process.env.OP_IMAGE_FETCH_TIMEOUT_MS || 30000);
 
 function safeJson(v, fallback) {
   if (v === null || v === undefined) return fallback;
@@ -103,6 +111,7 @@ function stripSpecForStudent(spec) {
     full_score: Number(s.full_score) || DEFAULT_FULL_SCORE,
     templates,
     template: templates[0] || null, // 兼容只认单个模板的旧前端
+    stem_blocks: normalizeStemBlocks(s), // 题干分块（文字块 + 视频块，按序渲染）
     steps: (Array.isArray(s.steps) ? s.steps : []).map((st, i) => {
       const videos = normalizeVideoUrls(st);
       return {
@@ -136,6 +145,52 @@ function normalizeVideoUrls(step) {
   return out;
 }
 
+/**
+ * 题干分块里的素材地址集合（视频块 / 图片块共用）。
+ * 新字段：block.urls[] / block.url；同时兼容步骤视频的老字段 video_urls / video_url，
+ * 避免历史数据或手写 JSON 读不回来。
+ */
+function collectBlockUrls(b) {
+  const out = [];
+  const push = (u) => {
+    const v = String(u || '').trim();
+    if (v && !out.includes(v)) out.push(v);
+  };
+  if (Array.isArray(b.urls)) b.urls.forEach(push);
+  push(b.url);
+  if (Array.isArray(b.video_urls)) b.video_urls.forEach(push);
+  push(b.video_url);
+  return out;
+}
+
+/**
+ * 统一"题干分块"字段。
+ * 新格式：spec.stem_blocks = [{type:'text',html}, {type:'video',title,urls[]}, {type:'image',title,urls[]}, ...]
+ *         —— 题干 = 文字块 / 视频块 / 图片块按顺序交替，教师可在任意一步后面挂演示视频或图示。
+ * 旧格式：只有 questions.content 一段 HTML（没有分块）→ 返回 []，前端回退整体渲染。
+ *
+ * 规则：空文字块、以及没有任何素材的视频块/图片块一律丢弃（教师端会给每一步留空位，
+ * 没填素材的占位块不应该落库，否则学生端会出现一堆空壳）。
+ */
+function normalizeStemBlocks(spec) {
+  const s = safeJson(spec, {});
+  const raw = Array.isArray(s.stem_blocks) ? s.stem_blocks : [];
+  const out = [];
+  for (const b of raw) {
+    if (!b || typeof b !== 'object') continue;
+    if (b.type === 'video' || b.type === 'image') {
+      const urls = collectBlockUrls(b);
+      if (!urls.length) continue;
+      out.push({ type: b.type, title: String(b.title || '').trim(), url: urls[0], urls });
+    } else {
+      const html = String(b.html || '').trim();
+      if (!html) continue;
+      out.push({ type: 'text', html });
+    }
+  }
+  return out;
+}
+
 /** 提交回执给学生看的形态（去掉内部字段，保留逐评分点明细——作答后可见） */
 function shapeResultForStudent(result) {
   if (!result || typeof result !== 'object') return result;
@@ -146,6 +201,128 @@ function shapeResultForStudent(result) {
   return out;
 }
 
+/**
+ * 操作题「题干图片」的上传 / 外链抓取路由（WPS 与 Access 共用，避免两边实现漂移）。
+ *   POST <base>/image        —— 上传本地图片
+ *   POST <base>/image/fetch  —— 把外网图片抓到本地后引用（机房断网也能看）
+ * 返回体与模板/视频一致：{ url, name, size, stored_name, source }，前端一套代码两端通用。
+ * base 形如 /api/teacher/wps-op；图片落到 <dir>，对外地址是 <urlPrefix>/<文件名>。
+ */
+function createOpImageRoutes(app, opts) {
+  const { authenticate, requireTeacher, dir, urlPrefix, base } = opts;
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+  const upload = multer({
+    storage: multer.diskStorage({
+      destination: (req, file, cb) => cb(null, dir),
+      filename: (req, file, cb) => {
+        const ext = (path.extname(fixUtf8Name(file.originalname)) || '.png').toLowerCase();
+        cb(null, 'img-' + Date.now() + '-' + Math.round(Math.random() * 1e9) + ext);
+      },
+    }),
+    limits: { fileSize: IMAGE_MAX_MB * 1024 * 1024 },
+    fileFilter: (req, file, cb) => {
+      if (IMAGE_EXT.test(fixUtf8Name(file.originalname))) return cb(null, true);
+      cb(new Error('题干图片只支持 png / jpg / jpeg / gif / webp / bmp 格式。'));
+    },
+  });
+  const wrap = (mw) => (req, res, next) => {
+    mw(req, res, (err) => (err ? res.status(400).json({ data: null, error: err.message || '图片上传失败' }) : next()));
+  };
+
+  app.post(base + '/image', authenticate, requireTeacher, wrap(upload.single('file')), (req, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ data: null, error: '未接收到图片文件' });
+      res.json({
+        data: {
+          url: urlPrefix + '/' + req.file.filename,
+          name: fixUtf8Name(req.file.originalname),
+          size: req.file.size,
+          stored_name: req.file.filename,
+          source: 'local',
+        },
+        error: null,
+      });
+    } catch (e) {
+      console.error('op image upload error:', e);
+      res.status(500).json({ data: null, error: e.message });
+    }
+  });
+
+  app.post(base + '/image/fetch', authenticate, requireTeacher, async (req, res) => {
+    const url = String((req.body && req.body.url) || '').trim();
+    if (!/^https?:\/\//i.test(url)) {
+      return res.status(400).json({ data: null, error: '请填写以 http:// 或 https:// 开头的图片直链' });
+    }
+    let outPath = null;
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), IMAGE_FETCH_TIMEOUT_MS);
+      let resp;
+      try {
+        resp = await fetch(url, { signal: ctrl.signal, redirect: 'follow' });
+      } finally {
+        clearTimeout(timer);
+      }
+      if (!resp.ok) throw new Error('对方返回 HTTP ' + resp.status);
+
+      const ct = String(resp.headers.get('content-type') || '');
+      // 对方给的不是图片（网页 / JSON 报错页 / 防盗链页）就直说，别存成一个坏文件。
+      // octet-stream 放行：有些图床不报 content-type。
+      if (ct && !/^image\//i.test(ct) && !/^application\/octet-stream/i.test(ct)) {
+        throw new Error(`这个地址返回的不是图片（Content-Type: ${ct.slice(0, 40)}），请换图片直链`);
+      }
+      let ext = '';
+      try { ext = (path.extname(new URL(url).pathname) || '').toLowerCase(); } catch { ext = ''; }
+      if (!IMAGE_EXT.test(ext)) {
+        if (/png/.test(ct)) ext = '.png';
+        else if (/gif/.test(ct)) ext = '.gif';
+        else if (/webp/.test(ct)) ext = '.webp';
+        else if (/bmp/.test(ct)) ext = '.bmp';
+        else ext = '.jpg';
+      }
+      const maxBytes = IMAGE_MAX_MB * 1024 * 1024;
+      const declared = Number(resp.headers.get('content-length') || 0);
+      if (declared && declared > maxBytes) {
+        throw new Error(`图片约 ${(declared / 1048576).toFixed(1)}MB，超过上限 ${IMAGE_MAX_MB}MB`);
+      }
+
+      const fileName = 'img-url-' + Date.now() + '-' + Math.round(Math.random() * 1e9) + ext;
+      outPath = path.join(dir, fileName);
+      let received = 0;
+      const limiter = new Transform({
+        transform(chunk, enc, cb) {
+          received += chunk.length;
+          if (received > maxBytes) return cb(new Error(`图片超过上限 ${IMAGE_MAX_MB}MB`));
+          cb(null, chunk);
+        },
+      });
+      await pipeline(Readable.fromWeb(resp.body), limiter, fs.createWriteStream(outPath));
+
+      let baseName = url;
+      try { baseName = path.basename(new URL(url).pathname) || url; } catch { /* 保持原样 */ }
+      res.json({
+        data: {
+          url: urlPrefix + '/' + fileName,
+          name: baseName,
+          size: received,
+          stored_name: fileName,
+          source: 'fetched',
+          source_url: url,
+        },
+        error: null,
+      });
+    } catch (e) {
+      if (outPath) { try { if (fs.existsSync(outPath)) fs.unlinkSync(outPath); } catch { /* ignore */ } }
+      console.error('op image fetch error:', e);
+      const hint = /abort|timeout|fetch failed|ENOTFOUND|ECONN/i.test(String(e.message))
+        ? '（如果这台机器连不上外网，请改用「上传本地图片」）'
+        : '';
+      res.status(400).json({ data: null, error: '抓取失败：' + e.message + hint });
+    }
+  });
+}
+
 function registerWpsOp(app, deps) {
   const { pool, authenticate, requireTeacher, requireStudent, uploadsDir } = deps;
 
@@ -153,9 +330,19 @@ function registerWpsOp(app, deps) {
   const templateDir = path.join(baseDir, 'templates');
   const submissionDir = path.join(baseDir, 'submissions');
   const videoDir = path.join(baseDir, 'videos');
-  for (const dir of [templateDir, submissionDir, videoDir]) {
+  const imageDir = path.join(baseDir, 'images');
+  for (const dir of [templateDir, submissionDir, videoDir, imageDir]) {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   }
+
+  // 题干图片：上传 / 外链抓取（与 Access 共用同一实现，见 createOpImageRoutes）
+  createOpImageRoutes(app, {
+    authenticate,
+    requireTeacher,
+    dir: imageDir,
+    urlPrefix: '/uploads/wps-op/images',
+    base: '/api/teacher/wps-op',
+  });
 
   const makeStorage = (dir, prefix, fallbackExt) => multer.diskStorage({
     destination: (req, file, cb) => cb(null, dir),
@@ -803,7 +990,7 @@ function registerWpsOp(app, deps) {
     }
   });
 
-  return { stripSpecForStudent, normalizeTemplates };
+  return { stripSpecForStudent, normalizeTemplates, normalizeStemBlocks };
 }
 
-module.exports = { registerWpsOp, stripSpecForStudent, normalizeTemplates };
+module.exports = { registerWpsOp, stripSpecForStudent, normalizeTemplates, normalizeStemBlocks, createOpImageRoutes };

@@ -42,7 +42,22 @@ interface SpecView {
   full_score: number;
   templates: TemplateItem[];
   template: TemplateItem | null;
+  /** 题干分块（文字块 + 视频块，按序渲染）；为空时回退渲染 content（老题） */
+  stem_blocks?: StemBlockView[];
   steps: StepView[];
+}
+
+/**
+ * 题干分块：与「评分步骤」分开的、教师原题版式。
+ * 老师按自己原题的《操作步骤》写，每一步文字后面可以挂一段演示视频 / 一组图示。
+ */
+interface StemBlockView {
+  type: 'text' | 'video' | 'image';
+  html?: string;
+  title?: string;
+  /** 兼容单条素材字段 */
+  url?: string;
+  urls?: string[];
 }
 
 interface QuestionItem {
@@ -182,8 +197,14 @@ const tplIcon = (kind?: string) => (kind === 'text' ? 'fa-file-lines' : kind ===
 /** 本地上传/抓取的视频（相对路径）可内嵌播放；外链在新窗口打开（机房断网时可能打不开） */
 const isLocalVideo = (u: string) => /^\/uploads\//.test(u) || /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//i.test(u);
 
-/** 一个步骤可挂多条演示视频：本地的内嵌播放，外链的给链接 */
-const VideoBlock: React.FC<{ urls?: string[]; url?: string; compact?: boolean }> = ({ urls, url, compact }) => {
+/** 题干视频块按钮文案（题干不分"这一步"，所以不说"这一步的"） */
+const stemVideoLabel = (b: StemBlockView) => {
+  const list = Array.isArray(b.urls) && b.urls.length ? b.urls : (b.url ? [b.url] : []);
+  return list.length > 1 ? `看演示视频（${list.length} 个）` : '看演示视频';
+};
+
+/** 一个步骤/一个题干块可挂多条演示视频：本地的内嵌播放，外链的给链接 */
+const VideoBlock: React.FC<{ urls?: string[]; url?: string; compact?: boolean; label?: string }> = ({ urls, url, compact, label }) => {
   const [open, setOpen] = React.useState(false);
   const list = (Array.isArray(urls) && urls.length ? urls : (url ? [url] : []))
     .map((u) => String(u || '').trim())
@@ -191,6 +212,7 @@ const VideoBlock: React.FC<{ urls?: string[]; url?: string; compact?: boolean }>
   if (!list.length) return null;
   const local = list.filter((u) => isLocalVideo(u));
   const remote = list.filter((u) => !isLocalVideo(u));
+  const closed = label || (list.length > 1 ? `看这一步的演示视频（${list.length} 个）` : '看这一步的演示视频');
   return (
     <div className="mt-1">
       <button
@@ -198,7 +220,7 @@ const VideoBlock: React.FC<{ urls?: string[]; url?: string; compact?: boolean }>
         className="inline-flex items-center gap-1 text-[11px] text-sky-600 hover:underline"
       >
         <i className={`fas ${open ? 'fa-circle-pause' : 'fa-circle-play'}`} />
-        {open ? '收起演示视频' : (list.length > 1 ? `看这一步的演示视频（${list.length} 个）` : '看这一步的演示视频')}
+        {open ? '收起演示视频' : closed}
       </button>
       {open && (
         <div className="mt-2 space-y-2">
@@ -230,6 +252,63 @@ const VideoBlock: React.FC<{ urls?: string[]; url?: string; compact?: boolean }>
               ))}
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+/** 题干图片块按钮文案（题干不分"这一步"，所以不说"这一步的"） */
+const stemImageLabel = (b: StemBlockView) => {
+  const list = Array.isArray(b.urls) && b.urls.length ? b.urls : (b.url ? [b.url] : []);
+  return list.length > 1 ? `看图示（${list.length} 张）` : '看图示';
+};
+
+/** 只认 http(s) 外链与同源 /uploads 素材（防手写 JSON 里的 javascript: 之类脏协议） */
+const safeAsset = (u: string) => (/^https?:\/\//i.test(u) || /^\/uploads\//.test(u) ? u : '');
+
+/** 本地上传/抓取到本地的素材走同源地址；外链原样用 */
+const assetSrc = (u: string) => (isLocalVideo(u) ? `${API_CONFIG.apiUrl}${u}` : u);
+
+/**
+ * 题干图片块：和视频块一样**默认收起**，点一下才展开（题面不会被图撑长）；
+ * 一个块可挂多张图（如"如图"的多张截图），点图在新窗口看大图。
+ */
+const ImageBlock: React.FC<{ urls?: string[]; url?: string; label?: string }> = ({ urls, url, label }) => {
+  const [open, setOpen] = React.useState(false);
+  const list = (Array.isArray(urls) && urls.length ? urls : (url ? [url] : []))
+    .map((u) => safeAsset(String(u || '').trim()))
+    .filter(Boolean);
+  if (!list.length) return null;
+  return (
+    <div className="mt-1">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="inline-flex items-center gap-1 text-[11px] text-emerald-600 hover:underline"
+      >
+        <i className={`fas ${open ? 'fa-image' : 'fa-eye'}`} />
+        {open ? '收起图示' : (label || '看图示')}
+      </button>
+      {open && (
+        <div className="mt-2 flex flex-wrap items-start gap-2">
+          {list.map((u, i) => (
+            <a
+              key={'img' + i}
+              href={assetSrc(u)}
+              target="_blank"
+              rel="noreferrer"
+              className="block overflow-hidden rounded-lg border border-gray-200 bg-white hover:border-emerald-300"
+              title="在新窗口看大图"
+            >
+              {/* eslint-disable-next-line jsx-a11y/img-redundant-alt */}
+              <img
+                src={assetSrc(u)}
+                alt={`图示 ${i + 1}`}
+                className="max-h-72 w-auto max-w-full"
+                loading="lazy"
+              />
+            </a>
+          ))}
         </div>
       )}
     </div>
@@ -509,12 +588,50 @@ export const WpsOpApp: React.FC = () => {
 
       {!loadingDetail && spec && (
         <div className="space-y-4">
-          {/* 题干 */}
+          {/* 题干：教师在教师端按"原题版式"分块（文字块 + 视频块 + 图片块），每一步后面可挂演示视频 / 图示 */}
           <div className="rounded-xl border border-gray-200 bg-white p-4">
-            <div
-              className="prose prose-sm max-w-none text-sm leading-relaxed text-gray-700"
-              dangerouslySetInnerHTML={{ __html: plainContent }}
-            />
+            {(spec.stem_blocks || []).length > 0 ? (
+              <div className="space-y-2.5">
+                {(spec.stem_blocks || []).map((b, i) => {
+                  if (b.type === 'video') {
+                    return (
+                      <div key={'sv' + i} className="rounded-lg border border-violet-100 bg-violet-50/50 px-3 py-2">
+                        {b.title && (
+                          <div className="text-xs font-medium text-violet-700">
+                            <i className="fas fa-circle-play mr-1" />{b.title}
+                          </div>
+                        )}
+                        <VideoBlock urls={b.urls} url={b.url} label={stemVideoLabel(b)} />
+                      </div>
+                    );
+                  }
+                  if (b.type === 'image') {
+                    return (
+                      <div key={'si' + i} className="rounded-lg border border-emerald-100 bg-emerald-50/40 px-3 py-2">
+                        {b.title && (
+                          <div className="text-xs font-medium text-emerald-700">
+                            <i className="fas fa-image mr-1" />{b.title}
+                          </div>
+                        )}
+                        <ImageBlock urls={b.urls} url={b.url} label={stemImageLabel(b)} />
+                      </div>
+                    );
+                  }
+                  return (
+                    <div
+                      key={'st' + i}
+                      className="prose prose-sm max-w-none text-sm leading-relaxed text-gray-700"
+                      dangerouslySetInnerHTML={{ __html: sanitizeHtml(b.html || '') }}
+                    />
+                  );
+                })}
+              </div>
+            ) : (
+              <div
+                className="prose prose-sm max-w-none text-sm leading-relaxed text-gray-700"
+                dangerouslySetInnerHTML={{ __html: plainContent }}
+              />
+            )}
           </div>
 
           {/* 步骤 */}

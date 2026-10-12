@@ -25,7 +25,8 @@ import { WpsOpAnalytics } from './WpsOpAnalytics';
  *        Access：表/字段/类型/主键/记录/排序/筛选/对象）
  *   2) 骨架可在可视化面板里改分值、改标签；也可以直接编辑 JSON
  *   3) 模板支持多文件：空白表 + txt/csv 数据源（Access 还要带上待导入的 xlsx）
- *   4) 每一步可挂演示视频：本地上传 或 外链抓取到本地（机房断网也能播），**一步可多条**
+ *   4) 演示视频 / 题干图片两处可挂：**题干分块**（老师原题的每一步后面，最贴近学生看到的题面）
+ *      与**评分步骤**；视频与图片都可本地上传 / 外链抓取到本地（机房断网也能看），一处可多条/多张
  *   5) 默认满分 100（评分点很细，10 分不够用）
  */
 
@@ -57,6 +58,23 @@ interface TemplateDef {
   kind?: string;
 }
 
+/**
+ * 题干分块：题干不再是"一整块 HTML"，而是**文字块 + 视频块 + 图片块**的顺序列表。
+ * 老师对着自己原题的《操作步骤》写：一段说明，然后每一步文字后面挂视频块 / 图片块。
+ * 学生端按数组顺序渲染，所以"第几步的演示 / 图示"就在第几步文字下面。
+ */
+interface StemBlockDef {
+  type: 'text' | 'video' | 'image';
+  /** type=text：该块的 HTML（支持简单标签） */
+  html?: string;
+  /** type=video|image：可选的块标题，如「第 1 步演示」「第 1 步图示」 */
+  title?: string;
+  /** type=video|image：兼容单条素材字段（后端/前端都会合并进 urls） */
+  url?: string;
+  /** type=video|image：一块可挂多条素材（多角度视频 / 多张图） */
+  urls?: string[];
+}
+
 interface SpecDef {
   version: number;
   full_score: number;
@@ -64,6 +82,8 @@ interface SpecDef {
   templates?: TemplateDef[];
   /** 一期单模板字段：继续保留（后端 normalizeTemplates 会合并） */
   template?: { name?: string; path?: string; size?: number | null };
+  /** 题干分块（文字块 + 视频块）；为空时学生端回退渲染 questions.content */
+  stem_blocks?: StemBlockDef[];
   steps: StepDef[];
 }
 
@@ -416,6 +436,7 @@ const defaultSpec = (op: OpKind): SpecDef => ({
   full_score: DEFAULT_FULL_SCORE,
   ...(op === 'wps' ? { grader: { sheet: 'Sheet1' } } : {}),
   templates: [],
+  stem_blocks: [{ type: 'text', html: '' }],
   steps: [emptyStep(0, op)],
 });
 
@@ -453,6 +474,104 @@ const normalizeVideos = (s: any): string[] => {
   return out;
 };
 
+/**
+ * 题干素材块（视频块 / 图片块）的地址集合 —— 两者用同一组键，都走这个函数。
+ * ⛔ 键名是 `urls[]` / `url`（与"步骤视频"的 `video_urls` / `video_url` **不是同一组键**）。
+ * 曾经这里误用 `normalizeVideos()`（只认 video_urls/video_url）→ 打开带题干视频的题时视频块被当成"空块"丢掉，
+ * 再点保存就**静默删掉老师的视频**。两组键都认，防止历史/手写数据读不回来。
+ */
+const stemUrls = (b: any): string[] => {
+  const out: string[] = [];
+  const push = (u: any) => {
+    const v = String(u || '').trim();
+    if (v && !out.includes(v)) out.push(v);
+  };
+  if (Array.isArray(b?.urls)) b.urls.forEach(push);
+  push(b?.url);
+  if (Array.isArray(b?.video_urls)) b.video_urls.forEach(push);
+  push(b?.video_url);
+  return out;
+};
+
+/**
+ * 题干分块规范化（与后端 `normalizeStemBlocks` 同口径，改口径要两边同步）：
+ * 丢掉空文字块、以及没填素材的视频块 / 图片块（编辑器会给每一步自动留一个空视频位）。
+ */
+const normalizeStemBlocks = (v: any): StemBlockDef[] => {
+  const raw = Array.isArray(v?.stem_blocks) ? v.stem_blocks : (Array.isArray(v) ? v : []);
+  const out: StemBlockDef[] = [];
+  raw.forEach((b: any) => {
+    if (!b || typeof b !== 'object') return;
+    if (b.type === 'video' || b.type === 'image') {
+      const urls = stemUrls(b);
+      if (!urls.length) return;
+      out.push({ type: b.type, title: String(b.title || '').trim(), url: urls[0], urls });
+    } else {
+      const html = String(b.html || '').trim();
+      if (!html) return;
+      out.push({ type: 'text', html });
+    }
+  });
+  return out;
+};
+
+/** 分块 → 题干全文 HTML（写回 questions.content，供列表标题/搜索/兜底渲染用） */
+const stemToHtml = (blocks: StemBlockDef[]): string =>
+  (Array.isArray(blocks) ? blocks : [])
+    .filter((b) => b.type === 'text')
+    .map((b) => String(b.html || '').trim())
+    .filter(Boolean)
+    .join('\n');
+
+const STEP_LINE_RE = /^(步骤\s*\d+|第\s*\d+\s*步|\d+\s*[.、．)）])/;
+/** 单独一行的数字（如从表格导出的"序号"列）也算步骤开始 */
+const LONE_NUM_RE = /^\d{1,2}$/;
+
+/**
+ * 「按步骤自动拆块」：把一整段题干 HTML 按行拆开。
+ * 识别「1.」「1、」「步骤1」「第1步」，以及**单独一行的序号**（表格导出常见：序号列 + "步骤N" 列 + 说明）。
+ * 每个步骤的后续行都归到该步骤块里（不会全塞进第一块），并在每步后面自动留一个空视频位。
+ * ⚠️ 序号行紧跟「步骤N」行时，序号只当噪声丢掉，避免同一个步骤被拆成两块。
+ */
+const splitStemIntoBlocks = (html: string): StemBlockDef[] => {
+  const src = String(html || '').trim();
+  if (!src) return [{ type: 'text', html: '' }];
+  const lines = src
+    .split(/<\/p>|<br\s*\/?>|\n/i)
+    .map((x) => x.trim())
+    .filter((x) => x && x !== '<p>')
+    .map((p) => (/^<p[^>]*>/i.test(p) ? p : `<p>${p}</p>`));
+  const plainOf = (line: string) => line.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
+
+  const head: string[] = [];
+  const steps: StemBlockDef[] = [];
+  let cur: string[] | null = null;
+  const closeStep = () => {
+    if (!cur) return;
+    if (cur.length) steps.push({ type: 'text', html: cur.join('') }, { type: 'video', urls: [] });
+    cur = null;
+  };
+  lines.forEach((line, i) => {
+    const plain = plainOf(line);
+    const nextPlain = i + 1 < lines.length ? plainOf(lines[i + 1]) : '';
+    // 序号列噪声：紧跟着「步骤N / 第N步」的纯数字行，直接跳过
+    if (LONE_NUM_RE.test(plain) && /^(步骤\s*\d+|第\s*\d+\s*步)/.test(nextPlain)) return;
+    if (STEP_LINE_RE.test(plain) || LONE_NUM_RE.test(plain)) {
+      closeStep();
+      cur = [line];
+    } else if (cur) {
+      cur.push(line);
+    } else {
+      head.push(line);
+    }
+  });
+  closeStep();
+  if (!steps.length) return [{ type: 'text', html: src }];
+  const out: StemBlockDef[] = [];
+  if (head.length) out.push({ type: 'text', html: head.join('') });
+  return out.concat(steps);
+};
+
 const parseSpec = (raw: any, op: OpKind): SpecDef => {
   if (!raw) return defaultSpec(op);
   let v = raw;
@@ -465,6 +584,7 @@ const parseSpec = (raw: any, op: OpKind): SpecDef => {
     ...(op === 'wps' ? { grader: v.grader || { sheet: 'Sheet1' } } : {}),
     templates,
     template: templates[0],
+    stem_blocks: normalizeStemBlocks(v),
     steps: v.steps.map((s: any, i: number) => {
       const videos = normalizeVideos(s);
       return {
@@ -506,7 +626,8 @@ export const WpsOpManager: React.FC = () => {
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<Row | null>(null);
-  const [content, setContent] = useState('');
+  /** 题干分块（文字块 + 视频块）；保存时由文字块拼出 questions.content */
+  const [stemBlocks, setStemBlocks] = useState<StemBlockDef[]>([{ type: 'text', html: '' }]);
   const [cluster, setCluster] = useState('');
   const [practiceEnabled, setPracticeEnabled] = useState(true);
   const [spec, setSpec] = useState<SpecDef>(() => defaultSpec('wps'));
@@ -520,9 +641,16 @@ export const WpsOpManager: React.FC = () => {
   const [templateBusy, setTemplateBusy] = useState(false);
   const [videoBusy, setVideoBusy] = useState(false);
   const [videoTarget, setVideoTarget] = useState<number | null>(null);
+  /** 题干视频块的落点（与步骤视频位分开，避免互相串台） */
+  const [stemVideoTarget, setStemVideoTarget] = useState<number | null>(null);
+  const [stemImageBusy, setStemImageBusy] = useState(false);
+  /** 题干图片块的落点（同样与视频块分开） */
+  const [stemImageTarget, setStemImageTarget] = useState<number | null>(null);
   const inspectRef = useRef<HTMLInputElement>(null);
   const templateRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLInputElement>(null);
+  const stemVideoRef = useRef<HTMLInputElement>(null);
+  const stemImageRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -568,7 +696,7 @@ export const WpsOpManager: React.FC = () => {
 
   const startNew = () => {
     setEditing({ id: '', content: '', cluster_id: null, practice_enabled: 1 });
-    setContent('');
+    setStemBlocks([{ type: 'text', html: '' }]);
     setCluster('');
     setPracticeEnabled(true);
     setSpec(defaultSpec(opKind));
@@ -579,13 +707,168 @@ export const WpsOpManager: React.FC = () => {
 
   const startEdit = (r: Row) => {
     setEditing(r);
-    setContent(r.content || '');
+    const sp = parseSpec(specOfRow(r, opKind), opKind);
+    // 老题（只有 content 没有分块）→ 自动包成一个文字块，老师接着拆/挂视频
+    setStemBlocks(sp.stem_blocks && sp.stem_blocks.length ? sp.stem_blocks : [{ type: 'text', html: r.content || '' }]);
     setCluster(r.cluster_id || '');
     setPracticeEnabled(Number(r.practice_enabled) === 1);
-    setSpec(parseSpec(specOfRow(r, opKind), opKind));
+    setSpec(sp);
     setValidation(null);
     setInspectNote('');
     setMsg(null);
+  };
+
+  // ---------- 题干分块编辑（文字块 + 视频块 + 图片块） ----------
+  const patchStemBlock = (bi: number, patch: Partial<StemBlockDef>) => {
+    setStemBlocks((bs) => bs.map((b, i) => (i === bi ? { ...b, ...patch } : b)));
+  };
+  const addStemBlock = (type: 'text' | 'video' | 'image', at?: number) => {
+    setStemBlocks((bs) => {
+      const block: StemBlockDef = type === 'text' ? { type: 'text', html: '' } : { type, urls: [] };
+      const i = at === undefined ? bs.length : Math.min(Math.max(at, 0), bs.length);
+      return [...bs.slice(0, i), block, ...bs.slice(i)];
+    });
+  };
+  const delStemBlock = (bi: number) => setStemBlocks((bs) => bs.filter((_, i) => i !== bi));
+  const moveStemBlock = (bi: number, dir: -1 | 1) => {
+    setStemBlocks((bs) => {
+      const j = bi + dir;
+      if (j < 0 || j >= bs.length) return bs;
+      const next = bs.slice();
+      [next[bi], next[j]] = [next[j], next[bi]];
+      return next;
+    });
+  };
+  /**
+   * 往指定题干素材块（视频 / 图片）追加一条地址。
+   * 视频块与图片块用同一组键（urls[] / url），所以这里不需要区分类型，只排除文字块，
+   * 避免"给文字块挂视频"这种串台。
+   */
+  const appendStemUrl = (bi: number, url: string) => {
+    const v = String(url || '').trim();
+    if (!v) return;
+    setStemBlocks((bs) => bs.map((b, i) => {
+      if (i !== bi || b.type === 'text') return b;
+      const list = stemUrls(b);
+      if (list.includes(v)) return { ...b, urls: list, url: list[0] };
+      const next = [...list, v];
+      return { ...b, urls: next, url: next[0] };
+    }));
+  };
+  const removeStemUrl = (bi: number, url: string) => {
+    setStemBlocks((bs) => bs.map((b, i) => {
+      if (i !== bi) return b;
+      const next = stemUrls(b).filter((u) => u !== url);
+      return { ...b, urls: next, url: next[0] || '' };
+    }));
+  };
+  /** 一整块题干按「1. / 步骤N / 第N步」自动拆成 说明块 + 每步文字块 + 每步视频位 */
+  const splitStemBlock = (bi: number) => {
+    const b = stemBlocks[bi];
+    if (!b || b.type !== 'text') return;
+    const blocks = splitStemIntoBlocks(b.html || '');
+    if (blocks.length <= 1) {
+      setMsg({ type: 'err', text: '没识别到「1.」「步骤1」「第1步」这类步骤行，没法自动拆块' });
+      return;
+    }
+    setStemBlocks((bs) => [...bs.slice(0, bi), ...blocks, ...bs.slice(bi + 1)]);
+    setMsg({ type: 'ok', text: `已拆成 ${blocks.filter((x) => x.type === 'text').length} 个文字块 + ${blocks.filter((x) => x.type === 'video').length} 个视频位，往每一步的视频位上传视频即可` });
+  };
+  const pickStemVideo = (bi: number) => {
+    setStemVideoTarget(bi);
+    stemVideoRef.current?.click();
+  };
+  const onStemVideoPicked = async (f: File | null) => {
+    const bi = stemVideoTarget;
+    if (!f || bi === null) return;
+    setVideoBusy(true);
+    setMsg(null);
+    try {
+      const d = await uploadFile(`${conf.base}/video`, f);
+      appendStemUrl(bi, d.url);
+      setMsg({ type: 'ok', text: `视频已上传并挂到题干第 ${bi + 1} 块（${fmtSize(d.size)}），机房断网也能播` });
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e?.isAuthError ? '登录已失效，请重新登录' : (e?.message || '视频上传失败') });
+    } finally {
+      setVideoBusy(false);
+      setStemVideoTarget(null);
+      if (stemVideoRef.current) stemVideoRef.current.value = '';
+    }
+  };
+  /** 外链抓取到本地 → 挂到指定题干视频块 */
+  const fetchStemVideo = async (bi: number) => {
+    const url = window.prompt('粘贴视频直链（http/https，需服务端能直接下载）：', '');
+    if (!url) return;
+    setVideoBusy(true);
+    setMsg(null);
+    try {
+      const token = getAuthToken();
+      const res = await fetch(`${API_CONFIG.apiUrl}${conf.base}/video/fetch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ url }),
+      });
+      let json: any = null;
+      try { json = await res.json(); } catch { /* ignore */ }
+      if (res.status === 401) { const e: any = new Error('登录已失效，请重新登录'); e.isAuthError = true; throw e; }
+      if (!res.ok) throw new Error(json?.error || `抓取失败（${res.status}）`);
+      const d = json?.data || {};
+      appendStemUrl(bi, d.url);
+      setMsg({ type: 'ok', text: `外链视频已抓到本地并挂到题干第 ${bi + 1} 块（${fmtSize(d.size)}）` });
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e?.isAuthError ? '登录已失效，请重新登录' : (e?.message || '抓取失败') });
+    } finally {
+      setVideoBusy(false);
+    }
+  };
+
+  // ---------- 题干图片块：上传本地 / 抓取外链 / 粘地址 ----------
+  const pickStemImage = (bi: number) => {
+    setStemImageTarget(bi);
+    stemImageRef.current?.click();
+  };
+  const onStemImagePicked = async (f: File | null) => {
+    const bi = stemImageTarget;
+    if (!f || bi === null) return;
+    setStemImageBusy(true);
+    setMsg(null);
+    try {
+      const d = await uploadFile(`${conf.base}/image`, f);
+      appendStemUrl(bi, d.url);
+      setMsg({ type: 'ok', text: `图片已上传并挂到题干第 ${bi + 1} 块（${fmtSize(d.size)}），机房断网也能看` });
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e?.isAuthError ? '登录已失效，请重新登录' : (e?.message || '图片上传失败') });
+    } finally {
+      setStemImageBusy(false);
+      setStemImageTarget(null);
+      if (stemImageRef.current) stemImageRef.current.value = '';
+    }
+  };
+  /** 外链抓取到本地 → 挂到指定题干图片块（机房断网也能看） */
+  const fetchStemImage = async (bi: number) => {
+    const url = window.prompt('粘贴图片直链（http/https，需服务端能直接下载）：', '');
+    if (!url) return;
+    setStemImageBusy(true);
+    setMsg(null);
+    try {
+      const token = getAuthToken();
+      const res = await fetch(`${API_CONFIG.apiUrl}${conf.base}/image/fetch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ url }),
+      });
+      let json: any = null;
+      try { json = await res.json(); } catch { /* ignore */ }
+      if (res.status === 401) { const e: any = new Error('登录已失效，请重新登录'); e.isAuthError = true; throw e; }
+      if (!res.ok) throw new Error(json?.error || `抓取失败（${res.status}）`);
+      const d = json?.data || {};
+      appendStemUrl(bi, d.url);
+      setMsg({ type: 'ok', text: `外链图片已抓到本地并挂到题干第 ${bi + 1} 块（${fmtSize(d.size)}）` });
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e?.isAuthError ? '登录已失效，请重新登录' : (e?.message || '抓取失败') });
+    } finally {
+      setStemImageBusy(false);
+    }
   };
 
   // ---------- 评分点结构编辑 ----------
@@ -822,7 +1105,8 @@ export const WpsOpManager: React.FC = () => {
           + `${sh?.charts?.length || 0} 个图表，已自动生成 ${sug.steps.length} 个步骤 / ${checks} 个评分点`
         );
       }
-      const parsed = parseSpec({ ...sug, full_score: spec.full_score || DEFAULT_FULL_SCORE, templates: spec.templates, template: spec.template }, opKind);
+      // ⚠️ 带上 stem_blocks：自动生成评分点只覆盖 steps，别把老师已经挂好的题干视频冲掉
+      const parsed = parseSpec({ ...sug, full_score: spec.full_score || DEFAULT_FULL_SCORE, templates: spec.templates, template: spec.template, stem_blocks: spec.stem_blocks }, opKind);
       setSpec(parsed);
       setMsg({ type: 'ok', text: '已用标准答案生成评分点骨架，请核对分值与描述后保存' });
     } catch (e: any) {
@@ -853,7 +1137,8 @@ export const WpsOpManager: React.FC = () => {
 
   const save = async () => {
     if (!editing) return;
-    if (!content.trim()) { setMsg({ type: 'err', text: '请填写题干' }); return; }
+    const contentHtml = stemToHtml(stemBlocks).trim();
+    if (!contentHtml) { setMsg({ type: 'err', text: '题干正文不能为空：至少填一个文字块（整段题干可以先粘进一个文字块，再点「按步骤自动拆块」）' }); return; }
     if (!spec.steps.length) { setMsg({ type: 'err', text: '至少要有一个步骤' }); return; }
     const unlabeled = spec.steps.filter((s) => !s.title.trim());
     if (unlabeled.length) { setMsg({ type: 'err', text: '每个步骤都要填标题（学生端会显示）' }); return; }
@@ -863,12 +1148,14 @@ export const WpsOpManager: React.FC = () => {
     try {
       const clean: SpecDef = {
         ...spec,
+        // 过滤掉"还没来得及填视频"的空视频位，避免学生端出现空壳
+        stem_blocks: normalizeStemBlocks({ stem_blocks: stemBlocks }),
         templates: (spec.templates || []).map((t) => ({ name: t.name, path: t.path, size: t.size ?? null, kind: t.kind })),
         template: (spec.templates || [])[0],
       };
       const payload: any = {
         type: conf.rowType,
-        content: content.trim(),
+        content: contentHtml,
         cluster_id: cluster || null,
         practice_enabled: practiceEnabled ? 1 : 0,
         [conf.specField]: clean,
@@ -906,6 +1193,8 @@ export const WpsOpManager: React.FC = () => {
   };
 
   const totalCheckScore = spec.steps.reduce((a, st) => a + st.checks.reduce((b, c) => b + (Number(c.score) || 0), 0), 0);
+  const stemVideoTotal = stemBlocks.reduce((a, b) => a + (b.type === 'video' ? stemUrls(b).length : 0), 0);
+  const stemImageTotal = stemBlocks.reduce((a, b) => a + (b.type === 'image' ? stemUrls(b).length : 0), 0);
 
   // ============================================================
   // 编辑视图（整页）
@@ -949,16 +1238,163 @@ export const WpsOpManager: React.FC = () => {
             <h3 className="mb-3 text-sm font-bold text-gray-800">基本信息</h3>
             <div className="grid gap-3 sm:grid-cols-3">
               <div className="sm:col-span-3">
-                <label className="mb-1 block text-xs text-gray-500">题干（支持简单 HTML，如 &lt;p&gt;、&lt;strong&gt;）</label>
-                <textarea
-                  value={content}
-                  onChange={(e) => setContent(e.target.value)}
-                  rows={6}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
-                  placeholder={opKind === 'access'
-                    ? '<p>下载「xxx.accdb」和「data.xlsx」，用 Access 完成以下操作并保存：</p><p>1. ...</p>'
-                    : '<p>下载「xxx.xlsx」和「data.txt」，用 WPS 表格完成以下操作并保存：</p><p>1. ...</p>'}
-                />
+                <div className="mb-1.5 flex flex-wrap items-center gap-2">
+                  <label className="text-xs text-gray-500">
+                    题干分块 —— <b>文字块</b> / <b>视频块</b> / <b>图片块</b> 按顺序显示（把视频块、图片块放在某一步文字下面，学生就能看「这一步怎么做 / 长什么样」）
+                  </label>
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] ${stemVideoTotal ? 'bg-violet-50 text-violet-700' : 'bg-gray-100 text-gray-500'}`}>
+                    视频 {stemVideoTotal} 条
+                  </span>
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] ${stemImageTotal ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-500'}`}>
+                    图片 {stemImageTotal} 张
+                  </span>
+                  <div className="ml-auto flex flex-wrap gap-1.5">
+                    <button onClick={() => addStemBlock('text')} className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-50">
+                      <i className="fas fa-plus mr-1" />文字块
+                    </button>
+                    <button onClick={() => addStemBlock('video')} className="rounded bg-violet-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-violet-700">
+                      <i className="fas fa-plus mr-1" />视频块
+                    </button>
+                    <button onClick={() => addStemBlock('image')} className="rounded bg-emerald-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-emerald-700">
+                      <i className="fas fa-plus mr-1" />图片块
+                    </button>
+                  </div>
+                </div>
+
+                {stemBlocks.length === 0 && (
+                  <div className="rounded-lg border border-dashed border-gray-300 p-3 text-center text-xs text-gray-400">
+                    题干是空的，点右上「+ 文字块」开始；已有整段题干也可以直接粘进一个文字块，再点块上的「按步骤拆块」
+                  </div>
+                )}
+
+                <div className="space-y-2">
+                  {stemBlocks.map((b, bi) => (
+                    <div key={bi} className={`rounded-lg border p-2.5 ${b.type === 'video' ? 'border-violet-200 bg-violet-50/40' : b.type === 'image' ? 'border-emerald-200 bg-emerald-50/40' : 'border-gray-200 bg-white'}`}>
+                      <div className="mb-1.5 flex flex-wrap items-center gap-2">
+                        <span className={`flex h-5 w-5 flex-none items-center justify-center rounded-full text-[11px] font-bold text-white ${b.type === 'video' ? 'bg-violet-500' : b.type === 'image' ? 'bg-emerald-500' : 'bg-sky-600'}`}>{bi + 1}</span>
+                        <span className={`rounded px-1.5 py-0.5 text-[10px] ${b.type === 'video' ? 'bg-violet-100 text-violet-700' : b.type === 'image' ? 'bg-emerald-100 text-emerald-700' : 'bg-sky-100 text-sky-700'}`}>
+                          {b.type === 'video' ? '视频块' : b.type === 'image' ? '图片块' : '文字块'}
+                        </span>
+                        {b.type === 'text' && (
+                          <button
+                            onClick={() => splitStemBlock(bi)}
+                            className="rounded border border-sky-300 px-2 py-0.5 text-[11px] text-sky-700 hover:bg-sky-50"
+                            title="把这一块里的「1.」「步骤1」「第1步」等行各自拆成独立的块，并在每一步后面自动加一个视频位"
+                          >
+                            <i className="fas fa-scissors mr-1" />按步骤拆块
+                          </button>
+                        )}
+                        {/* 想把图/视频插到"某一步"下面，就在那一步的文字块上点这两个按钮（插到该块之后） */}
+                        <button
+                          onClick={() => addStemBlock('video', bi + 1)}
+                          className="rounded border border-violet-200 px-1.5 py-0.5 text-[11px] text-violet-600 hover:bg-violet-50"
+                          title="在这一块后面插入一个视频块（例如「第 3 步」的演示视频）"
+                        >
+                          ＋视频
+                        </button>
+                        <button
+                          onClick={() => addStemBlock('image', bi + 1)}
+                          className="rounded border border-emerald-200 px-1.5 py-0.5 text-[11px] text-emerald-600 hover:bg-emerald-50"
+                          title="在这一块后面插入一个图片块（例如「第 4 步」的图表效果图）"
+                        >
+                          ＋图片
+                        </button>
+                        <div className="ml-auto flex flex-none items-center gap-1">
+                          <button onClick={() => moveStemBlock(bi, -1)} disabled={bi === 0} className="rounded border border-gray-300 px-1.5 py-0.5 text-[11px] text-gray-600 hover:bg-gray-50 disabled:opacity-40" title="上移"><i className="fas fa-arrow-up" /></button>
+                          <button onClick={() => moveStemBlock(bi, 1)} disabled={bi === stemBlocks.length - 1} className="rounded border border-gray-300 px-1.5 py-0.5 text-[11px] text-gray-600 hover:bg-gray-50 disabled:opacity-40" title="下移"><i className="fas fa-arrow-down" /></button>
+                          <button onClick={() => delStemBlock(bi)} className="rounded border border-rose-200 px-1.5 py-0.5 text-[11px] text-rose-600 hover:bg-rose-50">删除</button>
+                        </div>
+                      </div>
+
+                      {b.type === 'text' ? (
+                        <textarea
+                          value={b.html || ''}
+                          onChange={(e) => patchStemBlock(bi, { html: e.target.value })}
+                          rows={3}
+                          className="w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
+                          placeholder={opKind === 'access'
+                            ? '<p>下载「xxx.accdb」和「data.xlsx」，用 Access 完成以下操作并保存：</p>'
+                            : '<p>下载「xxx.xlsx」和「data.txt」，用 WPS 表格完成以下操作并保存：</p>'}
+                        />
+                      ) : (
+                        <div>
+                          <input
+                            value={b.title || ''}
+                            onChange={(e) => patchStemBlock(bi, { title: e.target.value })}
+                            placeholder={b.type === 'image'
+                              ? '这块图的说明（可不填，如：第 4 步 簇状柱形图效果）'
+                              : '这块视频的说明（可不填，如：第 1 步 导入外部数据）'}
+                            className="mb-1.5 w-full rounded border border-gray-300 px-2 py-1 text-xs"
+                          />
+                          <div className="mb-1 flex flex-wrap items-center gap-1.5">
+                            {b.type === 'image' ? (
+                              <>
+                                <button onClick={() => pickStemImage(bi)} disabled={stemImageBusy} className="rounded bg-emerald-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-emerald-700 disabled:bg-gray-300">
+                                  <i className="fas fa-upload mr-1" />上传本地图片
+                                </button>
+                                <button onClick={() => fetchStemImage(bi)} disabled={stemImageBusy} className="rounded border border-emerald-300 px-2 py-1 text-[11px] font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50" title="把外网图片下载到本机，机房断网也能看">
+                                  <i className="fas fa-cloud-arrow-down mr-1" />抓取外链到本地
+                                </button>
+                                <button onClick={() => appendStemUrl(bi, window.prompt('图片地址（http/https 或 /uploads/…）：', '') || '')} disabled={stemImageBusy} className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-50 disabled:opacity-50">
+                                  <i className="fas fa-link mr-1" />粘贴地址
+                                </button>
+                                <span className="text-[10px] text-gray-400">支持 png / jpg / gif / webp / bmp</span>
+                              </>
+                            ) : (
+                              <>
+                                <button onClick={() => pickStemVideo(bi)} disabled={videoBusy} className="rounded bg-violet-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-violet-700 disabled:bg-gray-300">
+                                  <i className="fas fa-upload mr-1" />上传本地视频
+                                </button>
+                                <button onClick={() => fetchStemVideo(bi)} disabled={videoBusy} className="rounded border border-violet-300 px-2 py-1 text-[11px] font-medium text-violet-700 hover:bg-violet-50 disabled:opacity-50" title="把外网链接的视频下载到本机，机房断网也能播">
+                                  <i className="fas fa-cloud-arrow-down mr-1" />抓取外链到本地
+                                </button>
+                                <button onClick={() => appendStemUrl(bi, window.prompt('视频地址（http/https 或 /uploads/…）：', '') || '')} disabled={videoBusy} className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-50 disabled:opacity-50">
+                                  <i className="fas fa-link mr-1" />粘贴地址
+                                </button>
+                              </>
+                            )}
+                          </div>
+                          {stemUrls(b).length === 0 ? (
+                            <div className={`rounded border border-dashed px-2 py-1.5 text-[11px] text-gray-400 ${b.type === 'image' ? 'border-emerald-200' : 'border-violet-200'}`}>
+                              {b.type === 'image'
+                                ? '还没挂图。一块可挂多张（如多张截图），学生端点「看图示」展开；空图片块保存时会自动丢掉。'
+                                : '还没挂视频。一块可挂多条（不同角度 / 不同版本），学生端按顺序列出；空视频块保存时会自动丢掉。'}
+                            </div>
+                          ) : b.type === 'image' ? (
+                            <div className="flex flex-wrap gap-2">
+                              {stemUrls(b).map((u, vi) => (
+                                <div key={vi} className="w-44 overflow-hidden rounded border border-emerald-200 bg-white">
+                                  <img src={u} alt={`图片 ${vi + 1}`} title={u} className="h-24 w-full bg-gray-50 object-contain" />
+                                  <div className="flex items-center gap-1 px-1.5 py-1">
+                                    <span className={`min-w-0 flex-1 truncate text-[10px] ${isLocalVideo(u) ? 'text-emerald-700' : 'text-amber-700'}`} title={u}>
+                                      {isLocalVideo(u) ? '本地(断网可用)' : '外链(需联网)'}
+                                    </span>
+                                    <a href={u} target="_blank" rel="noreferrer" className="flex-none text-[10px] text-sky-600 hover:underline">看图</a>
+                                    <button onClick={() => removeStemUrl(bi, u)} className="flex-none rounded border border-rose-200 px-1 text-[10px] text-rose-600 hover:bg-rose-50">移除</button>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="space-y-1">
+                              {stemUrls(b).map((u, vi) => (
+                                <div key={vi} className="flex items-center gap-2 rounded bg-white px-2 py-1">
+                                  <span className="flex h-4 w-4 flex-none items-center justify-center rounded-full bg-violet-500 text-[9px] font-bold text-white">{vi + 1}</span>
+                                  <span className="min-w-0 flex-1 truncate text-[11px] text-gray-600" title={u}>{u}</span>
+                                  <span className={`flex-none rounded px-1.5 py-0.5 text-[10px] ${isLocalVideo(u) ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                                    {isLocalVideo(u) ? '本地(断网可用)' : '外链(需联网)'}
+                                  </span>
+                                  <a href={u} target="_blank" rel="noreferrer" className="flex-none text-[11px] text-sky-600 hover:underline">测试播放</a>
+                                  <button onClick={() => removeStemUrl(bi, u)} className="flex-none rounded border border-rose-200 px-1.5 py-0.5 text-[11px] text-rose-600 hover:bg-rose-50">移除</button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </div>
               <div>
                 <label className="mb-1 block text-xs text-gray-500">所属分类（章/小节）</label>
@@ -1091,6 +1527,9 @@ export const WpsOpManager: React.FC = () => {
                     try {
                       const parsed = parseSpec(JSON.parse(specJson), opKind);
                       setSpec(parsed);
+                      // 题干分块以「题干分块编辑器」为准；JSON 里带了 stem_blocks 时也同步过去，
+                      // 免得老师改了 JSON 却看不到变化（保存时仍是编辑器里的分块落库）。
+                      if (Array.isArray(parsed.stem_blocks) && parsed.stem_blocks.length) setStemBlocks(parsed.stem_blocks);
                       setMsg({ type: 'ok', text: 'JSON 已应用' });
                     } catch (e: any) {
                       setMsg({ type: 'err', text: 'JSON 格式有误：' + e.message });
@@ -1104,6 +1543,8 @@ export const WpsOpManager: React.FC = () => {
             )}
 
             <input ref={videoRef} type="file" accept="video/*" className="hidden" onChange={(e) => onVideoPicked(e.target.files?.[0] || null)} />
+            <input ref={stemVideoRef} type="file" accept="video/*" className="hidden" onChange={(e) => onStemVideoPicked(e.target.files?.[0] || null)} />
+            <input ref={stemImageRef} type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp" className="hidden" onChange={(e) => onStemImagePicked(e.target.files?.[0] || null)} />
 
             <div className="space-y-3">
               {spec.steps.map((st, si) => (
@@ -1335,6 +1776,9 @@ export const WpsOpManager: React.FC = () => {
             const tpls = sp.templates || [];
             const videoTotal = sp.steps.reduce((a, s) => a + normalizeVideos(s).length, 0);
             const videos = sp.steps.filter((s) => normalizeVideos(s).length > 0).length;
+            // ⚠️ 变量名不能叫 stemVideos：会遮蔽同名的模块级函数（TDZ 直接报错）
+            const stemVideoCnt = (sp.stem_blocks || []).reduce((a, b) => a + (b.type === 'video' ? stemUrls(b).length : 0), 0);
+            const stemImageCnt = (sp.stem_blocks || []).reduce((a, b) => a + (b.type === 'image' ? stemUrls(b).length : 0), 0);
             return (
               <div key={r.id} className="flex items-start justify-between gap-4 rounded-lg border border-gray-200 bg-white p-4">
                 <div className="min-w-0 flex-1">
@@ -1353,6 +1797,12 @@ export const WpsOpManager: React.FC = () => {
                     </span>
                     <span className={`rounded px-2 py-0.5 text-[11px] ${videoTotal ? 'bg-violet-50 text-violet-700' : 'bg-gray-100 text-gray-500'}`}>
                       视频 {videoTotal} 条 · {videos}/{sp.steps.length} 步
+                    </span>
+                    <span className={`rounded px-2 py-0.5 text-[11px] ${stemVideoCnt ? 'bg-violet-50 text-violet-700' : 'bg-gray-100 text-gray-500'}`}>
+                      题干视频 {stemVideoCnt} 条
+                    </span>
+                    <span className={`rounded px-2 py-0.5 text-[11px] ${stemImageCnt ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-500'}`}>
+                      题干图片 {stemImageCnt} 张
                     </span>
                   </div>
                   <div className="line-clamp-2 text-sm text-gray-700">{stripHtml(r.content)}</div>

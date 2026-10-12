@@ -33,7 +33,7 @@ const { Transform, Readable } = require('stream');
 const { pipeline } = require('stream/promises');
 const { v4: uuidv4 } = require('uuid');
 const grader = require('./access-grader');
-const { stripSpecForStudent, normalizeTemplates } = require('./wps-op');
+const { stripSpecForStudent, normalizeTemplates, createOpImageRoutes } = require('./wps-op');
 
 const DB_EXT = /\.(accdb|mdb)$/i;                       // 作答文件：必须 Access 库
 const TEMPLATE_EXT = /\.(accdb|mdb|xlsx|xlsm|csv|txt)$/i; // 模板：空白库 + 数据源
@@ -66,7 +66,8 @@ function registerAccessOp(app, deps) {
   const submissionDir = path.join(baseDir, 'submissions');
   const videoDir = path.join(baseDir, 'videos');
   const extraDir = path.join(baseDir, 'extras');
-  for (const dir of [templateDir, submissionDir, videoDir, extraDir]) {
+  const imageDir = path.join(baseDir, 'images');
+  for (const dir of [templateDir, submissionDir, videoDir, extraDir, imageDir]) {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   }
 
@@ -129,6 +130,15 @@ function registerAccessOp(app, deps) {
       next();
     });
   };
+
+  // 题干图片：上传 / 外链抓取（与 WPS 共用同一实现）
+  createOpImageRoutes(app, {
+    authenticate,
+    requireTeacher,
+    dir: imageDir,
+    urlPrefix: '/uploads/access-op/images',
+    base: '/api/teacher/access-op',
+  });
 
   // ---------------------------------------------------------------
   // 教师端

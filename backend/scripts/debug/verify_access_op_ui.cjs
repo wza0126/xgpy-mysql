@@ -350,6 +350,26 @@ async function setFileInput(b, acceptIncludes, absPath) {
     ok('★ 提供「上传标准答案库 → 自动生成评分点」', /上传标准答案库 → 自动生成评分点/.test(eText));
     ok('★ 提示 .accdb 空白库 + xlsx 数据源', /\.accdb\/\.mdb/.test(eText) && /数据源/.test(eText));
     ok('★ 编辑器渲染：评分点面板', /操作步骤与评分点/.test(eText));
+    // ★ 题干分块（文字块/视频块/图片块）是 WPS 与 Access 共用的编辑器：Access 端也要能插图片
+    const accAddImg = await b.evalJs(`(() => {
+      const btn = Array.from(document.querySelectorAll('button')).find(x => (x.textContent||'').trim() === '图片块');
+      if (!btn) return 'not-found';
+      btn.click();
+      return 'clicked';
+    })()`);
+    await sleep(500);
+    const accImgText = await b.evalJs('document.body.innerText');
+    ok('★ Access 题干可插入图片块（上传本地图片 / 抓取外链到本地 / 粘贴地址）',
+      accAddImg === 'clicked'
+      && /上传本地图片/.test(accImgText) && /抓取外链到本地/.test(accImgText) && /粘贴地址/.test(accImgText),
+      String(accAddImg));
+    ok('★ Access 图片块同样提示支持格式与「看图示」',
+      /支持 png \/ jpg \/ gif \/ webp \/ bmp/.test(accImgText) && /看图示/.test(accImgText));
+
+    // ★ 题干分块（文字块 + 视频块）：WPS / Access 共用同一套编辑器，这里确认 Access 也吃到了
+    ok('★ Access 题干同样支持「分块」（文字块 + 视频块）', /题干分块/.test(eText) && /文字块/.test(eText) && /视频块/.test(eText));
+    const accStemVideoBtns = await b.evalJs(`Array.from(document.querySelectorAll('button')).filter(x => (x.textContent||'').includes('上传本地视频')).length`);
+    ok('★ Access 题干视频位可上传本地视频', accStemVideoBtns >= 1, 'count=' + accStemVideoBtns);
 
     const fullScoreVal = await b.evalJs(`(() => {
       const lab = Array.from(document.querySelectorAll('label')).find(l => (l.textContent||'').includes('满分（默认 100）'));
