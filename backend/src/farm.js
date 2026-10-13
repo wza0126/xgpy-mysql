@@ -29,6 +29,9 @@
 //     定位：浇水/施肥是「投资」（既长自己，又抬高后续每一次除草的收益），除草是「变现」。
 
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const multer = require('multer');
 
 // ============ 常数与配置表 ============
 
@@ -71,6 +74,19 @@ const OP_LABEL = {
   harvest: '收获',
 };
 
+// 学生手册（教师可上传替换）：guide_url 为空时前端回落到**随包内置**的默认手册。
+// ⛔ 内置手册随前端一起发布（frontend/public/code-farm-guide.html），所以新装的 exe 不用配也能看。
+const GUIDE_FALLBACK = '/code-farm-guide.html';
+const MAX_GUIDE_BYTES = 8 * 1024 * 1024; // 手册 HTML 大小上限（正常约 90KB，留足余量防误传大文件）
+
+// ---------- 学生代码容器（每人 5 格，存库） ----------
+// 用途：学生把写好的农活代码存进容器，下次打开编辑器点一下容器就取回来接着改、直接运行。
+// ⛔ 与「教师默认代码 default_code」不是一回事：default_code 是老师下发全班同一份起始模板，
+//    容器是学生自己的私人物品，只增不减地跟着他走。
+const MAX_CODE_SLOTS = 5; // 固定 5 格（与前端标签条数量一一对应，改动要前后端同改）
+const MAX_SLOT_NAME = 16; // 容器名长度上限（标签条上要放得下）
+const MAX_SLOT_CODE = 5000; // 容器内代码长度上限（与 farm_logs.code 截断口径一致）
+
 const DEFAULT_CFG = {
   enabled: 0,
   class_ids: null,
@@ -83,6 +99,10 @@ const DEFAULT_CFG = {
   notice: null,
   // 编辑器默认代码（教师可配）：NULL/'' 时前端用内置示例兜底
   default_code: null,
+  // 学生手册：guide_url 为空 → 用内置默认手册；guide_enabled=0 → 学生桌面不显示入口
+  guide_url: null,
+  guide_name: null,
+  guide_enabled: 1,
   start_at: null,
 };
 
@@ -357,7 +377,53 @@ function cropCatalog() {
 
 // ============ 路由 ============
 
-function registerFarm(app, { pool, authenticate, requireTeacher, requireStudent }) {
+function registerFarm(app, { pool, authenticate, requireTeacher, requireStudent, uploadsDir }) {
+  // ---------- 学生手册的落盘与上传 ----------
+  // 教师上传后落在 uploads/farm/guides/，对外相对地址 = /uploads/farm/guides/<file>.html
+  const guideDir = path.join(uploadsDir || path.join(__dirname, '..', 'uploads'), 'farm', 'guides');
+  if (!fs.existsSync(guideDir)) fs.mkdirSync(guideDir, { recursive: true });
+  const GUIDE_URL_PREFIX = '/uploads/farm/guides/';
+
+  // ⛔ 只收单个 .html / .htm（手册是一份自包含单文件网页），大小上限 8MB；
+  //    磁盘名用固定前缀 + 时间戳，绕开中文名 / 同名覆盖的坑，原始文件名只回给前端展示。
+  const guideUpload = multer({
+    storage: multer.diskStorage({
+      destination: (req, file, cb) => cb(null, guideDir),
+      filename: (req, file, cb) =>
+        cb(null, 'guide-' + Date.now() + '-' + Math.round(Math.random() * 1e9) + '.html'),
+    }),
+    limits: { fileSize: MAX_GUIDE_BYTES },
+    fileFilter: (req, file, cb) => {
+      const n = String(file.originalname || '').toLowerCase();
+      if (n.endsWith('.html') || n.endsWith('.htm')) return cb(null, true);
+      cb(new Error('学生手册只支持 .html / .htm 单文件网页。'));
+    },
+  });
+
+  // multer 的错误转成 JSON（否则前端会拿到一整页 HTML 报错）
+  const wrapGuideUpload = (mw) => (req, res, next) =>
+    mw(req, res, (err) => (err ? res.status(400).json({ data: null, error: err.message || '手册上传失败' }) : next()));
+
+  /** /uploads/farm/guides/xxx.html → 磁盘绝对路径（只认本目录内的合法文件名，防路径穿越） */
+  function guideAbsPath(u) {
+    const s = String(u || '');
+    if (!s.startsWith(GUIDE_URL_PREFIX)) return null;
+    const name = s.slice(GUIDE_URL_PREFIX.length);
+    if (!/^[A-Za-z0-9._-]+$/.test(name)) return null;
+    return path.join(guideDir, name);
+  }
+
+  /** 删掉被替换掉/被清空的旧手册文件（best-effort，失败不影响主流程） */
+  function removeGuideFile(u) {
+    const abs = guideAbsPath(u);
+    if (!abs) return;
+    try {
+      if (fs.existsSync(abs)) fs.unlinkSync(abs);
+    } catch (e) {
+      console.error('farm guide unlink failed:', e.message);
+    }
+  }
+
   async function loadConfig() {
     const [rows] = await pool.query('SELECT * FROM farm_config WHERE id = 1');
     return rows[0] || Object.assign({ id: 1 }, DEFAULT_CFG);
@@ -431,6 +497,10 @@ function registerFarm(app, { pool, authenticate, requireTeacher, requireStudent 
       notice: cfg.notice || '',
       // ⛔ 教师配置的编辑器默认代码：学生端拿它当初始模板 / 「恢复默认代码」的目标
       default_code: cfg.default_code || '',
+      // 学生手册：解析后的实际地址（老师没上传 → 内置默认手册）；
+      // guide_enabled=0 → 学生桌面不显示「农场手册」入口（手册本身仍可直接访问）
+      guide_url: cfg.guide_url || GUIDE_FALLBACK,
+      guide_enabled: Number(cfg.guide_enabled) !== 0,
       base_yield: num(cfg.base_yield, 10),
       // ⛔ 语义 = 每天的劳作次数（按动作计）。前端拿它算「今天还能劳作 N 次」。
       max_ops_per_day: num(cfg.max_ops_per_day, DEFAULT_CFG.max_ops_per_day),
@@ -464,6 +534,10 @@ function registerFarm(app, { pool, authenticate, requireTeacher, requireStudent 
       if (!myPlot) return res.json({ data: { enabled: false, reason: 'no_plot' }, error: null });
 
       const t = tickPlot(myPlot, cfg, now);
+      // ⛔ 地块的 class_id 可能过期（学生转班、或教师建了临时班做测验）：
+      //    它只在「写代码打工」时被刷新，于是刚换班的学生会看到「全班的地」是空的
+      //    （按班级查不到自己的地）。看农场时顺手对齐一次，让班级归属自愈。
+      myPlot.class_id = (prof && prof.class_id) || myPlot.class_id;
       await pool.query(plotUpdateSql(), plotUpdateParams(myPlot));
 
       const maxOps = Math.max(1, num(cfg.max_ops_per_day, DEFAULT_CFG.max_ops_per_day));
@@ -628,6 +702,119 @@ function registerFarm(app, { pool, authenticate, requireTeacher, requireStudent 
     }
   });
 
+  // ---------- 学生端：代码容器（每人 5 格，存库） ----------
+  // 语义：
+  //   · GET 永远返回 MAX_CODE_SLOTS 格（没存过的补成空容器），前端标签条直接按它渲染；
+  //   · PUT 支持「只改名」或「只改代码」——未传的字段保留原值（undefined = 不动），
+  //     这样前端重命名不会把代码清空，反之亦然；
+  //   · DELETE 清空该格（删行），回到空容器。
+  // ⛔ 不校验农场开关：容器是学生自己的资料，老师临时关掉农场再打开，代码不该「消失」。
+  // ⛔ 只按 req.user.userId 读写，没有任何跨学生入口 —— 同学之间互相看不到代码。
+  function shapeSlot(row, slot) {
+    const code = row && row.code != null ? String(row.code) : '';
+    return {
+      slot,
+      name: row && row.name != null ? String(row.name) : '',
+      code,
+      empty: code.trim() === '',
+      updated_at: (row && row.updated_at) || null,
+    };
+  }
+
+  async function loadSlots(studentId) {
+    const [rows] = await pool.query(
+      'SELECT slot, name, code, updated_at FROM farm_code_slots WHERE student_id = ? ORDER BY slot',
+      [studentId]
+    );
+    const bySlot = new Map(rows.map((r) => [Number(r.slot), r]));
+    const out = [];
+    for (let i = 1; i <= MAX_CODE_SLOTS; i++) out.push(shapeSlot(bySlot.get(i), i));
+    return out;
+  }
+
+  /** 解析 :slot 路径参数（只认 1..MAX_CODE_SLOTS，其余一律非法） */
+  function parseSlot(v) {
+    const n = Number(v);
+    if (!Number.isInteger(n) || n < 1 || n > MAX_CODE_SLOTS) return null;
+    return n;
+  }
+
+  app.get('/api/student/farm/code-slots', authenticate, requireStudent, async (req, res) => {
+    try {
+      const studentId = req.user.userId || req.user.user_id;
+      const slots = await loadSlots(studentId);
+      return res.json({
+        data: { slots, max_slots: MAX_CODE_SLOTS, max_name: MAX_SLOT_NAME, max_code: MAX_SLOT_CODE },
+        error: null,
+      });
+    } catch (error) {
+      console.error('Error in GET /api/student/farm/code-slots:', error);
+      res.status(500).json({ data: null, error: error.message });
+    }
+  });
+
+  app.put('/api/student/farm/code-slots/:slot', authenticate, requireStudent, async (req, res) => {
+    try {
+      const studentId = req.user.userId || req.user.user_id;
+      const slot = parseSlot(req.params.slot);
+      if (slot === null) {
+        return res.status(400).json({ data: null, error: '容器编号只能是 1 ~ ' + MAX_CODE_SLOTS });
+      }
+      const b = req.body || {};
+      const hasName = b.name !== undefined;
+      const hasCode = b.code !== undefined;
+
+      // 名字：去掉换行（标签条放不下多行）与首尾空白，超长截断；空串 → 存 NULL（前端显示默认「容器N」）
+      const nextNameIn = hasName
+        ? String(b.name == null ? '' : b.name).replace(/[\r\n]+/g, ' ').trim().slice(0, MAX_SLOT_NAME) || null
+        : undefined;
+      const nextCodeIn = hasCode ? String(b.code == null ? '' : b.code).replace(/\r\n/g, '\n').slice(0, MAX_SLOT_CODE) : undefined;
+
+      const [rows] = await pool.query(
+        'SELECT slot, name, code, updated_at FROM farm_code_slots WHERE student_id = ? AND slot = ?',
+        [studentId, slot]
+      );
+      const cur = rows[0] || null;
+      const nextName = hasName ? nextNameIn : (cur ? cur.name : null);
+      const nextCode = hasCode ? nextCodeIn : (cur ? cur.code : null);
+
+      // 两边都空且本来就没有这一格 → 不必写库造一条空行（前端照旧显示空容器）
+      if (!(nextName == null && (nextCode == null || String(nextCode).trim() === '')) ) {
+        await pool.query(
+          'INSERT INTO farm_code_slots (id, student_id, slot, name, code) VALUES (?, ?, ?, ?, ?) ' +
+            'ON DUPLICATE KEY UPDATE name = VALUES(name), code = VALUES(code)',
+          [genId(), studentId, slot, nextName, nextCode]
+        );
+      } else if (cur) {
+        await pool.query('DELETE FROM farm_code_slots WHERE student_id = ? AND slot = ?', [studentId, slot]);
+      }
+
+      const [again] = await pool.query(
+        'SELECT slot, name, code, updated_at FROM farm_code_slots WHERE student_id = ? AND slot = ?',
+        [studentId, slot]
+      );
+      return res.json({ data: { slot: shapeSlot(again[0], slot) }, error: null });
+    } catch (error) {
+      console.error('Error in PUT /api/student/farm/code-slots:', error);
+      res.status(500).json({ data: null, error: error.message });
+    }
+  });
+
+  app.delete('/api/student/farm/code-slots/:slot', authenticate, requireStudent, async (req, res) => {
+    try {
+      const studentId = req.user.userId || req.user.user_id;
+      const slot = parseSlot(req.params.slot);
+      if (slot === null) {
+        return res.status(400).json({ data: null, error: '容器编号只能是 1 ~ ' + MAX_CODE_SLOTS });
+      }
+      await pool.query('DELETE FROM farm_code_slots WHERE student_id = ? AND slot = ?', [studentId, slot]);
+      return res.json({ data: { slot: shapeSlot(null, slot) }, error: null });
+    } catch (error) {
+      console.error('Error in DELETE /api/student/farm/code-slots:', error);
+      res.status(500).json({ data: null, error: error.message });
+    }
+  });
+
   // ---------- 教师端：读配置 ----------
   app.get('/api/teacher/farm/config', authenticate, requireTeacher, async (req, res) => {
     try {
@@ -647,10 +834,16 @@ function registerFarm(app, { pool, authenticate, requireTeacher, requireStudent 
             weather: cfg.weather || 'sunny',
             notice: cfg.notice || '',
             default_code: cfg.default_code || '',
+            // 学生手册：'' = 用内置默认手册；guide_enabled=0 → 学生桌面不显示入口
+            guide_url: cfg.guide_url || '',
+            guide_name: cfg.guide_name || '',
+            guide_enabled: Number(cfg.guide_enabled) !== 0,
             start_at: cfg.start_at || null,
           },
           weathers: Object.keys(WEATHER).map((k) => ({ key: k, label: WEATHER[k].label })),
           crops: cropCatalog(),
+          // 内置默认手册地址（老师没上传时学生看到的那份），给后台「预览内置手册」按钮用
+          guide_default: GUIDE_FALLBACK,
           stats: {
             plots: num(stat && stat[0] && stat[0].plots, 0),
             harvests: num(stat && stat[0] && stat[0].harvests, 0),
@@ -690,7 +883,24 @@ function registerFarm(app, { pool, authenticate, requireTeacher, requireStudent 
           : b.default_code == null
           ? null
           : String(b.default_code).replace(/\r\n/g, '\n').slice(0, MAX_DEFAULT_CODE);
+      // ⛔ 学生手册：未传 guide_url（undefined）时**保留原值** —— 上传接口（/guide）单独维护这两个字段，
+      //    普通保存不该把它清掉；老师点「恢复内置示例」时才显式传 ''/'null'。guide_enabled 同理。
+      const guideUrl =
+        b.guide_url === undefined
+          ? (cfg.guide_url == null ? null : String(cfg.guide_url).slice(0, 255))
+          : (b.guide_url == null || b.guide_url === '' ? null : String(b.guide_url).slice(0, 255));
+      const guideName =
+        b.guide_name === undefined
+          ? (cfg.guide_name == null ? null : String(cfg.guide_name).slice(0, 255))
+          : (b.guide_name == null || b.guide_name === '' ? null : String(b.guide_name).slice(0, 255));
+      const guideEnabled =
+        b.guide_enabled === undefined
+          ? (Number(cfg.guide_enabled) === 0 ? 0 : 1)
+          : (b.guide_enabled === true || b.guide_enabled === 1 || b.guide_enabled === '1' ? 1 : 0);
       const resetWorld = b.reset_world === true;
+
+      // 手册被换掉 / 清空时，把 uploads 里的旧文件删掉（只认本模块目录内的文件名，防误删）
+      if (guideUrl !== (cfg.guide_url || null)) removeGuideFile(cfg.guide_url);
 
       // 首次开启（或曾经没设过起点）时打上世界起点
       let startAt = cfg.start_at || null;
@@ -699,7 +909,7 @@ function registerFarm(app, { pool, authenticate, requireTeacher, requireStudent 
 
       await pool.query(
         'UPDATE farm_config SET enabled=?, class_ids=?, day_minutes=?, base_yield=?, max_ops_per_day=?, ' +
-          'weather=?, notice=?, default_code=?, start_at=?, updated_by=? WHERE id = 1',
+          'weather=?, notice=?, default_code=?, guide_url=?, guide_name=?, guide_enabled=?, start_at=?, updated_by=? WHERE id = 1',
         [
           enabled,
           classIds.length ? JSON.stringify(classIds) : null,
@@ -709,6 +919,9 @@ function registerFarm(app, { pool, authenticate, requireTeacher, requireStudent 
           weather,
           notice,
           defaultCode,
+          guideUrl,
+          guideName,
+          guideEnabled,
           startAt,
           teacherId,
         ]
@@ -728,6 +941,54 @@ function registerFarm(app, { pool, authenticate, requireTeacher, requireStudent 
     } catch (error) {
       console.error('Error in PUT /api/teacher/farm/config:', error);
       res.status(500).json({ data: null, error: error.message });
+    }
+  });
+
+  // ---------- 教师端：学生手册（上传 / 清除） ----------
+  // ⛔ 上传即生效：直接写 farm_config.guide_url，并把 guide_enabled 打开 ——
+  //    老师传完不用再点一次「保存设置」；桌面入口开关仍走 PUT /config。
+  app.post(
+    '/api/teacher/farm/guide',
+    authenticate,
+    requireTeacher,
+    wrapGuideUpload(guideUpload.single('file')),
+    async (req, res) => {
+      try {
+        if (!req.file) return res.status(400).json({ data: null, error: '没有收到文件，请选择一个 .html 手册' });
+        const cfg = await loadConfig();
+        const url = GUIDE_URL_PREFIX + req.file.filename;
+        // multer 给的是 latin1 解码的文件名，中文名要转回 utf8，否则后台回显乱码
+        let name = String(req.file.originalname || '');
+        try { name = Buffer.from(name, 'latin1').toString('utf8'); } catch { /* 保持原样 */ }
+        name = name.slice(0, 255);
+        const prev = cfg.guide_url || null;
+        await pool.query(
+          'UPDATE farm_config SET guide_url=?, guide_name=?, guide_enabled=1, updated_by=? WHERE id = 1',
+          [url, name, req.user.userId || req.user.user_id]
+        );
+        if (prev && prev !== url) removeGuideFile(prev);
+        res.json({ data: { url, name, size: num(req.file.size, 0) }, error: null });
+      } catch (e) {
+        console.error('Error in POST /api/teacher/farm/guide:', e);
+        // 落盘成功但入库失败 → 把刚上传的孤儿文件删掉，别白占空间
+        try { if (req.file && req.file.path) fs.unlinkSync(req.file.path); } catch { /* ignore */ }
+        res.status(500).json({ data: null, error: e.message });
+      }
+    }
+  );
+
+  /** 清除自定义手册 → 回到内置默认手册（同时删掉磁盘上的旧文件） */
+  app.delete('/api/teacher/farm/guide', authenticate, requireTeacher, async (req, res) => {
+    try {
+      const cfg = await loadConfig();
+      await pool.query('UPDATE farm_config SET guide_url=NULL, guide_name=NULL, updated_by=? WHERE id = 1', [
+        req.user.userId || req.user.user_id,
+      ]);
+      removeGuideFile(cfg.guide_url);
+      res.json({ data: { ok: true }, error: null });
+    } catch (e) {
+      console.error('Error in DELETE /api/teacher/farm/guide:', e);
+      res.status(500).json({ data: null, error: e.message });
     }
   });
 
@@ -792,6 +1053,9 @@ module.exports = {
   WEATHER,
   MAX_OPS,
   MAX_PARAM,
+  MAX_CODE_SLOTS,
+  MAX_SLOT_NAME,
+  MAX_SLOT_CODE,
   LABOR_GROWTH,
   WATER_PER_UNIT,
   FERT_PER_UNIT,

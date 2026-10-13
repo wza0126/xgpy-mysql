@@ -13191,7 +13191,7 @@ registerGameTasks(app, { pool, authenticate, requireTeacher, requireStudent });
 // ===== 代码农场（桌面游戏）=====
 // 教师端：开关 / 参数 / 全班地块总览 / 劳作日志；学生端：农场状态（桌面轮询）+ 劳作提交。
 // 学生端代码由前端子集解释器执行，只上交「操作序列」；生长与积分结算全在 farm.js 服务端完成。
-registerFarm(app, { pool, authenticate, requireTeacher, requireStudent });
+registerFarm(app, { pool, authenticate, requireTeacher, requireStudent, uploadsDir });
 
 // ===== 教师端接口 =====
 

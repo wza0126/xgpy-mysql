@@ -3,7 +3,7 @@
  *
  * 端到端验证：用一个全新临时库跑 runMigrations()，确认
  *   1) 迁移总数 = embedded-migrations.js 的条数（当前 101），最新一条 = embedded 的最后一条
- *   2) 代码农场三表 farm_config / farm_plots / farm_logs 真正建出来
+ *   2) 代码农场四表 farm_config / farm_plots / farm_logs / farm_code_slots 真正建出来
  *   3) farm_config 有单行配置记录，且含天气 / 劳作上限 / 默认代码列
  * 结束后 DROP 临时库，不留痕。
  */
@@ -39,6 +39,7 @@ async function main() {
     check('farm_config 表已建', names.includes('farm_config'));
     check('farm_plots 表已建', names.includes('farm_plots'));
     check('farm_logs 表已建', names.includes('farm_logs'));
+    check('farm_code_slots 表已建（100：学生 5 个代码容器）', names.includes('farm_code_slots'));
 
     const [rows] = await conn.query('SELECT COUNT(*) AS c FROM farm_config');
     check('farm_config 有单行配置', rows[0].c === 1, `count=${rows[0].c}`);
@@ -48,15 +49,26 @@ async function main() {
     check('farm_config.weather 列存在（天气设置）', cfgNames.includes('weather'));
     check('farm_config.max_ops_per_day 列存在', cfgNames.includes('max_ops_per_day'));
     check('farm_config.default_code 列存在（098：编辑器默认代码）', cfgNames.includes('default_code'));
+    check('farm_config.guide_url 列存在（099：学生手册地址）', cfgNames.includes('guide_url'));
+    check('farm_config.guide_name 列存在（099：手册原始文件名）', cfgNames.includes('guide_name'));
+    check('farm_config.guide_enabled 列存在（099：桌面手册入口开关）', cfgNames.includes('guide_enabled'));
 
     const [plotCols] = await conn.query('SHOW COLUMNS FROM farm_plots');
     const plotNames = plotCols.map((c) => c.Field);
     check('farm_plots.ops_today 列存在', plotNames.includes('ops_today'));
 
+    const [slotCols] = await conn.query('SHOW COLUMNS FROM farm_code_slots');
+    const slotNames = slotCols.map((c) => c.Field);
+    check('farm_code_slots 有 slot / name / code 列（100：学生代码容器）',
+      ['slot', 'name', 'code'].every((x) => slotNames.includes(x)), slotNames.join(','));
+    const [slotIdx] = await conn.query('SHOW INDEX FROM farm_code_slots WHERE Key_name = ?', ['uk_farm_slot']);
+    check('farm_code_slots 有 (student_id, slot) 唯一键（一人 5 格不重复）', slotIdx.length >= 2,
+      `index parts=${slotIdx.length}`);
+
     const [mig] = await conn.query('SELECT COUNT(*) AS c, MAX(version) AS v FROM schema_migrations');
     check('schema_migrations 条数 = embedded 条数', mig[0].c === embedded.length, `${mig[0].c} / ${embedded.length}`);
     const lastVersion = embedded.length ? embedded[embedded.length - 1].version : '';
-    check('最新迁移 = embedded 的最后一条（当前 098）', String(mig[0].v) === String(lastVersion),
+    check('最新迁移 = embedded 的最后一条（不写死编号）', String(mig[0].v) === String(lastVersion),
       `${mig[0].v} vs ${lastVersion}`);
 
     // 096 改的是 point_transactions.source_type 枚举，确认 'farm' 已进入枚举

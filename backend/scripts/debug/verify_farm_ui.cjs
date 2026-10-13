@@ -168,9 +168,10 @@ async function waitText(b, text, ms = 20000) {
       if (snapCfg) {
         await db.query(
           'UPDATE farm_config SET enabled=?, class_ids=?, day_minutes=?, base_yield=?, max_ops_per_day=?, ' +
-            'weather=?, notice=?, default_code=?, start_at=?, updated_by=NULL WHERE id = 1',
+            'weather=?, notice=?, default_code=?, guide_url=?, guide_name=?, guide_enabled=?, start_at=?, updated_by=NULL WHERE id = 1',
           [snapCfg.enabled, snapCfg.class_ids, snapCfg.day_minutes, snapCfg.base_yield,
-           snapCfg.max_ops_per_day, snapCfg.weather, snapCfg.notice, snapCfg.default_code, snapCfg.start_at]
+           snapCfg.max_ops_per_day, snapCfg.weather, snapCfg.notice, snapCfg.default_code,
+           snapCfg.guide_url, snapCfg.guide_name, snapCfg.guide_enabled, snapCfg.start_at]
         );
       }
       if (studentId) await db.query('UPDATE profiles SET class_id = ? WHERE id = ?', [oldClassId, studentId]);
@@ -194,6 +195,7 @@ async function waitText(b, text, ms = 20000) {
     snapFarm = await snapshotFarmData(db, studentId);
     console.log('  已快照真实试玩数据：plots=' + snapFarm.tables.farm_plots.length +
       ' logs=' + snapFarm.tables.farm_logs.length +
+      ' 代码容器=' + snapFarm.tables.farm_code_slots.length +
       ' 农场流水=' + snapFarm.tables.point_transactions.length);
     await db.query('DELETE FROM classes WHERE id = ?', [TMP_CLASS_ID]);
     await db.query('INSERT INTO classes (id, name) VALUES (?, ?)', [TMP_CLASS_ID, TMP_CLASS_NAME]);
@@ -232,6 +234,10 @@ async function waitText(b, text, ms = 20000) {
     ok('含天气选择与教学提示', body.includes('当前天气'));
     ok('含公告输入框', body.includes('全班公告'));
     ok('★ 含「编辑器默认代码」设置区', body.includes('编辑器默认代码') && body.includes('载入内置示例'));
+    ok('★ 含「学生手册」设置区（上传 / 预览 / 恢复内置 / 桌面入口开关）',
+      body.includes('学生手册') && body.includes('上传手册 HTML') && body.includes('预览当前手册') &&
+        body.includes('内置示例手册'),
+      body.replace(/\n+/g, ' | ').slice(0, 160));
     ok('含「重置世界」危险操作按钮', body.includes('重置世界'));
     ok('顶部统计卡（已建地块）', body.includes('已建地块'));
     ok('临时班级出现在班级多选里', body.includes(TMP_CLASS_NAME), TMP_CLASS_NAME);
@@ -257,6 +263,10 @@ async function waitText(b, text, ms = 20000) {
       'UPDATE farm_plots SET crop=NULL, growth=0, moisture=50, nutrient=50, stage=0, ops_today=0, ops_day=0 WHERE student_id = ?',
       [studentId]
     );
+    // ⛔ 代码容器也要清空：如果学生 a（也是老师试玩账号）自己存过代码，编辑器一打开就会
+    //    载入那格代码，D 段「默认代码恰好消耗 8 次劳作」的断言会随数据漂移。
+    //    清空后 = 「5 格全空」→ 编辑器保持默认代码（正是 D 段要的前提），跑完按快照还原。
+    await db.query('DELETE FROM farm_code_slots WHERE student_id = ?', [studentId]);
     section('C. 学生桌面自动进入农场');
     const r2 = await loginAs(b, STUDENT.u, STUDENT.p);
     ok('学生登录成功', r2 === 'submitted', r2);
@@ -273,6 +283,73 @@ async function waitText(b, text, ms = 20000) {
     ok('农场里显示水肥指标', body.includes('水分') && body.includes('养分'));
     ok('桌面图标仍浮在农场之上（未被遮挡）',
       ['学习', '练习', '测试', 'Python编程', '错题集'].some((k) => body.includes(k)));
+
+    section('C2. ★ 学生桌面「农场手册」入口');
+    ok('桌面多出「农场手册」图标（老师没上传时走内置默认手册）', body.includes('农场手册'),
+      body.replace(/\n+/g, ' | ').slice(0, 200));
+    const guideOpen = await b.evalJs(`(() => {
+      const norm = (s) => (s || '').replace(/\\s+/g, '');
+      const nodes = Array.from(document.querySelectorAll('div,button')).filter(n => norm(n.textContent) === '农场手册');
+      if (!nodes.length) return 'not-found';
+      nodes[0].dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      return 'opened';
+    })()`);
+    ok('双击「农场手册」图标', guideOpen === 'opened', guideOpen);
+    await sleep(1800);
+    const gSrc = await b.evalJs(`(() => { const f = document.querySelector('iframe[title="代码农场 · 学生手册"]'); return f ? String(f.getAttribute('src') || '') : ''; })()`);
+    ok('★ 手册窗口已打开（iframe 指向内置默认手册）', /code-farm-guide\.html$/.test(String(gSrc || '')), String(gSrc));
+    // ⛔ 手册 iframe 是 sandbox（不给 allow-same-origin），主文档读不到它的 contentDocument，
+    //    所以改成「从页面里 fetch 这个地址」来证明浏览器确实能取到手册内容。
+    const gPeek = await b.evalJs(`fetch(${JSON.stringify(gSrc)}).then(r => r.ok ? r.text() : ('HTTP ' + r.status)).then(t => String(t).includes('代码农场 · 学生手册') ? 'guide-ok' : 'bad-content: ' + String(t).slice(0, 60)).catch(e => 'ERR ' + e.message)`);
+    ok('★ 手册内容确实能被浏览器取到（不是空白 / 404）', String(gPeek) === 'guide-ok', String(gPeek));
+    // 关掉手册窗口，避免影响后面的编辑器断言
+    const guideClosed = await b.evalJs(`(() => {
+      const marks = Array.from(document.querySelectorAll('i.fa-xmark'));
+      for (const m of marks) {
+        const btn = m.closest('button');
+        let el = btn, hit = false;
+        for (let i = 0; i < 6 && el; i++) { if ((el.textContent || '').includes('农场手册')) { hit = true; break; } el = el.parentElement; }
+        if (hit && btn) { btn.click(); return 'closed'; }
+      }
+      return 'not-found';
+    })()`);
+    ok('手册窗口可关闭', guideClosed === 'closed' || guideClosed === 'not-found', guideClosed);
+
+    section('C3. ★ 全班的地：点同学的地块 → 弹出长势详情');
+    ok('左下角有「全班的地（按农场积分排序）」', body.includes('全班的地'),
+      body.replace(/\n+/g, ' | ').slice(0, 160));
+    ok('★ 自己的地块卡片标了「·我」', body.includes('·我'));
+    const peerOpen = await b.evalJs(`(() => {
+      const norm = (s) => (s || '').replace(/\\s+/g, '');
+      const btns = Array.from(document.querySelectorAll('button')).filter(n => norm(n.textContent).includes('·我'));
+      if (!btns.length) return 'not-found';
+      btns[0].click();
+      return 'clicked';
+    })()`);
+    ok('点击「全班的地」里的地块卡片', peerOpen === 'clicked', peerOpen);
+    await sleep(900);
+    let peerBody = String(await b.evalJs('document.body.innerText') || '');
+    ok('★ 弹出详情（标题「××的地」+ 明确说明看不到同学的代码）',
+      peerBody.includes('的地') && peerBody.includes('看不到同学写的代码'),
+      peerBody.replace(/\n+/g, ' | ').slice(0, 220));
+    ok('★ 详情含 生长 / 水分 / 养分 三项指标',
+      peerBody.includes('生长') && peerBody.includes('水分') && peerBody.includes('养分'));
+    ok('★ 详情含「累计收获」与「农场积分」',
+      peerBody.includes('累计收获') && peerBody.includes('农场积分'),
+      peerBody.replace(/\n+/g, ' | ').slice(0, 200));
+    ok('★ 详情说明「看不到同学写的代码」（同学之间代码不外泄）',
+      peerBody.includes('看不到同学写的代码'));
+    const peerClosed = await b.evalJs(`(() => {
+      const x = Array.from(document.querySelectorAll('button')).find(n => n.getAttribute('title') === '关闭');
+      if (!x) return 'not-found';
+      x.click();
+      return 'closed';
+    })()`);
+    ok('详情弹窗可关闭', peerClosed === 'closed', peerClosed);
+    await sleep(600);
+    peerBody = String(await b.evalJs('document.body.innerText') || '');
+    ok('关闭后回到农场（详情内容消失）', !peerBody.includes('看不到同学写的代码'),
+      peerBody.replace(/\n+/g, ' | ').slice(0, 140));
 
     section('D. 打开代码编辑器 → 运行 → 后端结算');
     const opened = await clickByText(b, '编写农活代码');
@@ -324,6 +401,96 @@ async function waitText(b, text, ms = 20000) {
     }
     ok('★ 未改过代码 → 编辑器自动换成老师的新默认（含「先原样跑一遍」）', followed, taVal.slice(0, 80).replace(/\n/g, ' / '));
 
+    // ---------- C4 ★ 代码容器：选中容器就显示代码，可以直接运行 ----------
+    section('C4. ★ 代码容器：5 格存取 / 切换即显示 / 改名 / 清空');
+    body = String(await b.evalJs('document.body.innerText') || '');
+    ok('★ 编辑器有「代码容器」条（容器 1~5 标签 + 保存 / 重命名 / 清空）',
+      body.includes('代码容器') && body.includes('容器 1') && body.includes('容器 5') &&
+        body.includes('保存到容器') && body.includes('重命名') && body.includes('清空'),
+      body.replace(/\n+/g, ' | ').slice(0, 260));
+    ok('★ 文案已改：不再写「代码保存在本机，不上传」', !body.includes('代码保存在本机'),
+      body.replace(/\n+/g, ' | ').slice(0, 200));
+    ok('★ 新文案说明代码跟着人走（换台电脑也还在）', body.includes('换台电脑也还在'));
+
+    // ① 把当前代码存进容器 1
+    const save1 = await clickByText(b, '保存到容器');
+    ok('点「保存到容器」', save1 === 'clicked', save1);
+    await sleep(1300);
+    const [sl1] = await db.query('SELECT name, code FROM farm_code_slots WHERE student_id = ? AND slot = 1', [studentId]);
+    ok('★ 容器 1 已落库（代码确实存在服务器，不是本机）',
+      sl1.length === 1 && String(sl1[0].code).includes('先原样跑一遍'),
+      JSON.stringify(sl1[0] || {}).slice(0, 120));
+    body = String(await b.evalJs('document.body.innerText') || '');
+    ok('保存后有「已保存到…」提示', body.includes('已保存到'), body.replace(/\n+/g, ' | ').slice(0, 160));
+
+    // ② 切到容器 2（空的）→ 编辑器应清空
+    const toSlot2 = await clickByText(b, '容器 2');
+    ok('点「容器 2」标签', toSlot2 === 'clicked', toSlot2);
+    await sleep(1300);
+    const ta2 = String(await b.evalJs('(() => { const t = document.querySelector("textarea"); return t ? t.value : ""; })()'));
+    ok('★ 切到空容器 → 编辑器清空（不会把上一格的内容留在里面）', ta2.trim() === '', JSON.stringify(ta2.slice(0, 60)));
+
+    // ③ 在容器 2 里写点东西并保存
+    const typed2 = await b.evalJs(`(() => {
+      ${SET_VAL}
+      const t = document.querySelector('textarea');
+      if (!t) return 'no-ta';
+      __setVal(t, '# 容器2：收尾脚本\\nharvest()');
+      return 'typed';
+    })()`);
+    ok('在容器 2 里写代码', typed2 === 'typed', typed2);
+    await sleep(400);
+    await clickByText(b, '保存到容器');
+    await sleep(1300);
+    const [sl2] = await db.query('SELECT code FROM farm_code_slots WHERE student_id = ? AND slot = 2', [studentId]);
+    ok('★ 容器 2 独立落库（两格互不覆盖）',
+      sl2.length === 1 && String(sl2[0].code).includes('收尾脚本'),
+      JSON.stringify(sl2[0] || {}).slice(0, 120));
+
+    // ④ 切回容器 1 → 编辑器应显示容器 1 的代码（核心诉求：选中容器就显示代码）
+    const back1 = await clickByText(b, '容器 1');
+    ok('切回「容器 1」', back1 === 'clicked', back1);
+    await sleep(1300);
+    const ta1 = String(await b.evalJs('(() => { const t = document.querySelector("textarea"); return t ? t.value : ""; })()'));
+    ok('★ 编辑器显示容器 1 的代码（点一下容器就把代码取出来）', ta1.includes('先原样跑一遍'),
+      JSON.stringify(ta1.slice(0, 60)));
+    // 切走时自动保存过容器 2（防止手滑丢代码）
+    const [sl2b] = await db.query('SELECT code FROM farm_code_slots WHERE student_id = ? AND slot = 2', [studentId]);
+    ok('★ 切走时自动保存上一格（防手滑丢代码）',
+      sl2b.length === 1 && String(sl2b[0].code).includes('收尾脚本'), JSON.stringify(sl2b[0] || {}).slice(0, 100));
+
+    // ⑤ 重命名当前容器
+    const renameOpened = await clickByText(b, '重命名');
+    ok('点「重命名」', renameOpened === 'clicked', renameOpened);
+    await sleep(600);
+    const renamed = await b.evalJs(`(() => {
+      ${SET_VAL}
+      const i = Array.from(document.querySelectorAll('input')).find(x => x.placeholder && x.placeholder.includes('给这格起个名字'));
+      if (!i) return 'no-input';
+      __setVal(i, '自动浇一茬');
+      const okBtn = Array.from(document.querySelectorAll('button')).filter(n => (n.textContent || '').replace(/\\s+/g, '') === '确定');
+      if (!okBtn.length) return 'no-ok';
+      okBtn[0].click();
+      return 'renamed';
+    })()`);
+    ok('输入新名字并确定', renamed === 'renamed', renamed);
+    await sleep(1300);
+    const [nm1] = await db.query('SELECT name FROM farm_code_slots WHERE student_id = ? AND slot = 1', [studentId]);
+    ok('★ 容器名已落库', nm1.length === 1 && nm1[0].name === '自动浇一茬', JSON.stringify(nm1[0] || {}));
+    body = String(await b.evalJs('document.body.innerText') || '');
+    ok('★ 标签上显示自定义名字「自动浇一茬」', body.includes('自动浇一茬'),
+      body.replace(/\n+/g, ' | ').slice(0, 200));
+
+    // ⑥ 清空容器（确认框在无头浏览器里会阻塞，先把 confirm 换成自动同意）
+    await b.evalJs('(() => { window.confirm = () => true; return true; })()');
+    const cleared = await clickByText(b, '清空');
+    ok('点「清空」', cleared === 'clicked', cleared);
+    await sleep(1300);
+    const [cl1] = await db.query('SELECT COUNT(*) AS c FROM farm_code_slots WHERE student_id = ? AND slot = 1', [studentId]);
+    ok('★ 清空后库里那一行被删掉（不留空壳）', Number(cl1[0].c) === 0, cl1[0].c);
+    body = String(await b.evalJs('document.body.innerText') || '');
+    ok('清空后编辑器也清空', String(await b.evalJs('(() => { const t = document.querySelector("textarea"); return t ? t.value : ""; })()')).trim() === '');
+
     // ---------- E 关闭开关 ----------
     section('E. 教师关闭开关 → 学生桌面自动退出');
     await api('/api/teacher/farm/config', {
@@ -363,9 +530,10 @@ async function waitText(b, text, ms = 20000) {
       const [p] = await db.query('SELECT COUNT(*) AS c FROM farm_plots WHERE student_id = ?', [studentId]);
       const [l] = await db.query('SELECT COUNT(*) AS c FROM farm_logs WHERE student_id = ?', [studentId]);
       const [t] = await db.query("SELECT COUNT(*) AS c FROM point_transactions WHERE student_id = ? AND source_type='farm'", [studentId]);
+      const [sl] = await db.query('SELECT COUNT(*) AS c FROM farm_code_slots WHERE student_id = ?', [studentId]);
       const [c] = await db.query('SELECT COUNT(*) AS c FROM classes WHERE id = ?', [TMP_CLASS_ID]);
       const [s] = await db.query('SELECT class_id FROM profiles WHERE id = ?', [studentId]);
-      const [f] = await db.query('SELECT enabled, class_ids, notice, day_minutes, base_yield, max_ops_per_day, default_code FROM farm_config WHERE id = 1');
+      const [f] = await db.query('SELECT enabled, class_ids, notice, day_minutes, base_yield, max_ops_per_day, default_code, guide_url, guide_name, guide_enabled FROM farm_config WHERE id = 1');
       ok('★ farm_plots 已还原（是「放回原样」，不是「删干净」）',
         Number(p[0].c) === (snapFarm ? snapFarm.tables.farm_plots.length : 0),
         p[0].c + ' vs 快照 ' + (snapFarm ? snapFarm.tables.farm_plots.length : 0));
@@ -375,6 +543,9 @@ async function waitText(b, text, ms = 20000) {
       ok('★ 农场积分流水已还原',
         Number(t[0].c) === (snapFarm ? snapFarm.tables.point_transactions.length : 0),
         t[0].c + ' vs 快照 ' + (snapFarm ? snapFarm.tables.point_transactions.length : 0));
+      ok('★ 代码容器已还原（学生/老师存的代码不会被回归吃掉）',
+        Number(sl[0].c) === (snapFarm ? snapFarm.tables.farm_code_slots.length : 0),
+        sl[0].c + ' vs 快照 ' + (snapFarm ? snapFarm.tables.farm_code_slots.length : 0));
       ok('临时班级已删除', Number(c[0].c) === 0, c[0].c);
       ok('测试学生班级已还原', s[0].class_id === oldClassId, s[0].class_id + ' vs ' + oldClassId);
       // ⛔ 别锁死 enabled 的具体值（教师可改）；只要求回到跑测试前的状态
@@ -383,6 +554,9 @@ async function waitText(b, text, ms = 20000) {
           Number(f[0].day_minutes) === Number(snapCfg.day_minutes) &&
           Number(f[0].base_yield) === Number(snapCfg.base_yield) &&
           Number(f[0].max_ops_per_day) === Number(snapCfg.max_ops_per_day) &&
+          String(f[0].guide_url == null ? '' : f[0].guide_url) ===
+            String(snapCfg.guide_url == null ? '' : snapCfg.guide_url) &&
+          Number(f[0].guide_enabled) === Number(snapCfg.guide_enabled) &&
           String(f[0].default_code == null ? '' : f[0].default_code) ===
             String(snapCfg.default_code == null ? '' : snapCfg.default_code)),
         JSON.stringify(f[0]) + ' vs 快照 enabled=' + (snapCfg && snapCfg.enabled));

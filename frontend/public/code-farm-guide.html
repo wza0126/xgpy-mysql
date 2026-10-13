@@ -1,0 +1,1869 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>代码农场 · 学生手册</title>
+<style>
+  :root{
+    --bg:#f4f7f2; --card:#ffffff; --ink:#1f2937; --ink-2:#4b5563; --ink-3:#6b7280;
+    --line:#e2e8e0; --green:#16a34a; --green-d:#15803d; --green-l:#dcfce7;
+    --amber:#f59e0b; --amber-l:#fef3c7; --sky:#0ea5e9; --violet:#8b5cf6;
+    --code-bg:#1b2735; --code-ink:#e6edf5;
+    --radius:14px;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    font-size:15px; line-height:1.75;
+  }
+  a{color:var(--green-d)}
+
+  /* ===== 首屏 ===== */
+  .hero{
+    background:linear-gradient(160deg,#0f5132 0%,#16a34a 55%,#65a30d 100%);
+    color:#fff; padding:44px 24px 38px; position:relative; overflow:hidden;
+  }
+  .hero::after{
+    content:""; position:absolute; right:-60px; top:-60px; width:260px; height:260px;
+    background:radial-gradient(circle,rgba(255,255,255,.22),transparent 68%); border-radius:50%;
+  }
+  .hero .wrap{max-width:900px; margin:0 auto; position:relative; z-index:1}
+  .hero h1{margin:0 0 6px; font-size:32px; letter-spacing:.5px}
+  .hero p{margin:0; opacity:.92; font-size:15px}
+  .hero .tag{
+    display:inline-block; margin-bottom:14px; padding:3px 11px; border-radius:999px;
+    background:rgba(255,255,255,.18); font-size:12.5px; letter-spacing:.6px;
+  }
+
+  main{max-width:900px; margin:0 auto; padding:26px 20px 60px}
+  section{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:22px 24px; margin-bottom:20px}
+  h2{font-size:20px; margin:0 0 4px; display:flex; align-items:center; gap:9px}
+  h2 .n{
+    display:inline-flex; align-items:center; justify-content:center; flex:0 0 auto;
+    width:26px; height:26px; border-radius:8px; background:var(--green-l); color:var(--green-d);
+    font-size:13px; font-weight:700;
+  }
+  h3{font-size:16px; margin:22px 0 8px}
+  .lead{color:var(--ink-2); margin:0 0 16px}
+  p{margin:9px 0}
+  ul,ol{margin:8px 0; padding-left:22px}
+  li{margin:5px 0}
+
+  /* ===== 三步 ===== */
+  .steps{display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-top:6px}
+  .step{background:var(--green-l); border-radius:11px; padding:14px 15px}
+  .step b{display:block; font-size:13px; color:var(--green-d); letter-spacing:.4px; margin-bottom:3px}
+  .step span{font-size:14px; color:#14532d}
+
+  /* ===== 表格 ===== */
+  .tbl-wrap{overflow-x:auto; margin:12px 0}
+  table{border-collapse:collapse; width:100%; font-size:14px; min-width:520px}
+  th,td{border:1px solid var(--line); padding:8px 11px; text-align:left; vertical-align:top}
+  th{background:#f0f5ee; font-weight:600; font-size:13px; color:#374151; white-space:nowrap}
+  td code, p code, li code, th code{
+    background:#eef2ec; border:1px solid #dde5da; border-radius:5px;
+    padding:1px 5px; font-size:13px; font-family:ui-monospace,Consolas,"Courier New",monospace;
+  }
+  .mono{font-family:ui-monospace,Consolas,"Courier New",monospace; font-size:13.5px}
+
+  /* ===== 代码块 ===== */
+  pre{
+    background:var(--code-bg); color:var(--code-ink); border-radius:11px; padding:14px 16px;
+    overflow-x:auto; font-size:13.5px; line-height:1.65; margin:10px 0;
+    font-family:ui-monospace,Consolas,"Courier New",monospace;
+  }
+  pre code{background:none; border:none; padding:0; color:inherit; font-size:inherit}
+  .c-kw{color:#7dd3fc} .c-str{color:#a5e8a0} .c-num{color:#fbbf24} .c-com{color:#7c8ba1; font-style:italic}
+  .cap{font-size:12.5px; color:var(--ink-3); margin:-4px 0 12px}
+
+  /* ===== 提示条 ===== */
+  .note{border-left:4px solid var(--sky); background:#eef7fd; padding:11px 15px; border-radius:0 9px 9px 0; margin:14px 0; font-size:14.3px}
+  .warn{border-left:4px solid var(--amber); background:var(--amber-l); padding:11px 15px; border-radius:0 9px 9px 0; margin:14px 0; font-size:14.3px}
+  .note > b:first-child,.warn > b:first-child{display:block; margin-bottom:2px; font-size:13px; letter-spacing:.3px}
+  .note > b:first-child{color:#0369a1} .warn > b:first-child{color:#b45309}
+  .note b,.warn b{font-weight:600}
+
+  /* ===== API 卡 ===== */
+  .api-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:10px; margin-top:12px}
+  .api{border:1px solid var(--line); border-radius:10px; padding:11px 13px; background:#fbfdfa}
+  .api .sig{font-family:ui-monospace,Consolas,monospace; font-size:13.5px; color:var(--green-d); font-weight:600}
+  .api .desc{font-size:13.4px; color:var(--ink-2); margin-top:3px}
+  .api .cost{
+    display:inline-block; margin-top:5px; padding:1px 8px; border-radius:99px;
+    background:var(--green-l); color:var(--green-d); font-size:12px; font-weight:600;
+  }
+
+  /* ===== 演练场 ===== */
+  .pg{background:#f7faf5; border:1px solid var(--line); border-radius:12px; padding:14px; margin-top:12px}
+  .pg-bar{display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:10px}
+  .pg-bar .sp{margin-left:auto}
+  .pg-bar select{
+    border:1px solid var(--line); background:#fff; border-radius:8px; padding:6px 9px;
+    font-size:13.5px; color:var(--ink); font-family:inherit;
+  }
+  button{
+    font-family:inherit; font-size:13.5px; border-radius:8px; cursor:pointer;
+    border:1px solid var(--line); background:#fff; color:var(--ink); padding:6px 12px;
+    transition:background .14s,border-color .14s;
+  }
+  button:hover{background:#f1f5ef}
+  button.primary{background:var(--green); border-color:var(--green); color:#fff; font-weight:600}
+  button.primary:hover{background:var(--green-d); border-color:var(--green-d)}
+  .pg-grid{display:grid; grid-template-columns:1fr 1fr; gap:12px}
+  textarea{
+    width:100%; min-height:270px; resize:vertical; border:1px solid #cfd8cb; border-radius:9px;
+    padding:11px 13px; font-family:ui-monospace,Consolas,"Courier New",monospace;
+    font-size:13.5px; line-height:1.65; color:#1f2937; background:#fff; tab-size:4;
+  }
+  textarea:focus{outline:2px solid #86efac; outline-offset:0; border-color:#86efac}
+  .out-panel{display:flex; flex-direction:column; gap:10px; min-width:0}
+  .out-block{background:#fff; border:1px solid var(--line); border-radius:9px; padding:10px 12px; min-width:0}
+  .out-block h4{margin:0 0 6px; font-size:12.5px; letter-spacing:.4px; color:var(--ink-3); font-weight:600; text-transform:uppercase}
+  .out-block .body{font-size:13.4px; font-family:ui-monospace,Consolas,monospace; white-space:pre-wrap; word-break:break-word; max-height:190px; overflow:auto}
+  .empty{color:#9ca3af; font-style:italic; font-size:13.2px; font-family:inherit}
+  .ev-ok{color:#15803d}
+  .ev-bad{color:#b91c1c}
+  .ev-info{color:#0369a1}
+  .meter{margin:7px 0}
+  .meter .lb{display:flex; justify-content:space-between; font-size:12.5px; color:var(--ink-2); margin-bottom:3px}
+  .meter .bar{height:9px; border-radius:99px; background:#e8eee5; overflow:hidden}
+  .meter .bar i{display:block; height:100%; border-radius:99px; transition:width .35s ease}
+  .plot-line{font-size:13.4px; color:var(--ink); margin-top:4px}
+  .stage-pill{display:inline-block; padding:1px 8px; border-radius:99px; font-size:12.5px; background:#eef2ec; color:#374151}
+  .stat-row{display:flex; gap:14px; flex-wrap:wrap; font-size:13px; color:var(--ink-2); margin-top:8px}
+
+  footer{max-width:900px; margin:0 auto; padding:0 20px 50px; color:var(--ink-3); font-size:13px}
+  footer .box{border-top:1px dashed var(--line); padding-top:16px}
+
+  @media (max-width:760px){
+    .steps{grid-template-columns:1fr}
+    .pg-grid{grid-template-columns:1fr}
+    .hero h1{font-size:25px}
+    section{padding:18px 16px}
+    main{padding:18px 12px 40px}
+  }
+  @media print{
+    body{background:#fff}
+    section{break-inside:avoid; box-shadow:none}
+    .pg-bar,.no-print{display:none !important}
+  }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <span class="tag">西高中趣味学习平台 · 学生手册</span>
+    <h1>代码农场</h1>
+    <p>用 Python 照顾你的地：每一次农活都要花力气，写对代码才长得快。</p>
+  </div>
+</header>
+
+<main>
+
+  <!-- 1 -->
+  <section id="start">
+    <h2><span class="n">1</span>三步就能开始</h2>
+    <p class="lead">老师打开「代码农场」开关后，你的桌面会自己变成一片农场——不用你找入口。</p>
+    <div class="steps">
+      <div class="step"><b>① 桌面变农场</b><span>开关打开后，桌面壁纸变成田野，学习类的图标仍然浮在上面，正常点正常用。</span></div>
+      <div class="step"><b>② 找到「我的地」</b><span>屏幕中间的田块就是你的地。左下角是「全班的地」（按农场积分排序），点一下任意一位同学，就能看他的地种了什么、长得怎么样。</span></div>
+      <div class="step"><b>③ 写代码干活</b><span>点「编写农活代码」，写 Python，点运行。作物按你的代码生长。</span></div>
+    </div>
+    <div class="note">
+      <b>不小心关掉了？</b>
+      农场世界右上角有「收起」，收起后桌面右下角会留一个小挂件，点它可以随时回到农场。
+    </div>
+    <div class="note">
+      <b>写好的代码别丢了：5 个「代码容器」</b>
+      编辑器最上面一排有 5 个格子。点一下格子，里面存的代码就出现在编辑器里，可以直接运行；
+      改完点「保存到容器」存回去，点「重命名」还能给格子起名字（比如「自动浇一茬」「收尾脚本」）。
+      <b>代码存在服务器上</b>，不是存在这台电脑里——换个座位、换台电脑、清了浏览器缓存，你的脚本都还在。
+      建议一格放一种写法，上课时来回切着比效果。
+    </div>
+  </section>
+
+  <!-- 2 -->
+  <section id="rules">
+    <h2><span class="n">2</span>先看懂这 6 条规则</h2>
+    <p class="lead">这套规则决定了「怎么写代码才能长得最快」，值得先花两分钟读完。第 6 条讲除草——它以前几乎是摆设，现在很值钱，值得单独看一眼。</p>
+
+    <h3>① 每一次农活都算一次劳作</h3>
+    <p>不是「点一次运行 = 一次劳作」，而是<b>你干了多少件农活，就花多少次劳作</b>：</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>你写的代码</th><th>花几次劳作</th></tr></thead>
+        <tbody>
+          <tr><td><code>plant("wheat")</code> 播种</td><td>1 次</td></tr>
+          <tr><td><code>water(n)</code> 浇水 n 份</td><td><b>n 次</b></td></tr>
+          <tr><td><code>fertilize(n)</code> 施肥 n 份</td><td><b>n 次</b></td></tr>
+          <tr><td><code>weed()</code> 除草松土</td><td>1 次</td></tr>
+          <tr><td><code>harvest()</code> 收获</td><td>1 次</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>每天总次数有限（<b>默认 15 次</b>，老师可调），用完就要等第二天。
+      所以「多做一件农活」是有代价的——<b>劳作次数才是这个游戏里最稀缺的资源</b>，怎么把 15 次花在刀刃上，就是你要用代码解决的问题。</p>
+    <div class="note">
+      <b>一天的「标准成绩」是多少？</b>
+      晴天、从一块空地开始，光是<b>把水肥一路补满</b>就能成熟，一共花 <b>12 次劳作</b>（播种 1 + 水肥 10 + 收获 1）。
+      但这并不是最省的写法——<b>把水肥和除草搭配好，11 次就能收一茬</b>。
+      省下来的每一次劳作，都是你多收一茬的本钱。
+    </div>
+
+    <h3>② 每补进一份水/肥，作物当场吸收一次</h3>
+    <p>不是等代码跑完才一起结算。<b>你每补进去一份水、一份肥，作物立刻按当时的水肥吸收一次</b>：</p>
+    <pre><code>这一次吸收的成长 = 16 × (水分 ÷ 100) × (养分 ÷ 100) × 天气倍率</code></pre>
+    <p>注意公式里<b>水分和养分是相乘的</b>，所以：</p>
+    <ul>
+      <li>水 50、肥 50 时补一份，只能长 <code>16 × 0.5 × 0.5 = 4</code>；</li>
+      <li>水 100、肥 100 时补一份，能长满额 <code>16</code>。</li>
+    </ul>
+    <p>结论：<b>让水、肥一起往上涨</b>，别只顾一样；哪一样到了 100 就立刻停止补它。</p>
+
+    <h3>③ 水、肥各有上限 100，浇多了是浪费</h3>
+    <p><code>water(n)</code> 每份 +12 水分，<code>fertilize(n)</code> 每份 +12 养分，最多只能到 100。
+      水分 98 时再补一份，只加到 100（那 12 点里 10 点白扔），<b>但这一次劳作照样要扣</b>——补到 100 就该停手。</p>
+
+    <h3>④ 挂着也长，但要靠水肥撑着</h3>
+    <p>时间本身也会让作物生长，每个「农场日」自然长一次：</p>
+    <pre><code>自然成长 = 12 × (水分 ÷ 100) × (养分 ÷ 100) × 天气倍率</code></pre>
+    <p>可每天水分会蒸发 −6、养分被消耗 −4。所以放着不管，水肥早晚见底，作物就不再长了——挂机也要维护。</p>
+
+    <h3>⑤ 成熟才能收获，收获换积分</h3>
+    <p>成长值到 <b>100</b> 就是成熟。收获后地变回空地，水分养分重置为 50，同时得到积分。
+      积分会自动加到你的账号上，和平台其它地方赚的积分是同一份。</p>
+
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>作物</th><th>成熟积分（基础 10 分时）</th><th>特点</th></tr></thead>
+        <tbody>
+          <tr><td><code>wheat</code> 小麦</td><td>10 分</td><td>稳妥，标准收益</td></tr>
+          <tr><td><code>carrot</code> 胡萝卜</td><td>12 分</td><td>收益略高</td></tr>
+          <tr><td><code>corn</code> 玉米</td><td>14 分</td><td>收益最高</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="cap">最终以老师设置的「收获基础积分」为准，上表按默认 10 分计算。</p>
+
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>天气</th><th>生长倍率</th><th>蒸发倍率</th><th>怎么应对</th></tr></thead>
+        <tbody>
+          <tr><td>晴 ☀️</td><td>×1.0</td><td>×1.0</td><td>常规操作</td></tr>
+          <tr><td>雨 🌧️</td><td>×1.2</td><td>×0.5</td><td>长得快、水也省，多浇多收</td></tr>
+          <tr><td>旱 🔥</td><td>×0.6</td><td>×1.8</td><td>水掉得快，要更勤快地补</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="cap">天气由老师设定，全班一样。界面顶部天空的颜色就是当前天气。</p>
+
+    <h3>⑥ 除草：水肥越足，它越值钱</h3>
+    <p><code>weed()</code> 也是一次正经农活。它加的成长同样要乘水肥系数，满水满肥时的加成是 <b>24</b>：</p>
+    <pre><code>一次除草的成长 = 24 × (水分 ÷ 100) × (养分 ÷ 100) × 天气倍率</code></pre>
+    <p>把它和「浇一份水」摆在一起看（晴天，浇水按补进 12 点水分算）：</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>地里的水肥</th><th>浇一份水</th><th>除一次草</th><th>谁更划算</th></tr></thead>
+        <tbody>
+          <tr><td>50 / 50</td><td>+4.96</td><td><b>+6</b></td><td>除草略胜</td></tr>
+          <tr><td>70 / 70</td><td>+9.18</td><td><b>+11.76</b></td><td>除草胜出一截</td></tr>
+          <tr><td>90 / 90</td><td>+14.4</td><td><b>+19.44</b></td><td>除草胜出一大截</td></tr>
+          <tr><td>100 / 100</td><td>水已满，浇不动了</td><td><b>+24</b></td><td>只剩除草还能干活</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>看出门道了吗？这两个动作的分工完全不同：</p>
+    <ul>
+      <li><b>浇水、施肥是「投资」</b>：既让自己长一截，又把后面<b>每一次除草的收益一起抬高</b>。水肥不涨，除草就一直便宜。</li>
+      <li><b>除草是「变现」</b>：它不改变水肥，但你手里积攒的地力越高，它一次换回的成长就越多。</li>
+      <li>水、肥各只有 100 的上限，<b>补满就再也没得补</b>；除草没有这个天花板，它是你手里<b>唯一能一直用下去的农活</b>。</li>
+    </ul>
+    <div class="warn">
+      <b>别把它当摆设，也别把它当催熟药</b>
+      15 次劳作全拿去闷头除草、水肥一动不动，最多只能长到 84，照样收不了。
+      水、肥、除草这三样怎么切分这 15 次，是这个游戏留给你自己去试的问题——
+      手册不写标准答案，去第 7 节的演练场动手比一比，心里就有数了。
+    </div>
+  </section>
+
+  <!-- 3 -->
+  <section id="api">
+    <h2><span class="n">3</span>农活函数速查</h2>
+    <p class="lead">这些就是你指挥农场的全部「遥控器」。每个函数的括号、引号都要用英文输入法打。卡片下方的绿色标签就是它的「工价」。</p>
+    <div class="api-grid">
+      <div class="api"><div class="sig">plant("wheat")</div><div class="desc">播种。可选 <code>wheat</code> 小麦 / <code>carrot</code> 胡萝卜 / <code>corn</code> 玉米。地里有作物时要先收获。</div><div class="cost">花 1 次劳作</div></div>
+      <div class="api"><div class="sig">water(n)</div><div class="desc">浇水 n 份，每份 +12 水分，上限 100。不写 n 就是 1 份，n 最大 10。<b>水分越高，后面的除草也越值钱。</b></div><div class="cost">花 n 次劳作</div></div>
+      <div class="api"><div class="sig">fertilize(n)</div><div class="desc">施肥 n 份，每份 +12 养分，上限 100。不写 n 就是 1 份，n 最大 10。<b>养分越高，后面的除草也越值钱。</b></div><div class="cost">花 n 次劳作</div></div>
+      <div class="api"><div class="sig">weed()</div><div class="desc">除草松土，成长 +<b>24 × 水分% × 养分% × 天气</b>。地空着没法除。水肥 100/100 时一次 <b>+24</b>（= 1.5 次浇水的成长）；水肥越低越不划算。</div><div class="cost">花 1 次劳作</div></div>
+      <div class="api"><div class="sig">harvest()</div><div class="desc">收获。只有成长值满 100 才收得动，收获得积分。</div><div class="cost">花 1 次劳作</div></div>
+      <div class="api"><div class="sig">moisture()</div><div class="desc">读当前水分，返回 0～100 的数字。</div><div class="cost">免费</div></div>
+      <div class="api"><div class="sig">nutrient()</div><div class="desc">读当前养分，返回 0～100 的数字。</div><div class="cost">免费</div></div>
+      <div class="api"><div class="sig">growth()</div><div class="desc">读当前成长值，0～100，100 就是成熟。</div><div class="cost">免费</div></div>
+      <div class="api"><div class="sig">stage()</div><div class="desc">读阶段：<code>0</code> 空地 / <code>1</code> 幼苗 / <code>2</code> 成长 / <code>3</code> 成熟。</div><div class="cost">免费</div></div>
+      <div class="api"><div class="sig">crop()</div><div class="desc">读当前作物名，空地返回 <code>None</code>。</div><div class="cost">免费</div></div>
+      <div class="api"><div class="sig">ops_left()</div><div class="desc">读今天还剩几次劳作。<b>它会随着你调用农活函数实时变小</b>，可以放心当循环条件用。</div><div class="cost">免费</div></div>
+      <div class="api"><div class="sig">print(值, ...)</div><div class="desc">打印输出，多个值用逗号隔开。调试必备。</div><div class="cost">免费</div></div>
+    </div>
+
+    <div class="note">
+      <b>可以用中文吗？</b>
+      可以。上面每个函数和作物都有中文别名：<code>播种("玉米")</code>、<code>浇水(5)</code>、<code>水分()</code>、<code>收获()</code> 都能跑。
+      但建议平时用英文——以后真正写程序时，英文是通用做法。
+    </div>
+  </section>
+
+  <!-- 4 -->
+  <section id="syntax">
+    <h2><span class="n">4</span>这个环境里 Python 能写到什么程度</h2>
+    <p class="lead">农场里的 Python 是为教学精简过的，覆盖必修 1 的核心语法。先看看边界，避免踩空。</p>
+
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>✅ 支持</th><th>举例</th></tr></thead>
+        <tbody>
+          <tr><td>变量与赋值</td><td><code>x = 10</code>　<code>count += 1</code>　<code>total *= 2</code></td></tr>
+          <tr><td>算术运算</td><td><code>+ - * /</code>　整除 <code>//</code>　取余 <code>%</code>　乘方 <code>**</code></td></tr>
+          <tr><td>比较与逻辑</td><td><code>&gt; &lt; &gt;= &lt;= == !=</code>　<code>and or not</code></td></tr>
+          <tr><td>分支</td><td><code>if</code> / <code>elif</code> / <code>else</code></td></tr>
+          <tr><td>循环</td><td><code>for i in range(5):</code>　<code>while 条件:</code></td></tr>
+          <tr><td>循环控制</td><td><code>break</code>　<code>continue</code>　<code>pass</code></td></tr>
+          <tr><td>函数</td><td><code>def 名字(参数):</code>　<code>return 值</code></td></tr>
+          <tr><td>字符串</td><td>用引号包起来，可以 <code>+</code> 拼接</td></tr>
+          <tr><td>输出</td><td><code>print("水分", moisture())</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>❌ 暂不支持</th><th>替代写法</th></tr></thead>
+        <tbody>
+          <tr><td>列表、字典、元组</td><td><code>for i in [1,2,3]</code> 不行 → 用 <code>for i in range(1,4)</code></td></tr>
+          <tr><td>f-string</td><td><code>print(f"水分{moisture()}")</code> 不行 → 用 <code>print("水分", moisture())</code></td></tr>
+          <tr><td><code>import</code> 任何模块</td><td>不需要，农活函数开箱即用</td></tr>
+          <tr><td><code>input()</code> 交互输入</td><td>把值直接写在代码里</td></tr>
+          <tr><td>字符串方法和下标</td><td><code>s.split()</code>、<code>s[0]</code> 都不行</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="warn">
+      <b>缩进要小心</b>
+      Python 用缩进表示「谁属于谁」。循环体、if 里面都要往右缩进（4 个空格或 1 个 Tab，别混用）。
+      缩进错了，运行时会直接报「语法错误」，并告诉你第几行。
+    </div>
+  </section>
+
+  <!-- 5 -->
+  <section id="tutorial">
+    <h2><span class="n">5</span>三关教程：从手动到自动</h2>
+    <p class="lead">下面每段代码都可以直接复制到编辑器里跑。建议按顺序来，一关一关体会差别。</p>
+
+    <h3>第 1 关 · 手动干一次活</h3>
+    <pre><code># 播下小麦，然后把水肥都补满
+plant("wheat")
+water(5)
+fertilize(5)
+
+print("水分", moisture(), "养分", nutrient())</code></pre>
+    <p>空地初始水肥都是 50。两段补水分开看，效果差很多：</p>
+    <ul>
+      <li><b>先 <code>water(5)</code></b>：水分 50→62→74→86→98→100，每补一份就吸收一次，
+        这时养分还只有 50，5 次合计只长 <b>33.6</b>。</li>
+      <li><b>再 <code>fertilize(5)</code></b>：养分 50→100，这回水分已经是满的，5 次合计长 <b>67.2</b>。</li>
+    </ul>
+    <p>33.6 + 67.2 = 100.8，成长封顶 <b>100</b>——刚好成熟！总共花掉 1 + 5 + 5 = <b>11 次劳作</b>，还剩 4 次，可以直接 <code>harvest()</code> 收掉。</p>
+    <p class="cap">这里也验证了第 3 条规则：水分 50 + 5×12 = 110，被截到 100，最后那一份其实只加了 2 点水，但劳作还是照扣 1 次。</p>
+
+    <h3>第 2 关 · 让程序自己判断</h3>
+    <pre><code># 不管现在水肥是多少，都把它补到满
+if crop() == None:
+    plant("carrot")
+
+while moisture() &lt; 100:
+    water()
+
+while nutrient() &lt; 100:
+    fertilize()
+
+print("水分", moisture(), "养分", nutrient())</code></pre>
+    <p>这段代码比第 1 关好，好在哪里？</p>
+    <ul>
+      <li><b>不用你算账。</b>水是 40 还是 88，代码自己知道该补几份，一次都不会浪费。</li>
+      <li><b>不会白扣劳作。</b><code>while moisture() &lt; 100</code> 在水满时自动停下，绝不会出现「水已经 100 还在浇」的情况。</li>
+      <li><b>可以反复用。</b>每天上线跑一次，永远刚好补满。</li>
+      <li><code>while moisture() &lt; 100</code> 能正确结束，是因为每次 <code>water()</code> 后 <code>moisture()</code> 都会返回新值——这正是循环存在的意义。</li>
+    </ul>
+    <p>在这次「水 50、肥 50」的情况下，它和第 1 关干的事一模一样（11 次劳作，成长 100）。但换成水已经 88 的地，第 1 关的 <code>water(5)</code> 会白扣 2 次劳作，第 2 关还是刚好 1 次。这就是「让程序判断」的价值。</p>
+
+    <h3>第 3 关 · 打包成函数，顺手收一茬</h3>
+    <pre><code>def care():
+    if crop() == None:
+        plant("corn")
+    while moisture() &lt; 100:
+        water()
+    while nutrient() &lt; 100:
+        fertilize()
+    print("水分", moisture(), "养分", nutrient(), "成长", growth())
+
+care()
+
+# 如果已经成熟，就收掉
+if stage() == 3:
+    harvest()
+    print("收了一茬！")</code></pre>
+    <p>现在 <code>care()</code> 就是你的「一键农活」，它把「判断有没有作物 → 补水 → 补肥」打包成一句话。
+      以后每天上线就是：跑 <code>care()</code> → 等 <code>stage()</code> 变 3 → <code>harvest()</code>。
+      这一套下来 11 次劳作就把玉米催熟（<code>corn</code> 收获 14 分，是三种作物里最高的）。</p>
+
+    <div class="note">
+      <b>进阶：用算术替代循环</b>
+      想知道「还差多少水、大概补几份」，可以直接算：
+      <pre style="margin:8px 0 0"><code>need = 100 - moisture()
+print("还差", need, "点水分，约", need / 12, "次水")</code></pre>
+      能把「算账」写成表达式，说明你已经从「命令机器」升级到「用机器思考」了。
+    </div>
+
+    <div class="note">
+      <b>下一步：把除草加进来，自己找最优解</b>
+      上面三关都是「把水肥补满就收」，稳拿 12 次劳作的标准成绩。但 11 次才是现在的天花板——
+      把 <code>weed()</code> 放对位置就能省下一次。给你三条提示，代码自己想：
+      <ul style="margin:8px 0 0">
+        <li>除草<b>单次收益比浇水高</b>，但它不会让水肥变高；反过来，水肥越高，除草越赚。</li>
+        <li>水、肥各有 100 的上限，<b>补满了就再也补不进去</b>——那几次劳作是不是可以换个花法？</li>
+        <li>用 <code>ops_left()</code> 盯着剩余次数，把省下来的次数用在除草上。</li>
+      </ul>
+      到第 7 节的演练场多比几组写法，看你能不能跑出 11 次。
+    </div>
+  </section>
+
+  <!-- 6 -->
+  <section id="pitfalls">
+    <h2><span class="n">6</span>最常见的 7 个坑</h2>
+
+    <h3>坑 1：以为「循环写得多」就等于「长得多」</h3>
+    <p>这是最容易犯的错。下面两段代码，成长结果一样，但花的劳作差了将近一倍：</p>
+    <pre><code># A：一口气灌 10 份水
+plant("wheat")
+water(10)</code></pre>
+    <pre><code># B：需要几份就浇几份
+plant("wheat")
+while moisture() < 100:
+    water()</code></pre>
+    <ul>
+      <li><b>A</b>：水分在第 5 份就满了，后面 5 份白浇，但<b>劳作照样扣 10 次</b>——加上播种共 11 次，成长只有 33.6。</li>
+      <li><b>B</b>：水满即停，只扣 5 次——加上播种共 <b>6 次</b>，成长同样是 33.6。</li>
+    </ul>
+    <p>B 省下的 5 次劳作，正好够再跑一次 <code>fertilize(5)</code>，把成长推到 <b>100 成熟</b>。
+      <b>同样 11 次劳作：A 只长到三分之一，B 已经可以收获了。</b></p>
+    <div class="warn">
+      <b>记住这句话</b>
+      循环的价值不是「多干活」，而是<b>「不浪费劳作次数」</b>。省下来的每一次劳作，都是你多收一茬的本钱。
+    </div>
+
+    <h3>坑 2：水满了还接着浇</h3>
+    <p>水分 98 时补 1 份，只加到 100，那 12 点里 10 点白扔——但这 1 次劳作还是要扣。
+      <code>water(10)</code> 这种写法在水分 50 的地上，会让 5 次劳作完全打水漂。用 <code>while moisture() &lt; 100</code> 就不会发生。</p>
+
+    <h3>坑 3：只顾着补水，忘了施肥</h3>
+    <p>吸收公式里水分和养分是<b>相乘</b>的。养分停在 50，你浇的每一份水都只能拿一半收益：</p>
+    <pre><code>plant("wheat")
+while moisture() < 100:
+    water()
+# 花 6 次劳作，成长只有 33.6</code></pre>
+    <p>水补满之后紧接着 <code>while nutrient() &lt; 100: fertilize()</code>，再花 5 次，成长就直接到 100。
+      <b>水肥要一起补</b>，只补一样，另一样永远是拖后腿的那个。</p>
+
+    <h3>坑 4：地里有作物又 <code>plant()</code></h3>
+    <p>会收到提示「这块地还种着小麦，先收获再说」。正确的流程是：<b>成熟 → harvest() → 再 plant()</b>。</p>
+
+    <h3>坑 5：没成熟就想 <code>harvest()</code></h3>
+    <p>会提示「小麦还没成熟（68/100）」。用 <code>if stage() == 3:</code> 先判断一下就不会白点。</p>
+
+    <h3>坑 6：次数用完了还在提交农活</h3>
+    <p>会收到「力气不够了」或「今天的劳作次数用完了」的提示，被挡下的操作<b>不扣劳作</b>，也不算失败。
+      第二天次数会自动重置，作物在夜里也在按自然规律生长。</p>
+
+    <h3>坑 7：把除草当成「随便刷两下」的凑数动作</h3>
+    <p>除草现在很值钱，但它<b>不是催熟药</b>——不管水肥、闷头连刷，照样收不了：</p>
+    <pre><code># 这样写只会白忙
+plant("wheat")
+for i in range(50):
+    weed()</code></pre>
+    <p>实测：15 次劳作被耗尽（1 次播种 + 14 次除草），水肥从头到尾停在 50 没动过，
+      成长只有 <b>84</b>，离成熟还差 16 点。</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>写法</th><th>花几次劳作</th><th>结果</th></tr></thead>
+        <tbody>
+          <tr><td>只闷头除草，水肥一点也不补</td><td>15（用尽）</td><td>成长 84，收不了</td></tr>
+          <tr><td>只把水肥一路补满</td><td>12</td><td>成熟，收一茬</td></tr>
+          <tr><td>水肥和除草搭配着来</td><td><b>11</b></td><td>成熟，收一茬，还多剩 1 次</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>差别就出来了：<b>除草单次收益高，但它自己撑不起一整块地</b>；
+      水肥单次收益低，却能把整块地拉起来，还顺手把后面每一次除草的收益一起抬高。</p>
+    <div class="warn">
+      <b>记住这句话</b>
+      水肥必须补，<b>但真正省下来的那几次劳作，才有资格拿去除草</b>。
+      先补哪一样、补几次、什么时候开始除草——自己去演练场比一比，这才是这个游戏真正好玩的地方。
+    </div>
+  </section>
+
+  <!-- 7 -->
+  <section id="playground">
+    <h2><span class="n">7</span>演练场：在这里试跑你的代码</h2>
+    <p class="lead">
+      这个演练场用的是和平台里<b>同一个代码解释器</b>，结算规则也和平台一致。
+      你可以放心试错——它不会动你真实的农场，想试多久试多久。
+    </p>
+    <p class="cap">
+      初始状态：一块空地，水分 50、养分 50，今天还剩 15 次劳作。
+      想在平台上快速运行，也可以在代码框里按 <b>Ctrl + Enter</b>（Mac 用 Cmd + Enter）。
+    </p>
+
+    <div class="pg">
+      <div class="pg-bar no-print">
+        <label style="font-size:13.5px;color:var(--ink-2)">天气
+          <select id="pgWeather">
+            <option value="sunny">晴 ☀️（生长 ×1.0）</option>
+            <option value="rainy">雨 🌧️（生长 ×1.2）</option>
+            <option value="drought">旱 🔥（生长 ×0.6）</option>
+          </select>
+        </label>
+        <span class="sp"></span>
+        <button data-demo="basic">示例：手动干一次</button>
+        <button data-demo="smart">示例：自动补满</button>
+        <button data-demo="bad">示例：猛灌 20 次</button>
+        <button class="primary" id="pgRun">▶ 运行</button>
+      </div>
+      <div class="pg-grid">
+        <textarea id="pgCode" spellcheck="false"></textarea>
+        <div class="out-panel">
+          <div class="out-block">
+            <h4>农活清单（提交给服务器的操作）</h4>
+            <div class="body" id="pgOps"><span class="empty">点「运行」查看</span></div>
+          </div>
+          <div class="out-block">
+            <h4>print 输出</h4>
+            <div class="body" id="pgPrints"><span class="empty">—</span></div>
+          </div>
+          <div class="out-block">
+            <h4>结算结果</h4>
+            <div id="pgResult"><span class="empty">—</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="box">
+    <p><b>代码农场 · 学生手册</b>　西高中趣味学习平台</p>
+    <p>手册里的数值（每日劳作次数、收获积分、天气等）都是「默认值」，老师可以在后台调整，请以你屏幕上看到的实际数值为准。
+       第 7 节的演练场只是模拟试跑，不会影响你的真实农场。</p>
+  </div>
+</footer>
+
+<script>
+// 代码农场 · Python 子集解释器（零依赖，纯前端）
+// ============================================================
+// 为什么自己写而不用服务端沙箱：
+//   生产是 pkg 打的单文件 exe，服务器上不一定装了 Python；而「代码农场」要求即时反馈
+//   （写完就能看到作物变化）。所以这里内置一个**受限 Python 子集**解释器，
+//   覆盖高中必修1 的核心语法（顺序 / 选择 / 循环 / 函数 / 变量），学生写的就是真 Python 语法。
+//
+// ⛔ 判分边界：解释器只把学生代码翻译成「操作序列 ops」，真正的生长 / 收获 / 积分
+//    由后端 farm.js 结算（前端提交的 ops 在后端还会被夹取与限次）。
+//
+// 支持的语法：
+//   · 注释 #，空行
+//   · 变量赋值 = += -= *= /=，数字 / 字符串 / True / False / None
+//   · 算术 + - * / // % **，比较 == != < > <= >=，逻辑 and or not，括号
+//   · if / elif / else、for x in range(...)、while、break / continue / pass
+//   · def 定义函数、return
+//   · 内置 print 与农场 API（见 FARM_API）
+//
+// 不支持的（会给出明确提示）：列表/字典字面量、import、类、切片、多返回值等。
+// 与后端 farm.js 保持一致的操作常量（前端只在「本地镜像」里估算，最终以后端为准）
+const LABOR_GROWTH = 16; // ⛔ 每吸收一份水/肥的生长量（满水满肥时）
+const WATER_PER_UNIT = 12;
+const FERT_PER_UNIT = 12;
+const MAX_PARAM = 10; // 单次 water/fertilize 最多带几份（同时也是它要花的劳作次数）
+const WEED_GROWTH = 24; // 除草加成（满水满肥时，实际要乘水肥系数）= LABOR_GROWTH × 1.5
+const MAX_OPS_DEFAULT = 80;
+const MAX_STEPS = 40000;
+// 天气对生长的倍率（与后端 WEATHER 一致）
+const WEATHER_GROWTH = { sunny: 1.0, rainy: 1.2, drought: 0.6 };
+// 生长值 -> 阶段（与后端 stageOf 一致）：0 空地 / 1 幼苗 / 2 成长 / 3 成熟
+function stageOf(growth, crop) {
+    if (!crop)
+        return 0;
+    if (growth >= 100)
+        return 3;
+    if (growth >= 50)
+        return 2;
+    return 1;
+}
+// 作物别名：中英文都认，方便学生写 plant("小麦") 或 plant("wheat")
+const CROP_ALIAS = {
+    wheat: 'wheat', 小麦: 'wheat',
+    carrot: 'carrot', 胡萝卜: 'carrot',
+    corn: 'corn', 玉米: 'corn',
+};
+const FARM_API_DOC = [
+    { call: 'plant("wheat")', desc: '播种（花 1 次劳作）：wheat 小麦 / carrot 胡萝卜 / corn 玉米' },
+    { call: 'water(n)', desc: '浇水 n 份（花 n 次劳作）：每份 +12 水分，上限 100。水满了还浇就是白花力气；水分越高，后面每次除草也越值钱' },
+    { call: 'fertilize(n)', desc: '施肥 n 份（花 n 次劳作）：每份 +12 养分，上限 100。同上，别施多；养分越高，后面每次除草也越值钱' },
+    { call: 'weed()', desc: '除草松土（花 1 次劳作）：成长 +24×水肥系数。水肥 100/100 时 +24（= 1.5 次浇水），水肥越低越不划算' },
+    { call: 'harvest()', desc: '收获（花 1 次劳作）：只有成熟才能收，收获得积分' },
+    { call: 'moisture()', desc: '读当前水分（0-100）' },
+    { call: 'nutrient()', desc: '读当前养分（0-100）' },
+    { call: 'growth()', desc: '读当前生长值（0-100）' },
+    { call: 'stage()', desc: '读阶段：0 空地 / 1 幼苗 / 2 成长 / 3 成熟' },
+    { call: 'crop()', desc: '读当前作物名（空地返回 None）' },
+    { call: 'ops_left()', desc: '读今天还剩几次劳作（每次农活都会扣，写 while 循环时很有用）' },
+    { call: 'print(x)', desc: '输出，方便调试' },
+];
+const KEYWORDS = new Set([
+    'if', 'elif', 'else', 'for', 'while', 'in', 'and', 'or', 'not',
+    'True', 'False', 'None', 'def', 'return', 'break', 'continue', 'pass',
+]);
+const OPS = [
+    '**', '//', '==', '!=', '<=', '>=', '+=', '-=', '*=', '/=',
+    '+', '-', '*', '/', '%', '<', '>', '=', '(', ')', '[', ']', ',', ':', '.',
+];
+function isDigit(c) {
+    return c >= '0' && c <= '9';
+}
+function isNameStart(c) {
+    return /[A-Za-z_\u4e00-\u9fa5]/.test(c);
+}
+function isNamePart(c) {
+    return /[A-Za-z0-9_\u4e00-\u9fa5]/.test(c);
+}
+class FarmSyntaxError extends Error {
+    constructor(msg, line) {
+        super(msg);
+        this.name = 'FarmSyntaxError';
+        this.line = line;
+    }
+}
+function tokenize(src, lineNo) {
+    const out = [];
+    let i = 0;
+    const n = src.length;
+    while (i < n) {
+        const c = src[i];
+        if (c === ' ' || c === '\t' || c === '\r') {
+            i++;
+            continue;
+        }
+        if (c === '#')
+            break; // 注释到行尾
+        // 字符串
+        if (c === '"' || c === "'") {
+            const q = c;
+            let s = '';
+            i++;
+            while (i < n && src[i] !== q) {
+                if (src[i] === '\\' && i + 1 < n) {
+                    const nx = src[i + 1];
+                    s += nx === 'n' ? '\n' : nx === 't' ? '\t' : nx;
+                    i += 2;
+                    continue;
+                }
+                s += src[i];
+                i++;
+            }
+            if (i >= n)
+                throw new FarmSyntaxError('字符串没有用引号收尾', lineNo);
+            i++; // 跳过收尾引号
+            out.push({ t: 'str', v: s });
+            continue;
+        }
+        // 数字
+        if (isDigit(c) || (c === '.' && isDigit(src[i + 1] || ''))) {
+            let j = i;
+            while (j < n && (isDigit(src[j]) || src[j] === '.'))
+                j++;
+            const raw = src.slice(i, j);
+            const v = Number(raw);
+            if (!Number.isFinite(v))
+                throw new FarmSyntaxError('看不懂这个数字：' + raw, lineNo);
+            out.push({ t: 'num', v });
+            i = j;
+            continue;
+        }
+        // 标识符 / 关键字
+        if (isNameStart(c)) {
+            let j = i;
+            while (j < n && isNamePart(src[j]))
+                j++;
+            const w = src.slice(i, j);
+            out.push(KEYWORDS.has(w) ? { t: 'kw', v: w } : { t: 'name', v: w });
+            i = j;
+            continue;
+        }
+        // 运算符
+        let matched = '';
+        for (const op of OPS) {
+            if (src.startsWith(op, i)) {
+                matched = op;
+                break;
+            }
+        }
+        if (!matched)
+            throw new FarmSyntaxError('不认识的符号：' + c, lineNo);
+        out.push({ t: 'op', v: matched });
+        i += matched.length;
+    }
+    return out;
+}
+function toLogicalLines(code) {
+    const raw = code.replace(/\r\n?/g, '\n').split('\n');
+    const out = [];
+    for (let k = 0; k < raw.length; k++) {
+        const line = raw[k];
+        const lead = (line.match(/^[ \t]*/) || [''])[0];
+        let indent = 0;
+        for (const ch of lead)
+            indent += ch === '\t' ? 4 : 1;
+        const toks = tokenize(line.slice(lead.length), k + 1);
+        if (!toks.length)
+            continue;
+        out.push({ indent, tokens: toks, lineNo: k + 1 });
+    }
+    return out;
+}
+// ============ 表达式解析 ============
+class ExprParser {
+    constructor(toks, line) {
+        this.pos = 0;
+        this.toks = toks;
+        this.line = line;
+    }
+    peek() {
+        return this.pos < this.toks.length ? this.toks[this.pos] : null;
+    }
+    next() {
+        return this.pos < this.toks.length ? this.toks[this.pos++] : null;
+    }
+    expectOp(v) {
+        const t = this.next();
+        if (!t || t.t !== 'op' || t.v !== v) {
+            throw new FarmSyntaxError('这里应该有一个「' + v + '」', this.line);
+        }
+    }
+    isOp(v) {
+        const t = this.peek();
+        return !!t && t.t === 'op' && t.v === v;
+    }
+    isKw(v) {
+        const t = this.peek();
+        return !!t && t.t === 'kw' && t.v === v;
+    }
+    parseFull() {
+        const e = this.parseOr();
+        if (this.pos < this.toks.length) {
+            const t = this.toks[this.pos];
+            throw new FarmSyntaxError('表达式后面多了看不懂的内容', this.line);
+        }
+        return e;
+    }
+    parseOr() {
+        let a = this.parseAnd();
+        while (this.isKw('or')) {
+            this.next();
+            const b = this.parseAnd();
+            a = { k: 'bin', op: 'or', a, b, line: this.line };
+        }
+        return a;
+    }
+    parseAnd() {
+        let a = this.parseNot();
+        while (this.isKw('and')) {
+            this.next();
+            const b = this.parseNot();
+            a = { k: 'bin', op: 'and', a, b, line: this.line };
+        }
+        return a;
+    }
+    parseNot() {
+        if (this.isKw('not')) {
+            this.next();
+            const a = this.parseNot();
+            return { k: 'un', op: 'not', a, line: this.line };
+        }
+        return this.parseCmp();
+    }
+    parseCmp() {
+        let a = this.parseAdd();
+        const t = this.peek();
+        if (t && t.t === 'op' && ['==', '!=', '<', '>', '<=', '>='].includes(t.v)) {
+            this.next();
+            const b = this.parseAdd();
+            a = { k: 'bin', op: t.v, a, b, line: this.line };
+        }
+        return a;
+    }
+    parseAdd() {
+        let a = this.parseMul();
+        for (;;) {
+            const t = this.peek();
+            if (t && t.t === 'op' && (t.v === '+' || t.v === '-')) {
+                this.next();
+                const b = this.parseMul();
+                a = { k: 'bin', op: t.v, a, b, line: this.line };
+                continue;
+            }
+            break;
+        }
+        return a;
+    }
+    parseMul() {
+        let a = this.parseUnary();
+        for (;;) {
+            const t = this.peek();
+            if (t && t.t === 'op' && ['*', '/', '//', '%'].includes(t.v)) {
+                this.next();
+                const b = this.parseUnary();
+                a = { k: 'bin', op: t.v, a, b, line: this.line };
+                continue;
+            }
+            break;
+        }
+        return a;
+    }
+    parseUnary() {
+        const t = this.peek();
+        if (t && t.t === 'op' && (t.v === '-' || t.v === '+')) {
+            this.next();
+            const a = this.parseUnary();
+            return { k: 'un', op: t.v, a, line: this.line };
+        }
+        return this.parsePow();
+    }
+    parsePow() {
+        const a = this.parseAtom();
+        if (this.isOp('**')) {
+            this.next();
+            const b = this.parseUnary();
+            return { k: 'bin', op: '**', a, b, line: this.line };
+        }
+        return a;
+    }
+    parseAtom() {
+        const t = this.next();
+        if (!t)
+            throw new FarmSyntaxError('表达式不完整', this.line);
+        if (t.t === 'num')
+            return { k: 'num', v: t.v };
+        if (t.t === 'str')
+            return { k: 'str', v: t.v };
+        if (t.t === 'kw') {
+            if (t.v === 'True')
+                return { k: 'bool', v: true };
+            if (t.v === 'False')
+                return { k: 'bool', v: false };
+            if (t.v === 'None')
+                return { k: 'none' };
+            throw new FarmSyntaxError('关键字「' + t.v + '」不能出现在这个位置', this.line);
+        }
+        if (t.t === 'name') {
+            if (this.isOp('(')) {
+                this.next();
+                const args = [];
+                if (!this.isOp(')')) {
+                    for (;;) {
+                        args.push(this.parseOr());
+                        if (this.isOp(',')) {
+                            this.next();
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                this.expectOp(')');
+                return { k: 'call', name: t.v, args, line: this.line };
+            }
+            return { k: 'var', name: t.v, line: this.line };
+        }
+        if (t.t === 'op' && t.v === '(') {
+            const e = this.parseOr();
+            this.expectOp(')');
+            return e;
+        }
+        if (t.t === 'op' && t.v === '[') {
+            throw new FarmSyntaxError('农场里还不支持列表，用变量和循环就够了', this.line);
+        }
+        throw new FarmSyntaxError('这里的写法看不懂', this.line);
+    }
+}
+// ============ 语句解析 ============
+class Parser {
+    constructor(lines) {
+        this.i = 0;
+        this.lines = lines;
+    }
+    parseProgram() {
+        if (!this.lines.length)
+            return [];
+        const base = Math.min.apply(null, this.lines.map((l) => l.indent));
+        return this.parseBlock(base);
+    }
+    parseBlock(indent) {
+        const out = [];
+        while (this.i < this.lines.length) {
+            const L = this.lines[this.i];
+            if (L.indent < indent)
+                break;
+            if (L.indent > indent)
+                throw new FarmSyntaxError('缩进对不上，检查一下这一行前面的空格', L.lineNo);
+            out.push(this.parseStmt());
+        }
+        return out;
+    }
+    parseBody(parentIndent) {
+        if (this.i >= this.lines.length) {
+            throw new FarmSyntaxError('冒号后面需要缩进的代码块', this.lines[this.i - 1].lineNo);
+        }
+        const L = this.lines[this.i];
+        if (L.indent <= parentIndent) {
+            throw new FarmSyntaxError('冒号后面需要缩进的代码块', this.lines[this.i - 1].lineNo);
+        }
+        return this.parseBlock(L.indent);
+    }
+    // 取出 `if 条件:` / `for x in y:` 里 `:` 之前的 token
+    condTokens(L, head) {
+        const toks = L.tokens.slice(head);
+        if (!toks.length || toks[toks.length - 1].t !== 'op' || toks[toks.length - 1].v !== ':') {
+            throw new FarmSyntaxError('这一行结尾需要「:」', L.lineNo);
+        }
+        const body = toks.slice(0, toks.length - 1);
+        if (!body.length)
+            throw new FarmSyntaxError('条件不能为空', L.lineNo);
+        return body;
+    }
+    parseStmt() {
+        const L = this.lines[this.i];
+        const t0 = L.tokens[0];
+        if (t0.t === 'kw') {
+            if (t0.v === 'if')
+                return this.parseIf();
+            if (t0.v === 'for')
+                return this.parseFor();
+            if (t0.v === 'while')
+                return this.parseWhile();
+            if (t0.v === 'def')
+                return this.parseDef();
+            if (t0.v === 'return') {
+                this.i++;
+                const rest = L.tokens.slice(1);
+                const expr = rest.length ? new ExprParser(rest, L.lineNo).parseFull() : null;
+                return { k: 'return', expr, line: L.lineNo };
+            }
+            if (t0.v === 'break') {
+                this.i++;
+                return { k: 'break', line: L.lineNo };
+            }
+            if (t0.v === 'continue') {
+                this.i++;
+                return { k: 'continue', line: L.lineNo };
+            }
+            if (t0.v === 'pass') {
+                this.i++;
+                return { k: 'pass', line: L.lineNo };
+            }
+            if (t0.v === 'elif' || t0.v === 'else') {
+                throw new FarmSyntaxError('「' + t0.v + '」没有对应的 if', L.lineNo);
+            }
+            throw new FarmSyntaxError('这里不能写「' + t0.v + '」', L.lineNo);
+        }
+        this.i++;
+        // 赋值
+        const t1 = L.tokens[1];
+        if (t0.t === 'name' && t1 && t1.t === 'op' && ['=', '+=', '-=', '*=', '/='].includes(t1.v)) {
+            const rest = L.tokens.slice(2);
+            if (!rest.length)
+                throw new FarmSyntaxError('赋值号右边是空的', L.lineNo);
+            return { k: 'assign', name: t0.v, op: t1.v, expr: new ExprParser(rest, L.lineNo).parseFull(), line: L.lineNo };
+        }
+        return { k: 'expr', expr: new ExprParser(L.tokens, L.lineNo).parseFull(), line: L.lineNo };
+    }
+    parseIf() {
+        const L = this.lines[this.i];
+        const line = L.lineNo;
+        const branches = [];
+        const cond0 = new ExprParser(this.condTokens(L, 1), line).parseFull();
+        this.i++;
+        branches.push({ cond: cond0, body: this.parseBody(L.indent) });
+        for (;;) {
+            if (this.i >= this.lines.length)
+                break;
+            const N = this.lines[this.i];
+            const f = N.tokens[0];
+            if (N.indent !== L.indent || f.t !== 'kw')
+                break;
+            if (f.v === 'elif') {
+                const c = new ExprParser(this.condTokens(N, 1), N.lineNo).parseFull();
+                this.i++;
+                branches.push({ cond: c, body: this.parseBody(N.indent) });
+                continue;
+            }
+            if (f.v === 'else') {
+                if (N.tokens.length !== 2 || N.tokens[1].t !== 'op' || N.tokens[1].v !== ':') {
+                    throw new FarmSyntaxError('else 这一行只能写 else:', N.lineNo);
+                }
+                this.i++;
+                branches.push({ cond: null, body: this.parseBody(N.indent) });
+                break;
+            }
+            break;
+        }
+        return { k: 'if', branches, line };
+    }
+    parseFor() {
+        const L = this.lines[this.i];
+        const body = this.condTokens(L, 1); // 形如 [x, in, range(...)]
+        if (body.length < 3 || body[0].t !== 'name' || body[1].t !== 'kw' || body[1].v !== 'in') {
+            throw new FarmSyntaxError('for 要写成：for 变量 in range(次数):', L.lineNo);
+        }
+        const varName = body[0].v;
+        const iter = new ExprParser(body.slice(2), L.lineNo).parseFull();
+        this.i++;
+        return { k: 'for', varName, iter, body: this.parseBody(L.indent), line: L.lineNo };
+    }
+    parseWhile() {
+        const L = this.lines[this.i];
+        const cond = new ExprParser(this.condTokens(L, 1), L.lineNo).parseFull();
+        this.i++;
+        return { k: 'while', cond, body: this.parseBody(L.indent), line: L.lineNo };
+    }
+    parseDef() {
+        const L = this.lines[this.i];
+        const toks = L.tokens;
+        if (toks.length < 4 || toks[1].t !== 'name') {
+            throw new FarmSyntaxError('def 要写成：def 函数名(参数):', L.lineNo);
+        }
+        const name = toks[1].v;
+        if (toks[2].t !== 'op' || toks[2].v !== '(') {
+            throw new FarmSyntaxError('函数名后面要跟括号', L.lineNo);
+        }
+        const params = [];
+        let j = 3;
+        if (toks[j] && toks[j].t === 'op' && toks[j].v === ')') {
+            j++;
+        }
+        else {
+            for (;;) {
+                if (!toks[j] || toks[j].t !== 'name')
+                    throw new FarmSyntaxError('参数名不对', L.lineNo);
+                params.push(toks[j].v);
+                j++;
+                if (toks[j] && toks[j].t === 'op' && toks[j].v === ',') {
+                    j++;
+                    continue;
+                }
+                break;
+            }
+            if (!toks[j] || toks[j].t !== 'op' || toks[j].v !== ')') {
+                throw new FarmSyntaxError('参数列表缺少收尾的括号', L.lineNo);
+            }
+            j++;
+        }
+        if (!toks[j] || toks[j].t !== 'op' || toks[j].v !== ':') {
+            throw new FarmSyntaxError('def 这一行结尾需要「:」', L.lineNo);
+        }
+        if (params.length > 6)
+            throw new FarmSyntaxError('参数太多了（最多 6 个）', L.lineNo);
+        this.i++;
+        return { k: 'def', name, params, body: this.parseBody(L.indent), line: L.lineNo };
+    }
+}
+const CTRL_BREAK = { kind: 'break' };
+const CTRL_CONTINUE = { kind: 'continue' };
+class FarmRuntimeError extends Error {
+    constructor(msg, line) {
+        super(msg);
+        this.name = 'FarmRuntimeError';
+        this.line = line;
+    }
+}
+function toNum(v) {
+    if (typeof v === 'number')
+        return v;
+    if (typeof v === 'boolean')
+        return v ? 1 : 0;
+    if (v === null || v === undefined)
+        return 0;
+    if (typeof v === 'string') {
+        const n = Number(v);
+        if (Number.isFinite(n))
+            return n;
+    }
+    throw new Error('这个值不能当数字用');
+}
+function fmtVal(v) {
+    if (v === null || v === undefined)
+        return 'None';
+    if (typeof v === 'boolean')
+        return v ? 'True' : 'False';
+    if (typeof v === 'number')
+        return Number.isInteger(v) ? String(v) : String(Math.round(v * 100) / 100);
+    return String(v);
+}
+function truthy(v) {
+    if (v === null || v === undefined || v === false)
+        return false;
+    if (v === 0 || v === 0.0)
+        return false;
+    if (v === '')
+        return false;
+    return true;
+}
+class Interp {
+    constructor(mirror, maxOps) {
+        this.ops = [];
+        this.prints = [];
+        this.steps = 0;
+        this.curLine = 0;
+        this.laborWarned = false; // 劳作次数不够只提示一次，避免刷屏
+        this.mirror = { ...mirror };
+        this.maxOps = maxOps;
+    }
+    bump(line) {
+        this.curLine = line;
+        this.steps++;
+        if (this.steps > MAX_STEPS) {
+            throw new FarmRuntimeError('代码跑得太久了（可能是死循环），已停下', line);
+        }
+    }
+    pushOp(op, line) {
+        if (this.ops.length >= this.maxOps) {
+            throw new FarmRuntimeError('一次代码里的操作太多了（上限 ' + this.maxOps + ' 条）', line);
+        }
+        this.ops.push(op);
+    }
+    // ⛔ 扣劳作：与后端同口径（每个动作单位扣 1 次）。不够就跳过，并只提示一次。
+    spend(cost) {
+        if (cost > this.mirror.opsLeft) {
+            if (!this.laborWarned) {
+                this.laborWarned = true;
+                this.prints.push('[!] 今天的劳作次数不够了（这次还要 ' + cost + ' 次，只剩 ' + this.mirror.opsLeft +
+                    ' 次），后面的农活没有执行');
+            }
+            return false;
+        }
+        this.mirror.opsLeft -= cost;
+        return true;
+    }
+    // ⛔ 吸收：每补进一份水/肥就调用一次（与后端 applyOps 同口径）
+    absorb() {
+        var _a;
+        if (!this.mirror.crop)
+            return 0;
+        const mf = Math.min(1, this.mirror.moisture / 100);
+        const nf = Math.min(1, this.mirror.nutrient / 100);
+        const w = (_a = WEATHER_GROWTH[this.mirror.weather]) !== null && _a !== void 0 ? _a : 1;
+        const before = this.mirror.growth;
+        this.mirror.growth = Math.min(100, before + LABOR_GROWTH * mf * nf * w);
+        this.mirror.stage = stageOf(this.mirror.growth, this.mirror.crop);
+        return this.mirror.growth - before;
+    }
+    // 补 n 份水或肥，逐份吸收。返回实际补进去的份数（补不进去的份数照样花力气）。
+    pour(kind, n) {
+        const unit = kind === 'water' ? WATER_PER_UNIT : FERT_PER_UNIT;
+        let ups = 0;
+        for (let i = 0; i < n; i++) {
+            const b = kind === 'water' ? this.mirror.moisture : this.mirror.nutrient;
+            const v = Math.min(100, b + unit);
+            if (kind === 'water')
+                this.mirror.moisture = v;
+            else
+                this.mirror.nutrient = v;
+            if (v > b) {
+                ups++;
+                this.absorb();
+            }
+        }
+        return ups;
+    }
+    // ---------- 表达式 ----------
+    evalExpr(e, env) {
+        switch (e.k) {
+            case 'num': return e.v;
+            case 'str': return e.v;
+            case 'bool': return e.v;
+            case 'none': return null;
+            case 'var': {
+                if (env.has(e.name))
+                    return env.get(e.name);
+                throw new FarmRuntimeError('变量「' + e.name + '」还没有赋值', e.line);
+            }
+            case 'un': {
+                const a = this.evalExpr(e.a, env);
+                if (e.op === 'not')
+                    return !truthy(a);
+                if (e.op === '-')
+                    return -toNum(a);
+                return toNum(a);
+            }
+            case 'bin': {
+                if (e.op === 'and') {
+                    const a = this.evalExpr(e.a, env);
+                    return truthy(a) ? this.evalExpr(e.b, env) : a;
+                }
+                if (e.op === 'or') {
+                    const a = this.evalExpr(e.a, env);
+                    return truthy(a) ? a : this.evalExpr(e.b, env);
+                }
+                const a = this.evalExpr(e.a, env);
+                const b = this.evalExpr(e.b, env);
+                return this.binop(e.op, a, b, e.line);
+            }
+            case 'call': return this.evalCall(e, env);
+            default: throw new FarmRuntimeError('表达式无法求值', this.curLine);
+        }
+    }
+    binop(op, a, b, line) {
+        try {
+            switch (op) {
+                case '+':
+                    if (typeof a === 'string' || typeof b === 'string')
+                        return fmtVal(a) + fmtVal(b);
+                    return toNum(a) + toNum(b);
+                case '-': return toNum(a) - toNum(b);
+                case '*': return toNum(a) * toNum(b);
+                case '/': {
+                    const d = toNum(b);
+                    if (d === 0)
+                        throw new Error('不能除以 0');
+                    return toNum(a) / d;
+                }
+                case '//': {
+                    const d = toNum(b);
+                    if (d === 0)
+                        throw new Error('不能除以 0');
+                    return Math.floor(toNum(a) / d);
+                }
+                case '%': {
+                    const d = toNum(b);
+                    if (d === 0)
+                        throw new Error('不能除以 0');
+                    return toNum(a) % d;
+                }
+                case '**': return Math.pow(toNum(a), toNum(b));
+                case '==': return this.eq(a, b);
+                case '!=': return !this.eq(a, b);
+                case '<': return toNum(a) < toNum(b);
+                case '>': return toNum(a) > toNum(b);
+                case '<=': return toNum(a) <= toNum(b);
+                case '>=': return toNum(a) >= toNum(b);
+                default: throw new Error('不支持的运算：' + op);
+            }
+        }
+        catch (err) {
+            throw new FarmRuntimeError(err.message, line);
+        }
+    }
+    eq(a, b) {
+        if (a === null || a === undefined)
+            return b === null || b === undefined;
+        if (b === null || b === undefined)
+            return false;
+        if (typeof a === 'number' || typeof b === 'number' || typeof a === 'boolean' || typeof b === 'boolean') {
+            return toNum(a) === toNum(b);
+        }
+        return a === b;
+    }
+    // ---------- 内置函数 ----------
+    callBuiltin(name, args, line) {
+        var _a;
+        const arg = (i, d) => (args.length > i ? args[i] : d);
+        switch (name) {
+            case 'print':
+                this.prints.push(args.map(fmtVal).join(' '));
+                return { handled: true, value: null };
+            case 'range': {
+                const a0 = args.length >= 2 ? Math.round(toNum(args[0])) : 0;
+                const a1 = args.length >= 2 ? Math.round(toNum(args[1])) : Math.round(toNum(arg(0, 0)));
+                const step = args.length >= 3 ? Math.round(toNum(args[2])) : 1;
+                if (step === 0)
+                    throw new FarmRuntimeError('range 的步长不能是 0', line);
+                const out = [];
+                if (step > 0) {
+                    for (let v = a0; v < a1; v += step) {
+                        out.push(v);
+                        if (out.length > 100000)
+                            break;
+                    }
+                }
+                else {
+                    for (let v = a0; v > a1; v += step) {
+                        out.push(v);
+                        if (out.length > 100000)
+                            break;
+                    }
+                }
+                return { handled: true, value: out };
+            }
+            case 'plant':
+            case '播种': {
+                const raw = String(arg(0, ''));
+                const c = CROP_ALIAS[raw];
+                if (!c) {
+                    this.prints.push('[!] 没有「' + raw + '」这种作物，可选 wheat(小麦) / carrot(胡萝卜) / corn(玉米)');
+                    return { handled: true, value: null };
+                }
+                if (this.mirror.crop) {
+                    this.prints.push('[!] 这块地还种着作物，先收获');
+                    return { handled: true, value: null };
+                }
+                if (!this.spend(1))
+                    return { handled: true, value: null };
+                this.mirror.crop = c;
+                this.mirror.growth = 0;
+                this.mirror.stage = 1;
+                this.pushOp({ op: 'plant', crop: c }, line);
+                return { handled: true, value: null };
+            }
+            case 'water':
+            case '浇水': {
+                const n = Math.max(1, Math.min(MAX_PARAM, Math.round(toNum(arg(0, 1)))));
+                if (!this.spend(n))
+                    return { handled: true, value: null };
+                const ups = this.pour('water', n);
+                const warn = '[!] 只浇进去 ' + ups + ' 份，另外 ' + (n - ups) + ' 份因为水满了白花力气（每份水都要花 1 次劳作）';
+                if (ups < n && !this.prints.includes(warn))
+                    this.prints.push(warn);
+                this.pushOp({ op: 'water', n }, line);
+                return { handled: true, value: null };
+            }
+            case 'fertilize':
+            case '施肥': {
+                const n = Math.max(1, Math.min(MAX_PARAM, Math.round(toNum(arg(0, 1)))));
+                if (!this.spend(n))
+                    return { handled: true, value: null };
+                const ups = this.pour('fertilize', n);
+                const warn = '[!] 只施进去 ' + ups + ' 份，另外 ' + (n - ups) + ' 份因为养分满了白花力气（每份肥都要花 1 次劳作）';
+                if (ups < n && !this.prints.includes(warn))
+                    this.prints.push(warn);
+                this.pushOp({ op: 'fertilize', n }, line);
+                return { handled: true, value: null };
+            }
+            case 'weed':
+            case '除草': {
+                if (!this.mirror.crop) {
+                    this.prints.push('[!] 空地没有杂草可除');
+                    return { handled: true, value: null };
+                }
+                if (!this.spend(1))
+                    return { handled: true, value: null };
+                // ⛔ 除草的收益也看水肥：水肥不足时松土几乎没用（与后端一致）
+                const mf = Math.min(1, this.mirror.moisture / 100);
+                const nf = Math.min(1, this.mirror.nutrient / 100);
+                const w = (_a = WEATHER_GROWTH[this.mirror.weather]) !== null && _a !== void 0 ? _a : 1;
+                const add = WEED_GROWTH * mf * nf * w;
+                this.mirror.growth = Math.min(100, this.mirror.growth + add);
+                this.mirror.stage = stageOf(this.mirror.growth, this.mirror.crop);
+                const warn = '[!] 水肥不足，除草几乎没用——先把水补到 100、肥补到 100 再来除草';
+                if (add < 1 && !this.prints.includes(warn))
+                    this.prints.push(warn);
+                this.pushOp({ op: 'weed' }, line);
+                return { handled: true, value: null };
+            }
+            case 'harvest':
+            case '收获': {
+                if (!this.mirror.crop) {
+                    this.prints.push('[!] 空地没什么可收的');
+                    return { handled: true, value: null };
+                }
+                if (this.mirror.growth < 100) {
+                    const g = Math.round(this.mirror.growth * 100) / 100;
+                    this.prints.push('[!] 作物还没成熟，收不了（' + g + '/100），再浇点水施点肥');
+                    return { handled: true, value: null };
+                }
+                if (!this.spend(1))
+                    return { handled: true, value: null };
+                this.pushOp({ op: 'harvest' }, line);
+                this.mirror.crop = null;
+                this.mirror.growth = 0;
+                this.mirror.stage = 0;
+                this.mirror.moisture = 50;
+                this.mirror.nutrient = 50;
+                return { handled: true, value: null };
+            }
+            case 'moisture':
+            case '水分': return { handled: true, value: Math.round(this.mirror.moisture * 100) / 100 };
+            case 'nutrient':
+            case '养分': return { handled: true, value: Math.round(this.mirror.nutrient * 100) / 100 };
+            case 'growth':
+            case '生长': return { handled: true, value: Math.round(this.mirror.growth * 100) / 100 };
+            case 'stage':
+            case '阶段': return { handled: true, value: this.mirror.stage };
+            case 'crop':
+            case '作物': return { handled: true, value: this.mirror.crop };
+            case 'ops_left':
+            case '剩余劳作': return { handled: true, value: this.mirror.opsLeft };
+            case 'day':
+            case '天数': return { handled: true, value: this.mirror.day };
+            default:
+                return { handled: false };
+        }
+    }
+    evalCall(e, env) {
+        const vals = e.args.map((a) => this.evalExpr(a, env));
+        const b = this.callBuiltin(e.name, vals, e.line);
+        if (b.handled)
+            return b.value;
+        const fn = env.get(e.name);
+        if (fn && typeof fn === 'object' && fn.body) {
+            const f = fn;
+            if (vals.length !== f.params.length) {
+                throw new FarmRuntimeError('函数「' + e.name + '」需要 ' + f.params.length + ' 个参数，实际给了 ' + vals.length + ' 个', e.line);
+            }
+            const local = new Map(f.env);
+            f.params.forEach((p, i) => local.set(p, vals[i]));
+            const c = this.execBlock(f.body, local);
+            if (c && c.kind === 'return')
+                return c.value;
+            return null;
+        }
+        throw new FarmRuntimeError('没有名为「' + e.name + '」的函数', e.line);
+    }
+    // ---------- 语句 ----------
+    execBlock(stmts, env) {
+        for (const s of stmts) {
+            const c = this.execStmt(s, env);
+            if (c)
+                return c;
+        }
+        return null;
+    }
+    execStmt(s, env) {
+        this.bump(s.line);
+        switch (s.k) {
+            case 'pass':
+                return null;
+            case 'expr': {
+                this.evalExpr(s.expr, env);
+                return null;
+            }
+            case 'assign': {
+                const v = this.evalExpr(s.expr, env);
+                if (s.op === '=') {
+                    env.set(s.name, v);
+                    return null;
+                }
+                const cur = env.has(s.name)
+                    ? env.get(s.name)
+                    : (() => { throw new FarmRuntimeError('变量「' + s.name + '」还没有赋值，不能这样累加', s.line); })();
+                const op = s.op[0];
+                env.set(s.name, this.binop(op, cur, v, s.line));
+                return null;
+            }
+            case 'if': {
+                for (const br of s.branches) {
+                    if (br.cond === null || truthy(this.evalExpr(br.cond, env))) {
+                        return this.execBlock(br.body, env);
+                    }
+                }
+                return null;
+            }
+            case 'while': {
+                for (;;) {
+                    this.bump(s.line);
+                    if (!truthy(this.evalExpr(s.cond, env)))
+                        break;
+                    const c = this.execBlock(s.body, env);
+                    if (c) {
+                        if (c.kind === 'break')
+                            break;
+                        if (c.kind === 'return')
+                            return c;
+                        // continue 落到下一轮
+                    }
+                }
+                return null;
+            }
+            case 'for': {
+                const it = this.evalExpr(s.iter, env);
+                let items;
+                if (Array.isArray(it))
+                    items = it;
+                else if (typeof it === 'string')
+                    items = it.split('');
+                else
+                    throw new FarmRuntimeError('for 只能遍历 range(...) 或字符串', s.line);
+                for (const item of items) {
+                    this.bump(s.line);
+                    env.set(s.varName, item);
+                    const c = this.execBlock(s.body, env);
+                    if (c) {
+                        if (c.kind === 'break')
+                            break;
+                        if (c.kind === 'return')
+                            return c;
+                    }
+                }
+                return null;
+            }
+            case 'def': {
+                env.set(s.name, { params: s.params, body: s.body, env });
+                return null;
+            }
+            case 'return':
+                return { kind: 'return', value: s.expr ? this.evalExpr(s.expr, env) : null };
+            case 'break':
+                return CTRL_BREAK;
+            case 'continue':
+                return CTRL_CONTINUE;
+            default:
+                return null;
+        }
+    }
+}
+// ============ 对外入口 ============
+function runFarmCode(code, mirror, opts) {
+    const maxOps = Math.max(1, Math.min(MAX_OPS_DEFAULT, opts && opts.maxOps ? opts.maxOps : MAX_OPS_DEFAULT));
+    const interp = new Interp(mirror, maxOps);
+    if (!code || !code.trim()) {
+        return { ops: [], prints: [], error: null, errorLine: null, mirror: interp.mirror };
+    }
+    if (code.length > 8000) {
+        return { ops: [], prints: [], error: '代码太长了（上限 8000 字符）', errorLine: null, mirror: interp.mirror };
+    }
+    try {
+        const lines = toLogicalLines(code);
+        const ast = new Parser(lines).parseProgram();
+        const env = new Map();
+        interp.execBlock(ast, env);
+        return { ops: interp.ops, prints: interp.prints, error: null, errorLine: null, mirror: interp.mirror };
+    }
+    catch (err) {
+        const e = err;
+        const line = typeof e.line === 'number' ? e.line : interp.curLine || null;
+        let msg = e && e.message ? String(e.message) : '代码执行出错';
+        if (e instanceof FarmSyntaxError)
+            msg = '语法错误：' + msg;
+        else if (e instanceof FarmRuntimeError)
+            msg = '运行错误：' + msg;
+        return { ops: interp.ops, prints: interp.prints, error: msg, errorLine: line, mirror: interp.mirror };
+    }
+}
+
+</script>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ============================================================
+     结算引擎（与 backend/src/farm.js 的 applyOps 保持一致）
+     ⛔ 劳作口径：plant / weed / harvest 各 1 次；water(n) / fertilize(n) 各 n 次。
+     ⛔ 吸收时机：每补进一份水/肥就立刻吸收一次（不是整段代码末尾吸收一次）。
+     只用于本页演示；真实结算以服务器为准。
+     ============================================================ */
+  var CROPS = {
+    wheat: { name: '小麦', yield_mult: 1.0 },
+    carrot: { name: '胡萝卜', yield_mult: 1.15 },
+    corn: { name: '玉米', yield_mult: 1.35 }
+  };
+  var WEATHER = {
+    sunny: { label: '晴', growth: 1.0, evap: 1.0 },
+    rainy: { label: '雨', growth: 1.2, evap: 0.5 },
+    drought: { label: '旱', growth: 0.6, evap: 1.8 }
+  };
+  var OP_LABEL = { plant: '播种', water: '浇水', fertilize: '施肥', weed: '除草松土', harvest: '收获' };
+  var ACTION_OPS = ['plant', 'water', 'fertilize', 'weed', 'harvest'];
+  var LABOR_GROWTH = 16;
+  var WATER_PER_UNIT = 12;
+  var FERT_PER_UNIT = 12;
+  var MAX_PARAM = 10;
+  var MAX_OPS = 80;
+  var WEED_GROWTH = 24;
+  var DAILY_LABOR = 15; // 演练场固定「新的一天，还剩 15 次劳作」
+  var RESET_MOISTURE = 50;
+  var RESET_NUTRIENT = 50;
+  var baseYield = 10;
+
+  function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+  function num(v, d) { var n = Number(v); return isFinite(n) ? n : (d || 0); }
+  function round2(v) { return Math.round(num(v) * 100) / 100; }
+  function stageOf(g, crop) {
+    if (!crop) return 0;
+    if (num(g) >= 100) return 3;
+    if (num(g) >= 50) return 2;
+    return 1;
+  }
+  var STAGE_NAME = { 0: '空地', 1: '幼苗', 2: '成长中', 3: '已成熟' };
+
+  function applyOps(plot, weatherKey, ops, budget) {
+    var w = WEATHER[weatherKey] || WEATHER.sunny;
+    var events = [], harvests = [], acted = 0, gained = 0, labor = 0, refused = 0;
+    var left = Math.max(0, Math.round(num(budget, 0)));
+    var list = Array.isArray(ops) ? ops.slice(0, MAX_OPS) : [];
+
+    // 一次「吸收」：作物按当前水肥长一截，返回增量。
+    function absorb() {
+      if (!plot.crop) return 0;
+      var mf = clamp(num(plot.moisture) / 100, 0, 1);
+      var nf = clamp(num(plot.nutrient) / 100, 0, 1);
+      var before = num(plot.growth);
+      plot.growth = clamp(before + LABOR_GROWTH * mf * nf * w.growth, 0, 100);
+      plot.stage = stageOf(plot.growth, plot.crop);
+      return plot.growth - before;
+    }
+
+    // 扣劳作：不够就记账并返回 false（这一条不执行，也不扣）。
+    function charge(op, cost) {
+      if (cost > left) {
+        refused++;
+        events.push({ ok: false, text: '力气不够了：' + OP_LABEL[op] + '要花 ' + cost + ' 次劳作，今天只剩 ' + left + ' 次' });
+        return false;
+      }
+      left -= cost;
+      labor += cost;
+      return true;
+    }
+
+    for (var i = 0; i < list.length; i++) {
+      var raw = list[i] || {};
+      var op = String(raw.op || '');
+
+      if (ACTION_OPS.indexOf(op) < 0) {
+        events.push({ ok: false, text: '不认识的操作：' + (op || '(空)') });
+        continue;
+      }
+      if (left <= 0) {
+        refused += list.length - i;
+        events.push({ ok: false, text: '今天的劳作次数用完了，后面的操作都没有执行' });
+        break;
+      }
+
+      if (op === 'plant') {
+        var key = String(raw.crop || '');
+        var c = CROPS[key];
+        if (!c) { events.push({ ok: false, text: '没有「' + (key || '?') + '」这种作物' }); continue; }
+        if (plot.crop) { events.push({ ok: false, text: '这块地还种着' + CROPS[plot.crop].name + '，先收获再说' }); continue; }
+        if (!charge(op, 1)) continue;
+        plot.crop = key; plot.growth = 0; plot.stage = 1;
+        events.push({ ok: true, text: '播下「' + c.name + '」（花 1 次劳作）' });
+        acted++;
+      } else if (op === 'water' || op === 'fertilize') {
+        var isWater = op === 'water';
+        var unit = isWater ? WATER_PER_UNIT : FERT_PER_UNIT;
+        var n = clamp(Math.round(num(raw.n, 1)), 1, MAX_PARAM);
+        if (!charge(op, n)) continue;
+        var before = round2(isWater ? plot.moisture : plot.nutrient);
+        var ups = 0, delta = 0;
+        for (var k = 0; k < n; k++) {
+          var b = num(isWater ? plot.moisture : plot.nutrient);
+          var v = clamp(b + unit, 0, 100);
+          if (isWater) plot.moisture = v; else plot.nutrient = v;
+          if (v > b) { ups++; delta += absorb(); }
+        }
+        var after = round2(isWater ? plot.moisture : plot.nutrient);
+        var text = OP_LABEL[op] + ' x' + n + '（花 ' + n + ' 次劳作）：' + (isWater ? '水分' : '养分') + ' ' + before + ' → ' + after;
+        if (ups < n) text += '，只有 ' + ups + ' 份补得进去，另外 ' + (n - ups) + ' 份白花了力气';
+        text += delta > 0
+          ? '，作物吸收了 ' + ups + ' 次：成长 +' + round2(delta)
+          : '，没有作物吸收（成长不变）';
+        events.push({ ok: true, text: text });
+        acted++;
+      } else if (op === 'weed') {
+        if (!plot.crop) { events.push({ ok: false, text: '空地没有杂草可除' }); continue; }
+        if (!charge(op, 1)) continue;
+        var mf = clamp(num(plot.moisture) / 100, 0, 1);
+        var nf = clamp(num(plot.nutrient) / 100, 0, 1);
+        var b3 = round2(plot.growth);
+        var add = WEED_GROWTH * mf * nf * w.growth;
+        plot.growth = clamp(num(plot.growth) + add, 0, 100);
+        plot.stage = stageOf(plot.growth, plot.crop);
+        events.push({
+          ok: true,
+          text: '除草松土（花 1 次劳作）：成长 ' + b3 + ' → ' + round2(plot.growth) +
+            (add < 1 ? '（水肥不足，除草几乎没用）' : '')
+        });
+        acted++;
+      } else if (op === 'harvest') {
+        if (!plot.crop) { events.push({ ok: false, text: '空地没什么可收的' }); continue; }
+        if (num(plot.growth) < 100) {
+          events.push({ ok: false, text: CROPS[plot.crop].name + '还没成熟（' + round2(plot.growth) + '/100）' });
+          continue;
+        }
+        if (!charge(op, 1)) continue;
+        var cc = CROPS[plot.crop];
+        var gain = Math.round(baseYield * cc.yield_mult);
+        gained += gain;
+        harvests.push({ name: cc.name, gain: gain });
+        events.push({ ok: true, text: '收获「' + cc.name + '」，+' + gain + ' 积分（花 1 次劳作）' });
+        plot.crop = null; plot.growth = 0; plot.stage = 0;
+        plot.moisture = RESET_MOISTURE; plot.nutrient = RESET_NUTRIENT;
+        acted++;
+      }
+    }
+
+    plot.stage = stageOf(plot.growth, plot.crop);
+    return { events: events, acted: acted, gained: gained, harvests: harvests, labor: labor, refused: refused, left: left };
+  }
+
+  /* ============================================================
+     演示数据与界面
+     ============================================================ */
+  var DEMOS = {
+    basic: 'plant("wheat")\nwater(5)\nfertilize(5)\n\nprint("水分", moisture(), "养分", nutrient())',
+    smart: 'if crop() == None:\n    plant("carrot")\n\nwhile moisture() < 100:\n    water()\n\nwhile nutrient() < 100:\n    fertilize()\n\nprint("水分", moisture(), "养分", nutrient())',
+    bad: 'plant("corn")\n\n# 一口气灌 20 份水，看看要白扣多少次劳作\nfor i in range(20):\n    water()\n\nprint("水分", moisture(), "养分", nutrient())'
+  };
+
+  var elCode = document.getElementById('pgCode');
+  var elOps = document.getElementById('pgOps');
+  var elPrints = document.getElementById('pgPrints');
+  var elResult = document.getElementById('pgResult');
+  var elWeather = document.getElementById('pgWeather');
+  var elRun = document.getElementById('pgRun');
+
+  function emptyMirror() {
+    return { crop: null, growth: 0, moisture: 50, nutrient: 50, stage: 0, opsLeft: DAILY_LABOR, day: 0, weather: elWeather.value };
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function opLabel(o) {
+    if (o.op === 'plant') return 'plant("' + o.crop + '")';
+    if (o.op === 'water') return 'water(' + o.n + ')';
+    if (o.op === 'fertilize') return 'fertilize(' + o.n + ')';
+    return o.op + '()';
+  }
+
+  function highlight(code) {
+    return esc(code)
+      .replace(/(#[^\n]*)/g, '<span class="c-com">$1</span>')
+      .replace(/("(?:[^"\\]|\\.)*")/g, '<span class="c-str">$1</span>')
+      .replace(/\b(def|return|if|elif|else|for|while|in|and|or|not|True|False|None|break|continue|pass)\b/g, '<span class="c-kw">$1</span>')
+      .replace(/\b(\d+(?:\.\d+)?)\b/g, '<span class="c-num">$1</span>');
+  }
+
+  function meter(label, value, color) {
+    var v = clamp(num(value), 0, 100);
+    return '<div class="meter"><div class="lb"><span>' + label + '</span><span>' + round2(value) + ' / 100</span></div>' +
+      '<div class="bar"><i style="width:' + v.toFixed(1) + '%;background:' + color + '"></i></div></div>';
+  }
+
+  function opCost(o) {
+    if (o.op === 'water' || o.op === 'fertilize') return clamp(Math.round(num(o.n, 1)), 1, MAX_PARAM);
+    return 1;
+  }
+
+  function render(res, weatherKey) {
+    // 1. 农活清单
+    if (!res.ops.length) {
+      elOps.innerHTML = '<span class="empty">这次没有产生任何农活操作。</span>';
+    } else {
+      elOps.innerHTML = res.ops.map(function (o, i) {
+        return '<div>' + (i + 1) + '. ' + esc(opLabel(o)) + '　<span style="color:#9ca3af">−' + opCost(o) + '</span></div>';
+      }).join('') + '<div style="margin-top:6px;color:#6b7280">共 ' + res.ops.length + ' 条（上限 ' + MAX_OPS + ' 条）</div>';
+    }
+
+    // 2. print 输出
+    if (!res.prints.length) {
+      elPrints.innerHTML = '<span class="empty">这次没有 print 输出。</span>';
+    } else {
+      elPrints.innerHTML = res.prints.map(function (p) { return '<div>' + esc(p) + '</div>'; }).join('');
+    }
+
+    // 3. 结算
+    var html = '';
+    if (res.error) {
+      html += '<div class="ev-bad" style="margin-bottom:8px">⚠ ' + esc(res.error) +
+        (res.errorLine ? '（第 ' + res.errorLine + ' 行）' : '') + '</div>';
+    }
+    if (!res.ops.length && !res.error) {
+      html += '<div class="empty" style="margin-bottom:8px">还没有干活——试试 plant / water / fertilize。</div>';
+    }
+
+    var plot = { crop: null, growth: 0, moisture: 50, nutrient: 50, stage: 0 };
+    var r = applyOps(plot, weatherKey, res.ops, DAILY_LABOR);
+
+    html += '<div class="plot-line">作物：' + (plot.crop ? esc(CROPS[plot.crop].name) : '空地') +
+      ' <span class="stage-pill">' + STAGE_NAME[plot.stage] + '</span></div>';
+    html += meter('生长', plot.growth, 'linear-gradient(90deg,#22c55e,#f59e0b)');
+    html += meter('水分', plot.moisture, '#38bdf8');
+    html += meter('养分', plot.nutrient, '#a78bfa');
+
+    if (r.labor > 0) {
+      html += '<div class="stat-row"><span>本次消耗劳作：<b>' + r.labor + '</b> 次，今天还剩 <b>' + r.left + '</b> 次</span>' +
+        '<span style="color:#6b7280">（演练场每次都从「新的一天、还剩 ' + DAILY_LABOR + ' 次」重新开始）</span>' +
+        (r.gained ? '<span style="color:#b45309">收获积分 +<b>' + r.gained + '</b></span>' : '') + '</div>';
+    } else {
+      html += '<div class="stat-row"><span style="color:#6b7280">没有成功的农活，不消耗劳作次数。</span></div>';
+    }
+    if (r.refused > 0) {
+      html += '<div class="stat-row"><span style="color:#b91c1c">有 <b>' + r.refused + '</b> 条操作因为劳作次数不够被挡下（不扣次数）。</span></div>';
+    }
+
+    if (r.events.length) {
+      html += '<div style="margin-top:10px;border-top:1px dashed var(--line);padding-top:8px">' +
+        '<div style="font-size:12.5px;color:#6b7280;margin-bottom:4px">服务器结算日志</div>' +
+        '<div style="font-family:ui-monospace,Consolas,monospace;font-size:12.8px;line-height:1.7;max-height:150px;overflow:auto">' +
+        r.events.map(function (e) {
+          return '<div class="' + (e.ok ? 'ev-ok' : 'ev-bad') + '">' + (e.ok ? '· ' : '× ') + esc(e.text) + '</div>';
+        }).join('') + '</div></div>';
+    }
+
+    elResult.innerHTML = html;
+  }
+
+  function run() {
+    var code = elCode.value;
+    var weatherKey = elWeather.value;
+    var mirror = emptyMirror();
+    var res;
+    try {
+      res = runFarmCode(code, mirror, { maxOps: MAX_OPS });
+    } catch (err) {
+      res = { ops: [], prints: [], error: '代码执行出错：' + (err && err.message ? err.message : err), errorLine: null, mirror: mirror };
+    }
+    render(res, weatherKey);
+  }
+
+  elRun.addEventListener('click', run);
+  elWeather.addEventListener('change', function () { if (elCode.value.trim()) run(); });
+
+  Array.prototype.forEach.call(document.querySelectorAll('[data-demo]'), function (btn) {
+    btn.addEventListener('click', function () {
+      elCode.value = DEMOS[btn.getAttribute('data-demo')] || '';
+      run();
+    });
+  });
+
+  // Ctrl/Cmd + Enter 快捷运行
+  elCode.addEventListener('keydown', function (e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); run(); }
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      var s = elCode.selectionStart, en = elCode.selectionEnd;
+      elCode.value = elCode.value.slice(0, s) + '    ' + elCode.value.slice(en);
+      elCode.selectionStart = elCode.selectionEnd = s + 4;
+    }
+  });
+
+  // 初始载入第一关示例并跑一次，打开就有东西看
+  elCode.value = DEMOS.basic;
+  run();
+})();
+</script>
+
+</body>
+</html>

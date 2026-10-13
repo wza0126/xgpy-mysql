@@ -21,6 +21,9 @@
 const TABLES = [
   { t: 'farm_plots', where: 'student_id = ?' },
   { t: 'farm_logs', where: 'student_id = ?' },
+  // 学生自己的 5 个代码容器（迁移 100）：回归会写容器，跑完必须放回原样，
+  // 否则每跑一次就把学生 a（也是老师试玩账号）存的代码吃掉一份。
+  { t: 'farm_code_slots', where: 'student_id = ?' },
   { t: 'point_transactions', where: "student_id = ? AND source_type = 'farm'" },
 ];
 

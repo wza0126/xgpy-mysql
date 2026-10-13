@@ -637,9 +637,13 @@ function registerWpsOp(app, deps) {
           ORDER BY cluster_id ASC, created_at ASC`);
       const questions = qRows.map((q) => {
         const spec = safeJson(q.wps_spec, {});
+        // ⛔ 题目标题用**模板文件名**（去掉扩展名），不用题干正文：
+        //    题干是一整段操作说明（"1. … 2. …"），挤进表头又长又乱，几道题看着还差不多。
+        const tplName = (normalizeTemplates(spec)[0] || {}).name || '';
         return {
           id: q.id,
-          title: plainTitle(q.content, 36) || q.id,
+          title: templateTitle(tplName) || plainTitle(q.content, 36) || q.id,
+          template_name: String(tplName || ''),
           cluster_id: q.cluster_id || '',
           full_score: Number(spec.full_score) || DEFAULT_FULL_SCORE,
           step_count: Array.isArray(spec.steps) ? spec.steps.length : 0,
@@ -1001,4 +1005,18 @@ function registerWpsOp(app, deps) {
   return { stripSpecForStudent, normalizeTemplates, normalizeStemBlocks };
 }
 
-module.exports = { registerWpsOp, stripSpecForStudent, normalizeTemplates, normalizeStemBlocks, createOpImageRoutes, shapeResultForStudent };
+/**
+ * 模板文件名 → 题目简称（教师端列表 / 练习情况表头用）。
+ * 题干正文经常是一整段说明 + 每步要求，拿来当列头又长又乱（"步骤1…步骤2…"），
+ * 所以统一改成用**模板文件名**当题目标题：去掉目录、去掉扩展名后截断。
+ *   '人口密度数据分析表.xlsx' → '人口密度数据分析表'
+ *   '/uploads/.../2022北京冬奥会.accdb' → '2022北京冬奥会'
+ */
+function templateTitle(name, max = 36) {
+  const base = String(name || '').split(/[\\/]/).pop() || '';
+  const t = base.replace(/\.[^.]+$/, '').trim();
+  if (!t) return '';
+  return t.length > max ? t.slice(0, max) + '…' : t;
+}
+
+module.exports = { registerWpsOp, stripSpecForStudent, normalizeTemplates, normalizeStemBlocks, createOpImageRoutes, shapeResultForStudent, templateTitle };

@@ -33,7 +33,7 @@ const { Transform, Readable } = require('stream');
 const { pipeline } = require('stream/promises');
 const { v4: uuidv4 } = require('uuid');
 const grader = require('./access-grader');
-const { stripSpecForStudent, normalizeTemplates, createOpImageRoutes, shapeResultForStudent } = require('./wps-op');
+const { stripSpecForStudent, normalizeTemplates, createOpImageRoutes, shapeResultForStudent, templateTitle } = require('./wps-op');
 
 const DB_EXT = /\.(accdb|mdb)$/i;                       // 作答文件：必须 Access 库
 const TEMPLATE_EXT = /\.(accdb|mdb|xlsx|xlsm|csv|txt)$/i; // 模板：空白库 + 数据源
@@ -349,9 +349,12 @@ function registerAccessOp(app, deps) {
           ORDER BY cluster_id ASC, created_at ASC`);
       const questions = qRows.map((q) => {
         const spec = safeJson(q.access_spec, {});
+        // ⛔ 与 WPS 端同口径：标题 = 主模板文件名（去扩展名），不用题干正文。
+        const tplName = (normalizeTemplates(spec)[0] || {}).name || '';
         return {
           id: q.id,
-          title: String(q.content || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 36) || q.id,
+          title: templateTitle(tplName) || String(q.content || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 36) || q.id,
+          template_name: String(tplName || ''),
           cluster_id: q.cluster_id || '',
           full_score: Number(spec.full_score) || DEFAULT_FULL_SCORE,
           step_count: Array.isArray(spec.steps) ? spec.steps.length : 0,

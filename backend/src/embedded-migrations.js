@@ -403,5 +403,13 @@ module.exports = [
   {
     "version": "098_farm_default_code.sql",
     "sql": "-- 098_farm_default_code.sql\n-- 代码农场：编辑器「默认代码」改成教师可配。\n-- 教学用途：教师可以放一段**低效率的代码**（比如写死份数、不带判断的暴力写法）作为学生的起点，\n--   让学生先跑起来看结果、再动手改好，比凭空写一行更容易上手。\n-- 语义：\n--   · default_code 为 NULL 或空串 → 学生编辑器用前端内置示例兜底（行为与旧版一致）；\n--   · 学生自己改过代码后，不会被悄悄覆盖（前端只在「没动过」时跟随教师新默认）。\n-- 幂等：ADD COLUMN IF NOT EXISTS，重复执行安全。\n\nALTER TABLE `farm_config`\n  ADD COLUMN IF NOT EXISTS `default_code` TEXT DEFAULT NULL COMMENT '编辑器默认代码（教师可改，学生练手的起始模板；NULL=用内置示例）';\n"
+  },
+  {
+    "version": "099_farm_guide.sql",
+    "sql": "-- 099_farm_guide.sql\n-- 代码农场：把《学生使用手册》做成「教师可上传 / 学生桌面可点开」的入口。\n--\n-- 背景：手册是一份自包含的单文件 HTML（讲农活 API、生长规则，并带一个可交互试跑区），\n--   学生写代码时能随手对照，不用老师投屏念。\n--   · 教师上传后落在 uploads/farm/guides/，相对地址记在 guide_url（guide_name 存原始文件名，仅用于后台回显）；\n--   · guide_url 为 NULL 时，前端回落到**随包内置**的默认手册（/code-farm-guide.html）；\n--   · guide_enabled=0 可临时收起学生桌面上的「农场手册」图标（例如想当课堂任务再放出来）。\n-- 幂等：ADD COLUMN IF NOT EXISTS，重复执行安全；已有数据不受影响（默认可见）。\n\nALTER TABLE `farm_config`\n  ADD COLUMN IF NOT EXISTS `guide_url` VARCHAR(255) DEFAULT NULL COMMENT '学生手册 HTML 地址（教师上传，/uploads/...；NULL=用内置默认手册）',\n  ADD COLUMN IF NOT EXISTS `guide_name` VARCHAR(255) DEFAULT NULL COMMENT '学生手册的原始文件名（教师后台上传时记录，仅用于回显）',\n  ADD COLUMN IF NOT EXISTS `guide_enabled` TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否在学生桌面显示「农场手册」入口';\n"
+  },
+  {
+    "version": "100_farm_code_slots.sql",
+    "sql": "-- 100_farm_code_slots.sql\n-- 代码农场：给学生 5 个「代码容器」，把写好的农活代码存进数据库，随时取回来接着改、直接运行。\n--\n-- 背景：以前学生写的代码只留在这个浏览器里（localStorage），\n--   换个座位 / 换台机器 / 清一次浏览器缓存就没了，写好的自动化脚本只能当场用完。\n--   现在改成存服务器：点一下容器标签就显示里面的代码，改完存回去，下次开机还在。\n--\n-- 设计要点：\n--   1) 一人固定 5 格，slot = 1..5，(student_id, slot) 唯一键 ——\n--      后端用 INSERT ... ON DUPLICATE KEY UPDATE 天然幂等，不会存出重复格子。\n--   2) name 是学生自定义的容器名（NULL = 前端显示默认「容器 N」）——\n--      用来区分「自动浇一茬」「手动收尾」这类不同用途的脚本。\n--   3) code 长度与 farm_logs.code 同口径（5000 字符），存 TEXT 足够。\n--   4) ⛔ 只有学生自己的读写入口（req.user.userId），没有任何跨学生查询接口，\n--      同学之间互相看不到对方的代码。\n--\n-- 幂等：CREATE TABLE IF NOT EXISTS，重复执行安全。\n\nCREATE TABLE IF NOT EXISTS `farm_code_slots` (\n  `id` VARCHAR(50) PRIMARY KEY,\n  `student_id` VARCHAR(50) NOT NULL COMMENT '学生ID（profiles.id）',\n  `slot` TINYINT NOT NULL COMMENT '容器序号 1-5',\n  `name` VARCHAR(40) DEFAULT NULL COMMENT '学生自定义的容器名（NULL=前端显示默认「容器N」）',\n  `code` TEXT DEFAULT NULL COMMENT '容器内存的代码（最长 5000 字符，与 farm_logs.code 同口径）',\n  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '首次保存时间',\n  `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,\n  UNIQUE KEY `uk_farm_slot` (`student_id`, `slot`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='代码农场学生代码容器（每生 5 格）';\n"
   }
 ];

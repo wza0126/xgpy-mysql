@@ -10,6 +10,9 @@ import { studentLabel } from '../../utils/studentLabel';
  *     学生总分 = Σ 各题最高分（没做过的题不计入，只影响「已做」列）
  * 也就是同一题反复提交只认最好的一次，避免学生被自己的低分拖累。
  *
+ * ⛔ 题目标题取「主模板文件名」（如「人口密度数据分析表」），
+ *    不用题干正文 —— 题干是一整段操作说明，当列头又长又乱且几道题互相难辨。
+ *
  * ⚠️ WPS 与 Access 共用同一张提交表 wps_op_submissions，用 kind 区分
  *    （'wps' / 'access'），所以本组件只需换一个 base 路径即可复用。
  */
@@ -17,6 +20,8 @@ import { studentLabel } from '../../utils/studentLabel';
 interface QMeta {
   id: string;
   title: string;
+  /** 主模板文件名（含扩展名），无模板的老题为空串 */
+  template_name: string;
   cluster_id: string;
   full_score: number;
   step_count: number;
@@ -68,6 +73,10 @@ const scoreColor = (obtained: number, full: number) => {
   if (r >= 0.6) return 'text-amber-600';
   return 'text-rose-600';
 };
+
+/** 表头里的题目名（模板文件名可能很长，截断显示，完整名进 title 提示 + 下方对照表） */
+const HEAD_MAX = 12;
+const shortTitle = (t: string) => (t.length > HEAD_MAX ? t.slice(0, HEAD_MAX) + '…' : t);
 
 export const WpsOpAnalytics: React.FC<{ kind?: 'wps' | 'access' }> = ({ kind = 'wps' }) => {
   const isAccess = kind === 'access';
@@ -135,7 +144,8 @@ export const WpsOpAnalytics: React.FC<{ kind?: 'wps' | 'access' }> = ({ kind = '
 
   const exportCsv = () => {
     if (!data) return;
-    const head = ['账号', '姓名', '班级', ...data.questions.map((q) => `${q.title}(${q.full_score}分)`), '总分', '已做题数'];
+    // 导出用完整模板文件名（表头会截断，CSV 里给全称，方便老师直接拿去统计）
+    const head = ['账号', '姓名', '班级', ...data.questions.map((q) => `${q.template_name || q.title}(${q.full_score}分)`), '总分', '已做题数'];
     const lines = [head.join(',')];
     for (const s of rows) {
       const cells = [
@@ -188,7 +198,7 @@ export const WpsOpAnalytics: React.FC<{ kind?: 'wps' | 'access' }> = ({ kind = '
         <span className="rounded bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
           {questions.length} 道操作题 · 全卷满分 {d.full_mark}
         </span>
-        <span className="text-[11px] text-gray-400">每题取该生最高分，总分 = 各题最高分之和</span>
+        <span className="text-[11px] text-gray-400">每题取该生最高分，总分 = 各题最高分之和；题目名取模板文件名</span>
         <div className="ml-auto flex gap-2">
           <button onClick={() => load(classId)} className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50">
             <i className="fas fa-rotate mr-1" /> 刷新
@@ -224,10 +234,10 @@ export const WpsOpAnalytics: React.FC<{ kind?: 'wps' | 'access' }> = ({ kind = '
                 {questions.map((q, i) => (
                   <th
                     key={q.id}
-                    title={`${q.title}（${q.full_score} 分 / ${q.step_count} 步）`}
+                    title={`${q.template_name || q.title}（${q.full_score} 分 / ${q.step_count} 步）`}
                     className="border-b border-gray-200 px-2 py-2 text-center font-semibold whitespace-nowrap"
                   >
-                    <div className="text-[11px] text-gray-700">{i + 1}. {q.title.length > 10 ? q.title.slice(0, 10) + '…' : q.title}</div>
+                    <div className="text-[11px] text-gray-700">{i + 1}. {shortTitle(q.title)}</div>
                     <div className="text-[10px] font-normal text-gray-400">
                       {q.full_score} 分{q.practice_enabled ? '' : ' · 已下架'}
                     </div>
@@ -304,12 +314,15 @@ export const WpsOpAnalytics: React.FC<{ kind?: 'wps' | 'access' }> = ({ kind = '
       {/* 题目对照表（表头会截断，这里给全称） */}
       {questions.length > 1 && (
         <div className="rounded-lg border border-gray-200 bg-white p-3">
-          <div className="mb-2 text-xs font-semibold text-gray-600">题目对照</div>
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-xs font-semibold text-gray-600">
+            题目对照
+            <span className="font-normal text-gray-400">题目名 = 这道题的模板文件名（上传的空白表格 / 数据库文件名）</span>
+          </div>
           <div className="space-y-1">
             {questions.map((q, i) => (
               <div key={q.id} className="flex items-baseline gap-2 text-xs text-gray-500">
                 <span className="flex-none rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-600">{i + 1}</span>
-                <span className="min-w-0 flex-1 truncate">{q.title}</span>
+                <span className="min-w-0 flex-1 truncate text-gray-700">{q.template_name || q.title}</span>
                 <span className="flex-none text-[11px] text-gray-400">{q.cluster_id || '未分类'} · {q.full_score} 分</span>
               </div>
             ))}

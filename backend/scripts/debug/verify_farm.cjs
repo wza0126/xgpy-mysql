@@ -76,6 +76,7 @@ const near = (a, b, eps = 0.01) => Math.abs(num(a) - b) < eps;
   let snapPoints = 0;
   let snapEarned = 0; // ⛔ 累计获得积分也要快照：收获会让它 +10，不回滚就永久污染
   let snapFarm = null; // ⛔ 该学生的 地块 / 日志 / 农场流水 整份快照（跑完放回原样）
+  let guideUrl = ''; // 本脚本上传的测试手册地址（finally 里删掉磁盘文件）
 
   // 把测试学生的地恢复成「空地 + 水50/肥50 + 今天没用过劳作」
   async function resetPlot() {
@@ -94,10 +95,12 @@ const near = (a, b, eps = 0.01) => Math.abs(num(a) - b) < eps;
     await restoreFarmData(db, snapFarm);
     await db.query('UPDATE profiles SET current_points = ?, total_points_earned = ? WHERE id = ?',
       [snapPoints, snapEarned, studentId]);
+    // ⛔ 隔离探针行（伪造的「别的学生的容器」）无论测试卡在哪一步都要清掉，否则留一个假学生
+    await db.query('DELETE FROM farm_code_slots WHERE student_id = ?', ['tmp_farm_other_student']);
     if (snapCfg) {
       await db.query(
         'UPDATE farm_config SET enabled=?, class_ids=?, day_minutes=?, base_yield=?, max_ops_per_day=?, ' +
-          'weather=?, notice=?, default_code=?, start_at=?, updated_by=NULL WHERE id = 1',
+          'weather=?, notice=?, default_code=?, guide_url=?, guide_name=?, guide_enabled=?, start_at=?, updated_by=NULL WHERE id = 1',
         [
           snapCfg.enabled,
           snapCfg.class_ids,
@@ -107,9 +110,21 @@ const near = (a, b, eps = 0.01) => Math.abs(num(a) - b) < eps;
           snapCfg.weather,
           snapCfg.notice,
           snapCfg.default_code,
+          snapCfg.guide_url,
+          snapCfg.guide_name,
+          snapCfg.guide_enabled,
           snapCfg.start_at,
         ]
       );
+    }
+    // ⛔ 本脚本上传的测试手册文件也要从磁盘删掉（库已还原，别在 uploads/ 里留孤儿）
+    if (guideUrl) {
+      try {
+        const fsx = require('fs');
+        const px = require('path');
+        const abs = px.join(__dirname, '../../uploads/farm/guides', px.basename(guideUrl));
+        if (fsx.existsSync(abs)) fsx.unlinkSync(abs);
+      } catch { /* ignore */ }
     }
   }
 
@@ -135,6 +150,10 @@ const near = (a, b, eps = 0.01) => Math.abs(num(a) - b) < eps;
       weather: crows[0].weather,
       notice: crows[0].notice,
       default_code: crows[0].default_code,
+      // ⛔ 学生手册三列也要快照：本脚本会传一份测试手册再清掉，不清回去就把老师的手册吞了
+      guide_url: crows[0].guide_url,
+      guide_name: crows[0].guide_name,
+      guide_enabled: crows[0].guide_enabled,
       start_at: crows[0].start_at,
     } : null;
 
@@ -144,11 +163,14 @@ const near = (a, b, eps = 0.01) => Math.abs(num(a) - b) < eps;
     snapFarm = await snapshotFarmData(db, studentId);
     console.log('已快照：plots=' + snapFarm.tables.farm_plots.length +
       ' logs=' + snapFarm.tables.farm_logs.length +
+      ' 代码容器=' + snapFarm.tables.farm_code_slots.length +
       ' 农场流水=' + snapFarm.tables.point_transactions.length);
 
     // 清掉历史残留，保证从干净状态开始
     await db.query('DELETE FROM farm_logs WHERE student_id = ?', [studentId]);
     await db.query('DELETE FROM farm_plots WHERE student_id = ?', [studentId]);
+    // ⛔ 容器也要清空再跑：否则学生 a 自己存的代码会让「空容器」这类断言随数据漂移
+    await db.query('DELETE FROM farm_code_slots WHERE student_id = ?', [studentId]);
 
     // ---------- A. 未开启 ----------
     section('A. 未开启时');
@@ -243,6 +265,193 @@ const near = (a, b, eps = 0.01) => Math.abs(num(a) - b) < eps;
     r = await req('/api/teacher/farm/config', { token: teacherToken });
     ok('★ 超长默认代码被截断到 4000 字', String(r.body.data.config.default_code).length === 4000,
       'len=' + String(r.body.data.config.default_code).length);
+
+    // ---------- B3. ★ 学生手册（教师上传 → 学生可见 → 恢复内置） ----------
+    section('B3. ★ 学生手册：上传 / 下发 / 恢复内置');
+    r = await req('/api/teacher/farm/config', { token: teacherToken });
+    ok('配置含学生手册字段（guide_url / guide_name / guide_enabled）',
+      !!(r.body.data.config && 'guide_url' in r.body.data.config && 'guide_name' in r.body.data.config && 'guide_enabled' in r.body.data.config),
+      JSON.stringify(r.body.data.config && r.body.data.config.guide_url));
+    ok('★ 下发内置默认手册地址（老师没传时学生的兜底）',
+      String(r.body.data.guide_default || '') === '/code-farm-guide.html', r.body.data.guide_default);
+
+    r = await req('/api/student/farm/state', { token: studentToken });
+    ok('★ 未上传手册时学生拿到内置默认地址', r.body.data.world.guide_url === '/code-farm-guide.html',
+      r.body.data.world.guide_url);
+    ok('★ world 下发 guide_enabled（学生桌面入口开关）', r.body.data.world.guide_enabled === true,
+      String(r.body.data.world.guide_enabled));
+
+    // 真实 multipart 上传（直接用 Blob 造文件，不落临时文件）
+    const GHTML = '<!doctype html><meta charset="utf-8"><title>__tmp_farm_guide__</title><p>测试手册</p>';
+    const mkFd = (content, name, type) => {
+      const fd = new FormData();
+      fd.append('file', new Blob([content], { type: type || 'text/html' }), name);
+      return fd;
+    };
+    const gPost = (fd, token) => fetch(BASE + '/api/teacher/farm/guide', {
+      method: 'POST', headers: token ? { Authorization: 'Bearer ' + token } : {}, body: fd,
+    });
+
+    const upRes = await gPost(mkFd(GHTML, '老师改过的农场手册.html'), teacherToken);
+    const upBody = await upRes.json().catch(() => null);
+    ok('上传手册 200', upRes.status === 200, 'status=' + upRes.status + ' ' + JSON.stringify(upBody && upBody.error));
+    guideUrl = (upBody && upBody.data && upBody.data.url) || '';
+    ok('返回 /uploads/farm/guides/*.html 地址', /^\/uploads\/farm\/guides\/.+\.html$/.test(guideUrl), guideUrl);
+    // multer 的 originalname 是 latin1 解码的，中文名要转回 utf8，否则后台回显乱码
+    ok('★ 中文文件名正确回显（latin1→utf8）',
+      (upBody && upBody.data && upBody.data.name) === '老师改过的农场手册.html',
+      upBody && upBody.data && upBody.data.name);
+
+    r = await req('/api/teacher/farm/config', { token: teacherToken });
+    ok('上传即生效：guide_url 已写入配置', r.body.data.config.guide_url === guideUrl, r.body.data.config.guide_url);
+    ok('上传即生效：guide_name 已记录', r.body.data.config.guide_name === '老师改过的农场手册.html', r.body.data.config.guide_name);
+    ok('上传即生效：guide_enabled 自动打开（不用再点一次保存）', r.body.data.config.guide_enabled === true);
+
+    const gGet = await fetch(BASE + guideUrl);
+    ok('手册地址可直接取到（学生 iframe 就加载它）', gGet.status === 200, 'status=' + gGet.status);
+    ok('取到的就是刚上传的那份', (await gGet.text()).includes('__tmp_farm_guide__'));
+
+    r = await req('/api/student/farm/state', { token: studentToken });
+    ok('★ 学生 state 拿到老师上传的手册地址', r.body.data.world.guide_url === guideUrl, r.body.data.world.guide_url);
+
+    // 桌面入口开关：关掉后学生仍能拿到地址，但 guide_enabled=false（前端据此隐藏图标）
+    await req('/api/teacher/farm/config', {
+      method: 'PUT', token: teacherToken,
+      body: { enabled: true, class_ids: [], day_minutes: 10, base_yield: 10, max_ops_per_day: BUDGET, weather: 'sunny', guide_enabled: false },
+    });
+    r = await req('/api/student/farm/state', { token: studentToken });
+    ok('★ 关掉入口开关 → world.guide_enabled=false', r.body.data.world.guide_enabled === false, String(r.body.data.world.guide_enabled));
+    ok('★ 关掉入口只是隐藏图标，地址仍在（手册本身没被删）', r.body.data.world.guide_url === guideUrl, r.body.data.world.guide_url);
+    // 不带 guide_url 的保存必须保留已上传的手册（否则老师改个天气就把手册弄没了）
+    r = await req('/api/teacher/farm/config', { token: teacherToken });
+    ok('★ 缺省字段保留：guide_url 没被普通保存清空', r.body.data.config.guide_url === guideUrl, r.body.data.config.guide_url);
+    await req('/api/teacher/farm/config', {
+      method: 'PUT', token: teacherToken,
+      body: { enabled: true, class_ids: [], day_minutes: 10, base_yield: 10, max_ops_per_day: BUDGET, weather: 'sunny', guide_enabled: true },
+    });
+
+    const badRes = await gPost(mkFd('x', 'not-a-guide.txt', 'text/plain'), teacherToken);
+    ok('⛔ 非 .html 文件被拒（400）', badRes.status === 400, 'status=' + badRes.status);
+    const stuRes = await gPost(mkFd(GHTML, 'x.html'), studentToken);
+    ok('⛔ 学生不能上传手册（403）', stuRes.status === 403, 'status=' + stuRes.status);
+
+    // 恢复内置示例 → 旧文件应被删除
+    r = await req('/api/teacher/farm/guide', { method: 'DELETE', token: teacherToken });
+    ok('恢复内置示例 200', r.status === 200 && r.body.data && r.body.data.ok === true, JSON.stringify(r.body));
+    const gone = await fetch(BASE + guideUrl);
+    ok('★ 旧手册文件已从磁盘删除（地址 404）', gone.status === 404, 'status=' + gone.status);
+    r = await req('/api/student/farm/state', { token: studentToken });
+    ok('★ 清掉后学生回落到内置默认手册', r.body.data.world.guide_url === '/code-farm-guide.html', r.body.data.world.guide_url);
+    guideUrl = '';
+
+    // ---------- B4. ★ 代码容器（每人 5 格，存库，点一下就取回来直接运行） ----------
+    section('B4. ★ 代码容器：5 格存取 / 改名 / 缺省保留 / 隔离');
+    const OTHER_SLOT_ROW = 'tmp_farm_other_slot';
+    const OTHER_STUDENT = 'tmp_farm_other_student';
+    r = await req('/api/student/farm/code-slots', { token: studentToken });
+    ok('容器接口 200', r.status === 200, JSON.stringify(r.body && r.body.error));
+    let slotList = (r.body.data && r.body.data.slots) || [];
+    ok('★ 固定返回 5 个容器（没存过的也补成空容器）',
+      slotList.length === 5 && slotList.map((s) => s.slot).join(',') === '1,2,3,4,5',
+      slotList.map((s) => s.slot).join(','));
+    ok('空容器 empty=true / code 为空串', slotList.every((s) => s.empty === true && s.code === ''),
+      JSON.stringify(slotList[0]));
+    ok('下发上限（max_slots / max_name / max_code）',
+      r.body.data.max_slots === 5 && r.body.data.max_name === 16 && r.body.data.max_code === 5000,
+      JSON.stringify({ s: r.body.data.max_slots, n: r.body.data.max_name, c: r.body.data.max_code }));
+
+    r = await req('/api/student/farm/code-slots/3', {
+      method: 'PUT', token: studentToken,
+      body: { name: '自动浇一茬', code: 'plant("wheat")\nwhile moisture() < 100:\n    water()' },
+    });
+    ok('保存到容器 3（200）', r.status === 200 && r.body.data.slot.name === '自动浇一茬', JSON.stringify(r.body).slice(0, 160));
+    ok('保存后 empty=false（标签条据此显示小圆点）', r.body.data.slot.empty === false);
+
+    r = await req('/api/student/farm/code-slots', { token: studentToken });
+    slotList = r.body.data.slots;
+    const s3 = slotList.find((s) => s.slot === 3);
+    ok('★ 再查能取回刚存的代码（换台电脑也还在，不是存在本机）',
+      !!s3 && s3.code.includes('while moisture()') && s3.name === '自动浇一茬',
+      JSON.stringify(s3 && { n: s3.name, len: s3.code.length }));
+    ok('★ 其它 4 格仍是空的（互不串台）', slotList.filter((s) => s.empty).length === 4,
+      slotList.map((s) => (s.empty ? '空' : '有')).join(','));
+    ok('容器带 updated_at（教师备份 / 追溯用）', !!s3.updated_at, String(s3 && s3.updated_at));
+
+    // 只改名 → 代码必须保留（否则「重命名」会顺手把学生代码清掉）
+    r = await req('/api/student/farm/code-slots/3', { method: 'PUT', token: studentToken, body: { name: '浇一茬v2' } });
+    ok('★ 只传 name：代码保留原值（改名不清空代码）',
+      r.body.data.slot.name === '浇一茬v2' && r.body.data.slot.code.includes('while moisture()'),
+      JSON.stringify(r.body.data.slot).slice(0, 120));
+    // 只改代码 → 名字必须保留
+    r = await req('/api/student/farm/code-slots/3', { method: 'PUT', token: studentToken, body: { code: 'harvest()' } });
+    ok('★ 只传 code：容器名保留原值',
+      r.body.data.slot.name === '浇一茬v2' && r.body.data.slot.code === 'harvest()',
+      JSON.stringify(r.body.data.slot));
+
+    // 名字：超长截断 / 换行压平 / 空白回默认名
+    r = await req('/api/student/farm/code-slots/3', { method: 'PUT', token: studentToken, body: { name: 'A'.repeat(30), code: 'x' } });
+    ok('★ 容器名超长截断到 16 字', r.body.data.slot.name === 'A'.repeat(16), r.body.data.slot.name);
+    r = await req('/api/student/farm/code-slots/3', { method: 'PUT', token: studentToken, body: { name: '多\n行\n名', code: 'x' } });
+    ok('★ 容器名里的换行压成空格（标签条放得下）', r.body.data.slot.name === '多 行 名', JSON.stringify(r.body.data.slot.name));
+    r = await req('/api/student/farm/code-slots/3', { method: 'PUT', token: studentToken, body: { name: '   ', code: 'x' } });
+    ok('★ 空白名字 → 存空，前端回落到默认「容器 3」', r.body.data.slot.name === '', JSON.stringify(r.body.data.slot.name));
+
+    // 代码超长截断（与 farm_logs.code 同口径）
+    r = await req('/api/student/farm/code-slots/4', { method: 'PUT', token: studentToken, body: { code: 'z'.repeat(6000) } });
+    ok('★ 代码超长截断到 5000 字符', r.body.data.slot.code.length === 5000, r.body.data.slot.code.length);
+
+    // 非法编号：一律 400（不能让学生写到第 6 格 / 用编号绕路径）
+    for (const bad of ['0', '6', '99', 'abc', '-1']) {
+      const rb = await req('/api/student/farm/code-slots/' + bad, { method: 'PUT', token: studentToken, body: { code: 'x' } });
+      ok('⛔ 非法容器编号「' + bad + '」被拒（400）', rb.status === 400, 'status=' + rb.status);
+    }
+
+    // 鉴权：教师 token 不能碰学生容器
+    r = await req('/api/student/farm/code-slots', { token: teacherToken });
+    ok('⛔ 教师 token 读学生容器被拒（403）', r.status === 403, 'status=' + r.status);
+
+    // ⛔ 隔离：库里别的学生的容器绝不能出现在我的列表里
+    await db.query('DELETE FROM farm_code_slots WHERE id = ?', [OTHER_SLOT_ROW]);
+    await db.query(
+      'INSERT INTO farm_code_slots (id, student_id, slot, name, code) VALUES (?, ?, 1, ?, ?)',
+      [OTHER_SLOT_ROW, OTHER_STUDENT, '别人的容器', 'print("别人的代码")']
+    );
+    r = await req('/api/student/farm/code-slots', { token: studentToken });
+    ok('⛔ 看不到别人的容器（严格按 student_id 隔离）',
+      !JSON.stringify(r.body.data.slots).includes('别人的容器'), 'status=' + r.status);
+    await db.query('DELETE FROM farm_code_slots WHERE id = ?', [OTHER_SLOT_ROW]);
+
+    // 清空：DELETE 应真删行，而不是留个空壳
+    r = await req('/api/student/farm/code-slots/4', { method: 'DELETE', token: studentToken });
+    ok('清空容器 4（200）', r.status === 200 && r.body.data.slot.empty === true, JSON.stringify(r.body).slice(0, 120));
+    const [g4] = await db.query('SELECT COUNT(*) AS c FROM farm_code_slots WHERE student_id = ? AND slot = 4', [studentId]);
+    ok('清空后库里那一行确实没了（不留空壳）', Number(g4[0].c) === 0, g4[0].c);
+
+    // 5 格全用一遍 + 幂等
+    for (let i = 1; i <= 5; i++) {
+      await req('/api/student/farm/code-slots/' + i, { method: 'PUT', token: studentToken, body: { name: '格' + i, code: '# slot ' + i } });
+    }
+    const [cnt5] = await db.query('SELECT COUNT(*) AS c FROM farm_code_slots WHERE student_id = ?', [studentId]);
+    ok('★ 5 格都能存（库里恰好 5 行）', Number(cnt5[0].c) === 5, cnt5[0].c);
+    for (let k = 0; k < 3; k++) {
+      await req('/api/student/farm/code-slots/2', { method: 'PUT', token: studentToken, body: { code: 'k' + k } });
+    }
+    const [dup2] = await db.query('SELECT COUNT(*) AS c FROM farm_code_slots WHERE student_id = ? AND slot = 2', [studentId]);
+    ok('★ 反复保存同一格不产生重复行（唯一键幂等）', Number(dup2[0].c) === 1, dup2[0].c);
+
+    // ⛔ 容器是学生的私人资料：老师临时关掉农场再打开，代码不该「消失」
+    await req('/api/teacher/farm/config', {
+      method: 'PUT', token: teacherToken,
+      body: { enabled: false, class_ids: [], day_minutes: 10, base_yield: 10, max_ops_per_day: BUDGET, weather: 'sunny', notice: '欢迎来到代码农场' },
+    });
+    r = await req('/api/student/farm/code-slots', { token: studentToken });
+    ok('★ 农场开关关掉后容器仍可读（关游戏不清学生代码）',
+      r.status === 200 && r.body.data.slots.filter((s) => !s.empty).length === 5,
+      'status=' + r.status + ' 非空=' + (r.body.data ? r.body.data.slots.filter((s) => !s.empty).length : 'n/a'));
+    await req('/api/teacher/farm/config', {
+      method: 'PUT', token: teacherToken,
+      body: { enabled: true, class_ids: [], day_minutes: 10, base_yield: 10, max_ops_per_day: BUDGET, weather: 'sunny', notice: '欢迎来到代码农场' },
+    });
 
     // ---------- C. ⛔ 劳作计费口径 ----------
     section('C. ⛔ 劳作计费：按「动作单位」计（播种 1 / 除草 1 / 收获 1 / water(n)=n）');
@@ -459,6 +668,7 @@ const near = (a, b, eps = 0.01) => Math.abs(num(a) - b) < eps;
     const snapCounts = {
       plots: (snapFarm && snapFarm.tables.farm_plots.length) || 0,
       logs: (snapFarm && snapFarm.tables.farm_logs.length) || 0,
+      slots: (snapFarm && snapFarm.tables.farm_code_slots.length) || 0,
       txs: (snapFarm && snapFarm.tables.point_transactions.length) || 0,
     };
     const [[c1]] = await db.query('SELECT COUNT(*) AS c FROM farm_plots WHERE student_id = ?', [studentId]);
@@ -469,25 +679,35 @@ const near = (a, b, eps = 0.01) => Math.abs(num(a) - b) < eps;
       c2.c + ' vs 快照 ' + snapCounts.logs);
     const [[c3]] = await db.query("SELECT COUNT(*) AS c FROM point_transactions WHERE student_id = ? AND source_type = 'farm'", [studentId]);
     ok('★ 农场积分流水已还原', Number(c3.c) === snapCounts.txs, c3.c + ' vs 快照 ' + snapCounts.txs);
+    const [[c3b]] = await db.query('SELECT COUNT(*) AS c FROM farm_code_slots WHERE student_id = ?', [studentId]);
+    ok('★ 代码容器已还原（学生/老师存的代码不会被回归吃掉）', Number(c3b.c) === snapCounts.slots,
+      c3b.c + ' vs 快照 ' + snapCounts.slots);
     const [[c4]] = await db.query('SELECT current_points, total_points_earned FROM profiles WHERE id = ?', [studentId]);
     ok('学生积分已还原', Number(c4.current_points) === snapPoints, c4.current_points + ' vs ' + snapPoints);
     ok('★ 学生累计获得积分已还原', Number(c4.total_points_earned) === snapEarned,
       c4.total_points_earned + ' vs ' + snapEarned);
     // ⛔ 不要锁死「enabled 必须是 0」——开关是教师可改的内容，断言只要求「回到跑测试前的样子」
     const [[c5]] = await db.query(
-      'SELECT enabled, day_minutes, base_yield, max_ops_per_day, weather, notice, default_code, start_at FROM farm_config WHERE id = 1');
+      'SELECT enabled, day_minutes, base_yield, max_ops_per_day, weather, notice, default_code, ' +
+        'guide_url, guide_name, guide_enabled, start_at FROM farm_config WHERE id = 1');
     const cfgSame = snapCfg
       ? Number(c5.enabled) === Number(snapCfg.enabled) &&
         Number(c5.day_minutes) === Number(snapCfg.day_minutes) &&
         Number(c5.base_yield) === Number(snapCfg.base_yield) &&
         Number(c5.max_ops_per_day) === Number(snapCfg.max_ops_per_day) &&
         String(c5.weather) === String(snapCfg.weather) &&
+        String(c5.guide_url == null ? '' : c5.guide_url) ===
+          String(snapCfg.guide_url == null ? '' : snapCfg.guide_url) &&
+        String(c5.guide_name == null ? '' : c5.guide_name) ===
+          String(snapCfg.guide_name == null ? '' : snapCfg.guide_name) &&
+        Number(c5.guide_enabled) === Number(snapCfg.guide_enabled) &&
         String(c5.default_code == null ? '' : c5.default_code) ===
           String(snapCfg.default_code == null ? '' : snapCfg.default_code)
       : true;
     ok('配置已还原（与快照一致）', cfgSame,
       'enabled=' + c5.enabled + ' vs 快照 ' + (snapCfg && snapCfg.enabled) +
       ' | max_ops_per_day=' + c5.max_ops_per_day + ' vs ' + (snapCfg && snapCfg.max_ops_per_day) +
+      ' | guide_url=' + (c5.guide_url || '(内置)') + ' vs ' + ((snapCfg && snapCfg.guide_url) || '(内置)') +
       ' | default_code 长度=' + String(c5.default_code || '').length + ' vs ' +
       String((snapCfg && snapCfg.default_code) || '').length);
 

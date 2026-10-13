@@ -35,6 +35,7 @@ import { CreativeWorkshop } from '../components/student/CreativeWorkshop';
 import { SimilarPracticeWindow } from '../components/student/SimilarPracticeWindow';
 import { FarmOverlay } from '../components/student/FarmOverlay';
 import type { FarmState } from '../components/student/FarmOverlay';
+import { FarmGuideApp } from '../components/student/FarmGuideApp';
 import { RollCallApp } from '../components/teacher/RollCallApp';
 import { backendClient } from '../api/backendClient';
 import { API_CONFIG } from '../api/config';
@@ -569,6 +570,24 @@ export const Desktop: React.FC = () => {
       return;
     }
 
+    // 农场手册：独立窗口，iframe 直接加载服务端给的手册地址
+    if (icon.id === 'farmGuide') {
+      if (!guideAvailable) {
+        alert('学生手册暂时不可用，请让老师检查「代码农场 → 学生手册」。');
+        return;
+      }
+      openWindow({
+        id: 'farmGuide',
+        title: '农场手册',
+        icon: 'fa-book-open-reader',
+        isMinimized: false,
+        isMaximized: false,
+        component: <FarmGuideApp url={guideUrl} />,
+      });
+      activateWindow('farmGuide');
+      return;
+    }
+
     if (icon.id === 'apps') {
       if (!effectiveProfile) {
         alert('请先登录');
@@ -758,12 +777,23 @@ export const Desktop: React.FC = () => {
     };
   }, [handleOpenSimilarPractice]);
 
+  // ===== 代码农场 · 学生手册 =====
+  // 农场启用且手册可用时，桌面图标区多出一个「农场手册」入口。
+  // ⛔ 手册地址由服务端解析好（老师上传的那份，或随包内置的默认手册 /code-farm-guide.html），
+  //    前端不猜路径；guide_enabled=0（老师临时收起）时不显示入口。
+  const guideUrl = farmState?.enabled ? String(farmState.world?.guide_url || '') : '';
+  const guideAvailable = !!guideUrl && farmState?.world?.guide_enabled !== false;
+
   const getFilteredIcons = () => {
+    const all = guideAvailable
+      ? [...desktopIcons, { id: 'farmGuide', title: '农场手册', icon: 'fa-book-open-reader', color: 'bg-lime-600' }]
+      : desktopIcons;
+
     if (!isFocusModeActive || !focusModeConfig) {
-      return desktopIcons;
+      return all;
     }
-    
-    return desktopIcons.filter(icon => {
+
+    return all.filter(icon => {
       const showField = `focus_mode_show_${icon.id}`;
       return focusModeConfig[showField as keyof FocusModeConfig] !== false;
     });

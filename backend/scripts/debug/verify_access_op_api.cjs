@@ -213,6 +213,11 @@ async function login(username, password) {
     eq(an.status, 200, 'K1 HTTP 200');
     const qs = an.body?.data?.questions || [];
     ok(qs.some((x) => x.id === QUESTION_ID), 'K2 统计里包含样例题');
+    // ⛔ 与 WPS 端同口径：题目标题 = 主模板文件名（去扩展名），不是题干正文
+    const q0 = qs.find((x) => x.id === QUESTION_ID);
+    ok(q0?.title === '2022北京冬奥会', '★ K2b 题目标题 = 主模板文件名（去扩展名） — ' + (q0 && q0.title));
+    ok(q0?.template_name === '2022北京冬奥会.accdb', '★ K2c 下发完整模板文件名 — ' + (q0 && q0.template_name));
+    ok(q0 && !/导入|要求|下列/.test(String(q0.title)), '⛔ K2d 标题不含题干正文');
     const me = (an.body?.data?.students || []).find((s) => s.username === 'a');
     ok(!!me, 'K3 统计里有学生 a');
     eq(me?.scores?.[QUESTION_ID]?.best, 100, 'K4 学生最高分按 MAX 取 = 100');

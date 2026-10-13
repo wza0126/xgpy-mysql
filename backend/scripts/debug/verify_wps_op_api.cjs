@@ -349,6 +349,15 @@ async function login(username, password) {
     ok('返回操作题清单', Array.isArray(ad.questions) && ad.questions.length >= 1, 'n=' + (ad.questions || []).length);
     const aq = (ad.questions || []).find((q) => q.id === QUESTION_ID);
     ok('操作题清单含样例并带满分 100', !!aq && Number(aq.full_score) === FULL, 'full=' + aq?.full_score);
+    // ⛔ 题目标题口径：用**主模板文件名**（去扩展名），不是题干正文 ——
+    //    题干是一整段操作说明（"下载…完成以下操作…1. 2. 3."），当列头又长又乱、几道题还长得像。
+    //    这条断言把口径锁死，防以后有人改回 content。
+    ok('★ 题目标题 = 主模板文件名（去扩展名）', !!aq && aq.title === '人口密度数据分析表',
+      'title=' + (aq && aq.title));
+    ok('★ 额外下发完整模板文件名（含扩展名，供提示/对照/CSV 用）', !!aq && aq.template_name === '人口密度数据分析表.xlsx',
+      'template_name=' + (aq && aq.template_name));
+    ok('⛔ 标题里不再混入题干正文', !!aq && !/下载|完成以下操作|提示：/.test(String(aq.title)),
+      'title=' + (aq && aq.title));
     ok('全卷满分 = 100', Number(ad.full_mark) === FULL, 'full_mark=' + ad.full_mark);
 
     const aStu = (ad.students || []).find((s) => s.id === stuId);

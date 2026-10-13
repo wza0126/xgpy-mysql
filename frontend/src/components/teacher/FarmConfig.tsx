@@ -1,5 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { backendClient } from '../../api/backendClient';
+import { API_CONFIG } from '../../api/config';
+import { getAuthToken } from '../../utils/authToken';
 import { FARM_EXAMPLE_CODE } from '../../utils/farmPython';
 
 // ===== 代码农场 · 教师后台 =====
@@ -28,6 +30,12 @@ interface FarmConfigShape {
   notice: string;
   /** 编辑器默认代码（空串 = 用内置示例） */
   default_code: string;
+  /** 学生手册：上传后的相对地址（空串 = 用内置默认手册） */
+  guide_url: string;
+  /** 学生手册的原始文件名（回显用） */
+  guide_name: string;
+  /** 是否在学生桌面显示「农场手册」入口 */
+  guide_enabled: boolean;
   start_at: string | null;
 }
 
@@ -110,6 +118,9 @@ export const FarmConfig: React.FC = () => {
     weather: 'sunny',
     notice: '',
     default_code: '',
+    guide_url: '',
+    guide_name: '',
+    guide_enabled: true,
     start_at: null,
   });
 
@@ -129,7 +140,15 @@ export const FarmConfig: React.FC = () => {
       const r: any = await backendClient.get('/api/teacher/farm/config');
       const d = r?.data;
       if (d) {
-        setCfg({ ...d.config, notice: d.config.notice || '', default_code: d.config.default_code || '' });
+        setCfg({
+          ...d.config,
+          notice: d.config.notice || '',
+          default_code: d.config.default_code || '',
+          guide_url: d.config.guide_url || '',
+          guide_name: d.config.guide_name || '',
+          guide_enabled: d.config.guide_enabled !== false,
+        });
+        setGuideDefault(d.guide_default || '/code-farm-guide.html');
         setCrops(d.crops || []);
         setWeathers(d.weathers || []);
         setStats(d.stats || { plots: 0, harvests: 0, points: 0 });
@@ -212,6 +231,7 @@ export const FarmConfig: React.FC = () => {
         weather: cfg.weather,
         notice: cfg.notice,
         default_code: cfg.default_code,
+        guide_enabled: cfg.guide_enabled,
         reset_world: extra?.reset_world === true,
       });
       await loadConfig();
@@ -221,6 +241,60 @@ export const FarmConfig: React.FC = () => {
     } finally {
       setSaving(false);
     }
+  };
+
+  // ---------- 学生手册（上传 / 预览 / 恢复内置） ----------
+  // ⛔ 这两个 state 放在这里而不是组件顶部：只是把「手册」相关逻辑聚在一块，React 允许；
+  //    它们是无条件声明，渲染顺序稳定，不影响 hooks 规则。
+  const [guideDefault, setGuideDefault] = useState('/code-farm-guide.html');
+  const [guideBusy, setGuideBusy] = useState(false);
+
+  const uploadGuide = async (file?: File | null) => {
+    if (!file) return;
+    if (!/\.html?$/i.test(file.name)) {
+      flash('err', '手册请用 .html / .htm 单文件网页（双击能直接在浏览器打开的那种）');
+      return;
+    }
+    setGuideBusy(true);
+    try {
+      const token = getAuthToken();
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await fetch(`${API_CONFIG.apiUrl}/api/teacher/farm/guide`, {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: fd,
+      });
+      let json: any = null;
+      try { json = await res.json(); } catch { /* 非 JSON 响应 */ }
+      if (res.status === 401) throw new Error('登录已失效，请重新登录');
+      if (!res.ok) throw new Error(json?.error || `上传失败（${res.status}）`);
+      await loadConfig();
+      flash('ok', `手册已更新（${file.name}），学生桌面 10 秒内就能点开`);
+    } catch (e: any) {
+      flash('err', e?.message || '手册上传失败');
+    } finally {
+      setGuideBusy(false);
+    }
+  };
+
+  const clearGuide = async () => {
+    if (!window.confirm('确定改回内置默认手册吗？\n\n已上传的手册文件会从服务器删除，不可恢复。')) return;
+    setGuideBusy(true);
+    try {
+      await backendClient.delete('/api/teacher/farm/guide');
+      await loadConfig();
+      flash('ok', '已改回内置默认手册');
+    } catch (e: any) {
+      flash('err', e?.message || '操作失败');
+    } finally {
+      setGuideBusy(false);
+    }
+  };
+
+  const previewGuide = (url: string) => {
+    const target = url.startsWith('/uploads/') ? `${API_CONFIG.apiUrl}${url}` : url;
+    window.open(target, '_blank', 'noopener');
   };
 
   if (loading) {
@@ -473,6 +547,84 @@ fertilize(10)
 harvest()`}
               className="h-64 w-full resize-y overflow-auto rounded-lg border border-gray-300 bg-slate-900 p-3 font-mono text-xs leading-5 text-slate-100 outline-none focus:border-emerald-500"
             />
+          </div>
+
+          {/* 学生手册（学生桌面「农场手册」里打开的那份网页） */}
+          <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+            <div className="mb-1 flex items-center justify-between gap-3">
+              <h4 className="flex items-center gap-2 text-sm font-semibold text-gray-800">
+                <i className="fa-solid fa-book-open-reader text-emerald-600" />
+                学生手册
+              </h4>
+              <label className="flex cursor-pointer items-center gap-2" title="是否在学生桌面显示「农场手册」入口">
+                <input
+                  type="checkbox"
+                  checked={cfg.guide_enabled}
+                  onChange={(e) => setCfg({ ...cfg, guide_enabled: e.target.checked })}
+                  className="h-4 w-4 accent-emerald-600"
+                />
+                <span className="text-xs text-gray-500">{cfg.guide_enabled ? '桌面显示入口' : '已隐藏入口'}</span>
+              </label>
+            </div>
+            <p className="mb-3 text-xs leading-5 text-gray-500">
+              开启后学生桌面上会多一个「<b>农场手册</b>」图标，点开就是这份网页（讲农活 API、生长规则，
+              还带一个可交互试跑区，写得比讲台投屏清楚）。默认用<b>随包内置</b>的手册；
+              想换成自己改过的版本，就把单文件 HTML 传上来 —— 传完立即生效，学生刷新即见。
+            </p>
+            <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg bg-gray-50 px-3 py-2 text-xs">
+              <span className="text-gray-500">当前使用：</span>
+              {cfg.guide_url ? (
+                <>
+                  <span className="rounded bg-emerald-50 px-2 py-0.5 font-medium text-emerald-700">
+                    <i className="fa-solid fa-file-code mr-1" />
+                    {cfg.guide_name || '自上传手册'}
+                  </span>
+                  <span className="text-gray-400">（自上传，优先于内置）</span>
+                </>
+              ) : (
+                <span className="rounded bg-sky-50 px-2 py-0.5 font-medium text-sky-700">
+                  <i className="fa-solid fa-box-open mr-1" />
+                  内置示例手册
+                </span>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <label
+                className={`cursor-pointer rounded-lg px-3 py-1.5 text-xs text-white transition-colors ${
+                  guideBusy ? 'bg-gray-400' : 'bg-emerald-600 hover:bg-emerald-500'
+                }`}
+              >
+                <i className="fa-solid fa-upload mr-1" />
+                {guideBusy ? '处理中…' : '上传手册 HTML'}
+                <input
+                  type="file"
+                  accept=".html,.htm,text/html"
+                  className="sr-only"
+                  disabled={guideBusy}
+                  onChange={(e) => { uploadGuide(e.target.files && e.target.files[0]); e.target.value = ''; }}
+                />
+              </label>
+              <button
+                onClick={() => previewGuide(cfg.guide_url || guideDefault)}
+                className="rounded-lg bg-gray-100 px-3 py-1.5 text-xs text-gray-600 transition-colors hover:bg-gray-200"
+              >
+                <i className="fa-solid fa-up-right-from-square mr-1" />
+                预览当前手册
+              </button>
+              {cfg.guide_url && (
+                <button
+                  onClick={clearGuide}
+                  disabled={guideBusy}
+                  className="rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-xs text-red-600 transition-colors hover:bg-red-100 disabled:opacity-50"
+                >
+                  <i className="fa-solid fa-rotate-left mr-1" />
+                  恢复内置示例
+                </button>
+              )}
+              <span className="text-[11px] text-gray-400">
+                上面那个「桌面显示入口」开关改完，记得点下面的「保存设置」
+              </span>
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
