@@ -168,9 +168,9 @@ async function waitText(b, text, ms = 20000) {
       if (snapCfg) {
         await db.query(
           'UPDATE farm_config SET enabled=?, class_ids=?, day_minutes=?, base_yield=?, max_ops_per_day=?, ' +
-            'weather=?, notice=?, start_at=?, updated_by=NULL WHERE id = 1',
+            'weather=?, notice=?, default_code=?, start_at=?, updated_by=NULL WHERE id = 1',
           [snapCfg.enabled, snapCfg.class_ids, snapCfg.day_minutes, snapCfg.base_yield,
-           snapCfg.max_ops_per_day, snapCfg.weather, snapCfg.notice, snapCfg.start_at]
+           snapCfg.max_ops_per_day, snapCfg.weather, snapCfg.notice, snapCfg.default_code, snapCfg.start_at]
         );
       }
       if (studentId) await db.query('UPDATE profiles SET class_id = ? WHERE id = ?', [oldClassId, studentId]);
@@ -200,7 +200,7 @@ async function waitText(b, text, ms = 20000) {
     await db.query('UPDATE profiles SET class_id = ? WHERE id = ?', [TMP_CLASS_ID, studentId]);
     await db.query(
       'UPDATE farm_config SET enabled=1, class_ids=?, day_minutes=1, base_yield=10, max_ops_per_day=15, ' +
-        "weather='sunny', notice=?, start_at=NOW() WHERE id = 1",
+        "weather='sunny', notice=?, default_code=NULL, start_at=NOW() WHERE id = 1",
       [JSON.stringify([TMP_CLASS_ID]), NOTICE]
     );
     const teacherToken = await loginToken(TEACHER.u, TEACHER.p);
@@ -231,6 +231,7 @@ async function waitText(b, text, ms = 20000) {
       && body.includes('成熟收获基础积分') && body.includes('每天劳作次数上限'));
     ok('含天气选择与教学提示', body.includes('当前天气'));
     ok('含公告输入框', body.includes('全班公告'));
+    ok('★ 含「编辑器默认代码」设置区', body.includes('编辑器默认代码') && body.includes('载入内置示例'));
     ok('含「重置世界」危险操作按钮', body.includes('重置世界'));
     ok('顶部统计卡（已建地块）', body.includes('已建地块'));
     ok('临时班级出现在班级多选里', body.includes(TMP_CLASS_NAME), TMP_CLASS_NAME);
@@ -301,6 +302,28 @@ async function waitText(b, text, ms = 20000) {
       'ops_today=' + plotRows[0]?.ops_today);
     ok('界面回显「本次消耗劳作」', body.includes('本次消耗劳作'), body.replace(/\n+/g, ' | ').slice(0, 200));
 
+    // ---------- D2 ★ 教师改「编辑器默认代码」→ 学生编辑器自动跟随 ----------
+    // ⛔ 这一段依赖「学生没动过代码」：脚本一路没改 textarea，所以代码仍等于默认，
+    //    老师换默认后应当自动跟随（改过的代码则保留，见 FarmOverlay 的 codeBaseRef 逻辑）。
+    section('D2. ★ 教师改「编辑器默认代码」→ 学生编辑器自动跟随');
+    const MARKER = '# 老师留的题目：先原样跑一遍，再想办法改好\nplant("wheat")\nwater(10)\nfertilize(10)\nharvest()';
+    const putDc = await api('/api/teacher/farm/config', {
+      method: 'PUT', token: teacherToken,
+      body: {
+        enabled: true, class_ids: [TMP_CLASS_ID], day_minutes: 1, base_yield: 10,
+        max_ops_per_day: 15, weather: 'sunny', notice: NOTICE, default_code: MARKER,
+      },
+    });
+    ok('教师端保存新默认代码（200）', putDc.status === 200, 'status=' + putDc.status);
+    let followed = false;
+    let taVal = '';
+    for (let i = 0; i < 44; i++) { // 学生桌面 10 秒轮询
+      await sleep(500);
+      taVal = String(await b.evalJs('(() => { const t = document.querySelector("textarea"); return t ? t.value : ""; })()'));
+      if (taVal.includes('先原样跑一遍')) { followed = true; break; }
+    }
+    ok('★ 未改过代码 → 编辑器自动换成老师的新默认（含「先原样跑一遍」）', followed, taVal.slice(0, 80).replace(/\n/g, ' / '));
+
     // ---------- E 关闭开关 ----------
     section('E. 教师关闭开关 → 学生桌面自动退出');
     await api('/api/teacher/farm/config', {
@@ -342,7 +365,7 @@ async function waitText(b, text, ms = 20000) {
       const [t] = await db.query("SELECT COUNT(*) AS c FROM point_transactions WHERE student_id = ? AND source_type='farm'", [studentId]);
       const [c] = await db.query('SELECT COUNT(*) AS c FROM classes WHERE id = ?', [TMP_CLASS_ID]);
       const [s] = await db.query('SELECT class_id FROM profiles WHERE id = ?', [studentId]);
-      const [f] = await db.query('SELECT enabled, class_ids, notice, day_minutes, base_yield, max_ops_per_day FROM farm_config WHERE id = 1');
+      const [f] = await db.query('SELECT enabled, class_ids, notice, day_minutes, base_yield, max_ops_per_day, default_code FROM farm_config WHERE id = 1');
       ok('★ farm_plots 已还原（是「放回原样」，不是「删干净」）',
         Number(p[0].c) === (snapFarm ? snapFarm.tables.farm_plots.length : 0),
         p[0].c + ' vs 快照 ' + (snapFarm ? snapFarm.tables.farm_plots.length : 0));
@@ -359,7 +382,9 @@ async function waitText(b, text, ms = 20000) {
         !snapCfg || (Number(f[0].enabled) === Number(snapCfg.enabled) &&
           Number(f[0].day_minutes) === Number(snapCfg.day_minutes) &&
           Number(f[0].base_yield) === Number(snapCfg.base_yield) &&
-          Number(f[0].max_ops_per_day) === Number(snapCfg.max_ops_per_day)),
+          Number(f[0].max_ops_per_day) === Number(snapCfg.max_ops_per_day) &&
+          String(f[0].default_code == null ? '' : f[0].default_code) ===
+            String(snapCfg.default_code == null ? '' : snapCfg.default_code)),
         JSON.stringify(f[0]) + ' vs 快照 enabled=' + (snapCfg && snapCfg.enabled));
       // ⛔ 积分还原断言：没有这条，脚本会静默给学生白送积分（流水已删、事后无法追溯）
       const [pp] = await db.query('SELECT current_points, total_points_earned FROM profiles WHERE id = ?', [studentId]);

@@ -399,5 +399,9 @@ module.exports = [
   {
     "version": "097_farm_labor_per_action.sql",
     "sql": "-- 097_farm_labor_per_action.sql\n-- 代码农场：劳作口径由「提交次数」改为「动作次数」。\n-- ⛔ 语义变更（无表结构变更）：farm_config.max_ops_per_day 现在表示「每天的劳作次数」，\n--   播种 / 除草 / 收获 各 1 次；water(n) / fertilize(n) 各 n 次。\n-- 旧值 3 在新口径下连一茬地都种不完（一茬约需 12 次：播种 1 + 水 5 + 肥 5 + 收获 1），故至少提到 15。\n-- 教师可在教师后台「代码农场 → 农场设置」随时调整。\n\nUPDATE `farm_config`\n   SET `max_ops_per_day` = GREATEST(15, `max_ops_per_day`);\n"
+  },
+  {
+    "version": "098_farm_default_code.sql",
+    "sql": "-- 098_farm_default_code.sql\n-- 代码农场：编辑器「默认代码」改成教师可配。\n-- 教学用途：教师可以放一段**低效率的代码**（比如写死份数、不带判断的暴力写法）作为学生的起点，\n--   让学生先跑起来看结果、再动手改好，比凭空写一行更容易上手。\n-- 语义：\n--   · default_code 为 NULL 或空串 → 学生编辑器用前端内置示例兜底（行为与旧版一致）；\n--   · 学生自己改过代码后，不会被悄悄覆盖（前端只在「没动过」时跟随教师新默认）。\n-- 幂等：ADD COLUMN IF NOT EXISTS，重复执行安全。\n\nALTER TABLE `farm_config`\n  ADD COLUMN IF NOT EXISTS `default_code` TEXT DEFAULT NULL COMMENT '编辑器默认代码（教师可改，学生练手的起始模板；NULL=用内置示例）';\n"
   }
 ];

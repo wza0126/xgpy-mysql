@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { backendClient } from '../../api/backendClient';
+import { FARM_EXAMPLE_CODE } from '../../utils/farmPython';
 
 // ===== 代码农场 · 教师后台 =====
 // 教师在这里开总开关 / 选班级 / 调世界参数；学生桌面 10 秒轮询到后自动进入农场态。
@@ -25,6 +26,8 @@ interface FarmConfigShape {
   max_ops_per_day: number;
   weather: string;
   notice: string;
+  /** 编辑器默认代码（空串 = 用内置示例） */
+  default_code: string;
   start_at: string | null;
 }
 
@@ -106,6 +109,7 @@ export const FarmConfig: React.FC = () => {
     max_ops_per_day: 15,
     weather: 'sunny',
     notice: '',
+    default_code: '',
     start_at: null,
   });
 
@@ -125,7 +129,7 @@ export const FarmConfig: React.FC = () => {
       const r: any = await backendClient.get('/api/teacher/farm/config');
       const d = r?.data;
       if (d) {
-        setCfg({ ...d.config, notice: d.config.notice || '' });
+        setCfg({ ...d.config, notice: d.config.notice || '', default_code: d.config.default_code || '' });
         setCrops(d.crops || []);
         setWeathers(d.weathers || []);
         setStats(d.stats || { plots: 0, harvests: 0, points: 0 });
@@ -207,6 +211,7 @@ export const FarmConfig: React.FC = () => {
         max_ops_per_day: cfg.max_ops_per_day,
         weather: cfg.weather,
         notice: cfg.notice,
+        default_code: cfg.default_code,
         reset_world: extra?.reset_world === true,
       });
       await loadConfig();
@@ -419,6 +424,55 @@ export const FarmConfig: React.FC = () => {
                 className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none"
               />
             </div>
+          </div>
+
+          {/* 编辑器默认代码（学生端「编写农活代码」的起始模板） */}
+          <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+            <div className="mb-1 flex items-center justify-between gap-3">
+              <h4 className="flex items-center gap-2 text-sm font-semibold text-gray-800">
+                <i className="fa-solid fa-file-code text-emerald-600" />
+                编辑器默认代码
+              </h4>
+              <span className="text-xs text-gray-400">{cfg.default_code.length} / 4000 字</span>
+            </div>
+            <p className="mb-3 text-xs leading-5 text-gray-500">
+              学生在「编写农活代码」窗口里看到的起始代码。可以故意放一段<b>低效率的代码</b>（例如写死份数、
+              不带判断的暴力写法），让学生先运行看结果、再动手改好，比凭空写一行更容易上手。
+              留空则用内置示例。
+              <br />
+              学生自己改过的代码不会被覆盖；改了这里之后，<b>没动过代码的学生</b>下次刷新会自动跟随新默认
+              （想让全班立刻换题，可让学生点一下编辑器里的「恢复默认代码」）。
+            </p>
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <button
+                onClick={() => setCfg({ ...cfg, default_code: FARM_EXAMPLE_CODE })}
+                className="rounded-lg bg-gray-100 px-3 py-1.5 text-xs text-gray-600 transition-colors hover:bg-gray-200"
+              >
+                <i className="fa-solid fa-file-import mr-1" />
+                载入内置示例
+              </button>
+              <button
+                onClick={() => setCfg({ ...cfg, default_code: '' })}
+                className="rounded-lg bg-gray-100 px-3 py-1.5 text-xs text-gray-600 transition-colors hover:bg-gray-200"
+              >
+                <i className="fa-solid fa-eraser mr-1" />
+                清空（改回内置示例）
+              </button>
+              <span className="text-[11px] text-gray-400">改完别忘了点下面的「保存设置」</span>
+            </div>
+            <textarea
+              value={cfg.default_code}
+              onChange={(e) => setCfg({ ...cfg, default_code: e.target.value })}
+              spellCheck={false}
+              maxLength={4000}
+              rows={12}
+              placeholder={`留空则用内置示例。例如故意留一份低效率代码让学生改：
+plant("wheat")
+water(10)
+fertilize(10)
+harvest()`}
+              className="h-64 w-full resize-y overflow-auto rounded-lg border border-gray-300 bg-slate-900 p-3 font-mono text-xs leading-5 text-slate-100 outline-none focus:border-emerald-500"
+            />
           </div>
 
           <div className="flex flex-wrap items-center gap-3">

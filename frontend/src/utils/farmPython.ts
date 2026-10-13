@@ -71,6 +71,26 @@ const CROP_ALIAS: Record<string, string> = {
   corn: 'corn', 玉米: 'corn',
 };
 
+// 「内置示例」：教师没在后台配置默认代码时的兜底，也是教师端「载入内置示例」的填充内容。
+// ⛔ 改动这里要连带核对：后端 farm.js 的耕作口径、学生手册、以及
+//    backend/scripts/debug/verify_farm_ui.cjs 里「默认代码恰好消耗 8 次劳作」的断言
+//    （播种 1 + 浇到满 5 + 施肥 2 = 8）。
+export const FARM_EXAMPLE_CODE = `# 用 Python 照顾你的地
+# 先播下种子（可选 wheat 小麦 / carrot 胡萝卜 / corn 玉米）
+if crop() == None:
+    plant("wheat")
+
+# 水分不够就浇水（水分满了再浇是浪费）
+while moisture() < 100:
+    water()
+
+# 养分不够就施肥
+if nutrient() < 80:
+    fertilize(2)
+
+print("水分", moisture(), "养分", nutrient())
+`;
+
 export const FARM_API_DOC = [
   { call: 'plant("wheat")', desc: '播种（花 1 次劳作）：wheat 小麦 / carrot 胡萝卜 / corn 玉米' },
   { call: 'water(n)', desc: '浇水 n 份（花 n 次劳作）：每份 +12 水分，上限 100。水满了还浇就是白花力气；水分越高，后面每次除草也越值钱' },

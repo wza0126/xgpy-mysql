@@ -97,7 +97,7 @@ const near = (a, b, eps = 0.01) => Math.abs(num(a) - b) < eps;
     if (snapCfg) {
       await db.query(
         'UPDATE farm_config SET enabled=?, class_ids=?, day_minutes=?, base_yield=?, max_ops_per_day=?, ' +
-          'weather=?, notice=?, start_at=?, updated_by=NULL WHERE id = 1',
+          'weather=?, notice=?, default_code=?, start_at=?, updated_by=NULL WHERE id = 1',
         [
           snapCfg.enabled,
           snapCfg.class_ids,
@@ -106,6 +106,7 @@ const near = (a, b, eps = 0.01) => Math.abs(num(a) - b) < eps;
           snapCfg.max_ops_per_day,
           snapCfg.weather,
           snapCfg.notice,
+          snapCfg.default_code,
           snapCfg.start_at,
         ]
       );
@@ -133,6 +134,7 @@ const near = (a, b, eps = 0.01) => Math.abs(num(a) - b) < eps;
       max_ops_per_day: crows[0].max_ops_per_day,
       weather: crows[0].weather,
       notice: crows[0].notice,
+      default_code: crows[0].default_code,
       start_at: crows[0].start_at,
     } : null;
 
@@ -190,6 +192,57 @@ const near = (a, b, eps = 0.01) => Math.abs(num(a) - b) < eps;
     ok('我的地块已初始化', !!r.body.data.me && typeof r.body.data.me.moisture === 'number');
     ok('劳作次数初始为满（' + BUDGET + '）', num(r.body.data.me.ops_left_today) === BUDGET, 'ops_left=' + r.body.data.me.ops_left_today);
     ok('同学列表含自己', Array.isArray(r.body.data.peers) && r.body.data.peers.some((p) => p.student_id === studentId));
+
+    // ---------- B2. ★ 编辑器默认代码（教师可配） ----------
+    section('B2. ★ 编辑器默认代码：教师可配，学生端下发');
+    const MARKER = '# 老师留的题目\nplant("wheat")\nwater(10)\nfertilize(10)\nharvest()\n';
+    r = await req('/api/teacher/farm/config', {
+      method: 'PUT',
+      token: teacherToken,
+      body: {
+        enabled: true, class_ids: [], day_minutes: 10, base_yield: 10,
+        max_ops_per_day: BUDGET, weather: 'sunny', notice: '欢迎来到代码农场', default_code: MARKER,
+      },
+    });
+    ok('教师保存 default_code 成功', r.status === 200 && r.body.data.ok === true, JSON.stringify(r.body));
+    r = await req('/api/teacher/farm/config', { token: teacherToken });
+    ok('★ 配置回读：default_code 原样返回', r.body.data.config.default_code === MARKER,
+      JSON.stringify(r.body.data.config.default_code));
+    r = await req('/api/student/farm/state', { token: studentToken });
+    ok('★ 学生 state 的 world 里带上 default_code（编辑器据此初始化）',
+      r.body.data.world.default_code === MARKER, JSON.stringify(r.body.data.world.default_code));
+
+    // ⛔ 不带 default_code 的保存（老前端 / 只想改开关）必须**保留**原值，不能把老师配好的代码清空
+    r = await req('/api/teacher/farm/config', {
+      method: 'PUT',
+      token: teacherToken,
+      body: { enabled: true, class_ids: [], day_minutes: 10, base_yield: 10, max_ops_per_day: BUDGET, weather: 'sunny', notice: '欢迎来到代码农场' },
+    });
+    ok('不带 default_code 保存 → 状态码 200', r.status === 200);
+    r = await req('/api/teacher/farm/config', { token: teacherToken });
+    ok('★ 缺省字段保留原值（没被清空）', r.body.data.config.default_code === MARKER,
+      JSON.stringify(r.body.data.config.default_code));
+
+    // 显式传 null / 空串 = 改回内置示例
+    r = await req('/api/teacher/farm/config', {
+      method: 'PUT',
+      token: teacherToken,
+      body: { enabled: true, class_ids: [], day_minutes: 10, base_yield: 10, max_ops_per_day: BUDGET, weather: 'sunny', notice: '欢迎来到代码农场', default_code: null },
+    });
+    r = await req('/api/teacher/farm/config', { token: teacherToken });
+    ok('显式传 null → 回读为空串（前端回退内置示例）', r.body.data.config.default_code === '',
+      JSON.stringify(r.body.data.config.default_code));
+
+    // 超长截断（MAX_DEFAULT_CODE = 4000）
+    r = await req('/api/teacher/farm/config', {
+      method: 'PUT',
+      token: teacherToken,
+      body: { enabled: true, class_ids: [], day_minutes: 10, base_yield: 10, max_ops_per_day: BUDGET, weather: 'sunny', default_code: 'x'.repeat(5000) },
+    });
+    ok('超长默认代码被接受（200）', r.status === 200);
+    r = await req('/api/teacher/farm/config', { token: teacherToken });
+    ok('★ 超长默认代码被截断到 4000 字', String(r.body.data.config.default_code).length === 4000,
+      'len=' + String(r.body.data.config.default_code).length);
 
     // ---------- C. ⛔ 劳作计费口径 ----------
     section('C. ⛔ 劳作计费：按「动作单位」计（播种 1 / 除草 1 / 收获 1 / water(n)=n）');
@@ -422,17 +475,21 @@ const near = (a, b, eps = 0.01) => Math.abs(num(a) - b) < eps;
       c4.total_points_earned + ' vs ' + snapEarned);
     // ⛔ 不要锁死「enabled 必须是 0」——开关是教师可改的内容，断言只要求「回到跑测试前的样子」
     const [[c5]] = await db.query(
-      'SELECT enabled, day_minutes, base_yield, max_ops_per_day, weather, notice, start_at FROM farm_config WHERE id = 1');
+      'SELECT enabled, day_minutes, base_yield, max_ops_per_day, weather, notice, default_code, start_at FROM farm_config WHERE id = 1');
     const cfgSame = snapCfg
       ? Number(c5.enabled) === Number(snapCfg.enabled) &&
         Number(c5.day_minutes) === Number(snapCfg.day_minutes) &&
         Number(c5.base_yield) === Number(snapCfg.base_yield) &&
         Number(c5.max_ops_per_day) === Number(snapCfg.max_ops_per_day) &&
-        String(c5.weather) === String(snapCfg.weather)
+        String(c5.weather) === String(snapCfg.weather) &&
+        String(c5.default_code == null ? '' : c5.default_code) ===
+          String(snapCfg.default_code == null ? '' : snapCfg.default_code)
       : true;
     ok('配置已还原（与快照一致）', cfgSame,
       'enabled=' + c5.enabled + ' vs 快照 ' + (snapCfg && snapCfg.enabled) +
-      ' | max_ops_per_day=' + c5.max_ops_per_day + ' vs ' + (snapCfg && snapCfg.max_ops_per_day));
+      ' | max_ops_per_day=' + c5.max_ops_per_day + ' vs ' + (snapCfg && snapCfg.max_ops_per_day) +
+      ' | default_code 长度=' + String(c5.default_code || '').length + ' vs ' +
+      String((snapCfg && snapCfg.default_code) || '').length);
 
     await db.end();
 

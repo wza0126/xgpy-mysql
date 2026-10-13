@@ -50,6 +50,7 @@ const WATER_PER_UNIT = 12; // 一份水补充的水分
 const FERT_PER_UNIT = 12; // 一份肥补充的养分
 const MAX_PARAM = 10; // 单次 water/fertilize 最多带几份（同时也是它要花的劳作次数）
 const MAX_OPS = 80; // 单次提交的操作条数上限（程序长度保护，与劳作次数无关）
+const MAX_DEFAULT_CODE = 4000; // 教师配置的「编辑器默认代码」长度上限（防误贴大文件）
 // ⛔ 除草加成（满水满肥时；实际值 = 此值 × 水% × 肥% × 天气）。
 //    = LABOR_GROWTH × 1.5 → 满水满肥时「一次除草 = 1.5 次浇水的成长」，除草才有学生愿意用。
 //    ⚠️ 别再往上调：W ≥ 80 时「完全不浇水施肥、只靠除草」也能达到最优，水肥管理会被架空
@@ -80,6 +81,8 @@ const DEFAULT_CFG = {
   max_ops_per_day: 15,
   weather: 'sunny',
   notice: null,
+  // 编辑器默认代码（教师可配）：NULL/'' 时前端用内置示例兜底
+  default_code: null,
   start_at: null,
 };
 
@@ -426,6 +429,8 @@ function registerFarm(app, { pool, authenticate, requireTeacher, requireStudent 
       weather: cfg.weather || 'sunny',
       weather_label: w.label,
       notice: cfg.notice || '',
+      // ⛔ 教师配置的编辑器默认代码：学生端拿它当初始模板 / 「恢复默认代码」的目标
+      default_code: cfg.default_code || '',
       base_yield: num(cfg.base_yield, 10),
       // ⛔ 语义 = 每天的劳作次数（按动作计）。前端拿它算「今天还能劳作 N 次」。
       max_ops_per_day: num(cfg.max_ops_per_day, DEFAULT_CFG.max_ops_per_day),
@@ -641,6 +646,7 @@ function registerFarm(app, { pool, authenticate, requireTeacher, requireStudent 
             max_ops_per_day: num(cfg.max_ops_per_day, DEFAULT_CFG.max_ops_per_day),
             weather: cfg.weather || 'sunny',
             notice: cfg.notice || '',
+            default_code: cfg.default_code || '',
             start_at: cfg.start_at || null,
           },
           weathers: Object.keys(WEATHER).map((k) => ({ key: k, label: WEATHER[k].label })),
@@ -674,6 +680,16 @@ function registerFarm(app, { pool, authenticate, requireTeacher, requireStudent 
       const maxOps = clamp(Math.round(num(b.max_ops_per_day, DEFAULT_CFG.max_ops_per_day)), 1, 200);
       const weather = WEATHER[b.weather] ? String(b.weather) : 'sunny';
       const notice = b.notice == null ? null : String(b.notice).slice(0, 255);
+      // ⛔ 未传 default_code（undefined）时**保留原值**：否则「只想改开关」的旧调用会把教师配好的默认代码清空；
+      //    显式传 null/'' 才表示「用内置示例」。CRLF 统一成 LF，长度截断防误贴大文件。
+      const defaultCode =
+        b.default_code === undefined
+          ? cfg.default_code == null
+            ? null
+            : String(cfg.default_code)
+          : b.default_code == null
+          ? null
+          : String(b.default_code).replace(/\r\n/g, '\n').slice(0, MAX_DEFAULT_CODE);
       const resetWorld = b.reset_world === true;
 
       // 首次开启（或曾经没设过起点）时打上世界起点
@@ -683,7 +699,7 @@ function registerFarm(app, { pool, authenticate, requireTeacher, requireStudent 
 
       await pool.query(
         'UPDATE farm_config SET enabled=?, class_ids=?, day_minutes=?, base_yield=?, max_ops_per_day=?, ' +
-          'weather=?, notice=?, start_at=?, updated_by=? WHERE id = 1',
+          'weather=?, notice=?, default_code=?, start_at=?, updated_by=? WHERE id = 1',
         [
           enabled,
           classIds.length ? JSON.stringify(classIds) : null,
@@ -692,6 +708,7 @@ function registerFarm(app, { pool, authenticate, requireTeacher, requireStudent 
           maxOps,
           weather,
           notice,
+          defaultCode,
           startAt,
           teacherId,
         ]
