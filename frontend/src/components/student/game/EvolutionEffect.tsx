@@ -1,10 +1,13 @@
 import React, { useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { PET_LEVELS, PET_STAGE_NAMES } from '../../../types';
+import { petStageName } from '../../../types';
 
 interface EvolutionEffectProps {
   show: boolean;
+  /** 真实宠物等级（无上限）。注意不是阶段——阶段由本组件按 min(等级, maxStage) 自己推导。 */
   level: number;
+  /** 阶段总数（pet_config.max_stage），缺省 5。只影响阶段名取的档位，不影响等级数字。 */
+  maxStage?: number;
   petImageUrl: string | null;
   petName: string;
   onComplete: () => void;
@@ -15,6 +18,7 @@ const STAR_COLORS = ['#FFD700', '#FF69B4', '#9370DB', '#00CED1', '#FF6B6B', '#4C
 export const EvolutionEffect: React.FC<EvolutionEffectProps> = ({
   show,
   level,
+  maxStage = 5,
   petImageUrl,
   petName,
   onComplete,
@@ -28,9 +32,11 @@ export const EvolutionEffect: React.FC<EvolutionEffectProps> = ({
     }
   }, [show, onComplete]);
 
-  const levelConfig = PET_LEVELS.find((l) => l.level === level);
-  const stageIndex = Math.min(level, PET_STAGE_NAMES.length) - 1;
-  const levelName = levelConfig?.name || (level > PET_STAGE_NAMES.length ? `超越阶段(Lv.${level})` : PET_STAGE_NAMES[stageIndex] || '未知');
+  // ⛔ 阶段名走统一入口 petStageName（阶段 = min(等级, maxStage)），与萌宠模块同口径：
+  //    5 个阶段是 幼年期/成长期/成熟期/完全体/究极体，
+  //    从 6 级开始等级继续涨，但阶段一直是最后一个「究极体」。
+  //    （这里以前写成 `level > 5 ? '超越阶段(Lv.X)'`，和萌宠模块显示的「究极体」对不上。）
+  const levelName = petStageName(level, maxStage);
 
   return (
     <AnimatePresence>

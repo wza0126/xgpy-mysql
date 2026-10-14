@@ -120,23 +120,21 @@ export const DesktopPet: React.FC<DesktopPetProps> = ({
       if (petData) setPetDetails(petData as Pet);
     } else {
       try {
-        const { data: allPets } = await backendClient.from('pets').select('*');
-        if (allPets && allPets.length > 0) {
-          const randomPet = allPets[Math.floor(Math.random() * allPets.length)];
-          await backendClient.from('student_pets').insert({
-            student_id: profile.id,
-            pet_id: randomPet.id,
-            growth_level: 1,
-            growth_value: 0,
-          });
+        // ⛔ 领养概念已废除（老师 2026-10-14 明确）：账号启用即自动随机选一只，
+        //    统一走后端幂等端点，避免这里和 PetModule 各自 insert 造成重复行。
+        const { data: ensured } = await backendClient.businessEnsurePet({ student_id: profile.id });
+        const petId = ensured?.pet?.pet_id;
+        if (petId) {
+          const { data: allPets } = await backendClient.from('pets').select('*');
+          const petMeta = ((allPets || []) as Pet[]).find((p) => p.id === petId) || null;
           setStudentPet({
-            id: '',
+            id: ensured?.pet?.id || '',
             student_id: profile.id,
-            pet_id: randomPet.id,
-            growth_level: 1,
-            growth_value: 0,
+            pet_id: petId,
+            growth_level: ensured?.pet?.growth_level || 1,
+            growth_value: ensured?.pet?.growth_value || 0,
           } as unknown as StudentPet);
-          setPetDetails(randomPet as Pet);
+          if (petMeta) setPetDetails(petMeta);
         }
       } catch (err) {
         console.error('自动分配宠物失败:', err);

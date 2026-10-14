@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
-import { ExchangeRecord, TestRecord, StudentPet, Pet, PET_STAGE_NAMES, getCumulativeThresholdForLevel } from '../../types';
+import { ExchangeRecord, TestRecord, StudentPet, Pet, petStageOf, petStageName, getCumulativeThresholdForLevel } from '../../types';
 import { useAuth } from '../../hooks/useAuth';
 import { useGameSystem } from '../../hooks/useGameSystem';
 import { API_CONFIG } from '../../api/config';
@@ -184,9 +184,10 @@ export const ProfileModule: React.FC = () => {
     }
   };
 
+  // 等级 = growth_level（无上限，直接显示）；阶段 = min(等级, maxStage)（走统一入口，只决定形态名）
   const currentLevel = studentPet?.growth_level || 1;
-  const currentStage = Math.min(currentLevel, levelConfig.maxStage);
-  const stageName = PET_STAGE_NAMES[currentStage - 1] || `阶段${currentStage}`;
+  const currentStage = petStageOf(currentLevel, levelConfig.maxStage);
+  const stageName = petStageName(currentLevel, levelConfig.maxStage);
   const currentLevelMinGrowth = getCumulativeThresholdForLevel(currentLevel, levelConfig.baseThreshold, levelConfig.increment);
   const nextLevelMinGrowth = getCumulativeThresholdForLevel(currentLevel + 1, levelConfig.baseThreshold, levelConfig.increment);
   const currentGrowth = studentPet?.growth_value || 0;

@@ -3260,6 +3260,73 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
   }
 });
 
+// ============== 业务API：确保学生有且只有一只宠物（幂等）==============
+// 口径（老师 2026-10-14 明确）：
+//   ① **领养概念已废除** —— 新学生启用账号时自动随机选一只，不需要学生点「领养」；
+//   ② 宠物等级是**学生级的唯一值** —— 不存在「几只不同等级的宠物」，所有宠物等级一样；
+//      只有「形态」（想显示第几阶段的形状）是按宠物选的，存在 student_pets.display_level。
+//
+// 为什么需要这个端点：以前「没有就随机插一只」的逻辑散落在 PetModule.fetchData 与
+//   DesktopPet.fetchPetData 两处，两者并发（桌面宠物先挂载、萌宠窗口后打开）会各插一行，
+//   于是同一学生出现 2~3 行重复宠物（实测 7 个养宠学生里 3 人中招，共 11 行）。
+//   这里用「先查 + 条件插入」把它收成一次幂等操作，重复调用不会多插。
+app.post('/api/business/ensure-pet', authenticate, async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    // 学生只能为自己确保宠物；教师/管理员可代指定 student_id
+    const requesterRole = req.user?.role;
+    const isTeacher = requesterRole && requesterRole !== 'student';
+    const studentId = isTeacher ? (req.body?.student_id || req.user?.userId) : req.user?.userId;
+    if (!studentId) {
+      await connection.rollback();
+      return res.status(400).json({ data: null, error: '缺少学生标识' });
+    }
+
+    // 已有宠物行 → 直接返回（幂等：重复调用不会多插）
+    const [existing] = await connection.query(
+      'SELECT * FROM student_pets WHERE student_id = ? ORDER BY adopted_at ASC, id ASC LIMIT 1 FOR UPDATE',
+      [studentId]
+    );
+    if (existing.length > 0) {
+      await connection.commit();
+      return res.json({ data: { created: false, pet: existing[0] }, error: null });
+    }
+
+    // 随机挑一只（池子为空则不动，由教师先在「宠物配置」里加宠物）
+    const [pool] = await connection.query('SELECT id FROM pets ORDER BY RAND() LIMIT 1');
+    if (pool.length === 0) {
+      await connection.commit();
+      return res.json({ data: { created: false, pet: null, reason: 'no_pet_pool' }, error: null });
+    }
+
+    const petRowId = uuidv4();
+    // 条件插入：并发下第二个请求不会插出第二行
+    await connection.query(`
+      INSERT INTO student_pets (id, student_id, pet_id, growth_level, growth_value)
+      SELECT ?, ?, ?, 1, 0 FROM DUAL
+      WHERE NOT EXISTS (SELECT 1 FROM student_pets WHERE student_id = ?)
+    `, [petRowId, studentId, pool[0].id, studentId]);
+
+    const [rows] = await connection.query(
+      'SELECT * FROM student_pets WHERE student_id = ? ORDER BY adopted_at ASC, id ASC LIMIT 1',
+      [studentId]
+    );
+    await connection.commit();
+    res.json({
+      data: { created: !!(rows[0] && rows[0].id === petRowId), pet: rows[0] || null },
+      error: null,
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error in ensure-pet:', error);
+    res.status(500).json({ data: null, error: error.message });
+  } finally {
+    connection.release();
+  }
+});
+
 // ============== 业务API：宠物喂食（防止重复）==============
 app.post('/api/business/feed-pet', authenticate, async (req, res) => {
   const connection = await pool.getConnection();
@@ -3418,11 +3485,22 @@ app.post('/api/business/feed-pet', authenticate, async (req, res) => {
       }
     }
     
+    // ⛔ 按 student_id 更新，**不是**按行 id：宠物等级是**学生级的唯一值**
+    //    （老师 2026-10-14 明确：不存在「几只不同等级的宠物」，所有宠物等级一样，
+    //    只有「形态」即想显示第几阶段的形状是按宠物选的，存在 display_level 列）。
+    //    历史数据里存在同一次自动领养竞态留下的重复行，若只更新当前这一行，
+    //    重复行就会停在旧等级 → 同一学生出现两个等级，与口径相悖。
     await connection.query(`
       UPDATE student_pets 
       SET growth_value = ?, growth_level = ?
-      WHERE id = ?
-    `, [newGrowthValue, newGrowthLevel, pet.id]);
+      WHERE student_id = ?
+    `, [newGrowthValue, newGrowthLevel, student_id]);
+
+    // 同步刷新 profiles.pet_level —— 这一列是 019/020 迁移留下的历史缓存列，
+    // 真源始终是 student_pets.growth_level。之前没人写它，导致它永久停在回填值
+    // （实测学生 a 实际 16 级、该列却一直是 5）。这里顺手对齐，避免它继续撒谎。
+    // ⛔ 注意 newGrowthLevel 是**无上限**的真实等级，绝不能在这里做 MIN(...,5) 截断。
+    await connection.query('UPDATE profiles SET pet_level = ? WHERE id = ?', [newGrowthLevel, student_id]);
     
     await connection.commit();
     
@@ -10544,6 +10622,18 @@ app.get('/api/student/game-diagnostics', authenticate, async (req, res) => {
       [userId]
     );
     results.profile_data = profileRows.length > 0 ? profileRows[0] : null;
+
+    // 4b. 宠物等级的「真源」对照 —— profiles.pet_level 是 019/020 迁移留下的历史缓存列，
+    //     真源一律是 student_pets.growth_level（萌宠模块 / 排行榜 / 学情 / 任务指标都用它）。
+    //     两值不一致时以 by_student_pets 为准，便于老师自查这类漂移。
+    const [petLevelRows] = await pool.query(
+      'SELECT MAX(growth_level) AS lv FROM student_pets WHERE student_id = ?',
+      [userId]
+    );
+    results.pet_level_source = {
+      by_student_pets: (petLevelRows[0] && petLevelRows[0].lv) || 1,
+      by_profiles_column: profileRows.length > 0 ? profileRows[0].pet_level : null,
+    };
 
     // 5. 检查当前系统配置值
     const [rawConfigs] = await pool.query(

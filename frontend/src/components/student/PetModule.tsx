@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
-import { Pet, StudentPet, PetFood, PetTip, PET_LEVELS, PET_STAGE_NAMES, getPetLevelConfig, getCumulativeThresholdForLevel, calculatePetLevel } from '../../types';
+import { Pet, StudentPet, PetFood, PetTip, PET_LEVELS, PET_STAGE_NAMES, getPetLevelConfig, getCumulativeThresholdForLevel, calculatePetLevel, petStageOf, petStageName } from '../../types';
 import { useAuth } from '../../hooks/useAuth';
 import { usePoints } from '../../hooks/usePoints';
 import { EvolutionEffect } from './game/EvolutionEffect';
@@ -76,21 +76,22 @@ export const PetModule: React.FC = () => {
           .maybeSingle();
         if (petData) setPetDetails(petData as Pet);
       } else if (petsData && petsData.length > 0) {
-        const randomPet = petsData[Math.floor(Math.random() * petsData.length)];
-        await backendClient.from('student_pets').insert({
-          student_id: profile.id,
-          pet_id: randomPet.id,
-          growth_level: 1,
-          growth_value: 0,
-        });
+        // ⛔ 领养概念已废除（老师 2026-10-14 明确）：新学生启用账号时自动随机选一只，
+        //    由后端 `/api/business/ensure-pet` 幂等地保证「有且只有一只」。
+        //    以前这里（以及 DesktopPet 里）各自「没有就随机 insert」，
+        //    桌面宠物先挂载、萌宠窗口后打开时两者并发 → 同一学生插出 2~3 行重复宠物。
+        //    改成一次幂等调用后，重复调用不会多插。
+        const { data: ensured } = await backendClient.businessEnsurePet({ student_id: profile.id });
+        const petId = ensured?.pet?.pet_id || petsData[0].id;
+        const petMeta = (petsData as Pet[]).find((p) => p.id === petId) || petsData[0];
         setStudentPet({
-          id: '',
+          id: ensured?.pet?.id || '',
           student_id: profile.id,
-          pet_id: randomPet.id,
-          growth_level: 1,
-          growth_value: 0,
+          pet_id: petId,
+          growth_level: ensured?.pet?.growth_level || 1,
+          growth_value: ensured?.pet?.growth_value || 0,
         } as StudentPet);
-        setPetDetails(randomPet as Pet);
+        setPetDetails(petMeta as Pet);
       }
       if (foodsData) setFoods(foodsData as PetFood[]);
       if (tipsData) setTips(tipsData as PetTip[]);
@@ -104,7 +105,8 @@ export const PetModule: React.FC = () => {
   const getPetImage = () => {
     if (!petDetails || !studentPet) return null;
     const displayLevel = studentPet.display_level || studentPet.growth_level || 1;
-    const stage = Math.min(displayLevel, levelConfig.maxStage);
+    // 形象只看「阶段」：level 可能已经 16 级了，但阶段封顶在第 5 形态，图也只有 5 张
+    const stage = petStageOf(displayLevel, levelConfig.maxStage);
     switch (stage) {
       case 1: return petDetails.image_level_1;
       case 2: return petDetails.image_level_2;
@@ -183,7 +185,9 @@ export const PetModule: React.FC = () => {
       growth_value: currentGrowthValue,
     });
 
-    setShowAdoptModal(false);
+    // 这里原本还有一行 `setShowAdoptModal(false)` —— 该 setter 从未定义过（没有 showAdoptModal 状态，
+    // 也没有对应的弹窗），首次领养走到这里会抛 ReferenceError，弹窗关不掉、fetchData 也执行不到。
+    // 领养/换养共用同一个选择弹窗（showChangePetModal），下一行已经在关它，故直接删掉那行。
     setShowChangePetModal(false);
     fetchData();
   };
@@ -246,11 +250,14 @@ export const PetModule: React.FC = () => {
       // 检查是否升级
       if (result.data?.level_up) {
         const newLevel = result.data.pet?.growth_level || studentPet.growth_level + 1;
-        const newStage = Math.min(newLevel, levelConfig.maxStage);
-        const oldStage = Math.min(studentPet.growth_level || 1, levelConfig.maxStage);
+        // 进化动画只在「阶段」变化时触发（等级一直涨、无上限，阶段封顶在第 5 形态）
+        const newStage = petStageOf(newLevel, levelConfig.maxStage);
+        const oldStage = petStageOf(studentPet.growth_level || 1, levelConfig.maxStage);
         // 只有阶段（形态）变化时才触发进化动画
         if (newStage > oldStage) {
-          setEvolvedLevel(newStage);
+          // ⛔ 传给进化动画的是**真实等级 newLevel**（无上限），不是阶段 newStage；
+          //    动画内部自己按 min(等级,5) 取阶段名，两边口径才和这里一致。
+          setEvolvedLevel(newLevel);
           setShowEvolution(true);
           setTimeout(() => {
             setShowEvolution(false);
@@ -282,11 +289,12 @@ export const PetModule: React.FC = () => {
         .update({ growth_value: newGrowth, growth_level: newLevel })
         .eq('id', studentPet.id);
 
-      const newStage = Math.min(newLevel, levelConfig.maxStage);
-      const oldStage = Math.min(studentPet.growth_level || 1, levelConfig.maxStage);
+      const newStage = petStageOf(newLevel, levelConfig.maxStage);
+      const oldStage = petStageOf(studentPet.growth_level || 1, levelConfig.maxStage);
       // 只有阶段（形态）变化时才触发进化动画
       if (newStage > oldStage) {
-        setEvolvedLevel(newStage);
+        // 同上：传真实等级，阶段名由 EvolutionEffect 自己按 min(等级,5) 推导
+        setEvolvedLevel(newLevel);
         setShowEvolution(true);
         setTimeout(() => {
           setShowEvolution(false);
@@ -305,8 +313,8 @@ export const PetModule: React.FC = () => {
   };
 
   const currentLevel = studentPet?.growth_level || 1;
-  const currentStage = Math.min(currentLevel, levelConfig.maxStage);
-  const stageName = PET_STAGE_NAMES[currentStage - 1] || `阶段${currentStage}`;
+  const currentStage = petStageOf(currentLevel, levelConfig.maxStage);
+  const stageName = petStageName(currentLevel, levelConfig.maxStage);
 
   // 计算当前等级的进度
   const currentLevelMinGrowth = getCumulativeThresholdForLevel(currentLevel, levelConfig.baseThreshold, levelConfig.increment);
@@ -345,7 +353,10 @@ export const PetModule: React.FC = () => {
       <EvolutionEffect
         show={showEvolution}
         level={evolvedLevel}
-        petImageUrl={petImage}
+        maxStage={levelConfig.maxStage}
+        // 形象图用**新阶段**的（evolvedLevel 是真实等级，按统一口径换算成阶段再取图）；
+        // 以前传的是当前状态的 petImage（还是旧阶段），进化动画里看到的其实是进化前的形象。
+        petImageUrl={getFormImage(petStageOf(evolvedLevel, levelConfig.maxStage))}
         petName={petDetails?.name || '萌宠'}
         onComplete={() => setShowEvolution(false)}
       />

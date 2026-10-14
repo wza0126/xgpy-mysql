@@ -415,13 +415,26 @@ const METRIC_DEFS = {
   pet_level: {
     label: '宠物等级',
     unit: '级',
-    hint: '当前宠物等级（读 profiles.pet_level）',
+    hint: '当前宠物等级（读 student_pets.growth_level，与萌宠模块同源；等级无上限）',
     scope: 'total',
     series: 'pet',
     params: [],
     async calc(pool, studentId) {
+      // ⛔ 口径（老师 2026-10-14 明确）：宠物等级是**学生级的唯一值** ——
+      //    一个学生只有一个宠物等级，**不存在「几只不同等级的宠物」**。
+      //    student_pets 里的多行不是「多只不同等级的宠物」，正常流程下一人只有一行
+      //    （换养走的是「删除旧行 + 插入新行并继承 growth_level/growth_value」）；
+      //    「形态」（想显示第几阶段的形状）才是按行选的，存在 display_level 列里。
+      //    所以这里取的是「该学生的宠物等级」这一个值，用 MAX 只是为了在历史重复行残留时
+      //    也能稳定取到同一个值（重复行是同一次自动领养竞态留下的，等级本应相同）。
+      //
+      // ⛔ 真源是 student_pets.growth_level，**不是** profiles.pet_level：
+      //    profiles.pet_level 是 019/020 迁移一次性回填的历史缓存列，之后长期没有任何代码写入它，
+      //    会永久停在回填时的值（实测学生 a 实际 16 级、profiles.pet_level 却仍是 5），
+      //    表现为「任务系统里宠物等级 5 级封顶」。现在 feed-pet 已顺手刷新它，但它仍只是缓存。
+      //    等级本身无上限（阶段=min(等级,max_stage)），所以这里不能加任何 MIN/LEAST 截断。
       const c = await scalar(pool,
-        'SELECT COALESCE(pet_level, 1) AS c FROM profiles WHERE id = ?',
+        'SELECT COALESCE(MAX(growth_level), 1) AS c FROM student_pets WHERE student_id = ?',
         [studentId], 'c');
       return { value: c };
     },

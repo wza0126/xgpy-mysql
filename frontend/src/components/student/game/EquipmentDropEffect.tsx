@@ -11,6 +11,17 @@ export interface DroppedEquipment {
 
 const DISPLAY_DURATION = 2000;
 
+/**
+ * 装备掉落弹窗。
+ *
+ * ⛔ 性能铁律（2026-10-14，配合 CritEffect 一起修「暴击后卡顿」）：
+ *    这里原先有**三处 `repeat: Infinity`**，其中一处还是 `blur-2xl`（40px 高斯模糊）的
+ *    `absolute inset-0` 光晕在无限做 opacity+scale 动画 —— 模糊层每帧重新栅格化，
+ *    是这套「暴击/掉装备」特效里最贵的一项。暴击与掉装备常常同一刻发生，
+ *    叠加剧场就是合成器被压住、滚轮失灵、要最小化复原才恢复。
+ *    现在：光晕改成**一次性淡入后静止**（视觉上仍是那团金色辉光），
+ *    流光扫过与图标浮动改成有限次数（不再永久跑），并给动画层标 willChange/contain。
+ */
 export const EquipmentDropEffect: React.FC = () => {
   const lastEvent = useGameEventStore((s) => s.lastEvent);
   const eventCount = useGameEventStore((s) => s.eventCount);
@@ -62,35 +73,41 @@ export const EquipmentDropEffect: React.FC = () => {
           transition={{ type: 'spring', stiffness: 300, damping: 20 }}
           className="fixed top-1/4 left-1/2 -translate-x-1/2 z-[9999] pointer-events-none"
         >
+          {/* 金色辉光：一次性淡入后**静止**（原来是 repeat:Infinity 的 40px 模糊层无限动画，
+              每帧重栅格化，是暴击时刻最贵的一笔开销）。 */}
           <motion.div
-            initial={{ opacity: 0, scale: 0.8 }}
-            animate={{ opacity: [0, 1, 0.6, 1], scale: [0.8, 1.1, 1] }}
-            transition={{ duration: 1.5, repeat: Infinity, repeatType: 'reverse' }}
-            className="absolute inset-0 rounded-3xl bg-gradient-to-r from-amber-300 to-yellow-400 blur-2xl opacity-70"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 0.7 }}
+            transition={{ duration: 0.45, ease: 'easeOut' }}
+            className="absolute inset-0 rounded-3xl bg-gradient-to-r from-amber-300 to-yellow-400 blur-2xl"
+            // ⚠️ 不要加 contain:'paint' —— 会把 blur 外溢的辉光裁掉
+            style={{ willChange: 'opacity' }}
           />
 
           <div
             className="relative flex flex-col items-center px-10 py-8 rounded-3xl shadow-2xl bg-gradient-to-r from-amber-400 to-yellow-500 text-white min-w-[320px] overflow-hidden"
           >
+            {/* 流光扫过：跑 2 次就停（原来 repeat:Infinity 会一直扫） */}
             <motion.div
               initial={{ x: '-100%' }}
               animate={{ x: '100%' }}
-              transition={{ duration: 1.2, repeat: Infinity, repeatDelay: 0.5 }}
+              transition={{ duration: 1.2, repeat: 1, repeatDelay: 0.4 }}
               className="absolute top-0 left-0 w-1/2 h-full bg-gradient-to-r from-transparent via-white/30 to-transparent skew-x-12"
             />
 
+            {/* 图标：进入弹跳 + 轻微浮动 2 次后停（原来 y 是 repeat:Infinity） */}
             <motion.div
               initial={{ scale: 0, rotate: -30 }}
               animate={{
                 scale: [0, 1.3, 1],
                 rotate: [ -30, 10, 0],
-                y: [0, -8, 0],
+                y: [0, -8, 0, -8, 0],
               }}
               transition={{
                 duration: 0.8,
                 scale: { times: [0, 0.6, 1], type: 'spring', stiffness: 400 },
                 rotate: { times: [0, 0.6, 1] },
-                y: { duration: 2, repeat: Infinity, repeatType: 'reverse' },
+                y: { duration: 2.4, delay: 0.8, repeat: 1, repeatType: 'reverse' },
               }}
               className="text-7xl mb-3 drop-shadow-lg"
             >

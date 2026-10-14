@@ -54,6 +54,11 @@ export const BuffAura: React.FC<BuffAuraProps> = ({ buffs }) => {
         style={{
           background: `radial-gradient(circle, ${aura.color}33 0%, ${aura.color}1a 50%, transparent 70%)`,
           boxShadow: `0 0 20px ${aura.color}22, 0 0 40px ${aura.color}11`,
+          // ⛔ 这个光环是**常驻**的（buff 生效期间一直在），动画是 repeat:Infinity 的 opacity 脉冲。
+          //    没有 willChange 时，浏览器有可能每帧连带把 radial-gradient + 双层 boxShadow 一起重绘；
+          //    标上 willChange 后它稳定在一个独立合成层里只做合成器动画（不重绘）。
+          //    ⚠️ 这里**不要**加 contain:'paint' —— 那会把元素自身外溢的 boxShadow 辉光裁掉。
+          willChange: 'opacity',
         }}
       />
     </AnimatePresence>

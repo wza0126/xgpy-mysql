@@ -6,6 +6,7 @@ import { BuffInfo, HonorEvent } from '../../../hooks/useGameSystem';
 import { PetSprite, PetMood } from './PetSprite';
 import { BuffAura } from './BuffAura';
 import { PetBubble } from './PetBubble';
+import { petStageOf } from '../../../types';
 
 interface PetCompanionProps {
   isCorrect: boolean | null;
@@ -69,9 +70,17 @@ export const PetCompanion: React.FC<PetCompanionProps> = ({
         setMaxStage(currentMaxStage);
 
         if (studentPetData) {
-          const displayLevel = studentPetData.display_level || studentPetData.growth_level || 1;
-          const stage = Math.min(displayLevel, currentMaxStage);
-          setPetLevel(stage);
+          // ⛔ 必须把「等级」和「阶段」分开，绝不能混用：
+          //    · 等级 realLevel = growth_level，**无上限**，只负责显示 `Lv.X`；
+          //    · 阶段 stage = min(形态(display_level) 或 等级, max_stage)，只负责挑形象图片。
+          //    这里以前把 stage 直接 setPetLevel、再传给 PetSprite 渲染 `Lv.{level}`，
+          //    结果练习界面 / 错题本的等级**永远封顶在 5**（实测学生 a 真实 16 级却显示 Lv.5）。
+          //    现在与萌宠模块 PetModule 完全同口径：`Lv.{growth_level} {PET_STAGE_NAMES[min(等级,5)-1]}`。
+          const realLevel = studentPetData.growth_level || 1;
+          const formLevel = studentPetData.display_level || realLevel;
+          // 阶段只用于挑形象图片（走统一入口 petStageOf）；等级单独用 realLevel 显示
+          const stage = petStageOf(formLevel, currentMaxStage);
+          setPetLevel(realLevel);
 
           const { data: petData } = await backendClient
             .from('pets')

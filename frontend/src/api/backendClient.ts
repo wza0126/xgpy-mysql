@@ -189,6 +189,14 @@ class MariaDBClient {
     });
   }
 
+  // 业务API - 确保学生有且只有一只宠物（幂等；领养已废除，账号启用即自动随机选一只）
+  async businessEnsurePet(data: any = {}) {
+    return fetchApi('/api/business/ensure-pet', {
+      method: 'POST',
+      body: JSON.stringify(data)
+    });
+  }
+
   // 业务API - 宠物喂食
   async businessFeedPet(data) {
     return fetchApi('/api/business/feed-pet', {
@@ -731,6 +739,7 @@ export interface BackendClient {
   importData(jsonData: any): Promise<any>;
   rpc(functionName: string, params?: any): Promise<BackendResult<any>>;
   // 业务 API：运行时由 MariaDBClient 实现，这里补齐声明以消除调用处的类型噪声
+  businessEnsurePet(data?: any): Promise<any>;
   businessSubmitAnswer(data: any): Promise<any>;
   businessSubmitTest(data: any): Promise<any>;
   businessSubmitExam(data: any): Promise<any>;

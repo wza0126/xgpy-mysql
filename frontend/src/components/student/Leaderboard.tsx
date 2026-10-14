@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
 import { API_CONFIG } from '../../api/config';
 import { useAuth } from '../../hooks/useAuth';
-import { PET_STAGE_NAMES } from '../../types';
+import { petStageName } from '../../types';
 
 interface LeaderboardItem {
   student_id: string;
@@ -132,10 +132,9 @@ export const Leaderboard: React.FC = () => {
     return rank;
   };
 
-  const getPetStageName = (level: number) => {
-    const stage = Math.min(level, maxStage);
-    return PET_STAGE_NAMES[stage - 1] || `阶段${stage}`;
-  };
+  // 阶段名走统一入口（与萌宠模块同口径）；等级本身无上限，只有阶段封顶在 maxStage，
+  // 所以 Lv.16 显示「究极体」而不是「阶段16」。
+  const getPetStageName = (level: number) => petStageName(level, maxStage);
 
   if (loading) {
     return (

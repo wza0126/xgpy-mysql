@@ -121,6 +121,29 @@ export function calculatePetLevel(growthValue: number, baseThreshold: number, in
   }
 }
 
+// ==================== 宠物「等级 / 阶段」统一口径（唯一入口） ====================
+// ⛔ 所有要展示宠物等级 / 阶段的地方都必须走这两个函数，别再各写各的 `Math.min(level, maxStage)`。
+//
+// 规则（与萌宠模块 PetModule 完全一致，改之前先确认它）：
+//   · **等级 level 无上限** —— 喂食一直涨，可以到 6、7、…、20 级，任何地方都不许截断；
+//   · **阶段 stage = clamp(level, 1, maxStage)** —— 默认 5 个阶段，
+//     所以从 6 级开始阶段一直是第 5 阶段「究极体」，但 `Lv.` 后面的数字继续往上走；
+//   · 阶段只用来**挑形象图片 / 显示阶段名**，绝不能拿去当等级数字显示。
+//
+// 踩过的坑（2026-10-14 修）：
+//   · PetCompanion 把 stage 当 level 传给 PetSprite 渲染 `Lv.X` → 练习界面/错题本等级永远封顶 5；
+//   · 任务系统的 pet_level 指标读的是 profiles.pet_level 这个没人写的死列 → 同样封顶 5。
+export function petStageOf(level: number, maxStage: number = PET_STAGE_NAMES.length): number {
+  const lv = Number.isFinite(level) ? Math.floor(level) : 1;
+  return Math.min(Math.max(lv, 1), Math.max(1, maxStage));
+}
+
+// 阶段名（幼年期 / 成长期 / 成熟期 / 完全体 / 究极体）；超过 maxStage 一律取最后一个阶段
+export function petStageName(level: number, maxStage: number = PET_STAGE_NAMES.length): string {
+  const s = petStageOf(level, maxStage);
+  return PET_STAGE_NAMES[s - 1] || `阶段${s}`;
+}
+
 export const POINTS_CORRECT = 10;
 export const POINTS_WRONG = -5;
 export const PET_ADOPTION_THRESHOLD = 100;
