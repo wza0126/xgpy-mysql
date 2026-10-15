@@ -26,6 +26,15 @@ interface PythonDraft {
   task_id?: string;
 }
 
+/** 填空题「逐空判分结果」：由后端 python-grader.gradeFillBlanks 生成，提交评分后随 grading 回传 */
+interface BlankResult {
+  index: number;
+  student_answer: string;
+  correct_answers: string[];
+  is_correct: boolean;
+  weight?: number;
+}
+
 interface PythonSubmission {
   id: string;
   code: string;
@@ -40,6 +49,7 @@ interface PythonSubmission {
     logic_score?: number;
     comment?: string;
     is_ai_graded?: boolean;
+    blank_results?: BlankResult[] | string;
   };
 }
 
@@ -64,6 +74,7 @@ export const PythonProgramming: React.FC = () => {
   const [submission, setSubmission] = useState<PythonSubmission | null>(null);
   const [loading, setLoading] = useState(true);
   const [blankAnswers, setBlankAnswers] = useState<string[]>([]);
+  const [hoverBlank, setHoverBlank] = useState<number | null>(null);
   const codeEditorRef = useRef<HTMLTextAreaElement>(null);
 
   // 扫描代码中的 input() 调用次数（忽略注释行）
@@ -115,6 +126,7 @@ export const PythonProgramming: React.FC = () => {
                   comment: sub.comment || '',
                   is_ai_graded: sub.is_ai_graded,
                   manually_adjusted: sub.manually_adjusted || false,
+                  blank_results: sub.blank_results,
                 }
               };
             }
@@ -204,6 +216,7 @@ export const PythonProgramming: React.FC = () => {
 
   const selectTask = async (task: PythonTask) => {
     setSelectedTask(task);
+    setHoverBlank(null);
     // 填空题保持在「编程填空」标签页，不跳转到「作业任务」
     if (task.task_type !== 'fill_blank') {
       setActiveTab('tasks');
@@ -234,6 +247,7 @@ export const PythonProgramming: React.FC = () => {
               comment: submissionData.comment || '',
               is_ai_graded: submissionData.is_ai_graded,
               manually_adjusted: submissionData.manually_adjusted || false,
+              blank_results: submissionData.blank_results,
             }
           };
         }
@@ -284,6 +298,23 @@ export const PythonProgramming: React.FC = () => {
     setCode(assembled);
   };
 
+  // 填空题逐空判分结果：提交并评分后由 grading.blank_results 回传（未提交 / 老记录为空数组）
+  // 兼容字符串形态（提交接口回执里是 JSON 字符串，详情接口里已是数组）
+  const blankResults: BlankResult[] = (() => {
+    const raw: any = submission?.grading?.blank_results;
+    if (Array.isArray(raw)) return raw as BlankResult[];
+    if (typeof raw === 'string' && raw.trim()) {
+      try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? (parsed as BlankResult[]) : [];
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  })();
+  const correctBlankCount = blankResults.filter((r) => r.is_correct).length;
+
   const renderFillBlankEditor = (template: string, answers: string[]) => {
     const lines = template.split('\n');
     let answerIdx = 0;
@@ -299,17 +330,58 @@ export const PythonProgramming: React.FC = () => {
           parts.push(<span key={`text-${lineIdx}-${lastIdx}`}>{line.substring(lastIdx, match.index)}</span>);
         }
         const currentIdx = answerIdx;
+        // 该空的判分结果：只有「已提交且已评分」才有 → 决定颜色与悬浮提示
+        const result = blankResults[currentIdx];
+        const graded = !!result;
+        const correct = !!result?.is_correct;
+        const inputClass = graded
+          ? correct
+            ? 'bg-green-900 text-green-100 border-green-400'
+            : 'bg-red-900 text-red-100 border-red-400'
+          : 'bg-yellow-900 text-yellow-100 border-yellow-600';
         parts.push(
-          <input
-            key={`input-${lineIdx}-${match.index}`}
-            type="text"
-            value={answers[currentIdx] || ''}
-            onChange={(e) => updateBlankAnswer(currentIdx, e.target.value)}
-            disabled={isSubmitted}
-            className="inline-block mx-1 px-2 py-0.5 bg-yellow-900 text-yellow-100 border border-yellow-600 rounded font-mono text-sm min-w-16 text-center focus:outline-none focus:ring-1 focus:ring-yellow-400 disabled:opacity-70"
-            style={{ width: Math.max(60, (answers[currentIdx]?.length || 4) * 10 + 16) }}
-            spellCheck={false}
-          />
+          <span
+            key={`blank-${lineIdx}-${match.index}`}
+            className="relative inline-block"
+            onMouseEnter={() => setHoverBlank(currentIdx)}
+            onMouseLeave={() => setHoverBlank((cur) => (cur === currentIdx ? null : cur))}
+          >
+            <input
+              type="text"
+              value={answers[currentIdx] || ''}
+              onChange={(e) => updateBlankAnswer(currentIdx, e.target.value)}
+              disabled={isSubmitted}
+              className={`inline-block mx-1 px-2 py-0.5 border rounded font-mono text-sm min-w-16 text-center focus:outline-none focus:ring-1 focus:ring-yellow-400 ${
+                graded ? 'disabled:opacity-100' : 'disabled:opacity-70'
+              } ${inputClass}`}
+              style={{ width: Math.max(60, (answers[currentIdx]?.length || 4) * 10 + 16) }}
+              spellCheck={false}
+            />
+            {graded && (
+              <span className={`text-xs ${correct ? 'text-green-400' : 'text-red-400'}`}>
+                {correct ? '✓' : '✗'}
+              </span>
+            )}
+            {graded && hoverBlank === currentIdx && (
+              <span className="absolute left-1/2 -translate-x-1/2 top-full mt-1 z-30 w-max max-w-xs whitespace-normal break-words px-3 py-2 rounded-lg bg-gray-800 border border-gray-500 shadow-xl text-xs leading-5 text-gray-100 pointer-events-none">
+                <span className={`font-bold ${correct ? 'text-green-400' : 'text-red-400'}`}>
+                  第 {result.index} 空 · {correct ? '✅ 正确' : '❌ 错误'}
+                </span>
+                <span className="block mt-1 text-gray-300">
+                  正确答案：
+                  <span className="font-mono text-green-300">
+                    {result.correct_answers?.length ? result.correct_answers.join('  或  ') : '（未配置）'}
+                  </span>
+                </span>
+                {!correct && (
+                  <span className="block text-gray-400">
+                    你填的是：
+                    <span className="font-mono text-red-300">{result.student_answer || '（空）'}</span>
+                  </span>
+                )}
+              </span>
+            )}
+          </span>
         );
         answerIdx++;
         lastIdx = match.index + match[0].length;
@@ -668,9 +740,18 @@ export const PythonProgramming: React.FC = () => {
                         : '已提交 | 待批改'}
                     </span>
                   </div>
+                  {selectedTask.task_type === 'fill_blank' && blankResults.length > 0 && (
+                    <div className="mt-2 text-sm text-blue-800">
+                      共 {blankResults.length} 个空，答对
+                      <span className="font-bold text-green-600 mx-1">{correctBlankCount}</span>个 ——
+                      绿色为正确、红色为错误，<span className="font-medium">鼠标移到空格上可查看正确答案</span>。
+                    </div>
+                  )}
                   {submission.grading?.comment && (
                     <div className="mt-2 pt-2 border-t border-blue-200">
-                      <div className="text-xs text-blue-600 font-medium mb-1">AI评语</div>
+                      <div className="text-xs text-blue-600 font-medium mb-1">
+                        {selectedTask.task_type === 'fill_blank' ? '评分说明' : 'AI评语'}
+                      </div>
                       <div className="text-sm text-blue-800 whitespace-pre-wrap">{submission.grading.comment}</div>
                     </div>
                   )}
@@ -728,7 +809,11 @@ export const PythonProgramming: React.FC = () => {
                 </div>
               </div>
               {selectedTask?.task_type === 'fill_blank' && selectedTask.blank_template ? (
-                <div className="flex-1 w-full p-4 font-mono text-sm bg-gray-900 text-gray-100 overflow-auto">
+                <div
+                  className={`flex-1 w-full p-4 font-mono text-sm bg-gray-900 text-gray-100 overflow-auto ${
+                    blankResults.length > 0 ? 'pb-24' : ''
+                  }`}
+                >
                   {renderFillBlankEditor(selectedTask.blank_template, blankAnswers)}
                 </div>
               ) : (

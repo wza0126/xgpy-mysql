@@ -6,11 +6,33 @@ import { backendClient } from '../../api/backendClient';
 import { useDesktopStore } from '../../store/desktopStore';
 import { useGameEventStore } from '../../store/gameEventStore';
 
-/** 测试 / 课堂任务窗口打开期间的答疑拦截提示语 */
-export const EXAM_QA_BLOCKED_MESSAGE = '测试期间禁止答疑';
+/** 会触发「暂停答疑」的模块窗口：id → 面向学生的称呼 */
+const EXAM_BLOCKING_WINDOWS: { id: string; label: string }[] = [
+  { id: 'test', label: '测试' },
+  { id: 'taskCenter', label: '任务中心' },
+];
 
-/** 会触发「禁止答疑」的模块窗口 id：测试、课堂任务 */
-const EXAM_BLOCKING_WINDOW_IDS = ['test', 'taskCenter'];
+/** 把 '测试、任务中心' 变成 '「测试」和「任务中心」' */
+const quoteWindows = (labels: string) =>
+  labels.split('、').filter(Boolean).map((n) => `「${n}」`).join('和');
+
+/**
+ * 窗口内提示条文案：一句话讲清「为什么不能答疑」+「该怎么办」。
+ * @param labels 当前挡住答疑的窗口名，多个用「、」连接，如 '测试、任务中心'
+ */
+export function buildExamQaBlockedBanner(labels: string): string {
+  const q = quoteWindows(labels);
+  return `答疑已暂停：${q}窗口正在运行。考试与作业期间禁止使用 AI 答疑，请关闭${q}窗口后再提问（只最小化不算关闭）。`;
+}
+
+/** 发问时回的一句话（与提示条同义，避免长段落） */
+export function buildExamQaBlockedMessage(labels: string): string {
+  const q = quoteWindows(labels);
+  return `⛔ 现在不能答疑：${q}窗口正在运行。请先把它关闭，再重新发送你的问题（只「最小化」不算关闭；本次提问不扣积分）。`;
+}
+
+/** 兜底：两个窗口都开着时的提示条文案 */
+export const EXAM_QA_BLOCKED_MESSAGE = buildExamQaBlockedBanner('测试、任务中心');
 
 interface Message {
   role: 'user' | 'assistant';
@@ -41,12 +63,21 @@ interface AiQaAppProps {
 
 export function AiQaApp({ onClose, initialData }: AiQaAppProps) {
   const { user, profile, refreshProfile } = useAuth();
-  // 订阅桌面窗口状态：只要「测试」或「课堂任务」窗口处于打开状态（含最小化），即禁止答疑
-  const isExamWindowOpen = useDesktopStore((state) =>
-    state.windows.some(
-      (w) => EXAM_BLOCKING_WINDOW_IDS.includes(w.id) && w.isOpen
-    )
+  // 订阅桌面窗口状态：只要「测试」或「任务中心」窗口处于打开状态（含最小化），即暂停答疑。
+  // ⚠️ selector 必须返回**稳定值**（这里是字符串），返回新数组会让 useSyncExternalStore 反复判定「快照变化」。
+  const blockingLabels = useDesktopStore((state) =>
+    EXAM_BLOCKING_WINDOWS
+      .filter((b) => state.windows.some((w) => w.id === b.id && w.isOpen))
+      .map((b) => b.label)
+      .join('、')
   );
+  const isExamWindowOpen = blockingLabels.length > 0;
+  // 用于界面文案：「测试」和「任务中心」
+  const blockingQuoted = blockingLabels
+    .split('、')
+    .filter(Boolean)
+    .map((n) => `「${n}」`)
+    .join('和');
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState(initialData?.question || '');
   const [isLoading, setIsLoading] = useState(false);
@@ -164,13 +195,13 @@ export function AiQaApp({ onClose, initialData }: AiQaAppProps) {
 
     const question = input.trim();
 
-    // 「测试」/「课堂任务」窗口打开期间禁止答疑：
-    // 本地直接回复拦截提示，不请求接口、不消耗积分、不写入历史记录
+    // 「测试」/「任务中心」窗口打开期间暂停答疑：
+    // 本地直接回复详细的操作指引（点名是哪个窗口挡着），不请求接口、不消耗积分、不写入历史记录
     if (isExamWindowOpen) {
       setMessages([
         ...messages,
         { role: 'user', content: question },
-        { role: 'assistant', content: EXAM_QA_BLOCKED_MESSAGE }
+        { role: 'assistant', content: buildExamQaBlockedMessage(blockingLabels) }
       ]);
       setInput('');
       setError(null);
@@ -279,6 +310,16 @@ export function AiQaApp({ onClose, initialData }: AiQaAppProps) {
           </button>
         </div>
       </div>
+
+      {/* 「测试」/「任务中心」窗口打开时的提示：一句话说明为什么答不了、该怎么办 */}
+      {isExamWindowOpen && (
+        <div className="mx-4 mt-3 p-3 rounded-xl bg-red-50 border border-red-300 flex items-start gap-2">
+          <span className="text-xl flex-shrink-0 leading-none">⛔</span>
+          <p className="text-sm text-red-800 leading-relaxed">
+            {buildExamQaBlockedBanner(blockingLabels)}
+          </p>
+        </div>
+      )}
 
       {studiousBanner && (
         <div className="mx-4 mt-3 p-3 rounded-xl bg-gradient-to-r from-blue-500 to-teal-500 text-white flex items-start gap-3 shadow-md">
@@ -410,7 +451,11 @@ export function AiQaApp({ onClose, initialData }: AiQaAppProps) {
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={handleKeyDown}
-                    placeholder="请输入你的问题... (Shift+Enter换行)"
+                    placeholder={
+                      isExamWindowOpen
+                        ? `请先关闭${blockingQuoted}窗口，再提问…`
+                        : '请输入你的问题... (Shift+Enter换行)'
+                    }
                     className="aiqa-input w-full p-4 bg-transparent resize-none focus:outline-none rounded-xl"
                     rows={1}
                     disabled={isLoading}

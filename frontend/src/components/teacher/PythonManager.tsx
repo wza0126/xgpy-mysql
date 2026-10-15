@@ -183,7 +183,15 @@ export const PythonManager: React.FC = () => {
     const blankAnswers = parseJsonField(task.blank_answers);
     const blankWeights = parseJsonField(task.blank_weights);
     const requiredKeywords = parseJsonField(task.required_keywords);
-    setFormData({ ...task, blank_answers: blankAnswers, blank_weights: blankWeights, required_keywords: requiredKeywords });
+    // ⛔ class_ids 必须一并归一化成数组：后端 formatRow 解析失败时会把 JSON 字符串原样返回，
+    //    而表单里 `[...class_ids, id]` 对字符串做扩展会把它逐字符拆开（2026-10-15 修 5 条坏数据的根因）。
+    setFormData({
+      ...task,
+      class_ids: parseJsonField(task.class_ids),
+      blank_answers: blankAnswers,
+      blank_weights: blankWeights,
+      required_keywords: requiredKeywords,
+    });
     setKeywordInput(requiredKeywords.join(', '));
     setEditingId(task.id);
     setActiveTab('create');
@@ -250,6 +258,10 @@ export const PythonManager: React.FC = () => {
     try {
       const dataToSave = {
         ...formData,
+        // 双保险：提交前再确认 class_ids 是数组，绝不把字符串发给后端
+        class_ids: Array.isArray(formData.class_ids)
+          ? formData.class_ids
+          : parseJsonField(formData.class_ids),
         required_keywords: keywordInput.split(',').map(k => k.trim()).filter(Boolean)
       };
       console.log('Saving task with data:', dataToSave);
@@ -413,6 +425,12 @@ export const PythonManager: React.FC = () => {
       alert(`导出失败: ${error.message}`);
     }
   };
+
+  // class_ids 兜底归一化：后端一般已解析成数组，但历史数据 / JSON.parse 失败时会返回字符串。
+  // ⛔ 直接把字符串当数组用（`[...str, id]`）会逐字符拆开并写回库 —— 必须在这里拦死。
+  const selectedClassIds: string[] = Array.isArray(formData.class_ids)
+    ? (formData.class_ids as string[])
+    : parseJsonField(formData.class_ids);
 
   return (
     <div className="h-full flex flex-col bg-gray-50">
@@ -1069,20 +1087,19 @@ export const PythonManager: React.FC = () => {
                       <label
                         key={cls.id}
                         className={`flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer transition ${
-                          (formData.class_ids || []).includes(cls.id)
+                          selectedClassIds.includes(cls.id)
                             ? 'bg-purple-100 border-purple-500 text-purple-700'
                             : 'bg-gray-50 border-gray-300 hover:bg-gray-100'
                         }`}
                       >
                         <input
                           type="checkbox"
-                          checked={(formData.class_ids || []).includes(cls.id)}
+                          checked={selectedClassIds.includes(cls.id)}
                           onChange={(e) => {
-                            const currentClasses = formData.class_ids || [];
                             if (e.target.checked) {
-                              setFormData({ ...formData, class_ids: [...currentClasses, cls.id] });
+                              setFormData({ ...formData, class_ids: [...selectedClassIds, cls.id] });
                             } else {
-                              setFormData({ ...formData, class_ids: currentClasses.filter(id => id !== cls.id) });
+                              setFormData({ ...formData, class_ids: selectedClassIds.filter(id => id !== cls.id) });
                             }
                           }}
                           className="rounded"

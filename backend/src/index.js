@@ -1102,6 +1102,30 @@ function stripQuestionRowsForRequester(tableName, rows, req) {
   return rows.map(stripQuestionForStudent);
 }
 
+// ⛔ 学生端「python_tasks」答案脱敏。python_tasks 没有走通用表接口，两个学生端取题接口
+//    (/api/python/tasks、/api/python/tasks/:taskId) 都是 SELECT t.*，
+//    会把下面三类**答案**原样发给学生（作答前就能看到标准答案）：
+//      · blank_answers    编程填空每个空的标准答案（39 道题全有）——正是判分依据；
+//      · reference_code   编程作业的参考代码（标准答案）；
+//      · expected_output  预期输出（照着 print 出来即可满分）。
+//    作答前一律剥离；填空的**逐空对错**在提交评分后由
+//    GET /api/python/submissions/:taskId 的 grading.blank_results 回传（见 python-grader.gradeFillBlanks）。
+//    教师端有自己的 /api/python/teacher/* 接口，不受影响。
+const PY_TASK_ANSWER_FIELDS = ['blank_answers', 'reference_code', 'expected_output'];
+
+function stripPythonTaskAnswersForRequester(rows, req) {
+  if (!rows) return rows;
+  if (isTeachingRole(req && req.user && req.user.role)) return rows;
+  const list = Array.isArray(rows) ? rows : [rows];
+  const stripped = list.map((r) => {
+    if (!r || typeof r !== 'object') return r;
+    const cloned = { ...r };
+    PY_TASK_ANSWER_FIELDS.forEach((f) => { delete cloned[f]; });
+    return cloned;
+  });
+  return Array.isArray(rows) ? stripped : stripped[0];
+}
+
 // 交卷后回传本次题目的答案与解析（题目本身已对学生脱敏），供结果页回顾
 function buildRevealList(questions, serverQuestionMap) {
   if (!Array.isArray(questions) || !serverQuestionMap) return [];
@@ -7018,6 +7042,18 @@ app.get('/api/student-buffs/:studentId', async (req, res) => {
 
 // ==================== Python 编程模块 API ====================
 
+// 【显示顺序】python_tasks 的 title 形如「第07题 for循环简单入门」；编程填空(fill_blank, 01–39) 与
+// 编程作业(code, 01–11) 两个模块**各自独立编号**。这里统一按「题号数字升序」显示，取代原来的
+// created_at DESC —— 倒序会让界面顺序与标题编号正好相反（学生会先看到第12题、再第34题…）。
+// · 只提取「第」与「题」**之间**的数字：不能取最后一个「第」，因为标题自身可能含「第n个数」，
+//   例如「第20题 用迭代法求斐波那契数列的第n个数2」取最后一个「第」会提取失败（CAST→0）；
+// · 不以「第NN题」开头的自由标题（老师新建题时未编号）统一排到最后，内部再按标题字典序。
+// 用法：query += pyTaskOrderSql('t.title')  或  '... ' + pyTaskOrderSql('title')
+const pyTaskOrderSql = (col = 'title') =>
+  `ORDER BY (${col} NOT REGEXP '^第[0-9]+题') ASC, ` +
+  `CAST(SUBSTRING_INDEX(SUBSTRING(${col}, LOCATE('第', ${col}) + 1), '题', 1) AS UNSIGNED) ASC, ` +
+  `${col} ASC`;
+
 // === 学生端 API ===
 
 // 获取编程任务列表
@@ -7048,10 +7084,11 @@ app.get('/api/python/tasks', authenticate, async (req, res) => {
       params.push(JSON.stringify(profile.class_id));
     }
 
-    query += ' ORDER BY t.created_at DESC';
+    // 按标题里的题号升序（见 pyTaskOrderSql 说明），不再按创建时间倒序
+    query += ' ' + pyTaskOrderSql('t.title');
 
     const [rows] = await pool.query(query, params);
-    res.json({ data: formatRows(rows), error: null });
+    res.json({ data: stripPythonTaskAnswersForRequester(formatRows(rows), req), error: null });
   } catch (error) {
     console.error('Error in GET /api/python/tasks:', error);
     res.status(500).json({ data: [], error: error.message });
@@ -7066,7 +7103,7 @@ app.get('/api/python/tasks/:taskId', authenticate, async (req, res) => {
     if (rows.length === 0) {
       return res.status(404).json({ data: null, error: 'Task not found' });
     }
-    res.json({ data: formatRow(rows[0]), error: null });
+    res.json({ data: stripPythonTaskAnswersForRequester(formatRow(rows[0]), req), error: null });
   } catch (error) {
     console.error('Error in GET /api/python/tasks/:id:', error);
     res.status(500).json({ data: null, error: error.message });
@@ -7466,8 +7503,9 @@ app.post('/api/python/teacher/tasks', authenticate, requireTeachingRole, async (
 // 教师获取任务列表
 app.get('/api/python/teacher/tasks', authenticate, requireTeachingRole, async (req, res) => {
   try {
+    // 按标题里的题号升序（见 pyTaskOrderSql 说明），与学生端保持一致
     const [rows] = await pool.query(
-      'SELECT * FROM python_tasks ORDER BY created_at DESC'
+      'SELECT * FROM python_tasks ' + pyTaskOrderSql('title')
     );
     res.json({ data: formatRows(rows), error: null });
   } catch (error) {
@@ -7766,7 +7804,8 @@ app.get('/api/python/teacher/export', authenticate, requireTeachingRole, async (
   try {
     const { class_id } = req.query;
 
-    let taskQuery = 'SELECT id, title, total_score, task_type FROM python_tasks WHERE is_active = TRUE ORDER BY created_at ASC';
+    // 导出表的列顺序也按题号升序（原为 created_at ASC，与标题编号顺序不一致）
+    let taskQuery = 'SELECT id, title, total_score, task_type FROM python_tasks WHERE is_active = TRUE ' + pyTaskOrderSql('title');
     const taskParams = [];
     const [taskRows] = await pool.query(taskQuery, taskParams);
     const tasks = taskRows.map(t => ({ id: t.id, title: t.title, total_score: t.total_score, task_type: t.task_type }));
