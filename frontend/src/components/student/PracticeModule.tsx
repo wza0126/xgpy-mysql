@@ -181,7 +181,6 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
 
   useEffect(() => {
     fetchInitialData();
-    fetchMasterThreshold();
     fetchPointsConfig();
   }, []);
 
@@ -206,10 +205,10 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
     return () => window.removeEventListener('openPracticeWithCluster', handler);
   }, []);
 
-  // 在显示设置界面时重新获取配置
+  // 在显示设置界面时重新获取配置（每次回到设置页都刷一次统计，练完题回来数字是新的）
   useEffect(() => {
     if (showConfig) {
-      fetchMasterThreshold();
+      fetchPracticeStats();
       fetchPointsConfig();
     }
   }, [showConfig]);
@@ -222,71 +221,64 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
 
   useEffect(() => {
     if (profile) {
-      fetchStats();
+      // ⛔ 必须在这里拉一次：profile 就绪前 showConfig 的 effect 已经跑过了，
+      //    那时 if(profile) 不成立 → 已掌握会一直停在初始的 0，要等开始练习/提交后才正常
+      //    （用户 2026-10-18 反馈：「练习模块刚打开时已掌握题数是 0」）。
+      fetchPracticeStats();
     }
   }, [profile]);
 
-  const fetchMasterThreshold = async () => {
-    const { data } = await backendClient.from('system_config').select('*');
-    if (data) {
-      const config = data.find((item: any) => (item.key || item.config_key) === 'master_question_threshold');
-      if (config) {
-        let value = config.value;
-        if (typeof config.value === 'string') {
-          try {
-            value = JSON.parse(config.value);
-          } catch {}
-        }
-        const finalValue = typeof value === 'object' && value !== null ? value.value : value;
-        setMasterThreshold(finalValue || 3);
-        // 阈值加载完成后，计算已掌握题目数
-        if (profile) {
-          fetchMasteredQuestions();
-        }
+  // ===== 练习统计（服务端聚合，一次请求）=====
+  // ⛔ 不要改回「前端拉 student_answers 全表自己算」：通用表接口 /api/query 不支持列投影
+  //    （.select('is_correct') 仍然整行返回），实测 1073 行 ≈ 364KB，提交后还要读两遍，
+  //    而且响应体积随答题记录**线性增长**。现在服务端两个聚合查询，响应约 3KB。
+  // 返回值为「已掌握题号集合」，调用方（开始练习）直接拿去过滤题目队列。
+  const statsInflightRef = useRef<Promise<Set<string>> | null>(null);
+
+  const fetchPracticeStats = (): Promise<Set<string>> => {
+    const empty = new Set<string>();
+    if (!profile) return Promise.resolve(empty);
+    // 同一时刻只发一次（挂载 effect 与 profile effect 可能同时触发）
+    if (statsInflightRef.current) return statsInflightRef.current;
+
+    const p = (async () => {
+      try {
+        const r: any = await backendClient.get('/api/student/practice-stats');
+        const d = r?.data;
+        if (!d) return empty;
+        const total = Number(d.total) || 0;
+        const correct = Number(d.correct) || 0;
+        const mastered = new Set<string>((d.mastered_question_ids || []).map(String));
+        setStats({
+          total,
+          correct,
+          wrong: Number(d.wrong) || Math.max(0, total - correct),
+          accuracy: Number(d.accuracy) || 0,
+          mastered: Number(d.mastered) || mastered.size,
+        });
+        setMasteredQuestionIds(mastered);
+        // 阈值由服务端按同一口径给出，前端不再单独查 system_config
+        //（也就没有「阈值还没到就先算一遍」那个时序坑了）
+        if (d.master_threshold) setMasterThreshold(Number(d.master_threshold) || 3);
+        return mastered;
+      } catch (e) {
+        console.error('拉取练习统计失败:', e);
+        return empty;
+      } finally {
+        statsInflightRef.current = null;
       }
-    }
+    })();
+    statsInflightRef.current = p;
+    return p;
   };
 
-  const getQuestionCorrectCount = async (questionId: string): Promise<number> => {
-    if (!profile) return 0;
-    const { data } = await backendClient
-      .from('student_answers')
-      .select('id')
-      .eq('student_id', profile.id)
-      .eq('question_id', questionId)
-      .eq('is_correct', true)
-      .eq('source', 'practice');
-    return data?.length || 0;
-  };
-
-  const fetchMasteredQuestions = async (): Promise<Set<string>> => {
-    const mastered = new Set<string>();
-    if (!profile) return mastered;
-
-    const { data } = await backendClient
-      .from('student_answers')
-      .select('question_id, is_correct')
-      .eq('student_id', profile.id)
-      .eq('source', 'practice');
-
-    if (data) {
-      const correctCounts: Record<string, number> = {};
-      data.forEach((record) => {
-        if (record.is_correct) {
-          correctCounts[record.question_id] = (correctCounts[record.question_id] || 0) + 1;
-        }
-      });
-      Object.entries(correctCounts).forEach(([questionId, count]) => {
-        if (count >= masterThreshold) {
-          mastered.add(questionId);
-        }
-      });
-      setMasteredQuestionIds(mastered);
-      setStats((prev) => ({ ...prev, mastered: mastered.size }));
-    }
-    return mastered;
-  };
-
+  /**
+   * 题库池（保留现状但记录隐患）：
+   * 通用表接口不支持列投影，这里拿到的是 questions 整行（实测 1004 行 ≈ 1.4MB），
+   * 其中 explanation/created_by/时间戳等字段练习选题目时用不到。
+   * 彻底解决要做「服务端按筛选条件出题」的分页接口（配置页只要章节计数），
+   * 属于独立改造，见 2026-10-18 记忆里的待办。
+   */
   const fetchInitialData = async () => {
     // ⛔ 服务端就把操作题（type='wps_op' / 'access_op'）挡掉：它们走**独立入口**（桌面「操作题」），
     //    没有 options/answers，混进普通练习池会被渲染成一道无法作答的空白题。
@@ -325,25 +317,6 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
     setLoading(false);
   };
 
-  const fetchStats = async () => {
-    if (!profile) return;
-    const { data } = await backendClient
-      .from('student_answers')
-      .select('is_correct')
-      .eq('student_id', profile.id);
-    if (data) {
-      const total = data.length;
-      const correct = data.filter((a) => a.is_correct).length;
-      setStats((prev) => ({
-        total,
-        correct,
-        wrong: total - correct,
-        accuracy: total > 0 ? Math.round((correct / total) * 100) : 0,
-        mastered: prev.mastered,
-      }));
-    }
-  };
-
   // 应用当前筛选条件（标签 + AI 聚类一级/二级）到题目列表
   const applyFiltersToList = (list: Question[]): Question[] => {
     let filtered = [...list];
@@ -374,7 +347,8 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
   };
 
   const applyFiltersAndStart = async () => {
-    const mastered = await fetchMasteredQuestions();
+    // 开始前先拿一次最新「已掌握题号」（服务端算，避免把已掌握的题再排进队列）
+    const mastered = await fetchPracticeStats();
     let filtered = [...questions];
 
     filtered = filtered.filter((q) => !mastered.has(q.id));
@@ -583,14 +557,9 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
         return;
       }
 
-      if (correct) {
-        const newMastered = new Set(masteredQuestionIds);
-        const currentCorrectCount = await getQuestionCorrectCount(currentQuestion.id);
-        if (currentCorrectCount >= masterThreshold) {
-          newMastered.add(currentQuestion.id);
-          setMasteredQuestionIds(newMastered);
-        }
-      }
+      // ⛔ 这里不再单独查一次「本题答对次数」：提交回执里已经带 question_correct_count / mastered
+      //    （服务端在同一事务里算好），上面 gateData 分支已把达到掌握标准的题移出队列。
+      //    原来那次 getQuestionCorrectCount 会把本题的历史答题行整行拉回来，纯属多余往返。
 
       if (!correct) {
         const { data: existing } = await backendClient
@@ -622,8 +591,8 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
       }));
 
       refreshProfile();
-      fetchStats();
-      fetchMasteredQuestions();
+      // 一次请求刷新统计 + 已掌握题号（原来这里是 fetchStats + fetchMasteredQuestions 两次全表读）
+      fetchPracticeStats();
     } finally {
       submittingRef.current = false;
       setIsSubmitting(false);
@@ -723,6 +692,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
           <div className="bg-amber-50 rounded-lg p-4 text-center">
             <p className="text-sm text-gray-600">已掌握</p>
             <p className="text-2xl font-bold text-amber-600">{stats.mastered}</p>
+            <p className="mt-0.5 text-[11px] leading-tight text-amber-700/70">同题答对 {masterThreshold} 次</p>
           </div>
           <div className="bg-green-50 rounded-lg p-4 text-center">
             <p className="text-sm text-gray-600">做对</p>

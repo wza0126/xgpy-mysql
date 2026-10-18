@@ -10,6 +10,7 @@ const { registerWpsOp } = require('./wps-op');
 const { registerAccessOp } = require('./access-op');
 const { registerGameTasks } = require('./game-task');
 const { registerFarm } = require('./farm');
+const { registerStudyGalaxy } = require('./study-galaxy');
 // 操作题累计得分（资格验证第三/四项）与成就殿堂共用同一个口径函数
 const { getOpScore } = require('./game-task-metrics');
 const PythonSandbox = require('./python-sandbox');
@@ -8334,7 +8335,7 @@ app.delete('/api/ai-qa-kb/:id', authenticate, async (req, res) => {
 // 4. cluster_id 不暴露给学生筛选页，仅用于内部检索
 
 // 分类总纲（唯一分类标准，与学习模块 16 章目录、练习模块章节筛选同源）
-const { CHAPTER_NAMES, SECTION_PATHS, SECTIONS_BY_CHAPTER, CHAPTER_ALLOW_SELF, CHAPTER_BY_CODE } = require('./chapter-taxonomy');
+const { CHAPTER_NAMES, SECTION_PATHS, SECTIONS_BY_CHAPTER, CHAPTER_ALLOW_SELF, CHAPTER_BY_CODE, SECTION_CODES } = require('./chapter-taxonomy');
 const CHAPTER_CODES = Object.fromEntries(Object.entries(CHAPTER_BY_CODE).map(([code, name]) => [name, code]));
 const { buildTaxonomyPromptText } = require('./chapter-taxonomy');
 
@@ -9264,6 +9265,32 @@ async function getMasteredByChapter(conn, studentId, threshold) {
 }
 
 /**
+ * 按「完整 cluster_id」聚合已掌握题数（章 / 小节粒度）。
+ *
+ * 与 getMasteredByChapter 同源同口径（练习来源答对次数 >= 掌握阈值），只是不折叠一级类目：
+ *   - 小节题 → key = "章名/小节名"
+ *   - 仅挂章级的题 → key = 章名
+ * 学习模块的小节「已掌握/总题数」就靠它，避免前端各自拉 student_answers 全表自己算。
+ */
+async function getMasteredBySection(conn, studentId, threshold) {
+  const [rows] = await conn.query(
+    `SELECT q.cluster_id AS cid, COUNT(*) AS n FROM (
+       SELECT question_id FROM student_answers
+       WHERE student_id = ? AND source = 'practice' AND is_correct = 1
+       GROUP BY question_id
+       HAVING COUNT(*) >= ?
+     ) m
+     JOIN questions q ON q.id = m.question_id
+     WHERE q.cluster_id IS NOT NULL AND q.cluster_id <> ''
+     GROUP BY q.cluster_id`,
+    [studentId, threshold]
+  );
+  const out = new Map();
+  for (const r of rows) out.set(String(r.cid), Number(r.n) || 0);
+  return out;
+}
+
+/**
  * 统一资格判定（普通测试 / 试卷PK 共用）。
  *
  * 四项条件同时满足才算通过：
@@ -9483,9 +9510,17 @@ app.get('/api/student/learn-chapters', authenticate, async (req, res) => {
 
     const lectureByChapter = new Map(meta.chapters.map(c => [c.cluster_id, c]));
 
-    // 已掌握题数（按章）——口径与练习模块一致：练习来源答对次数 >= 掌握阈值
+    // 已掌握题数——口径与练习模块一致：练习来源答对次数 >= 掌握阈值
+    // ⛔ 只查一次（按完整 cluster_id 聚合），章级数字由小节结果就地汇总：
+    //    原来 getMasteredByChapter + getMasteredBySection 各跑一条一模一样的聚合 SQL，
+    //    两次全表扫只用一次就够（两者口径本来就同源，汇总算法见下）。
     const masterThreshold = await getMasterThreshold();
-    const masteredByChapter = await getMasteredByChapter(pool, userId, masterThreshold);
+    const masteredBySection = await getMasteredBySection(pool, userId, masterThreshold);
+    const masteredByChapter = new Map();
+    for (const [cid, n] of masteredBySection) {
+      const ch = cid.includes('/') ? cid.split('/')[0] : cid;
+      masteredByChapter.set(ch, (masteredByChapter.get(ch) || 0) + n);
+    }
 
     const chapters = CHAPTER_NAMES.map((name, idx) => {
       const lec = lectureByChapter.get(name);
@@ -9497,8 +9532,11 @@ app.get('/api/student/learn-chapters', authenticate, async (req, res) => {
         return {
           name: s,
           path,
+          code: SECTION_CODES[path] || '',
           anchor: anchorIds.has(aid) ? aid : '',
           question_count: sectionCount.get(path) || 0,
+          // 该小节已掌握题数（口径 = 练习来源答对次数 >= 掌握阈值）
+          mastered_count: masteredBySection.get(path) || 0,
         };
       });
       const chapterSelf = chapterCount.get(name) || 0;
@@ -9534,6 +9572,57 @@ app.get('/api/student/learn-chapters', authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error('获取学习章节目录失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+/**
+ * 练习模块：顶部统计 + 已掌握题号（一次请求算完）
+ *
+ * 【为什么要这个接口】练习模块原来在前端拉 student_answers 全表自己算：
+ *   ① 通用表接口 /api/query **不认 select 列投影**（.select('is_correct') 仍然整行返回），
+ *      实测 1073 行 ≈ 364KB；
+ *   ② 每次提交答案后要读两遍（fetchStats + fetchMasteredQuestions）≈ 728KB，
+ *      而且响应体积随答题记录**线性增长**（练到 3000 行就是 1MB/题）。
+ *   改成服务端两个聚合查询后：响应 ~3KB，体积不随记录数涨。
+ *
+ * 【口径】
+ *   - total / correct / wrong / accuracy：该生**全部来源**的答题记录（与练习页顶部卡片历史口径一致）
+ *   - mastered / mastered_question_ids：练习来源（source='practice'）答对次数 >= 掌握阈值的题
+ *   - master_threshold：一并下发，前端不必再单独查 system_config（也就没有「阈值还没到就先算」的时序坑）
+ */
+app.get('/api/student/practice-stats', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId || req.user.id;
+    const [[agg]] = await pool.query(
+      `SELECT COUNT(*) AS total, COALESCE(SUM(is_correct = 1), 0) AS correct
+         FROM student_answers WHERE student_id = ?`,
+      [userId]
+    );
+    const masterThreshold = await getMasterThreshold();
+    const [rows] = await pool.query(
+      `SELECT question_id FROM student_answers
+        WHERE student_id = ? AND source = 'practice' AND is_correct = 1
+        GROUP BY question_id
+        HAVING COUNT(*) >= ?`,
+      [userId, masterThreshold]
+    );
+    const total = Number(agg && agg.total) || 0;
+    const correct = Number(agg && agg.correct) || 0;
+    res.json({
+      data: {
+        total,
+        correct,
+        wrong: Math.max(0, total - correct),
+        accuracy: total > 0 ? Math.round((correct / total) * 100) : 0,
+        mastered: rows.length,
+        mastered_question_ids: rows.map((r) => r.question_id),
+        master_threshold: masterThreshold,
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('获取练习统计失败:', error);
     res.status(500).json({ data: null, error: error.message });
   }
 });
@@ -9574,6 +9663,7 @@ app.get('/api/student/learn-chapter/:clusterId', authenticate, async (req, res) 
         sections: secs.map(s => ({
           name: s,
           path: `${clusterId}/${s}`,
+          code: SECTION_CODES[`${clusterId}/${s}`] || '',
           anchor: anchorInfo.map[s]?.index >= 0 ? anchorId(s) : '',
           question_count: countMap.get(`${clusterId}/${s}`) || 0,
         })),
@@ -13361,6 +13451,11 @@ registerGameTasks(app, { pool, authenticate, requireTeacher, requireStudent });
 // 教师端：开关 / 参数 / 全班地块总览 / 劳作日志；学生端：农场状态（桌面轮询）+ 劳作提交。
 // 学生端代码由前端子集解释器执行，只上交「操作序列」；生长与积分结算全在 farm.js 服务端完成。
 registerFarm(app, { pool, authenticate, requireTeacher, requireStudent, uploadsDir });
+
+// ===== 学习星域（桌面反馈图层）=====
+// 教师端：开关 / 班级白名单 / 今日目标 / 五档阈值；学生端：桌面轮询的聚合数据。
+// 图层盖住壁纸时前端会跳过背景图请求（省流量），所以这里只返回数据，不返回图片地址。
+registerStudyGalaxy(app, { pool, authenticate, requireTeacher, requireStudent });
 
 // ===== 教师端接口 =====
 

@@ -15,6 +15,7 @@ import { Analytics } from '../components/teacher/Analytics';
 import { AppManager } from '../components/teacher/AppManager';
 import { GameSettings } from '../components/teacher/GameSettings';
 import { FarmConfig } from '../components/teacher/FarmConfig';
+import { LayerBackground } from '../components/teacher/LayerBackground';
 import { NotificationManager } from '../components/teacher/NotificationManager';
 import { MessageManager } from '../components/teacher/MessageManager';
 import { PythonManager } from '../components/teacher/PythonManager';
@@ -61,7 +62,7 @@ const menuItems = [
   { id: 'prizes', title: '积分兑换管理', icon: 'fa-gift' },
   { id: 'pets', title: '萌宠配置', icon: 'fa-paw' },
   { id: 'game', title: '刷题打怪系统', icon: 'fa-gamepad' },
-  { id: 'farm', title: '代码农场', icon: 'fa-seedling' },
+  { id: 'layers', title: '图层背景', icon: 'fa-layer-group' },
   { id: 'analytics', title: '学情分析', icon: 'fa-chart-line' },
   { id: 'settings', title: '系统配置', icon: 'fa-cog' },
 ];
@@ -86,6 +87,8 @@ const components: Record<string, React.ReactNode> = {
   pets: <PetConfig />,
   game: <GameSettings />,
   farm: <FarmConfig />,
+  // 「图层背景」把代码农场与学习星域收到同一个入口；farm 保留映射，兼容旧链接/收藏
+  layers: <LayerBackground />,
   analytics: <Analytics />,
   settings: <SystemSettings />,
 };

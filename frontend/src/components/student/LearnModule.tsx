@@ -18,13 +18,18 @@ import { backendClient } from '../../api/backendClient';
 import { getSelfTest } from '../../data/learnSelfTest';
 import { useDesktopStore } from '../../store/desktopStore';
 import { PracticeModule } from './PracticeModule';
+import { peekPendingLearnChapter, clearPendingLearnChapter, onOpenLearnChapter } from '../../utils/learnNav';
 
 interface ChapterSection {
   name: string;
   path: string;
+  /** 小节编号（1.1.1，来自后端 chapter-taxonomy 的书写顺序；老后端可能没有） */
+  code?: string;
   /** 讲义正文里该小节标题的 DOM id（后端注入；讲义无对应标题时为空串） */
   anchor?: string;
   question_count: number;
+  /** 该小节已掌握题数（口径：练习来源答对次数 >= 掌握阈值） */
+  mastered_count?: number;
 }
 
 interface ChapterItem {
@@ -54,11 +59,23 @@ const PART_COLORS: Record<number, { grad: string; accent: string; border: string
 export const LearnModule: React.FC = () => {
   const [chapters, setChapters] = useState<ChapterItem[]>([]);
   const [loadingList, setLoadingList] = useState(true);
+  // 外部要求定位的章 / 小节（惰性读一次：窗口是「先派事件再开」的时序时，只能在挂载时拿到）
+  // ⚠️ 必须放在 expanded / activeSectionPath 之前：它们的初始值要用到它（外部跳进来时章要展开、小节要高亮）
+  const [pendingTarget] = useState<{ cluster_id: string; section?: string } | null>(() => peekPendingLearnChapter());
+  const pendingChapter = pendingTarget?.cluster_id ?? null;
+
   const [selectedChapter, setSelectedChapter] = useState<string | null>(null);
   const [chapterDetail, setChapterDetail] = useState<any>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // 外部跳进来时（星域「下一个目标」/ 知识点地图）默认展开目标章，学生一眼看到该章的小节
+  const [expanded, setExpanded] = useState<Set<string>>(() =>
+    pendingTarget ? new Set([pendingTarget.cluster_id]) : new Set<string>()
+  );
   const [showSelfTest, setShowSelfTest] = useState(false);
+  // 二级目录（知识点）当前选中项：只做高亮，用于点完知道「我刚看的是哪个知识点」
+  const [activeSectionPath, setActiveSectionPath] = useState<string | null>(() =>
+    pendingTarget?.section ? `${pendingTarget.cluster_id}/${pendingTarget.section}` : null
+  );
   const [visitedQuestions, setVisitedQuestions] = useState<Set<string>>(new Set());
   const [cssInjected, setCssInjected] = useState(false);
   // 右下角「回到顶部」悬浮按钮：讲义很长时免去手动滚回顶部
@@ -66,6 +83,14 @@ export const LearnModule: React.FC = () => {
   const [showBackTop, setShowBackTop] = useState(false);
   // 讲义正文容器：用于往小节标题里注入「去练习」按钮
   const lectureRef = React.useRef<HTMLDivElement | null>(null);
+  // 左侧目录滚动容器：从外部（星域知识点地图）跳进来时把目标章滚到可视区
+  const sidebarRef = React.useRef<HTMLDivElement | null>(null);
+  // 待滚到的小节：{ 章, 小节名 }。等该章讲义渲染完成后由下面的 effect 消费，随后置空（只生效一次）
+  const [pendingSectionTarget, setPendingSectionTarget] = useState<{ chapter: string; section: string } | null>(
+    pendingTarget && pendingTarget.section
+      ? { chapter: pendingTarget.cluster_id, section: pendingTarget.section }
+      : null
+  );
 
   // 监听右侧正文容器的滚动位置，超过阈值才显示按钮
   useEffect(() => {
@@ -159,13 +184,48 @@ export const LearnModule: React.FC = () => {
         const res = await backendClient.get('/api/student/learn-chapters');
         const list: ChapterItem[] = res.data?.chapters || [];
         setChapters(list);
-        if (list.length && !selectedChapter) setSelectedChapter(list[0].cluster_id);
+        // 默认选中：已有选择 > 外部指定的章 > 第一章
+        setSelectedChapter((prev) => {
+          if (prev && list.some((c) => c.cluster_id === prev)) return prev;
+          if (pendingChapter && list.some((c) => c.cluster_id === pendingChapter)) return pendingChapter;
+          return list[0]?.cluster_id ?? null;
+        });
       } catch (e) {
         console.error('加载学习章节目录失败:', e);
       } finally {
         setLoadingList(false);
       }
     })();
+  }, [pendingChapter]);
+
+  // 窗口已经开着时被要求切章（星域知识点地图 / 今日卡「下一个目标」在桌面再点一次）
+  useEffect(() => {
+    return onOpenLearnChapter((cid, section) => {
+      setSelectedChapter(cid);
+      setShowSelfTest(false);
+      setActiveSectionPath(null);
+      // 顺手展开该章小节，便于继续点到具体知识点
+      setExpanded((prev) => (prev.has(cid) ? prev : new Set(prev).add(cid)));
+      // 带小节时记下来，等这一章的讲义渲染完成后滚过去
+      setPendingSectionTarget(section ? { chapter: cid, section } : null);
+    });
+  }, []);
+
+  // 切章后把左侧目录里的目标章滚进可视区（不用 scrollIntoView：会连带滚外层窗口）
+  useEffect(() => {
+    if (!selectedChapter) return;
+    const box = sidebarRef.current;
+    if (!box) return;
+    const el = box.querySelector(`[data-learn-chapter="${CSS.escape(selectedChapter)}"]`) as HTMLElement | null;
+    if (!el) return;
+    const delta = el.getBoundingClientRect().top - box.getBoundingClientRect().top;
+    const top = box.scrollTop + delta - box.clientHeight / 2 + el.clientHeight / 2;
+    box.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+  }, [selectedChapter, chapters.length]);
+
+  // 待定位目标已取进 state，这里才清掉 pending（避免下次从图标打开还跳回旧章）
+  useEffect(() => {
+    clearPendingLearnChapter();
   }, []);
 
   // 加载已看记录
@@ -219,6 +279,52 @@ export const LearnModule: React.FC = () => {
   );
 
   const colors = PART_COLORS[current?.part_index || 1] || PART_COLORS[1];
+
+  /**
+   * 外部带小节跳转（今日卡「下一个目标」）：等该章讲义渲染出锚点后滚过去。
+   *
+   * 讲义渲染是异步的（换章要重新拉 html），元素出现时间不确定，所以失败就短间隔重试几次；
+   * 不论成功与否最后都清空目标，避免这个 effect 反复触发。
+   */
+  useEffect(() => {
+    const t = pendingSectionTarget;
+    if (!t) return;
+    // 章还没切过去 / 这一章的讲义还在加载 → 等下一轮
+    if (selectedChapter !== t.chapter || loadingDetail) return;
+    const norm = (s: string) => String(s || '').replace(/\s+/g, '');
+    const secs = current?.sections || [];
+    const hit =
+      secs.find((s) => s.name === t.section) ||
+      secs.find((s) => norm(s.name) === norm(t.section)) ||
+      secs.find((s) => norm(s.name).includes(norm(t.section)) || norm(t.section).includes(norm(s.name)));
+    let left = 20;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const attempt = () => {
+      /**
+       * ⚠️ 必须先确认容器已经有真实尺寸再滚。
+       * 窗口**最小化**时内容仍是挂载状态但高度为 0，此时算出来的 offset 是 0，
+       * 滚动会「成功」但实际没动（学生在最小化窗口上点「下一个目标」就是这么失效的）。
+       * 所以这里等容器高度恢复（点击会同时把窗口还原）后再滚，最多等 3 秒。
+       */
+      const scroller = scrollRef.current;
+      const anchorEl = hit?.anchor ? document.getElementById(hit.anchor) : null;
+      if (scroller && scroller.clientHeight > 40 && anchorEl) {
+        scrollToAnchor(hit!.anchor);
+        setActiveSectionPath(hit!.path);
+        setPendingSectionTarget(null);
+        return;
+      }
+      if (left-- > 0) {
+        timer = setTimeout(attempt, 150);
+        return;
+      }
+      setPendingSectionTarget(null);
+    };
+    attempt();
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
+  }, [pendingSectionTarget, selectedChapter, loadingDetail, chapterDetail?.html, current]);
 
   /**
    * 进度口径（v2.5.2 修正）：
@@ -318,7 +424,10 @@ export const LearnModule: React.FC = () => {
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.dataset.lpKey = marker;
-        btn.textContent = `去练习 ${sec.question_count}`;
+        // 与目录/胶囊同一口径：已掌握/总题数
+        const secM = Number(sec.mastered_count) || 0;
+        btn.textContent = `去练习 ${secM}/${sec.question_count}`;
+        // title 保持「去练习：<小节名>」纯格式：回归脚本按它比对小节名，加后缀会破坏解析
         btn.title = `去练习：${sec.name}`;
         btn.className = 'lp-inline-practice';
         // 用 dataset 传参，避免闭包持有旧 sec 对象
@@ -391,7 +500,7 @@ export const LearnModule: React.FC = () => {
   return (
     <div className="flex h-full bg-gray-50">
       {/* 左侧目录 */}
-      <div className="w-80 bg-white border-r border-gray-200 overflow-y-auto flex-shrink-0">
+      <div ref={sidebarRef} className="w-80 bg-white border-r border-gray-200 overflow-y-auto flex-shrink-0">
         <div className="sticky top-0 bg-white border-b border-gray-200 shadow-sm z-10">
           <div className="p-3 bg-gradient-to-r from-indigo-500 to-blue-600 text-white">
             <div className="flex items-center gap-3">
@@ -436,7 +545,8 @@ export const LearnModule: React.FC = () => {
                     return (
                       <div key={ch.cluster_id}>
                         <button
-                          onClick={() => { setSelectedChapter(ch.cluster_id); }}
+                          data-learn-chapter={ch.cluster_id}
+                          onClick={() => { setSelectedChapter(ch.cluster_id); setActiveSectionPath(null); }}
                           className={`w-full text-left px-3 py-2.5 rounded-xl transition-all duration-150 flex items-center gap-2 ${
                             active ? `bg-gradient-to-r ${c.grad} text-white shadow` : 'hover:bg-gray-100 text-gray-700'
                           }`}
@@ -447,10 +557,10 @@ export const LearnModule: React.FC = () => {
                           <span className={`flex-1 text-sm leading-snug ${active ? 'text-white font-medium' : 'text-gray-800'}`}>
                             {ch.cluster_id}
                           </span>
-                          <span className={`text-[11px] flex-shrink-0 rounded-full px-1.5 ${
+                          <span className={`text-[11px] flex-shrink-0 rounded-full px-1.5 tabular-nums ${
                             active ? 'bg-white/20 text-white' : 'bg-gray-100 text-gray-500'
                           }`}>
-                            {ch.question_count}
+                            {ch.mastered_count ?? 0}/{ch.question_count}
                           </span>
                           {ch.sections.length > 0 && (
                             <span
@@ -464,23 +574,62 @@ export const LearnModule: React.FC = () => {
                           )}
                         </button>
                         {isOpen && ch.sections.length > 0 && (
-                          <div className="ml-6 mt-0.5 mb-1 space-y-0.5 border-l border-gray-200 pl-2">
-                            {ch.sections.map((sec) => (
-                              <button
-                                key={sec.path}
-                                onClick={() => {
-                                  setSelectedChapter(ch.cluster_id);
-                                  // 讲义渲染是异步的（换章要重新拉 html），所以延迟到 DOM 就绪后再滚动
-                                  setTimeout(() => scrollToAnchor(sec.anchor), 160);
-                                }}
-                                className="w-full text-left px-2 py-1.5 rounded-lg text-xs text-gray-600 hover:bg-gray-100 flex items-center gap-2"
-                              >
-                                <span className="flex-1 leading-snug">{sec.name}</span>
-                                <span className={`text-[10px] ${sec.question_count > 0 ? 'text-gray-400' : 'text-gray-300'}`}>
-                                  {sec.question_count}
-                                </span>
-                              </button>
-                            ))}
+                          <div className="ml-5 mt-1 mb-1 space-y-0.5 border-l border-gray-300 pl-2">
+                            {ch.sections.map((sec) => {
+                              const sActive = activeSectionPath === sec.path;
+                              const noQ = sec.question_count === 0;
+                              // 该知识点已全部掌握 → 胶囊转绿，一眼能看出还差哪块
+                              const secDone = !noQ && (sec.mastered_count ?? 0) >= sec.question_count;
+                              return (
+                                <button
+                                  key={sec.path}
+                                  data-learn-section={sec.path}
+                                  onClick={() => {
+                                    setActiveSectionPath(sec.path);
+                                    setSelectedChapter(ch.cluster_id);
+                                    // 讲义渲染是异步的（换章要重新拉 html），所以延迟到 DOM 就绪后再滚动
+                                    setTimeout(() => scrollToAnchor(sec.anchor), 160);
+                                  }}
+                                  title={
+                                    noQ
+                                      ? `${sec.code ? sec.code + ' ' : ''}${sec.name}（暂无配套练习）`
+                                      : `${sec.code ? sec.code + ' ' : ''}${sec.name}（已掌握 ${sec.mastered_count ?? 0}/${sec.question_count} 题）`
+                                  }
+                                  className={`group w-full text-left px-2 py-1.5 rounded-lg flex items-center gap-2 transition-colors ${
+                                    sActive
+                                      ? 'bg-indigo-50 text-indigo-700'
+                                      : noQ
+                                      ? 'text-gray-500 hover:bg-gray-100'
+                                      : 'text-gray-700 hover:bg-gray-100 hover:text-indigo-700'
+                                  }`}
+                                >
+                                  <i
+                                    className={`fas fa-angle-right text-[10px] flex-shrink-0 ${
+                                      sActive ? 'text-indigo-500' : 'text-gray-400 group-hover:text-indigo-500'
+                                    }`}
+                                  ></i>
+                                  <span className={`flex-1 text-[13px] leading-snug ${sActive ? 'font-medium' : ''}`}>
+                                    {sec.code && (
+                                      <span className="mr-1 text-[11px] tabular-nums text-gray-400">{sec.code}</span>
+                                    )}
+                                    {sec.name}
+                                  </span>
+                                  <span
+                                    className={`text-[10px] flex-shrink-0 rounded-full px-1.5 py-px tabular-nums ${
+                                      sActive
+                                        ? 'bg-indigo-100 text-indigo-600'
+                                        : noQ
+                                        ? 'bg-gray-100 text-gray-400'
+                                        : secDone
+                                        ? 'bg-emerald-100 text-emerald-700'
+                                        : 'bg-gray-100 text-gray-600'
+                                    }`}
+                                  >
+                                    {sec.mastered_count ?? 0}/{sec.question_count}
+                                  </span>
+                                </button>
+                              );
+                            })}
                           </div>
                         )}
                       </div>
@@ -531,6 +680,49 @@ export const LearnModule: React.FC = () => {
                 </p>
               </div>
 
+              {/* 本章知识点（讲义小节导航）
+                  ⚠️ 放在「去练习这一章」**之前**、并单独成块放大：
+                  以前它挂在那个实心渐变大按钮右侧、12px 浅灰字，学生视线全被按钮吸走，
+                  逐个知识点学的入口几乎没人点（用户 2026-10-18 反馈）。 */}
+              {current.sections.filter((s) => s.question_count > 0).length > 0 && (
+                <div className="mb-5 rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2.5">
+                  <div className="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                    <span className="text-[13px] font-semibold text-indigo-800">
+                      <i className="fas fa-list-ul mr-1 text-[11px]"></i>
+                      本章知识点
+                    </span>
+                    <span className="text-[11px] text-indigo-500">
+                      共 {current.sections.filter((s) => s.question_count > 0).length} 个 · 点一个跳到该小节，并练这一块的题
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {current.sections.filter((s) => s.question_count > 0).map((s, i) => (
+                      <button
+                        key={s.path}
+                        data-section-link={s.path}
+                        onClick={() => goPractice(s.path, s)}
+                        title={`跳到讲义「${s.code ? s.code + ' ' : ''}${s.name}」小节，并打开该小节的练习（已掌握 ${s.mastered_count ?? 0}/${s.question_count} 题）`}
+                        className="group flex items-center gap-1.5 rounded-lg border border-indigo-300 bg-white px-2.5 py-1.5 text-[13px] font-medium text-gray-900 shadow-sm transition-all hover:-translate-y-0.5 hover:border-indigo-500 hover:bg-indigo-50 hover:text-indigo-700 hover:shadow"
+                      >
+                        <span className="flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-indigo-500 px-1 text-[10px] font-semibold tabular-nums text-white group-hover:bg-indigo-600">
+                          {s.code || i + 1}
+                        </span>
+                        <span className="leading-none">{s.name}</span>
+                        <span
+                          className={`shrink-0 rounded-full px-1.5 py-0.5 text-[11px] tabular-nums group-hover:bg-white ${
+                            s.question_count > 0 && (s.mastered_count ?? 0) >= s.question_count
+                              ? 'bg-emerald-50 text-emerald-700'
+                              : 'bg-indigo-50 text-indigo-600'
+                          }`}
+                        >
+                          {s.mastered_count ?? 0}/{s.question_count}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* 操作按钮 */}
               <div className="flex flex-wrap gap-2 mb-5">
                 <button
@@ -561,22 +753,6 @@ export const LearnModule: React.FC = () => {
                     ? `章末自测（${selfTestDoneInChapter}/${selfTest.length} 问）`
                     : '章末自测（本章暂未配备）'}
                 </button>
-                {current.sections.length > 0 && (
-                  <div className="flex items-center gap-1.5 flex-wrap ml-auto">
-                    {/* 显示本章全部有题的小节（不再截断为前 4 个，方便一章知识点多时逐个去练）
-                        点击后：学习页滚动到该小节 + 弹出带该小节筛选的练习窗口 */}
-                    {current.sections.filter(s => s.question_count > 0).map(s => (
-                      <button
-                        key={s.path}
-                        onClick={() => goPractice(s.path, s)}
-                        className="px-2.5 py-1.5 rounded-lg text-xs bg-white border border-gray-200 text-gray-600 hover:border-indigo-300 hover:text-indigo-600 transition-colors"
-                        title={`去练习并跳到讲义对应小节：${s.name}`}
-                      >
-                        {s.name} <span className="text-gray-400">{s.question_count}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
               </div>
 
               {/* 章末自测面板 */}

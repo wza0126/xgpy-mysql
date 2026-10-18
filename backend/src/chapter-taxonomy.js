@@ -176,6 +176,20 @@ CHAPTER_TAXONOMY.forEach((p) => p.chapters.forEach((c) => { CHAPTER_ALLOW_SELF[c
 const CHAPTER_BY_CODE = {};
 CHAPTER_TAXONOMY.forEach((p) => p.chapters.forEach((c) => { CHAPTER_BY_CODE[c.code] = c.name; }));
 
+// 小节编号（"章名/小节名" -> "1.1.1"）：按词表里的**书写顺序**编号，
+// 与教材一致；不要按拼音/字典序重排后再编号，否则编号会乱跳。
+const SECTION_CODES = {};
+CHAPTER_TAXONOMY.forEach((p) =>
+  p.chapters.forEach((c) =>
+    c.sections.forEach((s, i) => { SECTION_CODES[`${c.name}/${s}`] = `${c.code}.${i + 1}`; })
+  )
+);
+
+/** 取小节编号：sectionCode("数据与信息", "大数据") -> "1.1.3" */
+function sectionCode(chapterName, sectionName) {
+  return SECTION_CODES[`${chapterName}/${sectionName}`] || "";
+}
+
 // 生成给 AI 的紧凑词表文本（用于聚类提示词）
 function buildTaxonomyPromptText() {
   return CHAPTER_TAXONOMY.map((p) =>
@@ -193,5 +207,7 @@ module.exports = {
   SECTIONS_BY_CHAPTER,
   CHAPTER_ALLOW_SELF,
   CHAPTER_BY_CODE,
+  SECTION_CODES,
+  sectionCode,
   buildTaxonomyPromptText,
 };

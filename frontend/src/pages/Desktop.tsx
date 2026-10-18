@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import { useSiteConfig } from '../hooks/useSiteConfig';
 import { getAuthToken } from '../utils/authToken';
@@ -35,6 +35,9 @@ import { CreativeWorkshop } from '../components/student/CreativeWorkshop';
 import { SimilarPracticeWindow } from '../components/student/SimilarPracticeWindow';
 import { FarmOverlay } from '../components/student/FarmOverlay';
 import type { FarmState } from '../components/student/FarmOverlay';
+import { StudyGalaxyLayer } from '../components/student/StudyGalaxyLayer';
+import type { GalaxyData } from '../components/student/StudyGalaxyLayer';
+import { requestLearnChapter } from '../utils/learnNav';
 import { FarmGuideApp } from '../components/student/FarmGuideApp';
 import { RollCallApp } from '../components/teacher/RollCallApp';
 import { backendClient } from '../api/backendClient';
@@ -101,6 +104,10 @@ export const Desktop: React.FC = () => {
   // 代码农场（桌面游戏层）：教师开关打开且本班命中时自动进入
   const [farmState, setFarmState] = useState<FarmState | null>(null);
   const [farmDismissed, setFarmDismissed] = useState(false);
+  // 学习星域（桌面反馈层）：null = 未开启/不生效；galaxyLoaded 用来「先探再决定要不要拉背景图」
+  const [galaxy, setGalaxy] = useState<GalaxyData | null>(null);
+  const [galaxyLoaded, setGalaxyLoaded] = useState(false);
+  const galaxyOn = !!galaxy;
 
   // 代理模式下 profile 由 useAuth 直接设置为目标学生
   const effectiveProfile = profile;
@@ -242,6 +249,7 @@ export const Desktop: React.FC = () => {
       checkPythonAccessPermission();
       fetchFocusModeConfig();
       fetchFarmState();
+      fetchGalaxy();
 
       const interval = setInterval(() => {
         if (!isProxyMode) {
@@ -253,6 +261,7 @@ export const Desktop: React.FC = () => {
         checkPythonAccessPermission();
         fetchFocusModeConfig();
         fetchFarmState();
+        fetchGalaxy();
       }, 10000);
 
       return () => clearInterval(interval);
@@ -357,6 +366,37 @@ export const Desktop: React.FC = () => {
       }
     } catch {
       // 静默：农场是可选玩法，失败不影响桌面主流程（401 已由 backendClient 统一处理）
+    }
+  };
+
+  // ===== 学习星域（桌面反馈层）=====
+  // 与农场同一套 10 秒轮询节奏。后端已按班级开关做过判定，这里只认 enabled。
+  // 代理模式下教师正在看学生桌面，不叠图层，避免挡住教师视图。
+  // ⛔ 性能：图层是一整套 SVG（第 5 档约 500 个节点、125 个动画）。如果每 10 秒都把新对象
+  //    塞进 state，React 会整层重算一遍 —— 数据没变就别动 state，用序列化签名比一下即可。
+  //    另外窗口最小化/切到后台（document.hidden）时不发请求，省带宽也省服务器查询。
+  const galaxySigRef = useRef('');
+  const fetchGalaxy = async () => {
+    if (!effectiveProfile || effectiveProfile.role !== 'student' || isProxyMode) {
+      galaxySigRef.current = '';
+      setGalaxy(null);
+      setGalaxyLoaded(true);
+      return;
+    }
+    if (document.hidden) return; // 后台不轮询；恢复可见后下一拍（≤10s）自动补上
+    try {
+      const r: any = await backendClient.get('/api/student/study-galaxy');
+      const d = r?.data;
+      const next = d && d.enabled ? (d as GalaxyData) : null;
+      const sig = next ? JSON.stringify(next) : '';
+      if (sig === galaxySigRef.current) return; // 数据没变 → 不动 state，避免整层重渲染
+      galaxySigRef.current = sig;
+      setGalaxy(next);
+    } catch {
+      galaxySigRef.current = '';
+      setGalaxy(null);
+    } finally {
+      setGalaxyLoaded(true);
     }
   };
 
@@ -494,6 +534,15 @@ export const Desktop: React.FC = () => {
   useEffect(() => {
     let cancelled = false;
 
+    // ⛔ 星域开启时**不拉背景图**：星域层自己就是一张深空画面，再下载壁纸纯属浪费带宽
+    //    （每台机器每 30 秒一次）。先等第一次星域探测回来（galaxyLoaded）再决定，
+    //    否则会出现「先拉一次图、发现星域开着、再丢掉」的浪费。
+    if (!galaxyLoaded) return;
+    if (galaxyOn) {
+      if (useDesktopStore.getState().background !== '') setBackground('');
+      return;
+    }
+
     const fetchBackground = async () => {
       try {
         // 先检查学生是否有自定义背景（仅学生且已登录时才请求）
@@ -536,7 +585,7 @@ export const Desktop: React.FC = () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [setBackground, effectiveProfile]);
+  }, [setBackground, effectiveProfile, galaxyLoaded, galaxyOn]);
 
   // 拉取学生激活的窗口皮肤
   useEffect(() => {
@@ -689,6 +738,22 @@ export const Desktop: React.FC = () => {
     });
     activateWindow(icon.id);
   };
+
+  // 星域「知识点地图」/「下一个目标」点击 → 打开学习模块并定位到该章（带小节时再滚到该小节）。
+  // 窗口已开时 openWindow 只会置前（不换组件），所以切章靠 requestLearnChapter 派事件完成。
+  const handleOpenLearnChapter = useCallback((clusterId: string, section?: string) => {
+    if (!clusterId) return;
+    requestLearnChapter(clusterId, section);
+    openWindow({
+      id: 'learn',
+      title: '学习',
+      icon: 'fa-book',
+      isMinimized: false,
+      isMaximized: false,
+      component: <LearnModule />,
+    });
+    activateWindow('learn');
+  }, [openWindow, activateWindow]);
 
   const handleOpenAiQa = async (initialData?: { question?: string }) => {
     if (effectiveProfile) {
@@ -877,6 +942,13 @@ export const Desktop: React.FC = () => {
             第 {farmState.world?.day ?? 1} 天
           </span>
         </button>
+      ) : null}
+
+      {/* ===== 学习星域（桌面反馈层）=====
+          与农场同层（z-[5]）且互斥：农场开着时不叠星域，避免两层抢屏。
+          专注模式退化为「只留星点 + 进度线」，关掉一切动画。 */}
+      {galaxyOn && !(farmState?.enabled && !farmDismissed) ? (
+        <StudyGalaxyLayer data={galaxy as GalaxyData} simple={isFocusModeActive} onOpenChapter={handleOpenLearnChapter} />
       ) : null}
 
       <DesktopPet 
