@@ -230,33 +230,26 @@ export const QuestionManager: React.FC = () => {
   };
 
   const fetchAccuracyData = async () => {
-    const { data: answersData } = await backendClient
-      .from('student_answers')
-      .select('question_id, is_correct');
-
-    if (answersData) {
-      const accuracyMap: Record<string, { total: number; correct: number }> = {};
-      answersData.forEach((record: { question_id: string | null; is_correct: boolean }) => {
-        if (!record.question_id) return;
-        if (!accuracyMap[record.question_id]) {
-          accuracyMap[record.question_id] = { total: 0, correct: 0 };
-        }
-        accuracyMap[record.question_id].total++;
-        if (record.is_correct) {
-          accuracyMap[record.question_id].correct++;
-        }
-      });
+    // 服务端 GROUP BY question_id 聚合（原来拉 student_answers 全表在前端算，
+    // 数据量随全体学生作答量无限增长，题库页会越来越慢）
+    try {
+      const r: any = await backendClient.get('/api/teacher/questions/accuracy');
+      const rows: { question_id: string; total: number; correct: number }[] = Array.isArray(r?.data) ? r.data : [];
 
       const accuracyResult: Record<string, QuestionAccuracy> = {};
-      Object.entries(accuracyMap).forEach(([questionId, stats]) => {
-        accuracyResult[questionId] = {
-          question_id: questionId,
-          total_count: stats.total,
-          correct_count: stats.correct,
-          accuracy: stats.total > 0 ? Math.round((stats.correct / stats.total) * 100) : 0,
+      rows.forEach((row) => {
+        const total = Number(row.total) || 0;
+        const correct = Number(row.correct) || 0;
+        accuracyResult[row.question_id] = {
+          question_id: row.question_id,
+          total_count: total,
+          correct_count: correct,
+          accuracy: total > 0 ? Math.round((correct / total) * 100) : 0,
         };
       });
       setQuestionAccuracy(accuracyResult);
+    } catch (e) {
+      console.error('获取题库正确率失败:', e);
     }
   };
 

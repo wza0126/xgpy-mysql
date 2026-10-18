@@ -195,9 +195,13 @@ export const ExamManager: React.FC = () => {
   const fetchData = async () => {
     const [{ data: testsData }, { data: questionsData }, { data: classesData }, { data: profilesData }] = await Promise.all([
       backendClient.from('tests').select('*').eq('type', 'exam').order('created_at', { ascending: false }),
+      // 组卷预览要显示正确答案与解析 → 题库仍需完整字段（教师端，非学生端脱敏路径）。
+      // 真正的体积大头是 content/options/explanation，都是预览必需的，暂不投影。
       backendClient.from('questions').select('*'),
       backendClient.from('classes').select('*'),
-      backendClient.from('profiles').select('*').eq('role', 'student'),
+      // ⛔ 学生名单绝不能 select('*')：profiles 里有 password_hash 等敏感列，
+      //    组卷只需要认人（id/账号/姓名/班级）。
+      backendClient.from('profiles').selectExact('id, username, real_name, class_id, current_points').eq('role', 'student'),
     ]);
 
     if (testsData) {

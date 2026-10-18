@@ -87,47 +87,31 @@ export const Analytics: React.FC = () => {
     }
 
     if (studentsData && studentsData.length > 0) {
-      const studentsWithStats: StudentWithStats[] = await Promise.all(
-        (studentsData as StudentWithStats[]).map(async (student) => {
-          const [{ data: answers, error: answersError }, { data: petData, error: petError }] = await Promise.all([
-            backendClient.from('student_answers').select('is_correct').eq('student_id', student.id),
-            backendClient.from('student_pets').select('*').eq('student_id', student.id).maybeSingle(),
-          ]);
-
-          if (answersError) {
-            console.error(`获取学生 ${student.id} 答题记录失败:`, answersError);
-          }
-
-          const total = answers?.length || 0;
-          const correct = answers?.filter((a: any) => a.is_correct).length || 0;
-
-          return {
-            ...student,
-            total_answers: total,
-            correct_answers: correct,
-            accuracy: total > 0 ? Math.round((correct / total) * 100) : 0,
-            has_pet: !!petData,
-            pet_level: petData?.growth_level || 0,
-            total_mastered: 0,
-          };
-        })
-      );
-
-      // 「总掌握」与下方「章节掌握进度」同源：直接复用同一个后端接口，
-      // 避免在前端重复实现「同一道题练习答对 threshold 次记为掌握」的口径
+      // 全班统计一次聚合拿回（原来逐学生各发 2 个请求 + 一次 chapter-mastery，
+      // 50 人班级约 101 个请求，而且每个请求都是 student_answers 整表拉取）。
+      const statMap = new Map<string, any>();
       try {
-        const mastery = await analyticsFetch<ChapterMasteryData>(
-          `/api/teacher/analytics/chapter-mastery/${selectedClass}`
-        );
-        const masteryMap = new Map<string, number>(
-          (mastery.students || []).map((s) => [s.id, s.total_mastered || 0])
-        );
-        for (const s of studentsWithStats) {
-          s.total_mastered = masteryMap.get(s.id) || 0;
-        }
+        const overview: any = await backendClient.get('/api/teacher/students/overview', {
+          class_id: selectedClass,
+        });
+        (overview?.data?.students || []).forEach((s: any) => statMap.set(String(s.id), s));
       } catch (e) {
-        console.error('获取学生总掌握数据失败:', e);
+        console.error('获取学生概览失败:', e);
       }
+
+      const studentsWithStats: StudentWithStats[] = (studentsData as StudentWithStats[]).map((student) => {
+        const s: any = statMap.get(String(student.id)) || {};
+        return {
+          ...student,
+          total_answers: Number(s.total_answers) || 0,
+          correct_answers: Number(s.correct_answers) || 0,
+          accuracy: Number(s.accuracy) || 0,
+          has_pet: !!s.has_pet,
+          pet_level: Number(s.pet_level) || 0,
+          // 「总掌握」与下方「章节掌握进度」同源（同一个后端口径：practice 答对次数 >= 阈值）
+          total_mastered: Number(s.total_mastered) || 0,
+        };
+      });
 
       setStudents(studentsWithStats);
 

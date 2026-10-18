@@ -58,6 +58,8 @@ const PART_COLORS: Record<number, { grad: string; accent: string; border: string
 
 export const LearnModule: React.FC = () => {
   const [chapters, setChapters] = useState<ChapterItem[]>([]);
+  // 掌握数刷新信号：练习模块提交成功后会派发全局事件，这里 +1 触发目录与讲义内按钮重算
+  const [masteryTick, setMasteryTick] = useState(0);
   const [loadingList, setLoadingList] = useState(true);
   // 外部要求定位的章 / 小节（惰性读一次：窗口是「先派事件再开」的时序时，只能在挂载时拿到）
   // ⚠️ 必须放在 expanded / activeSectionPath 之前：它们的初始值要用到它（外部跳进来时章要展开、小节要高亮）
@@ -209,6 +211,33 @@ export const LearnModule: React.FC = () => {
       // 带小节时记下来，等这一章的讲义渲染完成后滚过去
       setPendingSectionTarget(section ? { chapter: cid, section } : null);
     });
+  }, []);
+
+  // ===== 学练联动：本窗口内练完题后刷新掌握数 =====
+  // 讲义顶部知识点胶囊、左侧目录的 m/N、讲义里「去练习 m/N」原本只在挂载时拉一次，
+  // 练完题回来数字不动（用户 2026-10-18 反馈的遗留项）。
+  // 练习模块每提交成功一次都会派发 xgpy:answer-submitted，这里 debounce 1.2s 合并连答。
+  useEffect(() => {
+    let timer: number | null = null;
+    const handler = () => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(async () => {
+        timer = null;
+        try {
+          const res = await backendClient.get('/api/student/learn-chapters');
+          const list: ChapterItem[] = res.data?.chapters || [];
+          if (list.length) setChapters(list);
+          setMasteryTick((v) => v + 1);
+        } catch (e) {
+          console.error('刷新掌握进度失败:', e);
+        }
+      }, 1200);
+    };
+    window.addEventListener('xgpy:answer-submitted', handler as EventListener);
+    return () => {
+      window.removeEventListener('xgpy:answer-submitted', handler as EventListener);
+      if (timer !== null) window.clearTimeout(timer);
+    };
   }, []);
 
   // 切章后把左侧目录里的目标章滚进可视区（不用 scrollIntoView：会连带滚外层窗口）
@@ -413,7 +442,14 @@ export const LearnModule: React.FC = () => {
 
       secs.forEach((sec) => {
         const marker = `lecturePracticeBtn_${sec.path}`;
-        if (host.querySelector(`[data-lp-key="${marker}"]`)) return; // 已注入，幂等
+        const secM = Number(sec.mastered_count) || 0;
+        const label = `去练习 ${secM}/${sec.question_count}`;
+        // 已注入：只更新文案（在本窗口练完题后 mastered_count 会变），不重复插入
+        const existing = host.querySelector(`[data-lp-key="${marker}"]`) as HTMLButtonElement | null;
+        if (existing) {
+          if (existing.textContent !== label) existing.textContent = label;
+          return;
+        }
         const head = host.querySelector(`#${CSS.escape(sec.anchor!)}`);
         // 锚点可能挂在标题上，也可能是标题前插入的空 span → 统一找到它所在/后随的标题
         const heading = (head?.tagName && /^H[1-6]$/.test(head.tagName)
@@ -425,8 +461,7 @@ export const LearnModule: React.FC = () => {
         btn.type = 'button';
         btn.dataset.lpKey = marker;
         // 与目录/胶囊同一口径：已掌握/总题数
-        const secM = Number(sec.mastered_count) || 0;
-        btn.textContent = `去练习 ${secM}/${sec.question_count}`;
+        btn.textContent = label;
         // title 保持「去练习：<小节名>」纯格式：回归脚本按它比对小节名，加后缀会破坏解析
         btn.title = `去练习：${sec.name}`;
         btn.className = 'lp-inline-practice';
@@ -459,7 +494,7 @@ export const LearnModule: React.FC = () => {
       if (timer !== null) window.clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chapterDetail?.html, current?.cluster_id, loadingDetail]);
+  }, [chapterDetail?.html, current?.cluster_id, loadingDetail, masteryTick]);
 
   /** 标记已看（仅进度用，不再触发 buff） */
   const markVisited = (key: string, text: string) => {

@@ -148,41 +148,35 @@ export const StudentManager: React.FC = () => {
         classMap[c.id] = c.name;
       });
 
-      const studentsWithStats = await Promise.all(
-        (studentsData as StudentWithStats[]).map(async (student) => {
-          const [{ data: answers }, { data: wrongs }, { data: pet }, { data: sessions }] = await Promise.all([
-            backendClient.from('student_answers').select('is_correct').eq('student_id', student.id),
-            backendClient.from('wrong_questions').select('*').eq('student_id', student.id).eq('is_resolved', false),
-            backendClient.from('student_pets').select('*').eq('student_id', student.id).maybeSingle(),
-            backendClient.from('login_sessions').select('is_active, last_active_at, expires_at').eq('user_id', student.id).eq('is_active', true),
-          ]);
+      // 全班统计一次聚合拿回（原来逐学生各发 4 个请求：答题/错题/宠物/会话，
+      // 50 人 ≈ 200 个请求且每个都是整表拉取）。在线判定与未解决错题数都在服务端算好。
+      const statMap = new Map<string, any>();
+      try {
+        const overview: any = await backendClient.get(
+          '/api/teacher/students/overview',
+          showNoClassStudents ? { no_class: '1' } : { class_id: selectedClass }
+        );
+        (overview?.data?.students || []).forEach((s: any) => statMap.set(String(s.id), s));
+      } catch (e) {
+        console.error('获取学生概览失败:', e);
+      }
 
-          const total = answers?.length || 0;
-          const correct = answers?.filter((a) => a.is_correct).length || 0;
-          
-          // 检查学生是否在线（有活跃且最近5分钟内活跃的session）
-          const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-          const isOnline = sessions && sessions.some((session: any) => {
-            const expiresAt = new Date(session.expires_at);
-            const lastActiveAt = new Date(session.last_active_at);
-            return expiresAt > new Date() && lastActiveAt > fiveMinutesAgo;
-          });
-
-          return {
-            ...student,
-            class: student.class_id ? { id: student.class_id, name: classMap[student.class_id] || '未知班级' } : undefined,
-            total_answers: total,
-            correct_answers: correct,
-            wrong_count: wrongs?.length || 0,
-            has_pet: !!pet,
-            pet_level: pet?.growth_level || 0,
-            accuracy: total > 0 ? Math.round((correct / total) * 100) : 0,
-            can_exchange_internet_code: student.can_exchange_internet_code ?? true,
-            hidden_features: student.hidden_features ? (typeof student.hidden_features === 'string' ? JSON.parse(student.hidden_features) : student.hidden_features) : ['paint_board', 'roll_call'],
-            is_online: !!isOnline,
-          };
-        })
-      );
+      const studentsWithStats = (studentsData as StudentWithStats[]).map((student) => {
+        const s: any = statMap.get(String(student.id)) || {};
+        return {
+          ...student,
+          class: student.class_id ? { id: student.class_id, name: classMap[student.class_id] || '未知班级' } : undefined,
+          total_answers: Number(s.total_answers) || 0,
+          correct_answers: Number(s.correct_answers) || 0,
+          wrong_count: Number(s.wrong_open) || 0,
+          has_pet: !!s.has_pet,
+          pet_level: Number(s.pet_level) || 0,
+          accuracy: Number(s.accuracy) || 0,
+          can_exchange_internet_code: student.can_exchange_internet_code ?? true,
+          hidden_features: student.hidden_features ? (typeof student.hidden_features === 'string' ? JSON.parse(student.hidden_features) : student.hidden_features) : ['paint_board', 'roll_call'],
+          is_online: !!s.is_online,
+        };
+      });
 
       setStudents(studentsWithStats);
       setSelectedStudents(new Set());

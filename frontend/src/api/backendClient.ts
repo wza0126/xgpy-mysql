@@ -305,6 +305,7 @@ class QueryBuilder {
     this.client = client;
     this.filters = {};
     this.selectColumns = [];
+    this.projectColumns = false;
     this.orderColumn = null;
     this.orderAscending = true;
     this.limitCount = null;
@@ -319,6 +320,20 @@ class QueryBuilder {
   select(columns = '*') {
     if (columns !== '*') {
       this.selectColumns = columns.split(',').map(c => c.trim());
+    }
+    return this;
+  }
+
+  /**
+   * 精确列投影：只取指定列（服务端 SELECT 指定列，而不是 SELECT * 再丢掉）。
+   * ⚠️ 与 select() 的区别：select() 历史上**不会**真正投影（服务端忽略），
+   *    因为老代码里有「select 只写了一列、但后面依赖整行其它字段」的用法。
+   *    新代码要省带宽请用这个；一旦用了，返回行里就只有这些列。
+   */
+  selectExact(columns = '*') {
+    if (columns !== '*') {
+      this.selectColumns = columns.split(',').map(c => c.trim());
+      this.projectColumns = true;
     }
     return this;
   }
@@ -389,10 +404,15 @@ class QueryBuilder {
   }
 
   async execute() {
-    const params = {
+    const params: any = {
       table: this.tableName,
       filters: Object.keys(this.filters).length > 0 ? this.filters : undefined
     };
+
+    // 只有显式 selectExact() 才真正投影（见方法注释）
+    if (this.projectColumns && this.selectColumns.length > 0) {
+      params.columns = this.selectColumns;
+    }
 
     if (this.orderColumn) {
       params.order = { column: this.orderColumn, ascending: this.orderAscending };
@@ -702,6 +722,7 @@ export type BackendResult<T = any> = {
 
 export interface BackendQuery {
   select(columns?: string): BackendQuery;
+  selectExact(columns?: string): BackendQuery;
   eq(column: string, value: any): BackendQuery;
   neq(column: string, value: any): BackendQuery;
   gt(column: string, value: any): BackendQuery;

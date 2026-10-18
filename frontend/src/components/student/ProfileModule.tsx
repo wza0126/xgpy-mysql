@@ -145,18 +145,19 @@ export const ProfileModule: React.FC = () => {
 
   const fetchStats = async () => {
     if (!profile) return;
-    const { data } = await backendClient
-      .from('student_answers')
-      .select('is_correct')
-      .eq('student_id', profile.id);
-    if (data) {
-      const total = data.length;
-      const correct = data.filter((a) => a.is_correct).length;
-      setStats({
-        total,
-        correct,
-        accuracy: total > 0 ? Math.round((correct / total) * 100) : 0,
-      });
+    // 服务端聚合（原来拉本人 student_answers 全表，响应体积随练习量线性增长）
+    try {
+      const r: any = await backendClient.get('/api/student/practice-stats');
+      const d = r?.data;
+      if (d) {
+        setStats({
+          total: Number(d.total) || 0,
+          correct: Number(d.correct) || 0,
+          accuracy: Number(d.accuracy) || 0,
+        });
+      }
+    } catch (e) {
+      console.error('获取答题统计失败:', e);
     }
   };
 

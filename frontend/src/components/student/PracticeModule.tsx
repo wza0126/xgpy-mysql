@@ -27,6 +27,15 @@ interface PracticeConfig {
 // 聚类树：一级类目 → 二级类目集合
 type ClusterTree = Record<string, Set<string>>;
 
+// 题库目录行：配置页只用它算筛选项与「当前匹配题数」，
+// 不含题干/选项 —— 真正的题目在点「开始练习」时由服务端按筛选条件下发。
+interface QuestionMeta {
+  id: string;
+  type: string;
+  tags: string[];
+  cluster_id: string;
+}
+
 // 把 cluster_id 拆成 [一级, 二级]；无斜杠时二级为空串
 const splitCluster = (clusterId: string | null | undefined): [string, string] | null => {
   if (!clusterId || typeof clusterId !== 'string') return null;
@@ -120,7 +129,12 @@ const clusterToSelection = (cid: string | null | undefined) => {
 };
 
 export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialCluster }) => {
-  const [questions, setQuestions] = useState<Question[]>([]);
+  // 题库目录（id/type/tags/cluster_id）：配置页算筛选项与匹配题数用，约 130KB。
+  // ⛔ 不要改回「用 /api/query 拉 questions 整行」：1004 行 ≈ 1.4MB，
+  //    而且 /api/query 不做学生端脱敏，会把 answers / explanation 一并下发。
+  const [questionMeta, setQuestionMeta] = useState<QuestionMeta[]>([]);
+  // 目录请求去重（StrictMode 双挂载 / 反复进配置页时只保留一个在途请求）
+  const catalogInflightRef = useRef<Promise<void> | null>(null);
   const [filteredQuestions, setFilteredQuestions] = useState<Question[]>([]);
   const [allTags, setAllTags] = useState<string[]>([]);
   const [clusterTree, setClusterTree] = useState<ClusterTree>({}); // AI 聚类一级→二级集合
@@ -273,33 +287,35 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
   };
 
   /**
-   * 题库池（保留现状但记录隐患）：
-   * 通用表接口不支持列投影，这里拿到的是 questions 整行（实测 1004 行 ≈ 1.4MB），
-   * 其中 explanation/created_by/时间戳等字段练习选题目时用不到。
-   * 彻底解决要做「服务端按筛选条件出题」的分页接口（配置页只要章节计数），
-   * 属于独立改造，见 2026-10-18 记忆里的待办。
+   * 题库目录（服务端聚合后的轻量元数据）：
+   * 只拿 id/type/tags/cluster_id，用来渲染筛选项与「当前匹配题数」。
+   * 真正的题目（题干/选项）在点「开始练习」时按筛选条件下发，且服务端已脱敏。
    */
   const fetchInitialData = async () => {
-    // ⛔ 服务端就把操作题（type='wps_op' / 'access_op'）挡掉：它们走**独立入口**（桌面「操作题」），
-    //    没有 options/answers，混进普通练习池会被渲染成一道无法作答的空白题。
-    //    下面再按题型兜底过滤一次（双保险，防止通用表接口 _neq 行为变化）。
-    const { data: questionsData } = await backendClient
-      .from('questions')
-      .select('*')
-      .eq('practice_enabled', true)
-      .neq('type', 'wps_op');
+    // 同一时刻只拉一次（React StrictMode 下挂载 effect 会跑两遍，目录约 146KB，没必要下两份）
+    if (catalogInflightRef.current) return catalogInflightRef.current;
+    const req = (async () => {
+    try {
+      const r: any = await backendClient.get('/api/student/practice-catalog');
+      // ⛔ 服务端已挡掉操作题（wps_op / access_op）；这里再兜底过滤一次，
+      //    防止以后改口径时混进普通练习池（它们没有 options，渲染成空白题）。
+      const items: QuestionMeta[] = (Array.isArray(r?.data?.items) ? r.data.items : [])
+        .filter((q: any) => !isOperationType(q.type))
+        .map((q: any) => ({
+          id: String(q.id),
+          type: q.type,
+          tags: Array.isArray(q.tags) ? q.tags : parseTags(q.tags),
+          cluster_id: q.cluster_id || '',
+        }));
 
-    const practiceRows = (questionsData || []).filter((q: any) => !isOperationType(q.type));
+      setQuestionMeta(items);
 
-    if (questionsData) {
-      setQuestions(practiceRows as Question[]);
       const tagsSet = new Set<string>();
       const tree: ClusterTree = {};
-      practiceRows.forEach((q: Question) => {
-        const tags = parseTags(q.tags);
-        tags.forEach((tag) => tagsSet.add(tag));
+      items.forEach((q) => {
+        (q.tags || []).forEach((tag) => tagsSet.add(tag));
         // 聚合 AI 聚类：cluster_id 形如 "信息系统/分类与类型"
-        const parts = splitCluster((q as any).cluster_id);
+        const parts = splitCluster(q.cluster_id);
         if (parts) {
           const [primary, secondary] = parts;
           if (!tree[primary]) tree[primary] = new Set();
@@ -313,12 +329,22 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
         sortedTree[p] = new Set(Array.from(tree[p]).sort());
       });
       setClusterTree(sortedTree);
+    } catch (e) {
+      console.error('拉取题库目录失败:', e);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
+    })();
+    catalogInflightRef.current = req;
+    // 请求结束后释放（下次进配置页还能重新拉，避免一直用旧目录）
+    req.finally(() => {
+      if (catalogInflightRef.current === req) catalogInflightRef.current = null;
+    });
+    return req;
   };
 
-  // 应用当前筛选条件（标签 + AI 聚类一级/二级）到题目列表
-  const applyFiltersToList = (list: Question[]): Question[] => {
+  // 应用当前筛选条件（标签 + AI 聚类一级/二级）到题目/目录列表
+  const applyFiltersToList = <T extends { tags?: any; cluster_id?: string | null }>(list: T[]): T[] => {
     let filtered = [...list];
     if (config.selectedTags.length > 0) {
       filtered = filtered.filter((q) => {
@@ -347,36 +373,55 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
   };
 
   const applyFiltersAndStart = async () => {
-    // 开始前先拿一次最新「已掌握题号」（服务端算，避免把已掌握的题再排进队列）
-    const mastered = await fetchPracticeStats();
-    let filtered = [...questions];
+    // 出题走服务端：过滤 / 排除已掌握 / 随机排序 / 脱敏 / 限量全在一处完成。
+    // 前端不再持有整包题库（原来 1004 行 ≈ 1.4MB，练一次要全下完）。
+    setLoading(true);
+    try {
+      const clusterPaths = config.selectedClusterSecondary.length > 0
+        ? config.selectedClusterSecondary
+        : config.selectedClusterPrimary;
 
-    filtered = filtered.filter((q) => !mastered.has(q.id));
-    filtered = applyFiltersToList(filtered);
+      const r: any = await backendClient.post('/api/student/practice/questions', {
+        tags: config.selectedTags,
+        clusters: clusterPaths,
+        order: config.order === 'random' ? 'random' : 'newest',
+        limit: 300,
+        exclude_mastered: true,
+      });
 
-    if (config.order === 'random') {
-      filtered = shuffleArray(filtered);
-    } else {
-      filtered.sort((a, b) => new Date(a.created_at || '').getTime() - new Date(b.created_at || '').getTime());
+      if (r?.error) {
+        alert(`出题失败：${r.error}`);
+        return;
+      }
+
+      const data = r?.data || {};
+      const list: Question[] = Array.isArray(data.items) ? data.items : [];
+      if (list.length === 0) {
+        alert('当前筛选条件下没有可练习的题目（可能都已掌握），换个范围试试');
+        return;
+      }
+      // 同步界面上的「已掌握」数字（出题接口不重复下发题号集合）
+      fetchPracticeStats();
+
+      setFilteredQuestions(list);
+      setCurrentIndex(0);
+      setSessionStats({ correct: 0, total: 0 });
+      setSelectedAnswer('');
+      setShowResult(false);
+      setShowConfig(false);
+      // 匹配量超出单次上限时明确告知，避免学生以为「题库只有这么多」
+      setSubmitNotice(
+        data.truncated
+          ? `当前条件下共 ${data.matched} 道可练题，本次先发 ${data.returned} 道；练完再点「开始练习」会继续出后面的题。`
+          : ''
+      );
+      answeredQuestionIdRef.current = null;
+    } catch (e) {
+      console.error('出题失败:', e);
+      alert('出题失败，请稍后重试');
+    } finally {
+      setLoading(false);
     }
-
-    setFilteredQuestions(filtered);
-    setCurrentIndex(0);
-    setSessionStats({ correct: 0, total: 0 });
-    setSelectedAnswer('');
-    setShowResult(false);
-    setShowConfig(false);
-    setSubmitNotice('');
-    answeredQuestionIdRef.current = null;
-  };
-
-  const shuffleArray = <T,>(array: T[]): T[] => {
-    const newArray = [...array];
-    for (let i = newArray.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [newArray[i], newArray[j]] = [newArray[j], newArray[i]];
-    }
-    return newArray;
   };
 
   const baseQuestion = filteredQuestions[currentIndex];
@@ -480,6 +525,14 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
         setShowResult(true);
         // 标记"当前这一屏题已提交"，未切题前不再允许提交
         answeredQuestionIdRef.current = currentQuestion.id;
+
+        // 通知学习模块刷新「已掌握/总题数」（同一 DOM 树里的另一个窗口）。
+        // 只在真的跨过掌握线时发，避免每答一题都让学习模块重拉一次目录。
+        if ((result.data as any)?.mastered) {
+          window.dispatchEvent(new CustomEvent('xgpy:answer-submitted', {
+            detail: { question_id: currentQuestion.id, source: 'practice' },
+          }));
+        }
 
         // 掌握门禁回执：该题答对次数已达阈值 → 立即移出练习队列并提示
         const gateData = result.data as any;
@@ -855,7 +908,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                 <i className="fa-solid fa-info-circle mr-1"></i>
                 当前符合条件的题目：
                 <span className="font-bold text-blue-600">
-                  {applyFiltersToList(questions).length}
+                  {applyFiltersToList(questionMeta).length}
                 </span>
                 道
               </p>
@@ -870,7 +923,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
               </button>
               <button
                 onClick={applyFiltersAndStart}
-                disabled={applyFiltersToList(questions).length === 0}
+                disabled={applyFiltersToList(questionMeta).length === 0}
                 className="flex-1 px-6 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
                 开始练习

@@ -881,6 +881,185 @@ app.get('/api/teacher/analytics/chapter-mastery/:classId', authenticate, require
   }
 });
 
+// ==================== 教师端：学生概览（一次聚合，取代逐学生的 N+1）====================
+// ⛔ 不要改回「先拉学生名单，再对每个学生发 4 个请求」：
+//    Analytics / StudentManager 原来一个 50 人班 ≈ 200 个请求，且每个请求都是
+//    student_answers 整表拉取（响应体积随全班答题量线性增长）。
+//    这里固定 5 条聚合查询，与班级人数无关。
+app.get('/api/teacher/students/overview', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const user = req.user || {};
+    const teacherId = user.userId || user.id;
+    const isAdmin = user.role === 'super_admin' || user.role === 'admin';
+
+    let visibleClassIds = null;
+    if (!isAdmin) {
+      const [cls] = await pool.query('SELECT id FROM classes WHERE teacher_id = ?', [teacherId]);
+      visibleClassIds = cls.map((c) => String(c.id));
+    }
+
+    const classId = String(req.query.class_id || '').trim();
+    const noClass = String(req.query.no_class || '') === '1';
+    const studentIds = String(req.query.student_ids || '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+
+    const where = ["p.role = 'student'"];
+    const params = [];
+
+    if (classId) {
+      if (visibleClassIds && !visibleClassIds.includes(classId)) {
+        return res.status(403).json({ data: null, error: '无权查看该班级' });
+      }
+      where.push('p.class_id = ?');
+      params.push(classId);
+    } else if (noClass) {
+      where.push('p.class_id IS NULL');
+    } else if (visibleClassIds) {
+      if (visibleClassIds.length === 0) {
+        return res.json({ data: { students: [], master_threshold: 0 }, error: null });
+      }
+      where.push('p.class_id IN (?)');
+      params.push(visibleClassIds);
+    }
+
+    if (studentIds.length) {
+      where.push('p.id IN (?)');
+      params.push(studentIds);
+    }
+
+    const [students] = await pool.query(
+      `SELECT p.id, p.username, p.real_name, p.class_id, p.current_points
+         FROM profiles p
+        WHERE ${where.join(' AND ')}`,
+      params
+    );
+    if (students.length === 0) {
+      return res.json({ data: { students: [], master_threshold: 0 }, error: null });
+    }
+
+    const ids = students.map((s) => String(s.id));
+    const masterThreshold = await getMasterThreshold();
+
+    // 1) 答题总数 / 做对数
+    const [answerRows] = await pool.query(
+      `SELECT student_id, COUNT(*) AS total, COALESCE(SUM(is_correct = 1), 0) AS correct
+         FROM student_answers WHERE student_id IN (?) GROUP BY student_id`,
+      [ids]
+    );
+    // 2) 已掌握题数（与 chapter-mastery 同口径）
+    const [masteredRows] = await pool.query(
+      `SELECT m.student_id, COUNT(*) AS n FROM (
+         SELECT student_id, question_id FROM student_answers
+         WHERE student_id IN (?) AND source = 'practice' AND is_correct = 1
+         GROUP BY student_id, question_id
+         HAVING COUNT(*) >= ?
+       ) m
+       JOIN questions q ON q.id = m.question_id
+       WHERE q.cluster_id IS NOT NULL AND q.cluster_id <> ''
+       GROUP BY m.student_id`,
+      [ids, masterThreshold]
+    );
+    // 3) 未解决错题数
+    const [wrongRows] = await pool.query(
+      `SELECT student_id, COUNT(*) AS n FROM wrong_questions
+        WHERE student_id IN (?) AND (is_resolved = 0 OR is_resolved IS NULL)
+        GROUP BY student_id`,
+      [ids]
+    );
+    // 4) 宠物（一位学生可能有多条历史记录 → 先聚合成一行，避免名单翻倍）
+    const [petRows] = await pool.query(
+      `SELECT student_id, MAX(growth_level) AS growth_level FROM student_pets
+        WHERE student_id IN (?) GROUP BY student_id`,
+      [ids]
+    );
+    // 5) 在线（与原前端口径一致：session 未过期且 5 分钟内有活跃）
+    const [onlineRows] = await pool.query(
+      `SELECT user_id FROM login_sessions
+        WHERE user_id IN (?) AND is_active = 1
+          AND expires_at > NOW()
+          AND last_active_at > DATE_SUB(NOW(), INTERVAL 5 MINUTE)
+        GROUP BY user_id`,
+      [ids]
+    );
+
+    const answerMap = new Map(answerRows.map((r) => [String(r.student_id), r]));
+    const masteredMap = new Map(masteredRows.map((r) => [String(r.student_id), Number(r.n) || 0]));
+    const wrongMap = new Map(wrongRows.map((r) => [String(r.student_id), Number(r.n) || 0]));
+    const petMap = new Map(petRows.map((r) => [String(r.student_id), Number(r.growth_level) || 0]));
+    const onlineSet = new Set(onlineRows.map((r) => String(r.user_id)));
+
+    const data = students.map((s) => {
+      const sid = String(s.id);
+      const agg = answerMap.get(sid) || {};
+      const total = Number(agg.total) || 0;
+      const correct = Number(agg.correct) || 0;
+      const petLevel = petMap.get(sid) || 0;
+      return {
+        id: s.id,
+        username: s.username,
+        real_name: s.real_name,
+        class_id: s.class_id,
+        current_points: Number(s.current_points) || 0,
+        total_answers: total,
+        correct_answers: correct,
+        wrong_answers: Math.max(0, total - correct),
+        accuracy: total > 0 ? Math.round((correct / total) * 100) : 0,
+        total_mastered: masteredMap.get(sid) || 0,
+        wrong_open: wrongMap.get(sid) || 0,
+        has_pet: petLevel > 0,
+        pet_level: petLevel,
+        is_online: onlineSet.has(sid),
+      };
+    });
+
+    res.json({ data: { students: data, master_threshold: masterThreshold }, error: null });
+  } catch (error) {
+    console.error('获取学生概览失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// ==================== 教师端：题库答题正确率（服务端聚合）====================
+// ⛔ 原来 QuestionManager 拉 student_answers **全表**（全体学生 × 全部作答）在前端
+//    GROUP BY 算每题正确率：数据量随使用无限增长，题库页会越来越慢。这里一条聚合搞定。
+app.get('/api/teacher/questions/accuracy', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT question_id, COUNT(*) AS total, COALESCE(SUM(is_correct = 1), 0) AS correct
+         FROM student_answers
+        WHERE question_id IS NOT NULL AND question_id <> ''
+        GROUP BY question_id`
+    );
+    res.json({
+      data: rows.map((r) => ({
+        question_id: r.question_id,
+        total: Number(r.total) || 0,
+        correct: Number(r.correct) || 0,
+      })),
+      error: null,
+    });
+  } catch (error) {
+    console.error('获取题库正确率失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// ==================== 教师端：轻量题库（组卷/考试选题用）====================
+// 教师端 ExamManager 需要全部题目来做选题与预览，但不需要 explanation 等大字段。
+// 实测整行 1.4MB → 轻量列约 0.9MB；真正的收益在「学生端不再拉全表」。
+app.get('/api/teacher/questions/base', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT id, type, content, options, tags, cluster_id, created_at
+         FROM questions ORDER BY created_at DESC`
+    );
+    res.json({ data: formatRows(rows), error: null });
+  } catch (error) {
+    console.error('获取轻量题库失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
 // ==================== 移动端学情分析 (v2.7.1) ====================
 // 教师账号在手机浏览器打开即可查看各班学生情况。
 // 设计要点：
@@ -1710,8 +1889,16 @@ app.post('/api/query', authenticate, async (req, res) => {
       filters = newFilters;
     }
     
-    let query = 'SELECT * FROM ??';
-    const params = [table];
+    // 列投影：columns 只接受合法列名（白名单正则），非法项丢弃；
+    // 全部非法时退回 SELECT *，避免历史调用方传了怪东西直接 500。
+    // ⚠️ 现状：前端只有显式调用 selectExact() 才会传 columns，
+    //    旧的 .select('a,b') 仍然拿整行（历史代码里存在「select 写了 1 列、但后面用到整行」的用法，
+    //    贸然全局生效会大面积出 undefined）。
+    const safeCols = Array.isArray(columns) ? columns.map(sanitizeColumn).filter(Boolean) : [];
+    let query = safeCols.length
+      ? `SELECT ${safeCols.map(() => '??').join(', ')} FROM ??`
+      : 'SELECT * FROM ??';
+    const params = safeCols.length ? [...safeCols, table] : [table];
     
     if (filters && Object.keys(filters).length > 0) {
       const conditions = [];
@@ -9627,6 +9814,138 @@ app.get('/api/student/practice-stats', authenticate, async (req, res) => {
   }
 });
 
+// ==================== 练习模块：题库目录 + 按需出题 ====================
+// ⛔ 不要改回「前端用 /api/query 拉 questions 整行」，两个原因：
+//    ① 体积：1004 行 ≈ 1.4MB（content 509KB + explanation 195KB + options 142KB），
+//       每次打开练习模块都要整包下载，配置页其实只用来算「筛选项 + 当前匹配题数」；
+//    ② 安全：/api/query 不过 stripQuestionRowsForRequester，学生按 F12 就能看到
+//       全库 answers / explanation（作答前）。拆成两步后学生只能拿到本轮题目的题干与选项。
+const PRACTICE_META_COLUMNS = 'id, type, tags, cluster_id';
+const PRACTICE_PICK_COLUMNS = 'id, type, content, options, tags, cluster_id, created_at';
+// 出题上限：一节课的量。筛得太宽时不至于又退回「整包下发」，
+// 同时前端会拿到 matched 用来提示「本次只取前 N 题」。
+const PRACTICE_PICK_LIMIT_MAX = 600;
+const PRACTICE_PICK_LIMIT_DEFAULT = 300;
+
+function parseQuestionTags(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return raw.split(',').map((s) => s.trim()).filter(Boolean);
+    }
+  }
+  return [];
+}
+
+// 聚类命中口径与前端 applyFiltersToList 一致：给的是「完整 cluster_id」或「一级章名」
+function matchClusterFilter(clusterId, clusters) {
+  if (!clusters || clusters.length === 0) return true;
+  if (!clusterId) return false;
+  return clusters.some((c) => clusterId === c || clusterId.startsWith(`${c}/`));
+}
+
+// 题库目录：只返回算筛选项与题数所需的四个字段（实测约 1/10 体积）
+app.get('/api/student/practice-catalog', authenticate, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT ${PRACTICE_META_COLUMNS} FROM questions
+        WHERE practice_enabled = 1${SQL_NOT_WPS_OP}`
+    );
+    res.json({
+      data: {
+        total: rows.length,
+        items: rows.map((r) => ({
+          id: r.id,
+          type: r.type,
+          tags: parseQuestionTags(r.tags),
+          cluster_id: r.cluster_id || '',
+        })),
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('获取练习题库目录失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 按筛选条件出题：服务端过滤 + 排除已掌握 + 排序 + 限量 + 脱敏
+app.post('/api/student/practice/questions', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId || req.user.id;
+    const body = req.body || {};
+    const tags = Array.isArray(body.tags) ? body.tags.filter(Boolean) : [];
+    const clusters = Array.isArray(body.clusters) ? body.clusters.filter(Boolean) : [];
+    const order = body.order === 'newest' ? 'newest' : 'random';
+    const rawLimit = Number(body.limit);
+    const limit = Math.min(
+      Math.max(Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : PRACTICE_PICK_LIMIT_DEFAULT, 1),
+      PRACTICE_PICK_LIMIT_MAX
+    );
+    const excludeMastered = body.exclude_mastered !== false;
+
+    let masteredSet = new Set();
+    if (excludeMastered) {
+      const masterThreshold = await getMasterThreshold();
+      const [mrows] = await pool.query(
+        `SELECT question_id FROM student_answers
+          WHERE student_id = ? AND source = 'practice' AND is_correct = 1
+          GROUP BY question_id
+          HAVING COUNT(*) >= ?`,
+        [userId, masterThreshold]
+      );
+      masteredSet = new Set(mrows.map((r) => r.question_id));
+    }
+
+    const [rows] = await pool.query(
+      `SELECT ${PRACTICE_PICK_COLUMNS} FROM questions
+        WHERE practice_enabled = 1${SQL_NOT_WPS_OP}
+        ORDER BY created_at ASC`
+    );
+
+    let matched = rows.filter((r) => {
+      if (excludeMastered && masteredSet.has(r.id)) return false;
+      if (tags.length) {
+        const qTags = parseQuestionTags(r.tags);
+        if (!tags.some((t) => qTags.includes(t))) return false;
+      }
+      return matchClusterFilter(r.cluster_id, clusters);
+    });
+
+    if (order === 'random') {
+      for (let i = matched.length - 1; i > 0; i -= 1) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [matched[i], matched[j]] = [matched[j], matched[i]];
+      }
+    }
+
+    const total = matched.length;
+    const items = matched
+      .slice(0, limit)
+      // ⛔ 必须脱敏：本轮题目同样不能带 answers / explanation / wps_spec / access_spec
+      .map((r) => stripQuestionForStudent(formatRow(r)));
+
+    res.json({
+      data: {
+        items,
+        matched: total,
+        returned: items.length,
+        truncated: total > limit,
+        limit,
+        excluded_mastered: excludeMastered ? masteredSet.size : 0,
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('按条件出题失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
 // 取某章讲义正文 + 该章自测题（原问答内容保留为章末自测）
 app.get('/api/student/learn-chapter/:clusterId', authenticate, async (req, res) => {
   try {
@@ -9652,6 +9971,10 @@ app.get('/api/student/learn-chapter/:clusterId', authenticate, async (req, res) 
     // anchor 是讲义正文里该小节标题的 DOM id（后端注入，见 lecture-anchors.js）。
     // 前端靠它做「点小节按钮 → 学习页滚动到位 + 弹出练习」的联动，
     // 也顺带修好左侧目录点击小节不跳转的老问题（以前讲义没有 id）。
+    // 各小节「已掌握题数」：与目录/胶囊同一口径（practice 答对次数 >= 掌握阈值）。
+    // 供讲义顶部胶囊与「去练习 m/N」显示，也用于「练完这类题回到讲义」时原地刷新。
+    const masterThreshold = await getMasterThreshold();
+    const masteredMap = await getMasteredBySection(pool, req.user.userId || req.user.id, masterThreshold);
     const anchorInfo = computeChapterAnchors(clusterId, lec?.html || '', secs);
     res.json({
       data: {
@@ -9666,6 +9989,7 @@ app.get('/api/student/learn-chapter/:clusterId', authenticate, async (req, res) 
           code: SECTION_CODES[`${clusterId}/${s}`] || '',
           anchor: anchorInfo.map[s]?.index >= 0 ? anchorId(s) : '',
           question_count: countMap.get(`${clusterId}/${s}`) || 0,
+          mastered_count: masteredMap.get(`${clusterId}/${s}`) || 0,
         })),
       },
       error: null,
