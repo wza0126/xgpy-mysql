@@ -3,6 +3,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
 import { Question } from '../../types';
 import { useAuth } from '../../hooks/useAuth';
+import { useQuickMode } from '../../hooks/useQuickMode';
+import { QuickModeToggle } from './QuickModeToggle';
 import { toDatabaseDateTime } from '../../utils/dateUtils';
 import { sanitizeHtml, htmlToPlainText } from '../../utils/htmlUtils';
 
@@ -133,6 +135,8 @@ export const SimilarPracticeWindow: React.FC<SimilarPracticeWindowProps> = ({ in
   // 同步提交锁：不依赖 React 重渲染（与练习模块同一套防卡机方案）。
   // 此前只有 state 锁，页面卡顿/掉帧时闭包里的 submitting 永远是 false，会被连点重复提交。
   const submittingRef = useRef(false);
+  // 快速模式：单选点选项即交 / 填空回车即交 / 结果页回车进下一题（默认开，偏好全局共享）
+  const [quickMode, toggleQuickMode] = useQuickMode();
 
   // overrideAnswer：点选项即交 / 回车即交时答案尚未进 state，由调用方直接传入。
   // 按钮 onClick 传入的是事件对象，用 typeof 过滤只认字符串。
@@ -216,9 +220,9 @@ export const SimilarPracticeWindow: React.FC<SimilarPracticeWindowProps> = ({ in
   };
 
   // 结果页按 Enter 进下一题；最后一题时等于「完成练习」。preventDefault 防止焦点
-  // 落在按钮上时原生 click 与监听器同时触发、连跳两题。
+  // 落在按钮上时原生 click 与监听器同时触发、连跳两题。（仅快速模式开启时）
   useEffect(() => {
-    if (!showResult) return;
+    if (!showResult || !quickMode) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Enter' || e.isComposing) return;
       e.preventDefault();
@@ -227,7 +231,7 @@ export const SimilarPracticeWindow: React.FC<SimilarPracticeWindowProps> = ({ in
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [showResult, currentIndex, questions.length, handleNext, onClose]);
+  }, [showResult, quickMode, currentIndex, questions.length, handleNext, onClose]);
 
   const handleAiQa = () => {
     if (!currentQuestion) return;
@@ -380,7 +384,7 @@ export const SimilarPracticeWindow: React.FC<SimilarPracticeWindowProps> = ({ in
                         // 快速作答：单选题选中即提交判分（防重复闸门在 handleSubmit 入口处）
                         if (showResult) return;
                         setSelectedAnswer(optionLetter);
-                        handleSubmit(optionLetter);
+                        if (quickMode) handleSubmit(optionLetter);
                       }}
                       disabled={showResult}
                       className={`w-full p-4 rounded-lg border-2 text-left transition-all ${borderClass} ${bgClass} ${showResult ? 'cursor-not-allowed' : ''}`}
@@ -401,6 +405,7 @@ export const SimilarPracticeWindow: React.FC<SimilarPracticeWindowProps> = ({ in
                   onChange={(e) => !showResult && setSelectedAnswer(e.target.value)}
                   onKeyDown={(e) => {
                     // 快速作答：回车即提交；过滤输入法合成态（选字回车不算）
+                    if (!quickMode) return;
                     if (e.key !== 'Enter') return;
                     if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                     const val = (e.target as HTMLInputElement).value;
@@ -447,6 +452,8 @@ export const SimilarPracticeWindow: React.FC<SimilarPracticeWindowProps> = ({ in
 
         {/* 操作按钮 */}
         <div className="mt-6 flex justify-end gap-3">
+          {/* 快速模式开关（悬浮看用法说明） */}
+          <QuickModeToggle quickMode={quickMode} onToggle={toggleQuickMode} />
           {currentQuestion && (
             <button
               onClick={handleAiQa}

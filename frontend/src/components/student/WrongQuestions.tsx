@@ -3,6 +3,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
 import { Question, WrongQuestion } from '../../types';
 import { useAuth } from '../../hooks/useAuth';
+import { useQuickMode } from '../../hooks/useQuickMode';
+import { QuickModeToggle } from './QuickModeToggle';
 import { usePoints } from '../../hooks/usePoints';
 import { toDatabaseDateTime } from '../../utils/dateUtils';
 import { useGameSystem, BuffInfo, SubmitResult, HonorEvent } from '../../hooks/useGameSystem';
@@ -108,6 +110,8 @@ export const WrongQuestions: React.FC = () => {
   const answeredQuestionIdRef = useRef<string | null>(null);
   // 连点冷却兜底（毫秒）
   const lastSubmitAtRef = useRef(0);
+  // 快速模式：单选点选项即交 / 填空回车即交 / 结果页回车进下一题（默认开，偏好全局共享）
+  const [quickMode, toggleQuickMode] = useQuickMode();
   const SUBMIT_COOLDOWN_MS = 1500;
   const [submitNotice, setSubmitNotice] = useState('');
   const [loading, setLoading] = useState(true);
@@ -507,9 +511,9 @@ export const WrongQuestions: React.FC = () => {
   };
 
   // 结果页按 Enter 直接进下一题（队列走完时 handleNextQuestion 内部会 handleBack 回列表）。
-  // preventDefault 防止焦点落在按钮上时原生 click 与监听器同时触发、连跳两题。
+  // preventDefault 防止焦点落在按钮上时原生 click 与监听器同时触发、连跳两题。（仅快速模式开启时）
   useEffect(() => {
-    if (!showResult) return;
+    if (!showResult || !quickMode) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Enter' || e.isComposing) return;
       e.preventDefault();
@@ -517,7 +521,7 @@ export const WrongQuestions: React.FC = () => {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [showResult, handleNextQuestion]);
+  }, [showResult, quickMode, handleNextQuestion]);
 
   if (loading) {
     return (
@@ -563,7 +567,7 @@ export const WrongQuestions: React.FC = () => {
                           // 快速作答：单选题选中即提交判分（防重复闸门在 handleSubmit 入口处）
                           if (showResult) return;
                           setSelectedAnswer(optionLetter);
-                          handleSubmit(optionLetter);
+                          if (quickMode) handleSubmit(optionLetter);
                         }}
                         disabled={showResult}
                         className={`w-full p-4 rounded-lg border-2 text-left transition-all ${
@@ -588,6 +592,7 @@ export const WrongQuestions: React.FC = () => {
                     onChange={(e) => !showResult && setSelectedAnswer(e.target.value)}
                     onKeyDown={(e) => {
                       // 快速作答：回车即提交；过滤输入法合成态（选字回车不算）
+                      if (!quickMode) return;
                       if (e.key !== 'Enter') return;
                       if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                       const val = (e.target as HTMLInputElement).value;
@@ -816,6 +821,8 @@ export const WrongQuestions: React.FC = () => {
               )}
 
               <div className="mt-6 flex justify-end gap-3">
+                {/* 快速模式开关（悬浮看用法说明） */}
+                <QuickModeToggle quickMode={quickMode} onToggle={toggleQuickMode} />
                 {/* AI答疑按钮 */}
                 {selectedQuestion && (
                   <button

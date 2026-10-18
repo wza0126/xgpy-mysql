@@ -3,6 +3,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
 import { Question, PracticeStats } from '../../types';
 import { useAuth } from '../../hooks/useAuth';
+import { useQuickMode } from '../../hooks/useQuickMode';
+import { QuickModeToggle } from './QuickModeToggle';
 import { usePoints } from '../../hooks/usePoints';
 import { toDatabaseDateTime } from '../../utils/dateUtils';
 import { useGameSystem, BuffInfo, SubmitResult, HonorEvent } from '../../hooks/useGameSystem';
@@ -173,6 +175,8 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
   const answeredQuestionIdRef = useRef<string | null>(null);
   // 同题连点冷却兜底（毫秒）
   const lastSubmitAtRef = useRef(0);
+  // 快速模式：单选点选项即交 / 填空回车即交 / 结果页回车进下一题（默认开，偏好全局共享）
+  const [quickMode, toggleQuickMode] = useQuickMode();
   const SUBMIT_COOLDOWN_MS = 1500;
   // 提交反馈提示（已掌握/重复提交等）
   const [submitNotice, setSubmitNotice] = useState('');
@@ -688,10 +692,10 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
     }
   };
 
-  // 结果页按 Enter 直接进下一题：配合"选中即交/回车即交"，全程键盘流。
+  // 结果页按 Enter 直接进下一题：配合"选中即交/回车即交"，全程键盘流（仅快速模式开启时）。
   // preventDefault 是为了焦点落在「下一题」按钮上时拦掉原生 click 激活，避免回车连跳两题。
   useEffect(() => {
-    if (!showResult) return;
+    if (!showResult || !quickMode) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Enter' || e.isComposing) return;
       e.preventDefault();
@@ -699,7 +703,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [showResult, handleNext]);
+  }, [showResult, quickMode, handleNext]);
 
   const toggleTag = (tag: string) => {
     setConfig((prev) => ({
@@ -1051,7 +1055,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                           if (showResult) return;
                           const letter = String.fromCharCode(65 + index);
                           setSelectedAnswer(letter);
-                          handleSubmit(letter);
+                          if (quickMode) handleSubmit(letter);
                         }}
                         disabled={showResult}
                         className={`w-full p-4 rounded-lg border-2 text-left transition-all ${
@@ -1076,6 +1080,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                       onKeyDown={(e) => {
                         // 快速作答：填空题输入完按回车即提交判分。
                         // 必须过滤中文输入法合成态：选字时的回车不能当成提交。
+                        if (!quickMode) return;
                         if (e.key !== 'Enter') return;
                         if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                         const val = (e.target as HTMLInputElement).value;
@@ -1308,6 +1313,8 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
             )}
 
             <div className="mt-6 flex justify-end gap-3">
+              {/* 快速模式开关（悬浮看用法说明） */}
+              <QuickModeToggle quickMode={quickMode} onToggle={toggleQuickMode} />
               {/* AI答疑按钮 */}
               {currentQuestion && (
                 <button
