@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
 import { Question } from '../../types';
@@ -130,9 +130,18 @@ export const SimilarPracticeWindow: React.FC<SimilarPracticeWindowProps> = ({ in
   // 答过之后把回执里的答案/解析合并进题目对象，渲染逻辑照旧
   const currentQuestion = baseQuestion && revealed ? { ...baseQuestion, ...revealed } : baseQuestion;
 
-  const handleSubmit = async () => {
-    if (!currentQuestion || !profile || submitting) return;
-    if (!selectedAnswer) return;
+  // 同步提交锁：不依赖 React 重渲染（与练习模块同一套防卡机方案）。
+  // 此前只有 state 锁，页面卡顿/掉帧时闭包里的 submitting 永远是 false，会被连点重复提交。
+  const submittingRef = useRef(false);
+
+  // overrideAnswer：点选项即交 / 回车即交时答案尚未进 state，由调用方直接传入。
+  // 按钮 onClick 传入的是事件对象，用 typeof 过滤只认字符串。
+  const handleSubmit = async (overrideAnswer?: unknown) => {
+    if (!currentQuestion || !profile) return;
+    if (submittingRef.current) return;
+    const ans = typeof overrideAnswer === 'string' ? overrideAnswer : selectedAnswer;
+    if (!ans) return;
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       // 题目已脱敏、本地拿不到正确答案：判分与答案一律由服务端给出。
@@ -140,7 +149,7 @@ export const SimilarPracticeWindow: React.FC<SimilarPracticeWindowProps> = ({ in
       const result = await backendClient.businessSubmitAnswer({
         student_id: profile.id,
         question_id: currentQuestion.id,
-        answer: selectedAnswer,
+        answer: ans,
         source: 'similar_practice',
       });
 
@@ -174,7 +183,7 @@ export const SimilarPracticeWindow: React.FC<SimilarPracticeWindowProps> = ({ in
             id: wrongId,
             student_id: profile.id,
             question_id: currentQuestion.id,
-            wrong_answer: selectedAnswer,
+            wrong_answer: ans,
             source: 'similar_practice',
             created_at: toDatabaseDateTime(new Date()),
             resolved: false,
@@ -192,6 +201,7 @@ export const SimilarPracticeWindow: React.FC<SimilarPracticeWindowProps> = ({ in
         alert('提交失败，请检查网络后重试');
       }
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
@@ -204,6 +214,20 @@ export const SimilarPracticeWindow: React.FC<SimilarPracticeWindowProps> = ({ in
       setIsCorrect(false);
     }
   };
+
+  // 结果页按 Enter 进下一题；最后一题时等于「完成练习」。preventDefault 防止焦点
+  // 落在按钮上时原生 click 与监听器同时触发、连跳两题。
+  useEffect(() => {
+    if (!showResult) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Enter' || e.isComposing) return;
+      e.preventDefault();
+      if (currentIndex < questions.length - 1) handleNext();
+      else onClose?.();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [showResult, currentIndex, questions.length, handleNext, onClose]);
 
   const handleAiQa = () => {
     if (!currentQuestion) return;
@@ -352,7 +376,12 @@ export const SimilarPracticeWindow: React.FC<SimilarPracticeWindowProps> = ({ in
                   return (
                     <button
                       key={index}
-                      onClick={() => !showResult && setSelectedAnswer(optionLetter)}
+                      onClick={() => {
+                        // 快速作答：单选题选中即提交判分（防重复闸门在 handleSubmit 入口处）
+                        if (showResult) return;
+                        setSelectedAnswer(optionLetter);
+                        handleSubmit(optionLetter);
+                      }}
                       disabled={showResult}
                       className={`w-full p-4 rounded-lg border-2 text-left transition-all ${borderClass} ${bgClass} ${showResult ? 'cursor-not-allowed' : ''}`}
                     >
@@ -370,6 +399,15 @@ export const SimilarPracticeWindow: React.FC<SimilarPracticeWindowProps> = ({ in
                   type="text"
                   value={selectedAnswer}
                   onChange={(e) => !showResult && setSelectedAnswer(e.target.value)}
+                  onKeyDown={(e) => {
+                    // 快速作答：回车即提交；过滤输入法合成态（选字回车不算）
+                    if (e.key !== 'Enter') return;
+                    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                    const val = (e.target as HTMLInputElement).value;
+                    if (!val.trim()) return;
+                    e.preventDefault();
+                    handleSubmit(val);
+                  }}
                   disabled={showResult}
                   placeholder="请输入答案"
                   className="w-full p-4 border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:outline-none"

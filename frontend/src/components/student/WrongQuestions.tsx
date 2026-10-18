@@ -257,7 +257,10 @@ export const WrongQuestions: React.FC = () => {
     answeredQuestionIdRef.current = null;
   };
 
-  const handleSubmit = async () => {
+  // overrideAnswer：快速作答（点选项即交 / 回车即交）时答案尚未进 state，由调用方直接传入。
+  // 按钮 onClick 传入的是事件对象，用 typeof 过滤只认字符串。
+  // 防重复三道闸（submittingRef / answeredQuestionIdRef / 冷却）都在入口处，任何触发方式都生效。
+  const handleSubmit = async (overrideAnswer?: unknown) => {
     if (!selectedQuestion || !profile) return;
 
     // 同步拦截（不依赖 state 是否已刷新）
@@ -285,11 +288,12 @@ export const WrongQuestions: React.FC = () => {
         blank_answers: compositeBlankAnswers
       });
     } else {
-      if (!selectedAnswer) {
+      const ans = typeof overrideAnswer === 'string' ? overrideAnswer : selectedAnswer;
+      if (!ans) {
         setIsSubmitting(false);
         return;
       }
-      const answerTrimmed = selectedAnswer.trim();
+      const answerTrimmed = ans.trim();
       if (!answerTrimmed) {
         alert('请输入答案');
         setIsSubmitting(false);
@@ -502,6 +506,19 @@ export const WrongQuestions: React.FC = () => {
     }
   };
 
+  // 结果页按 Enter 直接进下一题（队列走完时 handleNextQuestion 内部会 handleBack 回列表）。
+  // preventDefault 防止焦点落在按钮上时原生 click 与监听器同时触发、连跳两题。
+  useEffect(() => {
+    if (!showResult) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Enter' || e.isComposing) return;
+      e.preventDefault();
+      handleNextQuestion();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [showResult, handleNextQuestion]);
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -542,7 +559,12 @@ export const WrongQuestions: React.FC = () => {
                     return (
                       <button
                         key={index}
-                        onClick={() => !showResult && setSelectedAnswer(optionLetter)}
+                        onClick={() => {
+                          // 快速作答：单选题选中即提交判分（防重复闸门在 handleSubmit 入口处）
+                          if (showResult) return;
+                          setSelectedAnswer(optionLetter);
+                          handleSubmit(optionLetter);
+                        }}
                         disabled={showResult}
                         className={`w-full p-4 rounded-lg border-2 text-left transition-all ${
                           selectedAnswer === optionLetter
@@ -564,6 +586,15 @@ export const WrongQuestions: React.FC = () => {
                     type="text"
                     value={selectedAnswer}
                     onChange={(e) => !showResult && setSelectedAnswer(e.target.value)}
+                    onKeyDown={(e) => {
+                      // 快速作答：回车即提交；过滤输入法合成态（选字回车不算）
+                      if (e.key !== 'Enter') return;
+                      if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                      const val = (e.target as HTMLInputElement).value;
+                      if (!val.trim()) return;
+                      e.preventDefault();
+                      handleSubmit(val);
+                    }}
                     disabled={showResult}
                     placeholder="请输入答案"
                     className="w-full p-4 border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:outline-none"

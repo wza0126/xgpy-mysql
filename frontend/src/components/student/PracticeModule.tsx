@@ -429,7 +429,11 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
   // 答过之后把回执里的答案/解析合并进题目对象，原有渲染逻辑（正确答案高亮、解析、填空参考答案）无需改动
   const currentQuestion = baseQuestion && revealed ? { ...baseQuestion, ...revealed } : baseQuestion;
 
-  const handleSubmit = async () => {
+  // overrideAnswer：快速作答（点选项即交 / 填空回车即交）时，答案还没来得及进 state，
+  // 由调用方直接传入，避免读到闭包里的旧值。「提交答案」按钮的 onClick 会把事件对象
+  // 当第一个参数传进来，所以这里用 typeof 过滤，只认字符串。
+  // 防重复三道闸（submittingRef / answeredQuestionIdRef / 冷却）都在下面入口处，任何触发方式都生效。
+  const handleSubmit = async (overrideAnswer?: unknown) => {
     if (!currentQuestion || !profile) return;
 
     // 同步拦截（不依赖 state 是否已刷新）：
@@ -461,11 +465,12 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
           blank_answers: compositeBlankAnswers
         });
       } else {
-        if (!selectedAnswer) {
+        const ans = typeof overrideAnswer === 'string' ? overrideAnswer : selectedAnswer;
+        if (!ans) {
           setIsSubmitting(false);
           return;
         }
-        const answerTrimmed = selectedAnswer.trim();
+        const answerTrimmed = ans.trim();
         if (!answerTrimmed) {
           alert('请输入答案');
           return;
@@ -682,6 +687,19 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
       setCurrentIndex(newIndex);
     }
   };
+
+  // 结果页按 Enter 直接进下一题：配合"选中即交/回车即交"，全程键盘流。
+  // preventDefault 是为了焦点落在「下一题」按钮上时拦掉原生 click 激活，避免回车连跳两题。
+  useEffect(() => {
+    if (!showResult) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Enter' || e.isComposing) return;
+      e.preventDefault();
+      handleNext();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [showResult, handleNext]);
 
   const toggleTag = (tag: string) => {
     setConfig((prev) => ({
@@ -1028,7 +1046,13 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                     {getOptions(currentQuestion.options).map((option: string, index: number) => (
                       <button
                         key={index}
-                        onClick={() => !showResult && setSelectedAnswer(String.fromCharCode(65 + index))}
+                        onClick={() => {
+                          // 快速作答：单选题选中即提交判分（防重复闸门在 handleSubmit 入口处）
+                          if (showResult) return;
+                          const letter = String.fromCharCode(65 + index);
+                          setSelectedAnswer(letter);
+                          handleSubmit(letter);
+                        }}
                         disabled={showResult}
                         className={`w-full p-4 rounded-lg border-2 text-left transition-all ${
                           selectedAnswer === String.fromCharCode(65 + index)
@@ -1049,6 +1073,16 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                       type="text"
                       value={selectedAnswer}
                       onChange={(e) => !showResult && setSelectedAnswer(e.target.value)}
+                      onKeyDown={(e) => {
+                        // 快速作答：填空题输入完按回车即提交判分。
+                        // 必须过滤中文输入法合成态：选字时的回车不能当成提交。
+                        if (e.key !== 'Enter') return;
+                        if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                        const val = (e.target as HTMLInputElement).value;
+                        if (!val.trim()) return;
+                        e.preventDefault();
+                        handleSubmit(val);
+                      }}
                       disabled={showResult}
                       placeholder="请输入答案"
                       className="w-full p-4 border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:outline-none"
