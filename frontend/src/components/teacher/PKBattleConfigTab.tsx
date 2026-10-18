@@ -64,6 +64,8 @@ interface PKBattleConfig {
   qualification_correct_count: number | null;
   qualification_mastered_count: number | null;
   qualification_mastered_clusters: string[] | string | null;
+  qualification_wps_op_score: number | null;
+  qualification_access_op_score: number | null;
   // ===== 奖励配置（迁移 086）=====
   points_multiplier: number | string | null;
   win_bonus_rate: number | string | null;
@@ -107,6 +109,8 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
     qualification_correct_count: '' as string | number,
     qualification_mastered_count: '' as string | number,
     qualification_mastered_clusters: [] as string[],
+    qualification_wps_op_score: '' as string | number,
+    qualification_access_op_score: '' as string | number,
     // ===== 奖励配置 =====
     points_multiplier: 1 as string | number,
     win_bonus_rate: 0.5 as string | number,
@@ -189,6 +193,8 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
       qualification_correct_count: '',
       qualification_mastered_count: '',
       qualification_mastered_clusters: [],
+      qualification_wps_op_score: '',
+      qualification_access_op_score: '',
       points_multiplier: 1,
       win_bonus_rate: 0.5,
       draw_bonus_rate: 0,
@@ -225,6 +231,8 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
       qualification_correct_count: cfg.qualification_correct_count ?? '',
       qualification_mastered_count: cfg.qualification_mastered_count ?? '',
       qualification_mastered_clusters: parseJsonArray(cfg.qualification_mastered_clusters),
+      qualification_wps_op_score: cfg.qualification_wps_op_score ?? '',
+      qualification_access_op_score: cfg.qualification_access_op_score ?? '',
       points_multiplier: cfg.points_multiplier != null ? Number(cfg.points_multiplier) : 1,
       win_bonus_rate: cfg.win_bonus_rate != null ? Number(cfg.win_bonus_rate) : 0.5,
       draw_bonus_rate: cfg.draw_bonus_rate != null ? Number(cfg.draw_bonus_rate) : 0,
@@ -337,6 +345,15 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
         formData.qualification_mastered_clusters.length > 0
           ? formData.qualification_mastered_clusters
           : null,
+      // 操作题累计得分资格：空 = 不启用（与成就殿堂「累计操作题得分」同源）
+      qualification_wps_op_score:
+        formData.qualification_wps_op_score === ''
+          ? null
+          : Number(formData.qualification_wps_op_score),
+      qualification_access_op_score:
+        formData.qualification_access_op_score === ''
+          ? null
+          : Number(formData.qualification_access_op_score),
       // ===== 奖励配置 =====
       points_multiplier: numOr(formData.points_multiplier, 1),
       win_bonus_rate: numOr(formData.win_bonus_rate, 0.5),
@@ -532,6 +549,18 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
                         const sc = parseJsonArray(cfg.qualification_mastered_clusters);
                         return sc.length > 0 ? `（${sc.join('/')}）` : '（全部范围）';
                       })()}
+                    </span>
+                  )}
+                  {cfg.qualification_wps_op_score != null && cfg.qualification_wps_op_score > 0 && (
+                    <span>
+                      <i className="fa-solid fa-file-word mr-1"></i>
+                      需WPS操作题累计 {cfg.qualification_wps_op_score} 分
+                    </span>
+                  )}
+                  {cfg.qualification_access_op_score != null && cfg.qualification_access_op_score > 0 && (
+                    <span>
+                      <i className="fa-solid fa-database mr-1"></i>
+                      需Access操作题累计 {cfg.qualification_access_op_score} 分
                     </span>
                   )}
                   {tags.length > 0 && (
@@ -855,6 +884,48 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
                         )}
                       </div>
                     </div>
+                  </div>
+
+                  {/* 条件三：WPS 操作题累计得分 */}
+                  <div className="bg-white/70 rounded-lg p-3">
+                    <p className="text-xs font-medium text-blue-700 mb-2">条件三 · WPS操作题累计得分</p>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-gray-600 whitespace-nowrap">累计得分达到</span>
+                      <input
+                        type="number"
+                        value={formData.qualification_wps_op_score}
+                        onChange={(e) =>
+                          setFormData({ ...formData, qualification_wps_op_score: e.target.value })
+                        }
+                        className="w-24 p-2 border border-gray-300 rounded-lg text-center"
+                        min={0}
+                      />
+                      <span className="text-sm text-gray-600 whitespace-nowrap">分</span>
+                    </div>
+                    <p className="text-xs text-gray-400 mt-1">
+                      统计学生在「操作题」里 WPS 操作题的历史累计得分（口径与任务中心成就殿堂的「累计操作题得分」一致）
+                    </p>
+                  </div>
+
+                  {/* 条件四：Access 操作题累计得分 */}
+                  <div className="bg-white/70 rounded-lg p-3">
+                    <p className="text-xs font-medium text-blue-700 mb-2">条件四 · Access操作题累计得分</p>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-gray-600 whitespace-nowrap">累计得分达到</span>
+                      <input
+                        type="number"
+                        value={formData.qualification_access_op_score}
+                        onChange={(e) =>
+                          setFormData({ ...formData, qualification_access_op_score: e.target.value })
+                        }
+                        className="w-24 p-2 border border-gray-300 rounded-lg text-center"
+                        min={0}
+                      />
+                      <span className="text-sm text-gray-600 whitespace-nowrap">分</span>
+                    </div>
+                    <p className="text-xs text-gray-400 mt-1">
+                      统计学生在「操作题」里 Access 操作题的历史累计得分（与条件三各自独立，两项都填则都要达标）
+                    </p>
                   </div>
                 </div>
 

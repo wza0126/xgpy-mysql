@@ -94,6 +94,8 @@ interface ActiveConfig {
   qualification_correct_count: number | null;
   qualification_mastered_count: number | null;
   qualification_mastered_clusters: string[] | string | null;
+  qualification_wps_op_score: number | null;
+  qualification_access_op_score: number | null;
 }
 
 export const PKLobby: React.FC<{
@@ -229,14 +231,20 @@ export const PKLobby: React.FC<{
 
   const selectedConfig = activeConfigs.find((c) => c.id === selectedConfigId);
 
-  // 资格验证：做对题数与已掌握题数两项需同时满足（服务端裁定，口径唯一）
+  // 资格验证：做对题数 / 已掌握题数 / WPS·Access 操作题累计得分 四项需同时满足（服务端裁定，口径唯一）
   const qual = selectedConfig ? qualificationMap[selectedConfig.id] : null;
   const qualRequired = selectedConfig?.qualification_correct_count || 0;
   const myCorrect = pkProfile?.correct_count || 0;
-  // 兜底：资格明细尚未返回时，用旧的做对题数规则先做一次初步判断，避免出现"可点但必失败"
+  // 兜底：资格明细尚未返回时，用旧的做对题数规则先做一次初步判断，避免出现"可点但必失败"。
+  // 注意：只要配置里有**任意一项**操作题得分要求，就必须等明细返回（本地拿不到这两个数），
+  // 这时先判「未通过」，宁可慢一步也不要放个必然失败的按钮出去。
+  const hasOpScoreRule = !!selectedConfig && (
+    (selectedConfig.qualification_wps_op_score || 0) > 0
+    || (selectedConfig.qualification_access_op_score || 0) > 0
+  );
   const qualPassed = qual
     ? qual.passed
-    : (qualRequired <= 0 || myCorrect >= qualRequired);
+    : (!hasOpScoreRule && (qualRequired <= 0 || myCorrect >= qualRequired));
 
   // 今日次数已满
   const dailyLimit = selectedConfig?.daily_limit || activeConfigs[0]?.daily_limit || 20;
@@ -385,6 +393,16 @@ export const PKLobby: React.FC<{
                         <i className="fa-solid fa-graduation-cap mr-1"></i>需掌握{cfg.qualification_mastered_count}题
                       </span>
                     )}
+                    {!!cfg.qualification_wps_op_score && cfg.qualification_wps_op_score > 0 && (
+                      <span className="text-blue-600">
+                        <i className="fa-solid fa-file-word mr-1"></i>WPS操作题需{cfg.qualification_wps_op_score}分
+                      </span>
+                    )}
+                    {!!cfg.qualification_access_op_score && cfg.qualification_access_op_score > 0 && (
+                      <span className="text-blue-600">
+                        <i className="fa-solid fa-database mr-1"></i>Access操作题需{cfg.qualification_access_op_score}分
+                      </span>
+                    )}
                   </div>
                 </button>
               );
@@ -431,8 +449,12 @@ export const PKLobby: React.FC<{
         </button>
       </div>
 
-      {/* 资格不足提示（两项条件分别列出未达标项） */}
-      {!qualPassed && (qual?.correct?.enabled || qual?.mastered?.enabled || qualRequired > 0) && (
+      {/* 资格不足提示（四项条件分别列出未达标项） */}
+      {!qualPassed && (
+        qual?.correct?.enabled || qual?.mastered?.enabled
+        || qual?.wps_op?.enabled || qual?.access_op?.enabled
+        || qualRequired > 0 || hasOpScoreRule
+      ) && (
         <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-700 space-y-1">
           <p className="font-medium">
             <i className="fa-solid fa-shield-halved mr-2"></i>
@@ -454,9 +476,31 @@ export const PKLobby: React.FC<{
                   {qual.mastered.passed ? ' ✓' : ''}
                 </p>
               )}
+              {qual.wps_op?.enabled && (
+                <p className="pl-6">
+                  · WPS操作题累计得 <b>{qual.wps_op.required}</b> 分（当前 <b>{qual.wps_op.current}</b> 分）
+                  {qual.wps_op.passed ? ' ✓' : ''}
+                </p>
+              )}
+              {qual.access_op?.enabled && (
+                <p className="pl-6">
+                  · Access操作题累计得 <b>{qual.access_op.required}</b> 分（当前 <b>{qual.access_op.current}</b> 分）
+                  {qual.access_op.passed ? ' ✓' : ''}
+                </p>
+              )}
             </>
           ) : (
-            <p className="pl-6">· 累计做对 <b>{qualRequired}</b> 道题（当前 <b>{myCorrect}</b> 道）</p>
+            <>
+              {qualRequired > 0 && (
+                <p className="pl-6">· 累计做对 <b>{qualRequired}</b> 道题（当前 <b>{myCorrect}</b> 道）</p>
+              )}
+              {!!selectedConfig?.qualification_wps_op_score && (
+                <p className="pl-6">· WPS操作题累计得 <b>{selectedConfig.qualification_wps_op_score}</b> 分（正在核对…）</p>
+              )}
+              {!!selectedConfig?.qualification_access_op_score && (
+                <p className="pl-6">· Access操作题累计得 <b>{selectedConfig.qualification_access_op_score}</b> 分（正在核对…）</p>
+              )}
+            </>
           )}
           <p className="pl-6 text-amber-600">去练习模块继续加油！</p>
         </div>

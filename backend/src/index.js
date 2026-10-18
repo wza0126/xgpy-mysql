@@ -10,6 +10,8 @@ const { registerWpsOp } = require('./wps-op');
 const { registerAccessOp } = require('./access-op');
 const { registerGameTasks } = require('./game-task');
 const { registerFarm } = require('./farm');
+// 操作题累计得分（资格验证第三/四项）与成就殿堂共用同一个口径函数
+const { getOpScore } = require('./game-task-metrics');
 const PythonSandbox = require('./python-sandbox');
 const PythonGrader = require('./python-grader');
 const { v4: uuidv4 } = require('uuid');
@@ -3739,6 +3741,12 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
         }
         if (qualDetail.mastered.enabled && !qualDetail.mastered.passed) {
           parts.push(`掌握 ${qualDetail.mastered.required} 道题（当前 ${qualDetail.mastered.current} 道）`);
+        }
+        if (qualDetail.wps_op?.enabled && !qualDetail.wps_op.passed) {
+          parts.push(`WPS操作题累计得 ${qualDetail.wps_op.required} 分（当前 ${qualDetail.wps_op.current} 分）`);
+        }
+        if (qualDetail.access_op?.enabled && !qualDetail.access_op.passed) {
+          parts.push(`Access操作题累计得 ${qualDetail.access_op.required} 分（当前 ${qualDetail.access_op.current} 分）`);
         }
         return res.status(403).json({
           data: { qualification: qualDetail },
@@ -9258,19 +9266,27 @@ async function getMasteredByChapter(conn, studentId, threshold) {
 /**
  * 统一资格判定（普通测试 / 试卷PK 共用）。
  *
- * 两项条件同时满足才算通过：
- *   1. 做对题数  —— student_answers 中 is_correct=1 的累计条数 >= qualification_correct_count
+ * 四项条件同时满足才算通过：
+ *   1. 做对题数   —— student_answers 中 is_correct=1 的累计条数 >= qualification_correct_count
  *   2. 已掌握题数 —— 练习来源答对次数 >= 掌握阈值 的题数（限定一级类目范围）>= qualification_mastered_count
+ *   3. WPS操作题累计得分  >= qualification_wps_op_score
+ *   4. Access操作题累计得分 >= qualification_access_op_score
+ *      第 3/4 项口径与「任务中心 → 成就殿堂 → 累计操作题得分」完全同源
+ *      （wps_op_submissions.score_obtained 按 kind 求和，见 game-task-metrics.getOpScore）。
  * 任一阈值为 NULL / 0 / 空 即视为该条件不启用（不影响通过）。
  *
  * @param {string} studentId
- * @param {object} rule 形如 { qualification_correct_count, qualification_mastered_count, qualification_mastered_clusters }
+ * @param {object} rule 形如 { qualification_correct_count, qualification_mastered_count,
+ *                             qualification_mastered_clusters,
+ *                             qualification_wps_op_score, qualification_access_op_score }
  * @returns {Promise<object>} 判定明细，供接口回执与前端展示复用（口径只有这一处）
  */
 async function checkQualification(studentId, rule) {
   const requiredCorrect = Number(rule?.qualification_correct_count) || 0;
   const requiredMastered = Number(rule?.qualification_mastered_count) || 0;
   const masteredClusters = parseMasteredClusters(rule?.qualification_mastered_clusters);
+  const requiredWpsScore = Number(rule?.qualification_wps_op_score) || 0;
+  const requiredAccessScore = Number(rule?.qualification_access_op_score) || 0;
 
   const [cntRows] = await pool.query(
     'SELECT COUNT(*) AS cnt FROM student_answers WHERE student_id = ? AND is_correct = 1',
@@ -9285,11 +9301,17 @@ async function checkQualification(studentId, rule) {
     currentMastered = await getMasteredCountInClusters(pool, studentId, masterThreshold, masteredClusters);
   }
 
+  // 只在启用时查询，避免每次资格校验都多打两次聚合（未启用条件不影响结果）
+  const currentWpsScore = requiredWpsScore > 0 ? await getOpScore(pool, studentId, 'wps') : 0;
+  const currentAccessScore = requiredAccessScore > 0 ? await getOpScore(pool, studentId, 'access') : 0;
+
   const correctPassed = requiredCorrect <= 0 || currentCorrect >= requiredCorrect;
   const masteredPassed = requiredMastered <= 0 || currentMastered >= requiredMastered;
+  const wpsScorePassed = requiredWpsScore <= 0 || currentWpsScore >= requiredWpsScore;
+  const accessScorePassed = requiredAccessScore <= 0 || currentAccessScore >= requiredAccessScore;
 
   return {
-    passed: correctPassed && masteredPassed,
+    passed: correctPassed && masteredPassed && wpsScorePassed && accessScorePassed,
     correct: {
       required: requiredCorrect,
       current: currentCorrect,
@@ -9304,6 +9326,18 @@ async function checkQualification(studentId, rule) {
       clusters: masteredClusters,       // 空数组 = 全部范围
       master_threshold: masterThreshold,
     },
+    wps_op: {
+      required: requiredWpsScore,
+      current: currentWpsScore,
+      enabled: requiredWpsScore > 0,
+      passed: wpsScorePassed,
+    },
+    access_op: {
+      required: requiredAccessScore,
+      current: currentAccessScore,
+      enabled: requiredAccessScore > 0,
+      passed: accessScorePassed,
+    },
   };
 }
 
@@ -9312,9 +9346,13 @@ async function checkQualification(studentId, rule) {
  * 找不到记录时返回空规则（等于不限制）。
  */
 async function getTestQualificationRule(testId) {
+  // ⚠️ tests 表**没有 name 列**（只有 title）。此前这里 SELECT 了 name，
+  //    导致 GET /api/student/qualification/test/:id 一直 500（TestModule 走的是批量接口，
+  //    所以没人发现）。2026-10-16 一并修掉。
   const [rows] = await pool.query(
-    `SELECT id, title, name, is_active, qualification_correct_count,
-            qualification_mastered_count, qualification_mastered_clusters
+    `SELECT id, title, is_active, qualification_correct_count,
+            qualification_mastered_count, qualification_mastered_clusters,
+            qualification_wps_op_score, qualification_access_op_score
      FROM tests WHERE id = ? LIMIT 1`,
     [testId]
   );
@@ -9368,7 +9406,8 @@ app.post('/api/student/qualification/tests', authenticate, requireStudent, async
     const placeholders = ids.map(() => '?').join(',');
     const [rows] = await pool.query(
       `SELECT id, qualification_correct_count,
-              qualification_mastered_count, qualification_mastered_clusters
+              qualification_mastered_count, qualification_mastered_clusters,
+              qualification_wps_op_score, qualification_access_op_score
        FROM tests WHERE id IN (${placeholders})`,
       ids
     );
@@ -9388,7 +9427,8 @@ app.get('/api/student/qualification/pk/:configId', authenticate, requireStudent,
   try {
     const [rows] = await pool.query(
       `SELECT id, name, is_active, qualification_correct_count,
-              qualification_mastered_count, qualification_mastered_clusters
+              qualification_mastered_count, qualification_mastered_clusters,
+              qualification_wps_op_score, qualification_access_op_score
        FROM pk_battle_configs WHERE id = ? LIMIT 1`,
       [req.params.configId]
     );
@@ -16356,6 +16396,7 @@ app.post('/api/pk/battle-configs', authenticate, requireTeacher, async (req, res
       cluster_filters, difficulty_min, difficulty_max, is_active, daily_limit,
       qualification_correct_count, qualification_mastered_count,
       qualification_mastered_clusters,
+      qualification_wps_op_score, qualification_access_op_score,
       points_multiplier, win_bonus_rate, draw_bonus_rate,
       consolation_points, consolation_gap, first_battle_points,
       daily_battles_target, daily_battles_points,
@@ -16382,11 +16423,12 @@ app.post('/api/pk/battle-configs', authenticate, requireTeacher, async (req, res
          (id, teacher_id, name, mode, duration_seconds, question_count,
           tag_filters, cluster_filters, difficulty_min, difficulty_max, is_active, daily_limit,
           qualification_correct_count, qualification_mastered_count, qualification_mastered_clusters,
+          qualification_wps_op_score, qualification_access_op_score,
           points_multiplier, win_bonus_rate, draw_bonus_rate,
           consolation_points, consolation_gap, first_battle_points,
           daily_battles_target, daily_battles_points,
           equipment_drop_enabled, equipment_drop_multiplier)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, req.user.userId, name, mode || 'timed',
          duration_seconds || 180, question_count || 20,
          tag_filters ? JSON.stringify(tag_filters) : null,
@@ -16395,6 +16437,8 @@ app.post('/api/pk/battle-configs', authenticate, requireTeacher, async (req, res
          is_active === false ? 0 : 1, daily_limit || null,
          qualification_correct_count || null,
          qualification_mastered_count || null, masteredClusters,
+         qualification_wps_op_score || null,
+         qualification_access_op_score || null,
          reward.points_multiplier, reward.win_bonus_rate, reward.draw_bonus_rate,
          reward.consolation_points, reward.consolation_gap, reward.first_battle_points,
          reward.daily_battles_target, reward.daily_battles_points,
@@ -16421,6 +16465,7 @@ app.put('/api/pk/battle-configs/:id', authenticate, requireTeacher, async (req, 
       cluster_filters, difficulty_min, difficulty_max, is_active, daily_limit,
       qualification_correct_count, qualification_mastered_count,
       qualification_mastered_clusters,
+      qualification_wps_op_score, qualification_access_op_score,
       points_multiplier, win_bonus_rate, draw_bonus_rate,
       consolation_points, consolation_gap, first_battle_points,
       daily_battles_target, daily_battles_points,
@@ -16455,6 +16500,7 @@ app.put('/api/pk/battle-configs/:id', authenticate, requireTeacher, async (req, 
           tag_filters = ?, cluster_filters = ?, difficulty_min = ?, difficulty_max = ?,
           is_active = ?, daily_limit = ?, qualification_correct_count = ?,
           qualification_mastered_count = ?, qualification_mastered_clusters = ?,
+          qualification_wps_op_score = ?, qualification_access_op_score = ?,
           points_multiplier = ?, win_bonus_rate = ?, draw_bonus_rate = ?,
           consolation_points = ?, consolation_gap = ?, first_battle_points = ?,
           daily_battles_target = ?, daily_battles_points = ?,
@@ -16467,6 +16513,8 @@ app.put('/api/pk/battle-configs/:id', authenticate, requireTeacher, async (req, 
          is_active === false ? 0 : 1, daily_limit || null,
          qualification_correct_count || null,
          qualification_mastered_count || null, masteredClusters,
+         qualification_wps_op_score || null,
+         qualification_access_op_score || null,
          reward.points_multiplier, reward.win_bonus_rate, reward.draw_bonus_rate,
          reward.consolation_points, reward.consolation_gap, reward.first_battle_points,
          reward.daily_battles_target, reward.daily_battles_points,
@@ -16539,7 +16587,8 @@ app.get('/api/pk/battle-configs/active', authenticate, requireStudent, async (re
     const myClassId = profRows.length > 0 ? String(profRows[0].class_id || '') : '';
 
     const baseCols = `c.id, c.name, c.mode, c.duration_seconds, c.question_count, c.daily_limit,
-       c.qualification_correct_count, c.qualification_mastered_count, c.qualification_mastered_clusters`;
+       c.qualification_correct_count, c.qualification_mastered_count, c.qualification_mastered_clusters,
+       c.qualification_wps_op_score, c.qualification_access_op_score`;
     const sql = `
       SELECT ${baseCols}
       FROM pk_battle_configs c

@@ -964,15 +964,25 @@ export const TestModule: React.FC = () => {
   const getDailyLimit = (test: any): number => parseInt(test?.daily_test_limit, 10) || 0;
 
   const startTest = async (test: Test) => {
-    // 资格验证（做对题数 + 已掌握题数，两项需同时满足；服务端为准，这里只是提前提示）
+    // 资格验证（做对题数 + 已掌握题数 + WPS/Access 操作题累计得分，四项需同时满足；
+    // 服务端为准，这里只是提前提示）
     const qualCheck = qualificationMap[test.id];
-    if (qualCheck && (qualCheck.correct?.enabled || qualCheck.mastered?.enabled) && !qualCheck.passed) {
+    if (qualCheck && (
+      qualCheck.correct?.enabled || qualCheck.mastered?.enabled
+      || qualCheck.wps_op?.enabled || qualCheck.access_op?.enabled
+    ) && !qualCheck.passed) {
       const parts: string[] = [];
       if (qualCheck.correct?.enabled && !qualCheck.correct.passed) {
         parts.push(`做对 ${qualCheck.correct.required} 道题（当前 ${qualCheck.correct.current} 道）`);
       }
       if (qualCheck.mastered?.enabled && !qualCheck.mastered.passed) {
         parts.push(`掌握 ${qualCheck.mastered.required} 道题（当前 ${qualCheck.mastered.current} 道）`);
+      }
+      if (qualCheck.wps_op?.enabled && !qualCheck.wps_op.passed) {
+        parts.push(`WPS操作题累计得 ${qualCheck.wps_op.required} 分（当前 ${qualCheck.wps_op.current} 分）`);
+      }
+      if (qualCheck.access_op?.enabled && !qualCheck.access_op.passed) {
+        parts.push(`Access操作题累计得 ${qualCheck.access_op.required} 分（当前 ${qualCheck.access_op.current} 分）`);
       }
       alert(`资格不足：需要先${parts.join('，且')}才能参加该测试`);
       return;
@@ -2007,9 +2017,12 @@ export const TestModule: React.FC = () => {
             const dailyLimit = getDailyLimit(test);
             const todayUsed = getTodayAttempts(test.id);
             const dailyExhausted = dailyLimit > 0 && todayUsed >= dailyLimit;
-            // 资格：两项条件（做对题数 + 已掌握题数）由服务端裁定，需同时满足
+            // 资格：四项条件（做对题数 + 已掌握题数 + WPS/Access 操作题累计得分）由服务端裁定，需同时满足
             const qual = qualificationMap[test.id];
-            const qualEnabled = !!qual && (qual.correct?.enabled || qual.mastered?.enabled);
+            const qualEnabled = !!qual && (
+              qual.correct?.enabled || qual.mastered?.enabled
+              || qual.wps_op?.enabled || qual.access_op?.enabled
+            );
             const qualificationLack = qualEnabled && !qual.passed;
             const blocked = dailyExhausted || qualificationLack;
             return (
@@ -2057,6 +2070,28 @@ export const TestModule: React.FC = () => {
                         {qual.mastered.passed
                           ? ' ✓ 已达标'
                           : `（当前 ${qual.mastered.current} 道）`}
+                      </span>
+                    </div>
+                  )}
+                  {qual.wps_op?.enabled && (
+                    <div className="flex items-center gap-1 text-sm">
+                      <i className={`fa-solid fa-file-word ${qual.wps_op.passed ? 'text-green-500' : 'text-amber-500'}`}></i>
+                      <span className={qual.wps_op.passed ? 'text-green-600' : 'text-amber-600'}>
+                        需WPS操作题累计得 {qual.wps_op.required} 分
+                        {qual.wps_op.passed
+                          ? ' ✓ 已达标'
+                          : `（当前 ${qual.wps_op.current} 分）`}
+                      </span>
+                    </div>
+                  )}
+                  {qual.access_op?.enabled && (
+                    <div className="flex items-center gap-1 text-sm">
+                      <i className={`fa-solid fa-database ${qual.access_op.passed ? 'text-green-500' : 'text-amber-500'}`}></i>
+                      <span className={qual.access_op.passed ? 'text-green-600' : 'text-amber-600'}>
+                        需Access操作题累计得 {qual.access_op.required} 分
+                        {qual.access_op.passed
+                          ? ' ✓ 已达标'
+                          : `（当前 ${qual.access_op.current} 分）`}
                       </span>
                     </div>
                   )}

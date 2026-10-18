@@ -75,6 +75,30 @@ async function scalar(pool, sql, args, key) {
   return Number(row && row[key]) || 0;
 }
 
+/**
+ * 操作题累计得分（**唯一口径**）。
+ *
+ * 教学侧有两处要用这个数：
+ *   1) 任务中心「成就殿堂 → 累计操作题得分」（指标 total_op_score）
+ *   2) 考试管理 → 普通测试 / 对战PK 的资格验证（新增的两条：WPS / Access）
+ * 所以把 SQL 收在这里，谁都不许另写一份 —— 否则「成就殿堂显示 120 分、
+ * 资格却说不够」这类自相矛盾迟早发生。
+ *
+ * @param {object}  pool
+ * @param {string}  studentId
+ * @param {string?} kind  'wps' | 'access'；留空/其它值 = 两者合计
+ * @returns {Promise<number>} 累计得分（无记录为 0）
+ */
+async function getOpScore(pool, studentId, kind) {
+  const args = [studentId];
+  let sql = 'SELECT COALESCE(SUM(score_obtained), 0) AS s FROM wps_op_submissions WHERE student_id = ?';
+  if (kind === 'wps' || kind === 'access') {
+    sql += ' AND kind = ?';
+    args.push(kind);
+  }
+  return scalar(pool, sql, args, 's');
+}
+
 const METRIC_DEFS = {
   // ============================================================
   // 一、当日口径（scope:'daily'）—— 一期每日任务用
@@ -321,13 +345,7 @@ const METRIC_DEFS = {
     }],
     async calc(pool, studentId, params) {
       const kind = params && params.kind;
-      const args = [studentId];
-      let sql = 'SELECT COALESCE(SUM(score_obtained), 0) AS s FROM wps_op_submissions WHERE student_id = ?';
-      if (kind === 'wps' || kind === 'access') {
-        sql += ' AND kind = ?';
-        args.push(kind);
-      }
-      return { value: await scalar(pool, sql, args, 's') };
+      return { value: await getOpScore(pool, studentId, kind) };
     },
   },
 
@@ -504,5 +522,6 @@ module.exports = {
   getProgress,
   getProgressBatch,
   getMasterThreshold,
+  getOpScore,
   DEFAULT_MASTER_THRESHOLD,
 };

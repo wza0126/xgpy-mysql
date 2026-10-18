@@ -6,6 +6,8 @@ const SecureAuth = require('../secure-auth');
 const matcher = require('./matcher');
 const roomManager = require('./roomManager');
 const battleEngine = require('./battleEngine');
+// 操作题累计得分：与 index.js 的 checkQualification、成就殿堂的 total_op_score 共用同一口径
+const { getOpScore } = require('../game-task-metrics');
 
 /**
  * 兼容解析 JSON 字段：mysql2 对 JSON 列默认返回已解析的对象/数组，
@@ -102,29 +104,39 @@ async function getMasteredCountInClusters(pool, userId, threshold, primaryNames)
 }
 
 /**
- * 资格验证：两项条件同时满足才能参加对战。
+ * 资格验证：四项条件同时满足才能参加对战。
  *   1. 做对题数   —— 累计 is_correct=1 的作答条数 >= qualification_correct_count
  *   2. 已掌握题数 —— 指定一级类目范围内的已掌握题数 >= qualification_mastered_count
+ *   3. WPS操作题累计得分    >= qualification_wps_op_score
+ *   4. Access操作题累计得分 >= qualification_access_op_score
+ *   第 3/4 项与「成就殿堂 → 累计操作题得分」同源（getOpScore，勿另写 SQL）。
  * 任一阈值为 NULL / 0 即该条件不启用。
+ *
+ * ⚠️ 口径必须与 index.js 的 checkQualification 保持一致（两边都读同一组列、同一套 SQL）。
  * @param {object} pool 数据库连接池
  * @param {string} userId 学生ID
  * @param {object|null} config 对战配置（可为 null，视为不限制）
- * @returns {{ok: boolean, correct?: number, required?: number, mastered?: number, masteredRequired?: number}}
+ * @returns {{ok:boolean, message?:string, parts?:string[]}}
  */
 async function checkQualification(pool, userId, config) {
-  const required = config && config.qualification_correct_count
-    ? Number(config.qualification_correct_count)
-    : 0;
-  const masteredRequired = config && config.qualification_mastered_count
-    ? Number(config.qualification_mastered_count)
-    : 0;
-  if (required <= 0 && masteredRequired <= 0) return { ok: true };
+  const toNum = (v) => (v ? Number(v) || 0 : 0);
+  const required = toNum(config && config.qualification_correct_count);
+  const masteredRequired = toNum(config && config.qualification_mastered_count);
+  const wpsRequired = toNum(config && config.qualification_wps_op_score);
+  const accessRequired = toNum(config && config.qualification_access_op_score);
+  if (required <= 0 && masteredRequired <= 0 && wpsRequired <= 0 && accessRequired <= 0) {
+    return { ok: true };
+  }
 
-  const [rows] = await pool.query(
-    'SELECT COUNT(*) AS cnt FROM student_answers WHERE student_id = ? AND is_correct = 1',
-    [userId]
-  );
-  const correct = rows[0].cnt || 0;
+  // 只在启用时查询，避免每次入队/建房都多打两次聚合
+  let correct = 0;
+  if (required > 0) {
+    const [rows] = await pool.query(
+      'SELECT COUNT(*) AS cnt FROM student_answers WHERE student_id = ? AND is_correct = 1',
+      [userId]
+    );
+    correct = rows[0].cnt || 0;
+  }
 
   let mastered = 0;
   if (masteredRequired > 0) {
@@ -134,17 +146,27 @@ async function checkQualification(pool, userId, config) {
     );
   }
 
-  const correctOk = required <= 0 || correct >= required;
-  const masteredOk = masteredRequired <= 0 || mastered >= masteredRequired;
-  if (correctOk && masteredOk) return { ok: true };
+  const wpsScore = wpsRequired > 0 ? await getOpScore(pool, userId, 'wps') : 0;
+  const accessScore = accessRequired > 0 ? await getOpScore(pool, userId, 'access') : 0;
 
-  // 回执带上两项的实际值，前端据此提示缺口
-  const reason = !correctOk && !masteredOk ? 'both' : (!correctOk ? 'correct' : 'mastered');
+  // 未达标项逐条列出来，前端直接把 message 展示给学生
+  const parts = [];
+  if (required > 0 && correct < required) parts.push(`做对 ${required} 道题（当前 ${correct} 道）`);
+  if (masteredRequired > 0 && mastered < masteredRequired) parts.push(`掌握 ${masteredRequired} 道题（当前 ${mastered} 道）`);
+  if (wpsRequired > 0 && wpsScore < wpsRequired) parts.push(`WPS操作题累计得 ${wpsRequired} 分（当前 ${wpsScore} 分）`);
+  if (accessRequired > 0 && accessScore < accessRequired) parts.push(`Access操作题累计得 ${accessRequired} 分（当前 ${accessScore} 分）`);
+  if (parts.length === 0) return { ok: true };
+
   return {
     ok: false,
-    reason,
+    parts,
+    message: `需要先${parts.join('，且')}才能参加对战`,
+    // 兼容字段（旧调用方仍在读）
+    reason: parts.length > 1 ? 'both' : 'single',
     correct, required,
     mastered, masteredRequired,
+    wpsScore, wpsRequired,
+    accessScore, accessRequired,
   };
 }
 
@@ -152,7 +174,8 @@ async function checkQualification(pool, userId, config) {
  * 解析对战配置的资格要求（按 config_id 或默认激活配置）
  */
 async function loadQualificationConfig(pool, configId) {
-  const fields = 'qualification_correct_count, qualification_mastered_count, qualification_mastered_clusters';
+  const fields = 'qualification_correct_count, qualification_mastered_count, qualification_mastered_clusters, '
+    + 'qualification_wps_op_score, qualification_access_op_score';
   if (configId) {
     const [rows] = await pool.query(
       `SELECT ${fields} FROM pk_battle_configs WHERE id = ? AND is_active = 1`,
@@ -314,20 +337,14 @@ function init(httpServer, pool) {
           await roomManager.leaveRoom(pool, { roomId: room_id, userId });
         }
 
-        // 资格验证：所选配置要求「做对题数」与「已掌握题数」同时达标才能参加
+        // 资格验证：所选配置要求「做对题数 / 已掌握题数 / WPS·Access 操作题累计得分」同时达标才能参加
         const qualConfig = await loadQualificationConfig(pool, data.config_id);
         const qual = await checkQualification(pool, userId, qualConfig);
         if (!qual.ok) {
-          const parts = [];
-          if (qual.reason === 'correct' || qual.reason === 'both') {
-            parts.push(`做对 ${qual.required} 道题（当前 ${qual.correct} 道）`);
-          }
-          if (qual.reason === 'mastered' || qual.reason === 'both') {
-            parts.push(`掌握 ${qual.masteredRequired} 道题（当前 ${qual.mastered} 道）`);
-          }
           return socket.emit('pk:room_error', {
             code: 'qualification',
-            message: `需要先${parts.join('，且')}才能参加对战`,
+            message: qual.message,
+            parts: qual.parts,
           });
         }
 
@@ -497,13 +514,14 @@ function init(httpServer, pool) {
           await roomManager.leaveRoom(pool, { roomId: row.room_id, userId: user.userId });
         }
 
-        // 资格验证：所选配置要求做对指定题数才能参加
+        // 资格验证：所选配置的全部资格条件都要达标才能建房
         const qualConfig = await loadQualificationConfig(pool, data.config_id);
         const qual = await checkQualification(pool, user.userId, qualConfig);
         if (!qual.ok) {
           return socket.emit('pk:room_error', {
             code: 'qualification',
-            message: `需要先做对 ${qual.required} 道题才能参加对战（当前 ${qual.correct} 道）`,
+            message: qual.message,
+            parts: qual.parts,
           });
         }
 
@@ -529,13 +547,14 @@ function init(httpServer, pool) {
         if (!room) {
           return socket.emit('pk:room_error', { code: 'invalid_code', message: '房间码无效' });
         }
-        // 资格验证：房间关联配置要求做对指定题数才能加入
+        // 资格验证：房间关联配置的全部资格条件都要达标才能加入
         const qualConfig = await loadQualificationConfig(pool, room.config_id);
         const qual = await checkQualification(pool, user.userId, qualConfig);
         if (!qual.ok) {
           return socket.emit('pk:room_error', {
             code: 'qualification',
-            message: `需要先做对 ${qual.required} 道题才能参加对战（当前 ${qual.correct} 道）`,
+            message: qual.message,
+            parts: qual.parts,
           });
         }
         const result = await roomManager.joinRoom(pool, {
@@ -822,4 +841,6 @@ function init(httpServer, pool) {
   return io;
 }
 
-module.exports = { init };
+// 除 init 外，额外导出资格判定（供 scripts/debug 下的回归脚本直接调用，
+// 避免「只有连上 socket 才能验证资格口径」）。行为与线上完全一致。
+module.exports = { init, checkQualification, loadQualificationConfig };

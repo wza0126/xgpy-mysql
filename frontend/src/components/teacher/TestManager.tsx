@@ -47,6 +47,8 @@ export const TestManager: React.FC = () => {
     qualification_correct_count: 0,
     qualification_mastered_count: 0,
     qualification_mastered_clusters: [] as string[],
+    qualification_wps_op_score: 0,
+    qualification_access_op_score: 0,
     daily_test_limit: 0,
   });
   const [allTags, setAllTags] = useState<string[]>([]);
@@ -135,6 +137,11 @@ export const TestManager: React.FC = () => {
       delete data.qualification_correct_count;
     }
 
+    // 操作题累计得分资格（与「成就殿堂 → 累计操作题得分」同源）：
+    // 0 / 空 = 不启用，统一写 null，与后端「NULL 即不限制」口径一致。
+    data.qualification_wps_op_score = Number(formData.qualification_wps_op_score) || null;
+    data.qualification_access_op_score = Number(formData.qualification_access_op_score) || null;
+
     try {
       if (editingTest) {
         await backendClient.from('tests').update(data).eq('id', editingTest.id);
@@ -188,6 +195,8 @@ export const TestManager: React.FC = () => {
       qualification_correct_count: 0,
       qualification_mastered_count: 0,
       qualification_mastered_clusters: [],
+      qualification_wps_op_score: 0,
+      qualification_access_op_score: 0,
       daily_test_limit: 0,
     });
   };
@@ -265,6 +274,8 @@ export const TestManager: React.FC = () => {
       qualification_correct_count: testData.qualification_correct_count || 0,
       qualification_mastered_count: testData.qualification_mastered_count || 0,
       qualification_mastered_clusters: parseTags(testData.qualification_mastered_clusters),
+      qualification_wps_op_score: testData.qualification_wps_op_score || 0,
+      qualification_access_op_score: testData.qualification_access_op_score || 0,
       daily_test_limit: parseInt(testData.daily_test_limit, 10) || 0,
     });
     setShowModal(true);
@@ -695,6 +706,44 @@ export const TestManager: React.FC = () => {
                         )}
                       </div>
                     </div>
+                  </div>
+
+                  {/* 条件三：WPS 操作题累计得分 */}
+                  <div className="bg-white/70 rounded-lg p-3">
+                    <p className="text-xs font-medium text-blue-700 mb-2">条件三 · WPS操作题累计得分</p>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-gray-600 whitespace-nowrap">累计得分达到</span>
+                      <input
+                        type="number"
+                        value={formData.qualification_wps_op_score}
+                        onChange={(e) => setFormData({ ...formData, qualification_wps_op_score: parseInt(e.target.value) || 0 })}
+                        className="w-24 p-2 border border-gray-300 rounded-lg text-center"
+                        min={0}
+                      />
+                      <span className="text-sm text-gray-600 whitespace-nowrap">分</span>
+                    </div>
+                    <p className="text-xs text-gray-400 mt-1">
+                      统计学生在「操作题」里 WPS 操作题的历史累计得分（口径与任务中心成就殿堂的「累计操作题得分」一致）
+                    </p>
+                  </div>
+
+                  {/* 条件四：Access 操作题累计得分 */}
+                  <div className="bg-white/70 rounded-lg p-3">
+                    <p className="text-xs font-medium text-blue-700 mb-2">条件四 · Access操作题累计得分</p>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-gray-600 whitespace-nowrap">累计得分达到</span>
+                      <input
+                        type="number"
+                        value={formData.qualification_access_op_score}
+                        onChange={(e) => setFormData({ ...formData, qualification_access_op_score: parseInt(e.target.value) || 0 })}
+                        className="w-24 p-2 border border-gray-300 rounded-lg text-center"
+                        min={0}
+                      />
+                      <span className="text-sm text-gray-600 whitespace-nowrap">分</span>
+                    </div>
+                    <p className="text-xs text-gray-400 mt-1">
+                      统计学生在「操作题」里 Access 操作题的历史累计得分（与条件三各自独立，两项都填则都要达标）
+                    </p>
                   </div>
                 </div>
 

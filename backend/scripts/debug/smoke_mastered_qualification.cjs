@@ -59,12 +59,21 @@ async function main() {
     // 新列必须可空（NULL = 不启用），否则老数据会受影响
     const mc = cols.find(c => c.Field === 'qualification_mastered_count');
     ok(`${t}.qualification_mastered_count 允许 NULL`, mc && mc.Null === 'YES', `Null=${mc?.Null}`);
+    // 迁移 103（2026-10-16）：WPS / Access 操作题累计得分资格
+    ok(`${t} 有 qualification_wps_op_score 列`, names.includes('qualification_wps_op_score'));
+    ok(`${t} 有 qualification_access_op_score 列`, names.includes('qualification_access_op_score'));
+    const wc = cols.find(c => c.Field === 'qualification_wps_op_score');
+    ok(`${t}.qualification_wps_op_score 允许 NULL`, wc && wc.Null === 'YES', `Null=${wc?.Null}`);
   }
 
   const mig = readSrc('src/embedded-migrations.js');
   ok('迁移 085 已内嵌', mig.includes('085_add_mastered_qualification'));
   ok('迁移 085 同时改两张表', /ALTER TABLE `tests`[\s\S]*ALTER TABLE `pk_battle_configs`/.test(
     fs.readFileSync(path.join(BACKEND, 'database/migrations/085_add_mastered_qualification.sql'), 'utf8')
+  ));
+  ok('迁移 103 已内嵌', mig.includes('103_qualification_op_score'));
+  ok('迁移 103 同时改两张表', /ALTER TABLE `tests`[\s\S]*ALTER TABLE `pk_battle_configs`/.test(
+    fs.readFileSync(path.join(BACKEND, 'database/migrations/103_qualification_op_score.sql'), 'utf8')
   ));
 
   // ══ B. 统计口径 ═══════════════════════════════════════════════════════
@@ -238,22 +247,41 @@ async function main() {
     /master_question_threshold/.test(idxSrc));
 
   // handler.js（PK socket）
-  ok('handler.js 的 checkQualification 也判两项 AND',
-    /const correctOk = required <= 0 \|\| correct >= required;/.test(handlerSrc)
-    && /const masteredOk = masteredRequired <= 0 \|\| mastered >= masteredRequired;/.test(handlerSrc));
+  // 注：2026-10-16 新增两项操作题得分资格后，判定改成「未达标项逐条 push 进 parts，
+  //     parts 为空才 ok」——语义仍是 AND，断言随之更新（旧断言写死了两个局部变量名）。
+  ok('handler.js 的 checkQualification 也判多项 AND',
+    /if \(required > 0 && correct < required\) parts\.push/.test(handlerSrc)
+    && /if \(masteredRequired > 0 && mastered < masteredRequired\) parts\.push/.test(handlerSrc)
+    && /if \(parts\.length === 0\) return \{ ok: true \}/.test(handlerSrc));
   ok('handler.js 加载配置时带上新字段',
     /qualification_mastered_count,\s*qualification_mastered_clusters/.test(handlerSrc));
   ok('handler.js 掌握阈值与练习同源', /master_question_threshold/.test(handlerSrc));
+  // 迁移 103 新增的两项（WPS / Access 操作题累计得分）
+  ok('handler.js 的 checkQualification 也判 WPS/Access 操作题得分',
+    /qualification_wps_op_score/.test(handlerSrc) && /qualification_access_op_score/.test(handlerSrc)
+    && /if \(wpsRequired > 0 && wpsScore < wpsRequired\) parts\.push/.test(handlerSrc)
+    && /if \(accessRequired > 0 && accessScore < accessRequired\) parts\.push/.test(handlerSrc));
+  ok('handler.js 加载配置时带上操作题得分列',
+    /qualification_wps_op_score, qualification_access_op_score/.test(handlerSrc));
+  ok('handler.js 与成就殿堂共用 getOpScore（不另写 SQL）',
+    /getOpScore/.test(handlerSrc) && !/FROM wps_op_submissions/.test(handlerSrc));
+  ok('index.js 的 checkQualification 也判两项操作题得分',
+    /qualification_wps_op_score/.test(idxSrc) && /qualification_access_op_score/.test(idxSrc)
+    && /getOpScore\(pool, studentId, 'wps'\)/.test(idxSrc)
+    && /getOpScore\(pool, studentId, 'access'\)/.test(idxSrc));
+  ok('index.js 三处规则查询都带上操作题得分列',
+    (idxSrc.match(/qualification_wps_op_score, qualification_access_op_score/g) || []).length >= 4);
 
   // ══ B2. 类目可练习题量接口（教师端设置上限的参考值）═════════════════════
   section('B2. 类目可练习题量接口');
 
   // 独立算出 practice_enabled=1 的题量分布，与接口比对
-  // ⛔ 必须同样排除 WPS 操作题（type='wps_op'）：它走独立入口，不计入可练习题量口径
-  //    （后端 index.js 的 SQL_NOT_WPS_OP）。漏掉这个条件接口与实测会差 1 题。
+  // ⛔ 必须同样排除操作题（type IN ('wps_op','access_op')）：它们走独立入口，不计入可练习题量口径
+  //    （后端 index.js 的 SQL_NOT_WPS_OP）。漏掉这个条件接口与实测会差 1~2 题。
   const [pcRows] = await pool.query(
     `SELECT cluster_id, COUNT(*) AS cnt FROM questions
-     WHERE practice_enabled = 1 AND type <> 'wps_op' AND cluster_id IS NOT NULL AND cluster_id <> ''
+     WHERE practice_enabled = 1 AND type NOT IN ('wps_op','access_op')
+       AND cluster_id IS NOT NULL AND cluster_id <> ''
      GROUP BY cluster_id`
   );
   const expectPrimary = {};
@@ -342,6 +370,15 @@ async function main() {
     /\/api\/student\/qualification\/pk\//.test(lobby));
   ok('PKLobby 用服务端 passed 判定', /qual\s*\?\s*qual\.passed/.test(lobby));
   ok('PKLobby 配置卡片展示掌握要求', /qualification_mastered_count/.test(lobby));
+  // 迁移 103：教师端可设置、学生端可展示 WPS / Access 操作题累计得分资格
+  ok('TestManager 表单含 WPS 操作题得分输入', /qualification_wps_op_score/.test(tm));
+  ok('TestManager 表单含 Access 操作题得分输入', /qualification_access_op_score/.test(tm));
+  ok('PKBattleConfigTab 表单含 WPS 操作题得分输入', /qualification_wps_op_score/.test(pk));
+  ok('PKBattleConfigTab 表单含 Access 操作题得分输入', /qualification_access_op_score/.test(pk));
+  ok('TestModule 展示 WPS/Access 操作题得分条件',
+    /qual\.wps_op\?\.enabled/.test(stu) && /qual\.access_op\?\.enabled/.test(stu));
+  ok('PKLobby 展示 WPS/Access 操作题得分条件',
+    /qual\.wps_op\?\.enabled/.test(lobby) && /qual\.access_op\?\.enabled/.test(lobby));
 
   // ══ 汇总 ═════════════════════════════════════════════════════════════
   console.log(`\n${'═'.repeat(60)}`);
