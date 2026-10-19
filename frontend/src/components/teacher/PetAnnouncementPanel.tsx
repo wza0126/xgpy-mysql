@@ -45,7 +45,7 @@ export const PetAnnouncementPanel: React.FC = () => {
 
   const loadItems = useCallback(async () => {
     try {
-      const res = await fetch(`${API_CONFIG.apiUrl}/pet/announcement/teacher`, { headers: authHeaders() });
+      const res = await fetch(`${API_CONFIG.apiUrl}/api/pet/announcement/teacher`, { headers: authHeaders() });
       const json = await res.json();
       if (json && json.data && Array.isArray(json.data.items)) {
         setItems(json.data.items as Announcement[]);
@@ -95,7 +95,7 @@ export const PetAnnouncementPanel: React.FC = () => {
     setBusy(true);
     setMsg('');
     try {
-      const res = await fetch(`${API_CONFIG.apiUrl}/pet/announcement`, {
+      const res = await fetch(`${API_CONFIG.apiUrl}/api/pet/announcement`, {
         method: 'POST',
         headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ content: text, duration_seconds: duration, class_ids: selectedClasses }),
@@ -114,7 +114,7 @@ export const PetAnnouncementPanel: React.FC = () => {
 
   const handleStop = async (id: string) => {
     try {
-      await fetch(`${API_CONFIG.apiUrl}/pet/announcement/${id}`, {
+      await fetch(`${API_CONFIG.apiUrl}/api/pet/announcement/${id}`, {
         method: 'DELETE',
         headers: authHeaders(),
       });

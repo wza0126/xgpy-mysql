@@ -45,7 +45,7 @@ export const PetModule: React.FC = () => {
     let alive = true;
     const load = async () => {
       try {
-        const res = await fetch(`${API_CONFIG.apiUrl}/pet/announcement`, { headers: authHeaders() });
+        const res = await fetch(`${API_CONFIG.apiUrl}/api/pet/announcement`, { headers: authHeaders() });
         const json = await res.json().catch(() => null);
         const d = json && json.data;
         if (!alive) return;
