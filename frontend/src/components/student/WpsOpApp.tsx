@@ -665,11 +665,18 @@ export const WpsOpApp: React.FC = () => {
         >
           <i className="fas fa-arrow-left" /> 返回列表
         </button>
-        {current.best_score !== null && (
-          <span className={`text-sm font-bold ${scoreColor(current.best_score, current.full_score)}`}>
-            最好成绩 {current.best_score} / {current.full_score}
+        <div className="flex items-center gap-2">
+          {/* 总分：不论是否作答过都固定显示，学生一眼知道这道题满分多少 */}
+          <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700">
+            总分 {current.full_score} 分
+            {current.step_count > 0 && <span className="font-normal text-emerald-600/80"> · {current.step_count} 步</span>}
           </span>
-        )}
+          {current.best_score !== null && (
+            <span className={`text-sm font-bold ${scoreColor(current.best_score, current.full_score)}`}>
+              最好成绩 {current.best_score} / {current.full_score}
+            </span>
+          )}
+        </div>
       </div>
 
       {loadingDetail && <div className="py-10 text-center text-sm text-gray-400">加载题目中…</div>}
@@ -724,7 +731,10 @@ export const WpsOpApp: React.FC = () => {
 
           {/* 步骤 */}
           <div className="rounded-xl border border-gray-200 bg-white p-4">
-            <h3 className="mb-3 text-sm font-bold text-gray-800">操作步骤与分值</h3>
+            <h3 className="mb-3 text-sm font-bold text-gray-800">
+              操作步骤与分值
+              <span className="ml-2 text-xs font-normal text-emerald-600">（总分 {current.full_score} 分）</span>
+            </h3>
             <ol className="space-y-2">
               {spec.steps.map((s) => (
                 <li key={s.id} className="flex gap-3 rounded-lg bg-gray-50 p-2.5">

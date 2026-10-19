@@ -808,9 +808,11 @@ app.get('/api/teacher/analytics/chapter-mastery/:classId', authenticate, require
     const masterThreshold = await getMasterThreshold();
 
     // 各章题库总量（与学习模块的分母口径一致）
+    // ⛔ 必须带 practice_enabled = 1：练习池只抽可练习题，停用题若计入分母，
+    //    学生会永远看到「N 题只掌握 N-1 题」，且练到无可练还被判未完成（2026-10-19 修）。
     const [clusterRows] = await pool.query(
       `SELECT cluster_id, COUNT(*) AS cnt FROM questions
-       WHERE cluster_id IS NOT NULL AND cluster_id <> ''${SQL_NOT_WPS_OP}
+       WHERE practice_enabled = 1 AND cluster_id IS NOT NULL AND cluster_id <> ''${SQL_NOT_WPS_OP}
        GROUP BY cluster_id`
     );
     const chapterQCount = new Map();
@@ -9321,16 +9323,34 @@ async function getMasteredQuestionIds(conn, studentId, threshold) {
 }
 
 /**
+ * 判断题目挂的 cluster_id 是否落在所选的统计范围内。
+ *
+ * 选择项两种粒度（2026-10-19 起支持到二级）：
+ *   · 「章名」         —— 一级类目，覆盖该章全部小节 + 仅挂章级的兜底题
+ *   · 「章名/小节名」  —— 二级类目（知识点），只算该知识点下的题，不含仅挂章级的题
+ *
+ * 用 `cid === sel || cid.startsWith(sel + '/')` 统一处理两档：
+ * 章级选择靠前缀命中其小节；知识点选择靠全等命中，且不会误伤同前缀的其它章
+ * （因为有 '/' 分隔符兜底）。
+ */
+function clusterInSelection(cid, wanted) {
+  if (!cid) return false;
+  for (const sel of wanted) {
+    if (cid === sel || cid.startsWith(sel + '/')) return true;
+  }
+  return false;
+}
+
+/**
  * 统计「指定一级类目范围内」的已掌握题数（资格验证用）。
  *
  * 口径与 getMasteredByChapter 完全一致：练习来源答对次数 >= 掌握阈值记为已掌握；
- * 一级类目命中判定取 cluster_id 的 '/' 前缀，因此「数据与信息」会把该章下所有小节
- * （如「数据与信息/数据、信息与知识的概念」）以及仅挂章级的题一并计入。
+ * 类目命中判定见 clusterInSelection —— 选到章则含该章全部小节，选到知识点则只算该小节。
  *
  * @param {object} conn 数据库连接或连接池
  * @param {string} studentId
  * @param {number} threshold 掌握阈值（来自 getMasterThreshold）
- * @param {string[]|null} primaryNames 一级类目名数组；null / 空数组 = 全部范围（不限类目）
+ * @param {string[]|null} primaryNames 选中的范围：章名 或 章名/小节名；null / 空数组 = 全部范围
  * @returns {Promise<number>} 该范围内已掌握题数
  */
 async function getMasteredCountInClusters(conn, studentId, threshold, primaryNames) {
@@ -9362,14 +9382,12 @@ async function getMasteredCountInClusters(conn, studentId, threshold, primaryNam
      WHERE q.cluster_id IS NOT NULL AND q.cluster_id <> ''`,
     [studentId, threshold]
   );
-  // 一级类目匹配在 JS 侧做（与 getMasteredByChapter 的取前缀逻辑同源，避免 SQL 里处理 '/'
+  // 类目匹配在 JS 侧做（与 getMasteredByChapter 的取前缀逻辑同源，避免 SQL 里处理 '/'
   // 的差异导致口径不一致；已掌握题数规模有限，代价可接受）
   const wanted = new Set(names);
   let count = 0;
   for (const r of rows) {
-    const cid = String(r.cid);
-    const primary = cid.includes('/') ? cid.split('/')[0] : cid;
-    if (wanted.has(primary)) count += 1;
+    if (clusterInSelection(String(r.cid), wanted)) count += 1;
   }
   return count;
 }
@@ -9381,9 +9399,10 @@ async function getMasteredCountInClusters(conn, studentId, threshold, primaryNam
  * 练习池也只抽 practice_enabled=1 的题。若按全库统计会把不可练的题算进来，
  * 导致教师设出一个学生永远达不到的阈值。
  *
- * 一级类目命中同样取 cluster_id 的 '/' 前缀 ⇒ 含该章全部小节 + 仅挂章级的题。
+ * 一级类目命中同样取 cluster_id 的 '/' 前缀 ⇒ 含该章全部小节 + 仅挂章级的题；
+ * 选中知识点（章名/小节名）时只统计该知识点下的题 —— 见 clusterInSelection。
  *
- * @param {string[]|null} primaryNames 一级类目名数组；null / 空数组 = 全部范围
+ * @param {string[]|null} primaryNames 选中的范围：章名 或 章名/小节名；null / 空数组 = 全部范围
  * @returns {Promise<number>} 该范围内可练习题量
  */
 async function getPracticableCountInClusters(primaryNames) {
@@ -9403,9 +9422,7 @@ async function getPracticableCountInClusters(primaryNames) {
   const wanted = new Set(names);
   let count = 0;
   for (const r of rows) {
-    const cid = String(r.cluster_id);
-    const primary = cid.includes('/') ? cid.split('/')[0] : cid;
-    if (wanted.has(primary)) count += 1;
+    if (clusterInSelection(String(r.cluster_id), wanted)) count += 1;
   }
   return count;
 }
@@ -9575,8 +9592,8 @@ async function getTestQualificationRule(testId) {
   return rows[0];
 }
 
-// 教师端：查询各一级类目可练习题量（供「已掌握题数」资格设置时参考上限）
-// 返回 { total, by_primary: {章名: 题量} }；全部范围 = total
+// 教师端：查询各一级类目 / 二级类目可练习题量（供「已掌握题数」资格设置时参考上限）
+// 返回 { total, by_primary: {章名: 题量}, by_cluster: {"章名/小节名": 题量} }；全部范围 = total
 app.get('/api/teacher/qualification/counts', authenticate, requireTeacher, async (req, res) => {
   try {
     const [rows] = await pool.query(
@@ -9585,15 +9602,17 @@ app.get('/api/teacher/qualification/counts', authenticate, requireTeacher, async
        GROUP BY cluster_id`
     );
     const byPrimary = {};
+    const byCluster = {};
     let total = 0;
     for (const r of rows) {
       const cid = String(r.cluster_id);
       const primary = cid.includes('/') ? cid.split('/')[0] : cid;
       const n = Number(r.cnt) || 0;
       byPrimary[primary] = (byPrimary[primary] || 0) + n;
+      byCluster[cid] = (byCluster[cid] || 0) + n;
       total += n;
     }
-    res.json({ data: { total, by_primary: byPrimary }, error: null });
+    res.json({ data: { total, by_primary: byPrimary, by_cluster: byCluster }, error: null });
   } catch (err) {
     console.error('查类目题量失败:', err);
     res.status(500).json({ data: null, error: '查询失败' });
@@ -9663,9 +9682,11 @@ app.get('/api/student/learn-chapters', authenticate, async (req, res) => {
     const meta = getLectureMeta();
 
     // 各 cluster_id 的题量（一级章 + 二级"章/小节"）
+    // ⛔ 分母必须与练习池同口径（practice_enabled = 1）：停用题不展示给学生，也不计入总题数，
+    //    否则小节会永远显示「6 题只掌握 5 题」且再也练不出第 6 题（2026-10-19 修）。
     const [clusterRows] = await pool.query(
       `SELECT cluster_id, COUNT(*) AS cnt FROM questions
-       WHERE cluster_id IS NOT NULL AND cluster_id <> ''${SQL_NOT_WPS_OP}
+       WHERE practice_enabled = 1 AND cluster_id IS NOT NULL AND cluster_id <> ''${SQL_NOT_WPS_OP}
        GROUP BY cluster_id`
     );
     const chapterCount = new Map();
@@ -9963,7 +9984,7 @@ app.get('/api/student/learn-chapter/:clusterId', authenticate, async (req, res) 
       const paths = secs.map(s => `${clusterId}/${s}`);
       const [rows] = await pool.query(
         `SELECT cluster_id, COUNT(*) AS cnt FROM questions
-         WHERE cluster_id IN (${placeholders})${SQL_NOT_WPS_OP} GROUP BY cluster_id`,
+         WHERE practice_enabled = 1 AND cluster_id IN (${placeholders})${SQL_NOT_WPS_OP} GROUP BY cluster_id`,
         paths
       );
       counts = rows;

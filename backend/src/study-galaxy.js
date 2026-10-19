@@ -215,6 +215,8 @@ function registerStudyGalaxy(app, { pool, authenticate, requireTeacher, requireS
     const todayMastered = num(todayMasteredRow && todayMasteredRow.c, 0);
 
     // 3) 知识点进度（按 cluster_id 聚合，只算带「章/小节」的二级分类）
+    // ⛔ 分母必须与练习池同口径（q.practice_enabled = 1）：停用题学生练不到，
+    //    若计入分母，该知识点的掌握比例永远到不了 100%，小节也点不亮（2026-10-19 修）。
     const [rows] = await pool.query(
       'SELECT q.cluster_id AS cluster, COUNT(*) AS total_q, ' +
         'SUM(CASE WHEN a.correct_cnt >= ? THEN 1 ELSE 0 END) AS mastered_q, ' +
@@ -223,7 +225,8 @@ function registerStudyGalaxy(app, { pool, authenticate, requireTeacher, requireS
         '  SELECT question_id, COUNT(*) AS answer_cnt, SUM(CASE WHEN is_correct = 1 THEN 1 ELSE 0 END) AS correct_cnt ' +
         '  FROM student_answers WHERE student_id = ? AND source = ? GROUP BY question_id ' +
         ') a ON a.question_id = q.id ' +
-        'WHERE ' + NOT_OP_SQL + " AND q.cluster_id IS NOT NULL AND q.cluster_id <> '' " +
+        'WHERE ' + NOT_OP_SQL + ' AND q.practice_enabled = 1 ' +
+        "AND q.cluster_id IS NOT NULL AND q.cluster_id <> '' " +
         'GROUP BY q.cluster_id',
       [threshold, studentId, 'practice']
     );
