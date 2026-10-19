@@ -8515,12 +8515,13 @@ app.delete('/api/ai-qa-kb/:id', authenticate, async (req, res) => {
 
 // ==================== AI 答疑模块 API 结束 ====================
 
-// ==================== 题目聚类 / 同类题推荐 API 开始 ====================
+// ==================== 题目聚类 / 知识点标注 API 开始 ====================
 //
 // 设计：
 // 1. questions 表新增 cluster_id（知识点路径，如 "信息系统/分类与类型"）和 sub_topic（子主题）字段
 // 2. 教师在题库管理模块选取题目后调用 /api/teacher/questions/cluster 批量聚类（AI 分批处理）
-// 3. 学生练习做错后调用 /api/practice/similar/:questionId 获取同 cluster_id 的同类题
+// 3. 学生端「相关知识点」按钮用 cluster_id 打开学习模块并定位到该知识点（2026-10-19 起
+//    取代原「练习同类题」功能，同类题接口 /api/practice/similar 已随之移除）
 // 4. cluster_id 不暴露给学生筛选页，仅用于内部检索
 
 // 分类总纲（唯一分类标准，与学习模块 16 章目录、练习模块章节筛选同源）
@@ -9027,137 +9028,6 @@ app.get('/api/teacher/questions/cluster-latest', authenticate, requireTeacher, a
     res.json({ data: rows.length > 0 ? rowToClusterJob(rows[0]) : null, error: null });
   } catch (error) {
     console.error('查询最近聚类任务失败:', error);
-    res.status(500).json({ data: null, error: error.message });
-  }
-});
-
-// 学生端：获取某题的同类题（用于做错后强化练习）
-// 查询逻辑（按优先级）：
-// 1. 同 cluster_id 的题（AI 聚类，最精准）
-// 2. 内容 LIKE 关键词的题（关键词从题干提取，2~6 字中文词组）
-// 3. 同 tags 中的某个细粒度标签的题（最后回退方案）
-// 排除当前题本身，排除已掌握题（可选，由前端传 masteredIds），随机取 limit 题
-app.get('/api/practice/similar/:questionId', authenticate, async (req, res) => {
-  try {
-    const { questionId } = req.params;
-    const limit = Math.min(parseInt(req.query.limit) || 5, 20);
-    const excludeIds = Array.isArray(req.query.excludeIds) ? req.query.excludeIds : [];
-
-    // 1. 查询当前题
-    const [curRows] = await pool.query(
-      'SELECT id, type, content, options, answers, tags, cluster_id FROM questions WHERE id = ?',
-      [questionId]
-    );
-    if (curRows.length === 0) {
-      return res.status(404).json({ data: null, error: '题目不存在' });
-    }
-    const cur = curRows[0];
-
-    // 排除当前题 + 已掌握题
-    const excludeSet = new Set([questionId, ...excludeIds]);
-
-    // 候选题库：必须是练习可用题（practice_enabled），且排除 WPS 操作题（走独立入口）
-    const fetchQuestions = async (whereClause, params) => {
-      const allExcluded = Array.from(excludeSet);
-      let sql = `SELECT id, type, content, options, answers, tags, explanation FROM questions WHERE practice_enabled = 1${SQL_NOT_WPS_OP} ${whereClause}`;
-      const queryParams = [...params];
-      if (allExcluded.length > 0) {
-        sql += ' AND id NOT IN (?)';
-        queryParams.push(allExcluded);
-      }
-      sql += ' ORDER BY RAND() LIMIT ?';
-      queryParams.push(limit);
-      const [rows] = await pool.query(sql, queryParams);
-      return rows;
-    };
-
-    let candidates = [];
-    // 准确追踪实际命中来源（避免簇内仅 1 题时仍标 'cluster' 的误导）
-    // cluster: 同 cluster_id 命中；keyword: 关键词命中；tag: 同标签命中；none: 全部回退失败
-    let actualSource = 'none';
-
-    // 优先级 1：同 cluster_id（簇内只有当前题时此处返回 0 条，自动进入下一级）
-    if (cur.cluster_id) {
-      candidates = await fetchQuestions(' AND cluster_id = ?', [cur.cluster_id]);
-      if (candidates.length > 0) actualSource = 'cluster';
-    }
-
-    // 优先级 2：从题干提取关键词做 LIKE 检索（去掉标点和常见虚词）
-    if (candidates.length < limit) {
-      const plainContent = (cur.content || '').replace(/<[^>]+>/g, '').trim();
-      // 提取 2~6 字的中文词组（粗略，不分词）
-      const keywordMatch = plainContent.match(/[\u4e00-\u9fa5]{2,6}/g) || [];
-      // 取前 3 个关键词
-      const keywords = keywordMatch.slice(0, 3);
-      if (keywords.length > 0) {
-        let sql = `SELECT id, type, content, options, answers, tags, explanation FROM questions WHERE practice_enabled = 1${SQL_NOT_WPS_OP} AND (`;
-        const ors = keywords.map(() => 'content LIKE ?').join(' OR ');
-        sql += ors + ')';
-        const params = keywords.map(k => `%${k}%`);
-        const allExcluded = Array.from(excludeSet).concat(candidates.map(c => c.id));
-        if (allExcluded.length > 0) {
-          sql += ' AND id NOT IN (?)';
-          params.push(allExcluded);
-        }
-        sql += ' ORDER BY RAND() LIMIT ?';
-        params.push(limit - candidates.length);
-        const [kwRows] = await pool.query(sql, params);
-        // 合并去重
-        const existIds = new Set(candidates.map(c => c.id));
-        for (const r of kwRows) {
-          if (!existIds.has(r.id)) {
-            candidates.push(r);
-            existIds.add(r.id);
-          }
-        }
-        if (kwRows.length > 0 && actualSource === 'none') actualSource = 'keyword';
-      }
-    }
-
-    // 优先级 3：同 tags（取第一个细粒度标签）
-    if (candidates.length < limit) {
-      let tags = cur.tags;
-      if (typeof tags === 'string') {
-        try { tags = JSON.parse(tags); } catch { tags = []; }
-      }
-      const tagList = Array.isArray(tags) ? tags.filter(Boolean) : [];
-      if (tagList.length > 0) {
-        const tag = tagList[0];
-        const tagRows = await fetchQuestions(
-          ' AND (tags IS NOT NULL AND JSON_CONTAINS(tags, JSON_QUOTE(?)))',
-          [tag]
-        );
-        // 合并去重
-        const existIds = new Set(candidates.map(c => c.id));
-        for (const r of tagRows) {
-          if (!existIds.has(r.id)) {
-            candidates.push(r);
-            existIds.add(r.id);
-          }
-        }
-        if (tagRows.length > 0 && actualSource === 'none') actualSource = 'tag';
-      }
-    }
-
-    // 截断到 limit
-    candidates = candidates.slice(0, limit);
-
-    res.json({
-      data: {
-        // 举一反三的题学生还没做过 → 同样脱敏，答案等提交后由 submit-answer 回执带回
-        questions: formatRows(stripQuestionRowsForRequester('questions', candidates, req)),
-        // source 现在准确反映实际命中来源：
-        //   cluster  → 同 AI 簇命中（最精准）
-        //   keyword  → 簇内无其他题或未聚类，靠题干关键词命中
-        //   tag      → 簇/关键词都没命中，靠标签回退
-        //   none     → 三级全失败（极罕见）
-        source: candidates.length > 0 ? actualSource : 'none',
-        cluster_id: cur.cluster_id || null,
-      },
-      error: null,
-    });
-  } catch (error) {
-    console.error('获取同类题失败:', error);
     res.status(500).json({ data: null, error: error.message });
   }
 });

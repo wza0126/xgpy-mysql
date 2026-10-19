@@ -1343,17 +1343,19 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                   AI答疑
                 </button>
               )}
-              {/* 练习同类题按钮 - 仅在提交答案后显示，做错做对都显示 */}
-              {showResult && currentQuestion && (
+              {/* 相关知识点：常驻按钮（不依赖是否已交卷），点开学习模块并定位到本题知识点 */}
+              {currentQuestion?.cluster_id && (
                 <button
                   onClick={() => {
-                    (window as any).openSimilarPracticeWindow?.({ questionId: currentQuestion.id });
+                    const cid = String(currentQuestion.cluster_id);
+                    const [chapter, section] = cid.includes('/') ? cid.split('/') : [cid, ''];
+                    (window as any).openLearnChapter?.(chapter, section || undefined);
                   }}
-                  className="px-4 py-2 bg-cyan-500 text-white rounded-lg hover:bg-cyan-600 transition-colors flex items-center gap-2"
-                  title="基于AI聚类推荐同知识点的题目进行强化练习"
+                  className="px-4 py-2 bg-emerald-500 text-white rounded-lg hover:bg-emerald-600 transition-colors flex items-center gap-2"
+                  title="打开学习模块，定位到本题所属的知识点"
                 >
-                  <i className="fa-solid fa-layer-group"></i>
-                  练习同类题
+                  <i className="fa-solid fa-book-open"></i>
+                  相关知识点
                 </button>
               )}
               {!showResult ? (

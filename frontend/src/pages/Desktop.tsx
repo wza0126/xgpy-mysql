@@ -32,7 +32,6 @@ import { TaskCenter } from '../components/student/TaskCenter';
 import { StudentRollCall } from '../components/student/StudentRollCall';
 import { ProxyBrowser } from '../components/student/ProxyBrowser';
 import { CreativeWorkshop } from '../components/student/CreativeWorkshop';
-import { SimilarPracticeWindow } from '../components/student/SimilarPracticeWindow';
 import { FarmOverlay } from '../components/student/FarmOverlay';
 import type { FarmState } from '../components/student/FarmOverlay';
 import { StudyGalaxyLayer } from '../components/student/StudyGalaxyLayer';
@@ -812,35 +811,14 @@ export const Desktop: React.FC = () => {
     };
   }, [handleOpenAiQa]);
 
-  // 同类题强化练习窗口（独立窗口，不影响当前练习）
-  const handleOpenSimilarPractice = (initialData?: { questionId?: string }) => {
-    if (!initialData?.questionId) return;
-    const windowId = 'app_similar_practice';
-    openWindow({
-      id: windowId,
-      title: '同类题强化练习',
-      icon: 'fa-layer-group',
-      isMinimized: false,
-      isMaximized: false,
-      initialData,
-      component: <SimilarPracticeWindow
-        initialData={initialData}
-        onClose={() => {
-          const { closeWindow } = useDesktopStore.getState();
-          closeWindow(windowId);
-        }}
-      />,
-    });
-    // 显式激活到最前，防止父窗口（练习/错题集）的 click 冒泡导致二次抢前
-    activateWindow(windowId);
-  };
-
+  // 练习 / 错题本里的「相关知识点」按钮 → 打开学习模块并定位到该题的知识点。
+  // 复用星域那套 handleOpenLearnChapter（打开窗口 + requestLearnChapter 双通道导航）。
   useEffect(() => {
-    (window as any).openSimilarPracticeWindow = handleOpenSimilarPractice;
+    (window as any).openLearnChapter = handleOpenLearnChapter;
     return () => {
-      delete (window as any).openSimilarPracticeWindow;
+      delete (window as any).openLearnChapter;
     };
-  }, [handleOpenSimilarPractice]);
+  }, [handleOpenLearnChapter]);
 
   // ===== 代码农场 · 学生手册 =====
   // 农场启用且手册可用时，桌面图标区多出一个「农场手册」入口。
