@@ -84,6 +84,11 @@ async function scalar(pool, sql, args, key) {
  * 所以把 SQL 收在这里，谁都不许另写一份 —— 否则「成就殿堂显示 120 分、
  * 资格却说不够」这类自相矛盾迟早发生。
  *
+ * ⛔ 口径（老师 2026-10-19 明确）：**所有操作题各自最高得分之和**。
+ *    旧口径是 SUM(score_obtained)（每次上传的评分都计入），同一道题反复上传同一个文件
+ *    就能无限刷分。新口径按 question_id 分组取 MAX(score_obtained) 再求和：
+ *    同一道题传 100 次，也只按它历史上最好的一次成绩计 1 次。
+ *
  * @param {object}  pool
  * @param {string}  studentId
  * @param {string?} kind  'wps' | 'access'；留空/其它值 = 两者合计
@@ -91,11 +96,15 @@ async function scalar(pool, sql, args, key) {
  */
 async function getOpScore(pool, studentId, kind) {
   const args = [studentId];
-  let sql = 'SELECT COALESCE(SUM(score_obtained), 0) AS s FROM wps_op_submissions WHERE student_id = ?';
+  let sql =
+    'SELECT COALESCE(SUM(t.best), 0) AS s FROM (' +
+    '  SELECT MAX(score_obtained) AS best FROM wps_op_submissions' +
+    '  WHERE student_id = ?';
   if (kind === 'wps' || kind === 'access') {
     sql += ' AND kind = ?';
     args.push(kind);
   }
+  sql += '  GROUP BY question_id) t';
   return scalar(pool, sql, args, 's');
 }
 
@@ -333,7 +342,7 @@ const METRIC_DEFS = {
   total_op_score: {
     label: '累计操作题得分',
     unit: '分',
-    hint: '历史累计的操作题得分（可在参数中限定 wps / access，留空为两者合计）',
+    hint: '所有操作题各自最高得分之和（同一道题多次上传只按历史最好一次计分，防止重复上传刷分；可在参数中限定 wps / access，留空为两者合计）',
     scope: 'total',
     series: 'op',
     params: [{

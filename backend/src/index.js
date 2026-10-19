@@ -9486,7 +9486,8 @@ async function getMasteredBySection(conn, studentId, threshold) {
  *   3. WPS操作题累计得分  >= qualification_wps_op_score
  *   4. Access操作题累计得分 >= qualification_access_op_score
  *      第 3/4 项口径与「任务中心 → 成就殿堂 → 累计操作题得分」完全同源
- *      （wps_op_submissions.score_obtained 按 kind 求和，见 game-task-metrics.getOpScore）。
+ *      （按 kind 过滤后，每道题取历史最高分再求和 —— 同题多次上传只计最好一次，
+ *        见 game-task-metrics.getOpScore，2026-10-19 改口径防刷分）。
  * 任一阈值为 NULL / 0 / 空 即视为该条件不启用（不影响通过）。
  *
  * @param {string} studentId
