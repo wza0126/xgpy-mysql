@@ -3,6 +3,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
 import { Pet, StudentPet, PetFood, PetTip, PET_LEVELS, PET_STAGE_NAMES, getPetLevelConfig, getCumulativeThresholdForLevel, calculatePetLevel, petStageOf, petStageName } from '../../types';
 import { useAuth } from '../../hooks/useAuth';
+import { API_CONFIG } from '../../api/config';
+import { authHeaders } from '../../utils/authToken';
 import { usePoints } from '../../hooks/usePoints';
 import { EvolutionEffect } from './game/EvolutionEffect';
 
@@ -14,6 +16,10 @@ export const PetModule: React.FC = () => {
   const [tips, setTips] = useState<PetTip[]>([]);
   const [currentTip, setCurrentTip] = useState<string>('');
   const [showTip, setShowTip] = useState(false);
+  // 萌宠公告：教师端发布的临时公告（可多条并存），生效期间优先显示、提示语不弹
+  const [announcements, setAnnouncements] = useState<
+    { id: string; content: string; remaining_seconds: number; created_by_name?: string | null }[]
+  >([]);
   const [isEating, setIsEating] = useState(false);
   const [showEvolution, setShowEvolution] = useState(false);
   const [evolvedLevel, setEvolvedLevel] = useState(1);
@@ -34,7 +40,49 @@ export const PetModule: React.FC = () => {
     }
   }, [profile]);
 
+  // 萌宠公告：进入页面拉一次 + 每 20 秒对齐（教师随时可能发布）
   useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const res = await fetch(`${API_CONFIG.apiUrl}/pet/announcement`, { headers: authHeaders() });
+        const json = await res.json().catch(() => null);
+        const d = json && json.data;
+        if (!alive) return;
+        setAnnouncements(d && d.active && Array.isArray(d.items) ? d.items : []);
+      } catch {
+        // 网络抖动：保留现有公告，不清空
+      }
+    };
+    load();
+    const poll = setInterval(load, 20000);
+    return () => {
+      alive = false;
+      clearInterval(poll);
+    };
+  }, []);
+
+  // 公告倒计时：每秒 -1，归零即移除（全部消失后提示语自动恢复）
+  useEffect(() => {
+    if (announcements.length === 0) return;
+    const tick = setInterval(() => {
+      setAnnouncements((prev) =>
+        prev
+          .map((a) => ({ ...a, remaining_seconds: Math.max(0, a.remaining_seconds - 1) }))
+          .filter((a) => a.remaining_seconds > 0)
+      );
+    }, 1000);
+    return () => clearInterval(tick);
+  }, [announcements.length]);
+
+  // 公告一出现就把正在显示的提示语收起
+  useEffect(() => {
+    if (announcements.length > 0) setShowTip(false);
+  }, [announcements.length]);
+
+  useEffect(() => {
+    // 公告生效期间不弹提示语（公告优先）
+    if (announcements.length > 0) return;
     if (studentPet && tips.length > 0) {
       const interval = setInterval(() => {
         const randomTip = tips[Math.floor(Math.random() * tips.length)];
@@ -44,7 +92,7 @@ export const PetModule: React.FC = () => {
       }, 15000);
       return () => clearInterval(interval);
     }
-  }, [studentPet, tips]);
+  }, [studentPet, tips, announcements.length]);
 
   const fetchData = async () => {
     if (!profile) return;
@@ -388,7 +436,44 @@ export const PetModule: React.FC = () => {
             </motion.div>
 
             <AnimatePresence>
-              {showTip && (
+              {announcements.length > 0 ? (
+                // 公告优先：醒目气泡（渐变描边 + 呼吸点 + 倒计时），可多条堆叠
+                <motion.div
+                  key="pet-announcement"
+                  initial={{ opacity: 0, y: 24, scale: 0.85 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: -24, scale: 0.85 }}
+                  className="absolute top-2 left-1/2 -translate-x-1/2 w-[360px] max-w-[94%] space-y-2"
+                >
+                  {announcements.map((a) => (
+                    <div
+                      key={a.id}
+                      className="rounded-2xl bg-gradient-to-br from-rose-500 via-orange-500 to-amber-400 p-[2px] shadow-2xl shadow-rose-500/40"
+                    >
+                      <div className="rounded-2xl bg-white/95 px-3 py-2.5">
+                        <div className="mb-1 flex items-center justify-between gap-2">
+                          <span className="flex items-center gap-1 text-xs font-bold text-rose-600">
+                            <span className="relative flex h-4 w-4 items-center justify-center">
+                              <span className="absolute inline-flex h-4 w-4 animate-ping rounded-full bg-rose-400 opacity-60"></span>
+                              <i className="fa-solid fa-bullhorn relative text-[10px]"></i>
+                            </span>
+                            公告
+                          </span>
+                          <span className="rounded-full bg-rose-500 px-2 py-0.5 text-[10px] font-semibold text-white">
+                            {a.remaining_seconds} 秒后关闭
+                          </span>
+                        </div>
+                        <p className="whitespace-pre-wrap text-sm font-medium leading-relaxed text-gray-800">
+                          {a.content}
+                        </p>
+                        {a.created_by_name && (
+                          <p className="mt-1 text-right text-[10px] text-gray-400">—— {a.created_by_name}</p>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </motion.div>
+              ) : showTip && (
                 <motion.div
                   initial={{ opacity: 0, y: 20, scale: 0.8 }}
                   animate={{ opacity: 1, y: 0, scale: 1 }}

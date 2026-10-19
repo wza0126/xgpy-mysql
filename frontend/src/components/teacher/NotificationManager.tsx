@@ -5,6 +5,7 @@ import { API_CONFIG } from '../../api/config';
 import { useAuth } from '../../hooks/useAuth';
 import { formatDateTime, formatDate } from '../../utils/dateUtils';
 import { RewardGrantModal } from './RewardGrantModal';
+import { PetAnnouncementPanel } from './PetAnnouncementPanel';
 
 // 携带登录凭证的请求头（供直连 fetch 使用；json=true 时附加 Content-Type）
 function authHeaders(json = false): Record<string, string> {
@@ -66,6 +67,8 @@ export const NotificationManager: React.FC = () => {
   const { profile } = useAuth();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showRewardGrant, setShowRewardGrant] = useState(false);
+  // 萌宠公告弹窗（入口在页头「萌宠公告」按钮，与萌宠配置共用同一个面板）
+  const [showPetAnnouncement, setShowPetAnnouncement] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [classes, setClasses] = useState<Class[]>([]);
   const [selectedClass, setSelectedClass] = useState<string | null>(null);
@@ -483,6 +486,15 @@ export const NotificationManager: React.FC = () => {
           <motion.button
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
+            onClick={() => setShowPetAnnouncement(true)}
+            className="bg-gradient-to-r from-rose-500 to-orange-500 hover:from-rose-600 hover:to-orange-600 text-white px-6 py-3 rounded-lg flex items-center gap-2 shadow-lg"
+          >
+            <i className="fa-solid fa-bullhorn"></i>
+            萌宠公告
+          </motion.button>
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
             onClick={() => setShowRewardGrant(true)}
             className="bg-amber-500 hover:bg-amber-600 text-white px-6 py-3 rounded-lg flex items-center gap-2 shadow-lg"
           >
@@ -642,6 +654,45 @@ export const NotificationManager: React.FC = () => {
         classes={classes}
         onGranted={fetchNotifications}
       />
+
+      {/* 萌宠公告弹窗（与萌宠配置 → 提示语 里的面板同一组件） */}
+      <AnimatePresence>
+        {showPetAnnouncement && (
+          <>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black/50 z-[9998]"
+              onClick={() => setShowPetAnnouncement(false)}
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="fixed inset-0 flex items-center justify-center z-[9999] p-4 pointer-events-none"
+            >
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl max-h-[90vh] overflow-y-auto pointer-events-auto">
+                <div className="flex items-center justify-between border-b border-gray-100 p-4">
+                  <h2 className="text-lg font-bold text-gray-800">
+                    <i className="fa-solid fa-bullhorn mr-2 text-orange-500"></i>
+                    萌宠公告
+                  </h2>
+                  <button
+                    onClick={() => setShowPetAnnouncement(false)}
+                    className="text-gray-400 hover:text-gray-600"
+                  >
+                    <i className="fa-solid fa-times text-xl"></i>
+                  </button>
+                </div>
+                <div className="p-4">
+                  <PetAnnouncementPanel />
+                </div>
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
 
       {/* 创建通知模态框 */}
       <AnimatePresence>

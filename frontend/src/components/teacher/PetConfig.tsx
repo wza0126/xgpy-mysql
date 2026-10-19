@@ -4,6 +4,7 @@ import { backendClient } from '../../api/backendClient';
 import { API_CONFIG } from '../../api/config';
 import { Pet, PetFood, PetTip, Class } from '../../types';
 import { LicenseGuard } from '../common/LicenseGuard';
+import { PetAnnouncementPanel } from './PetAnnouncementPanel';
 
 interface FocusModeConfig {
   focus_mode_enabled: boolean;
@@ -517,6 +518,10 @@ export const PetConfig: React.FC = () => {
 
       {activeTab === 'tips' && (
         <div>
+          {/* 萌宠公告：发一条临时公告，学生端气泡优先显示；期间提示语不弹 */}
+          <div className="mb-4">
+            <PetAnnouncementPanel />
+          </div>
           <button
             onClick={() => openModal('tip')}
             className="mb-4 px-4 py-2 bg-blue-500 text-white rounded-lg"

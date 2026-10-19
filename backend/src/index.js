@@ -9800,6 +9800,154 @@ app.get('/api/student/learn-chapters', authenticate, async (req, res) => {
  *   - mastered / mastered_question_ids：练习来源（source='practice'）答对次数 >= 掌握阈值的题
  *   - master_threshold：一并下发，前端不必再单独查 system_config（也就没有「阈值还没到就先算」的时序坑）
  */
+// ===== 萌宠公告（教师端设置 → 学生端萌宠气泡优先显示，倒计时结束自动关闭） =====
+// 存储复用 pet_config 单行表的 announcement_* 四个字段（见迁移 105）。
+// 生效判定：内容非空 且 ends_at > NOW()；过期不做清理，读的时候判断掉即可。
+
+/** 解析 announcement_class_ids（JSON 数组）；空/非法 = 全部班级 */
+function parseAnnouncementClasses(raw) {
+  if (!raw) return [];
+  try {
+    const v = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return Array.isArray(v) ? v.map((x) => String(x)).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 单行公告 → 对外结构（remaining_seconds 用服务端时钟算，学生机时间不准也不受影响） */
+function mapAnnouncementRow(r) {
+  const endsMs = r.ends_at ? new Date(r.ends_at).getTime() : 0;
+  const remaining = Number.isFinite(endsMs) ? Math.ceil((endsMs - Date.now()) / 1000) : 0;
+  return {
+    id: r.id,
+    content: String(r.content || '').trim(),
+    class_ids: parseAnnouncementClasses(r.class_ids),
+    created_by: r.created_by || null,
+    created_by_name: r.created_by_name || null,
+    started_at: r.started_at || null,
+    ends_at: r.ends_at || null,
+    remaining_seconds: Math.max(0, remaining),
+    active: endsMs > Date.now(),
+  };
+}
+
+/** 当前所有生效公告（多条并存，最新在前） */
+async function listActiveAnnouncements() {
+  const [rows] = await pool.query(
+    `SELECT id, content, class_ids, created_by, created_by_name, started_at, ends_at
+       FROM pet_announcements
+      WHERE ends_at > NOW(3)
+      ORDER BY created_at DESC
+      LIMIT 10`
+  );
+  return rows.map(mapAnnouncementRow);
+}
+
+/** 学生所属班级集合（主班级 class_id + 兼班 assigned_classes） */
+async function getStudentClassIds(userId) {
+  const [[p]] = await pool.query(
+    'SELECT class_id, assigned_classes FROM profiles WHERE id = ? LIMIT 1',
+    [userId]
+  );
+  const set = new Set();
+  if (p && p.class_id) set.add(String(p.class_id));
+  try {
+    const arr = JSON.parse((p && p.assigned_classes) || '[]');
+    if (Array.isArray(arr)) arr.forEach((x) => set.add(String(x)));
+  } catch {
+    // assigned_classes 不是 JSON 时按单班处理，忽略即可
+  }
+  return set;
+}
+
+// 学生端：当前生效的公告（按班级过滤；多条并存时最多返回 3 条给气泡轮播）
+app.get('/api/pet/announcement', authenticate, async (req, res) => {
+  try {
+    const list = await listActiveAnnouncements();
+    if (!list.length) return res.json({ data: { active: false, items: [] }, error: null });
+    const mine = await getStudentClassIds(req.user.userId || req.user.id);
+    const hit = list.filter(
+      (a) => a.class_ids.length === 0 || a.class_ids.some((id) => mine.has(id))
+    );
+    return res.json({
+      data: {
+        active: hit.length > 0,
+        items: hit.slice(0, 3).map(({ id, content, remaining_seconds, ends_at, created_by_name }) => ({
+          id, content, remaining_seconds, ends_at, created_by_name,
+        })),
+      },
+      error: null,
+    });
+  } catch (err) {
+    console.error('读萌宠公告失败:', err);
+    return res.status(500).json({ data: null, error: '读取公告失败' });
+  }
+});
+
+// 教师端：生效中的公告列表（多条并存，面板上一条一条停）
+app.get('/api/pet/announcement/teacher', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const items = await listActiveAnnouncements();
+    res.json({ data: { items, total: items.length }, error: null });
+  } catch (err) {
+    console.error('读萌宠公告失败:', err);
+    res.status(500).json({ data: null, error: '读取公告失败' });
+  }
+});
+
+// 教师端：发布一条公告（可多条并存；content + 自动关闭秒数 + 目标班级，班级为空 = 全部班级）
+app.post('/api/pet/announcement', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const content = String((req.body && req.body.content) || '').trim();
+    const duration = Math.round(Number(req.body && req.body.duration_seconds) || 0);
+    const classIds = Array.isArray(req.body && req.body.class_ids)
+      ? req.body.class_ids.map((x) => String(x || '').trim()).filter(Boolean)
+      : [];
+    if (!content) return res.status(400).json({ data: null, error: '公告内容不能为空' });
+    if (content.length > 500) return res.status(400).json({ data: null, error: '公告内容不超过 500 字' });
+    if (!(duration >= 5 && duration <= 3600)) {
+      return res.status(400).json({ data: null, error: '自动关闭时间需在 5~3600 秒之间' });
+    }
+    const uid = req.user.userId || req.user.id;
+    const [[me]] = await pool.query(
+      'SELECT real_name, username FROM profiles WHERE id = ? LIMIT 1',
+      [uid]
+    );
+    const name = String((me && (me.real_name || me.username)) || '').trim() || '老师';
+    const id = uuidv4();
+    await pool.query(
+      `INSERT INTO pet_announcements
+         (id, content, class_ids, created_by, created_by_name, started_at, ends_at)
+       VALUES (?, ?, ?, ?, ?, NOW(3), DATE_ADD(NOW(3), INTERVAL ? SECOND))`,
+      [id, content, classIds.length ? JSON.stringify(classIds) : null, uid, name, duration]
+    );
+    const [rows] = await pool.query(
+      `SELECT id, content, class_ids, created_by, created_by_name, started_at, ends_at
+         FROM pet_announcements WHERE id = ? LIMIT 1`,
+      [id]
+    );
+    res.json({ data: mapAnnouncementRow(rows[0] || {}), error: null });
+  } catch (err) {
+    console.error('发布萌宠公告失败:', err);
+    res.status(500).json({ data: null, error: '发布公告失败' });
+  }
+});
+
+// 教师端：停止某条公告（结束时间设成现在；行保留，便于追溯）
+app.delete('/api/pet/announcement/:id', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const [r] = await pool.query(
+      'UPDATE pet_announcements SET ends_at = NOW(3) WHERE id = ? AND ends_at > NOW(3)',
+      [req.params.id]
+    );
+    res.json({ data: { stopped: r.affectedRows || 0 }, error: null });
+  } catch (err) {
+    console.error('停止萌宠公告失败:', err);
+    res.status(500).json({ data: null, error: '停止公告失败' });
+  }
+});
+
 app.get('/api/student/practice-stats', authenticate, async (req, res) => {
   try {
     const userId = req.user.userId || req.user.id;
