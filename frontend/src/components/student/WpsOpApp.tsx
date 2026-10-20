@@ -608,6 +608,37 @@ export const WpsOpApp: React.FC = () => {
         </div>
         <p className="mb-4 text-xs text-gray-500">{conf.listDesc}</p>
 
+        {/* 累计得分总览：本页每道操作题的历史最高分之和（WPS / Access 各自独立统计） */}
+        {!loadingList && !listError && list.length > 0 && (() => {
+          const totalBest = list.reduce((s, it) => s + (Number(it.best_score) || 0), 0);
+          const totalFull = list.reduce((s, it) => s + (Number(it.full_score) || 0), 0);
+          const done = list.filter((it) => it.best_score !== null).length;
+          const pct = totalFull > 0 ? Math.round((totalBest * 100) / totalFull) : 0;
+          return (
+            <div className="mb-4 rounded-xl border border-emerald-200 bg-gradient-to-r from-emerald-50 to-teal-50 p-4">
+              <div className="flex items-end justify-between gap-3">
+                <div>
+                  <p className="text-xs font-medium text-emerald-700">累计得分（各题最高分之和）</p>
+                  <p className="mt-0.5">
+                    <span className="text-2xl font-extrabold text-emerald-700">{totalBest}</span>
+                    <span className="ml-1 text-sm text-gray-500">/ {totalFull} 分</span>
+                  </p>
+                </div>
+                <div className="text-right text-[11px] leading-5 text-gray-500">
+                  <p>共 {list.length} 题 · 已作答 {done} 题</p>
+                  <p>得分率 {pct}%</p>
+                </div>
+              </div>
+              <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-white/80">
+                <div
+                  className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-teal-400 transition-all"
+                  style={{ width: `${Math.min(100, pct)}%` }}
+                />
+              </div>
+            </div>
+          );
+        })()}
+
         {loadingList && <div className="py-10 text-center text-sm text-gray-400">加载中…</div>}
         {!loadingList && listError && (
           <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">

@@ -692,12 +692,14 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
     }
   };
 
-  // 结果页按 Enter 直接进下一题：配合"选中即交/回车即交"，全程键盘流（仅快速模式开启时）。
-  // preventDefault 是为了焦点落在「下一题」按钮上时拦掉原生 click 激活，避免回车连跳两题。
+  // 结果页按 Enter 或空格直接进下一题：配合"选中即交/回车即交"，全程键盘流（仅快速模式开启时）。
+  // preventDefault 有两个作用：① 焦点落在「下一题」按钮上时拦掉原生 click 激活，避免连跳两题；
+  // ② 空格默认会滚动页面，必须拦掉。
   useEffect(() => {
     if (!showResult || !quickMode) return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== 'Enter' || e.isComposing) return;
+      const isNextKey = e.key === 'Enter' || e.key === ' ' || e.code === 'Space';
+      if (!isNextKey || e.isComposing) return;
       e.preventDefault();
       handleNext();
     };

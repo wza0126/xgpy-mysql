@@ -44,7 +44,7 @@ export const QuickModeToggle: React.FC<QuickModeToggleProps> = ({ quickMode, onT
       <ul className="space-y-1">
         <li>· 单选题：点一下选项，立即判分</li>
         <li>· 填空题：输入完按回车，立即判分</li>
-        <li>· 看完解析按回车：直接进入下一题</li>
+        <li>· 看完解析按回车或空格：直接进入下一题</li>
       </ul>
       <div className="mt-1.5 pt-1.5 border-t border-white/20 text-gray-300">
         关闭后恢复传统方式：选好答案点「提交答案」

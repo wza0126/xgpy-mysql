@@ -58,6 +58,13 @@ type StudentInfo = {
   class_id: string;
 };
 
+/**
+ * 「试卷学生考试情况」的一行。
+ * is_absent=true 表示该生属于应考范围但**没有交卷**（用学生名单补出来的占位行，
+ * 不是真实 exam_records 记录），表格里显示为「未参加」。
+ */
+type RosterRow = ExamRecord & { student?: StudentInfo; is_absent: boolean };
+
 type QuestionMap = Record<string, Question>;
 
 const parseJsonField = (field: any) => {
@@ -424,26 +431,68 @@ export const ExamManager: React.FC = () => {
     setStudentAnswersForExam(data || []);
   };
 
+  /**
+   * 构造「应考名单」：已交卷的用真实 exam_records，没交卷的补占位行（is_absent=true）。
+   *
+   * 应考范围 = 试卷指定的班级（class_ids 为空 = 全校学生），再叠加老师在弹窗里选的班级筛选。
+   * 这样老师能看到「谁没考」，而不是只看到交了卷的那几个人。
+   */
+  const buildExamRoster = (exam: ExamTest, classFilter = ''): RosterRow[] => {
+    const targetClassIds = Array.isArray(exam.class_ids) ? exam.class_ids : [];
+    const recMap = new Map<string, ExamRecord>();
+    for (const r of examRecords) {
+      if (r.test_id === exam.id && !recMap.has(r.student_id)) recMap.set(r.student_id, r);
+    }
+    return students
+      .filter((s) => {
+        if (targetClassIds.length > 0 && !targetClassIds.includes(s.class_id || '')) return false;
+        if (classFilter && s.class_id !== classFilter) return false;
+        return true;
+      })
+      .map<RosterRow>((s) => {
+        const rec = recMap.get(s.id);
+        if (rec) return { ...rec, student: s, is_absent: false };
+        return {
+          id: `absent:${s.id}`,
+          test_id: exam.id,
+          student_id: s.id,
+          selected_question_ids: [],
+          score: 0,
+          correct_count: 0,
+          total_count: 0,
+          points_earned: 0,
+          internet_codes_earned: 0,
+          is_passed: false,
+          started_at: '',
+          completed_at: '',
+          student: s,
+          is_absent: true,
+        };
+      });
+  };
+
   const exportExamRecordsToXlsx = () => {
     if (!selectedExam) return;
     
-    const examStudentRecords = examRecords
-      .filter(r => r.test_id === selectedExam.id)
-      .map(record => {
-        const student = students.find(s => s.id === record.student_id);
+    // 与弹窗用同一份名单（含未参加的占位行），导出时状态列标注「未参加」
+    const examStudentRecords = buildExamRoster(selectedExam, filterClassId).map(record => {
+        const student = record.student;
         const studentClass = classes.find(c => c.id === student?.class_id);
+        const absent = record.is_absent;
         return {
           '学生姓名': student?.real_name || student?.username || '未知学生',
           '用户名': student?.username || '-',
           '班级': studentClass?.name || '-',
-          '得分': record.score || 0,
-          '正确题数': `${record.correct_count || 0}/${record.total_count || 0}`,
-          '正确率': record.total_count > 0 
-            ? Math.round((record.correct_count || 0) / record.total_count * 100) + '%' 
-            : '0%',
-          '获得积分': record.points_earned || 0,
-          '获得上网码': record.internet_codes_earned || 0,
-          '是否通过': record.is_passed ? '通过' : '未通过',
+          '得分': absent ? '' : (record.score || 0),
+          '正确题数': absent ? '' : `${record.correct_count || 0}/${record.total_count || 0}`,
+          '正确率': absent
+            ? ''
+            : (record.total_count > 0
+                ? Math.round((record.correct_count || 0) / record.total_count * 100) + '%'
+                : '0%'),
+          '获得积分': absent ? '' : (record.points_earned || 0),
+          '获得上网码': absent ? '' : (record.internet_codes_earned || 0),
+          '是否通过': absent ? '未参加' : (record.is_passed ? '通过' : '未通过'),
           '完成时间': record.completed_at ? formatDateTime(record.completed_at) : '-',
         };
       });
@@ -1465,11 +1514,20 @@ export const ExamManager: React.FC = () => {
                   <div>
                     <h3 className="text-xl font-bold text-gray-800">{selectedExam.title} - 学生考试情况</h3>
                     <p className="text-sm text-gray-500 mt-1">
-                      {filterClassId ? (
-                        <span>班级筛选: {classes.find(c => c.id === filterClassId)?.name}，共 {examRecords.filter(r => r.test_id === selectedExam.id && students.find(s => s.id === r.student_id)?.class_id === filterClassId).length} 人参加</span>
-                      ) : (
-                        <span>共 {examRecords.filter(r => r.test_id === selectedExam.id).length} 人参加</span>
-                      )}
+                      {(() => {
+                        const roster = buildExamRoster(selectedExam, filterClassId);
+                        const joined = roster.filter((r) => !r.is_absent).length;
+                        const absent = roster.length - joined;
+                        const clsName = classes.find((c) => c.id === filterClassId)?.name;
+                        return (
+                          <span>
+                            {filterClassId ? `班级筛选: ${clsName}，` : ''}
+                            应考 <b className="text-gray-700">{roster.length}</b> 人 ·
+                            已参加 <b className="text-purple-600">{joined}</b> 人 ·
+                            未参加 <b className={absent > 0 ? 'text-amber-600' : 'text-gray-400'}>{absent}</b> 人
+                          </span>
+                        );
+                      })()}
                     </p>
                   </div>
                   <button
@@ -1550,17 +1608,8 @@ export const ExamManager: React.FC = () => {
                     </div>
                     
                     {(() => {
-                      const examStudentRecords = examRecords
-                        .filter(r => r.test_id === selectedExam.id)
-                        .filter(r => {
-                          if (!filterClassId) return true;
-                          const student = students.find(s => s.id === r.student_id);
-                          return student?.class_id === filterClassId;
-                        })
-                        .map(record => ({
-                          ...record,
-                          student: students.find(s => s.id === record.student_id),
-                        }))
+                      // 应考名单（含未参加的学生，占位行排在后面并标注「未参加」）
+                      const examStudentRecords = buildExamRoster(selectedExam, filterClassId)
                         .sort((a, b) => {
                           if (recordSortField === 'username') {
                             const nameA = a.student?.real_name || a.student?.username || '';
@@ -1569,6 +1618,8 @@ export const ExamManager: React.FC = () => {
                               ? nameA.localeCompare(nameB) 
                               : nameB.localeCompare(nameA);
                           } else {
+                            // 按成绩排序时未参加的恒排最后（0 分不是最差，是没考）
+                            if (a.is_absent !== b.is_absent) return a.is_absent ? 1 : -1;
                             return recordSortOrder === 'asc' 
                               ? (a.score || 0) - (b.score || 0)
                               : (b.score || 0) - (a.score || 0);
@@ -1579,7 +1630,7 @@ export const ExamManager: React.FC = () => {
                         return (
                           <div className="text-center py-12 text-gray-500">
                             <i className="fa-solid fa-users text-4xl mb-4"></i>
-                            <p>暂无学生参加此考试</p>
+                            <p>该筛选范围内没有学生</p>
                           </div>
                         );
                       }
@@ -1600,42 +1651,53 @@ export const ExamManager: React.FC = () => {
                             </thead>
                             <tbody className="divide-y divide-gray-200">
                               {examStudentRecords.map((record) => (
-                                <tr key={record.id} className="hover:bg-gray-100">
+                                <tr
+                                  key={record.id}
+                                  className={record.is_absent ? 'bg-gray-50/60' : 'hover:bg-gray-100'}
+                                >
                                   <td className="px-4 py-3">
-                                    <div className="font-medium text-gray-800">
+                                    <div className={`font-medium ${record.is_absent ? 'text-gray-500' : 'text-gray-800'}`}>
                                       {record.student?.real_name || record.student?.username || '未知学生'}
                                     </div>
                                     <div className="text-xs text-gray-500">
                                       {record.student?.username}
                                     </div>
                                   </td>
-                                  <td className="px-4 py-3 text-center font-bold text-purple-600">
-                                    {record.score || 0}
+                                  <td className={`px-4 py-3 text-center font-bold ${record.is_absent ? 'text-gray-300' : 'text-purple-600'}`}>
+                                    {record.is_absent ? '—' : (record.score || 0)}
                                   </td>
                                   <td className="px-4 py-3 text-center text-gray-600">
-                                    {record.total_count > 0 
-                                      ? Math.round((record.correct_count || 0) / record.total_count * 100) 
-                                      : 0}%
+                                    {record.is_absent
+                                      ? '—'
+                                      : `${record.total_count > 0
+                                          ? Math.round((record.correct_count || 0) / record.total_count * 100)
+                                          : 0}%`}
                                   </td>
                                   <td className="px-4 py-3 text-center text-green-600">
-                                    +{record.points_earned || 0}
+                                    {record.is_absent ? '—' : `+${record.points_earned || 0}`}
                                   </td>
                                   <td className="px-4 py-3 text-center text-purple-600">
-                                    +{record.internet_codes_earned || 0}
+                                    {record.is_absent ? '—' : `+${record.internet_codes_earned || 0}`}
                                   </td>
                                   <td className="px-4 py-3 text-center">
-                                    <span className={`px-2 py-1 rounded-full text-xs ${
-                                      record.is_passed 
-                                        ? 'bg-green-100 text-green-600' 
-                                        : 'bg-red-100 text-red-600'
-                                    }`}>
-                                      {record.is_passed ? '通过' : '未通过'}
-                                    </span>
+                                    {record.is_absent ? (
+                                      <span className="px-2 py-1 rounded-full text-xs bg-gray-200 text-gray-500">
+                                        未参加
+                                      </span>
+                                    ) : (
+                                      <span className={`px-2 py-1 rounded-full text-xs ${
+                                        record.is_passed 
+                                          ? 'bg-green-100 text-green-600' 
+                                          : 'bg-red-100 text-red-600'
+                                      }`}>
+                                        {record.is_passed ? '通过' : '未通过'}
+                                      </span>
+                                    )}
                                   </td>
                                   <td className="px-4 py-3 text-right text-sm text-gray-500">
-                                    {record.completed_at 
-                                      ? formatDateTime(record.completed_at) 
-                                      : '-'}
+                                    {record.is_absent
+                                      ? '-'
+                                      : (record.completed_at ? formatDateTime(record.completed_at) : '-')}
                                   </td>
                                 </tr>
                               ))}

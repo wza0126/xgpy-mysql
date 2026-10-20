@@ -510,12 +510,14 @@ export const WrongQuestions: React.FC = () => {
     }
   };
 
-  // 结果页按 Enter 直接进下一题（队列走完时 handleNextQuestion 内部会 handleBack 回列表）。
-  // preventDefault 防止焦点落在按钮上时原生 click 与监听器同时触发、连跳两题。（仅快速模式开启时）
+  // 结果页按 Enter 或空格直接进下一题（队列走完时 handleNextQuestion 内部会 handleBack 回列表）。
+  // preventDefault 防止焦点落在按钮上时原生 click 与监听器同时触发、连跳两题；空格还要拦掉页面滚动。
+  // （仅快速模式开启时）
   useEffect(() => {
     if (!showResult || !quickMode) return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== 'Enter' || e.isComposing) return;
+      const isNextKey = e.key === 'Enter' || e.key === ' ' || e.code === 'Space';
+      if (!isNextKey || e.isComposing) return;
       e.preventDefault();
       handleNextQuestion();
     };
