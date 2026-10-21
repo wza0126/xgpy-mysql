@@ -3,8 +3,10 @@ import { motion } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
 import { API_CONFIG } from '../../api/config';
 import { useAuth } from '../../hooks/useAuth';
+import { getAuthToken } from '../../utils/authToken';
 import { applySiteConfig, useSiteConfig } from '../../hooks/useSiteConfig';
 import { DataManager } from './DataManager';
+import { ExplainStyleManager } from './ExplainStyleManager';
 
 const API_BASE = API_CONFIG.apiUrl;
 
@@ -183,6 +185,10 @@ export const SystemSettings: React.FC = () => {
   // 背景库列表
   const [backgroundLibrary, setBackgroundLibrary] = useState<any[]>([]);
   const [loadingBackgroundLibrary, setLoadingBackgroundLibrary] = useState(false);
+  // 讯飞发音人：后端下发（含分组），前端不再自己抄一份列表
+  const [xfyunVoices, setXfyunVoices] = useState<Array<{ id: string; name: string; group?: string; note?: string }>>([]);
+  const [ttsTesting, setTtsTesting] = useState(false);
+  const [ttsHint, setTtsHint] = useState('');
 
   useEffect(() => {
     fetchConfigs();
@@ -194,7 +200,60 @@ export const SystemSettings: React.FC = () => {
     fetchLicenseStatus();
     fetchStudentBgSettings();
     fetchBackgroundLibrary();
+    fetchXfyunVoices();
   }, []);
+
+  // 讯飞发音人清单（后端唯一真源）
+  const fetchXfyunVoices = async () => {
+    try {
+      const token = getAuthToken();
+      const r = await fetch(`${API_BASE}/api/teacher/explain/tts/config`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
+      const json = await r.json();
+      if (Array.isArray(json?.data?.voices)) setXfyunVoices(json.data.voices);
+    } catch (error) {
+      console.error('获取讯飞发音人清单失败:', error);
+    }
+  };
+
+  // 试听：用当前（可能还没保存的）发音人 + 语速合成一句，直接播放
+  const handleTtsPreview = async () => {
+    setTtsTesting(true);
+    setTtsHint('');
+    try {
+      const token = getAuthToken();
+      const r = await fetch(`${API_BASE}/api/teacher/explain/tts`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          text: '这是一句试听，我们看这道题。',
+          voice: configs.xfyun_voice,
+          speed: configs.xfyun_speed,
+        }),
+      });
+      if (!r.ok) {
+        let msg = '试听失败';
+        try { const j = await r.json(); msg = j?.error || msg; } catch { /* 非 JSON */ }
+        setTtsHint(msg.includes('11200') ? '该发音人账号未开通（报 11200），去讯飞控制台添加试用后再试' : msg);
+        return;
+      }
+      const blob = await r.blob();
+      // ⚠️ 未开通的 vcn 可能「不报错但静默回落成小燕」，听一下才知道有没有真的换上
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audio.onended = () => URL.revokeObjectURL(url);
+      await audio.play();
+      setTtsHint('已播放。如果听着还是小燕的声音，说明这个发音人没开通（讯飞会静默回落）。');
+    } catch (error: any) {
+      setTtsHint(error?.message || '试听失败');
+    } finally {
+      setTtsTesting(false);
+    }
+  };
 
   const fetchDesktopBackground = async () => {
     try {
@@ -1160,17 +1219,32 @@ export const SystemSettings: React.FC = () => {
                     <div className="col-span-1">
                       <label className="block text-sm font-medium text-gray-700 mb-1">默认发音人</label>
                       <select
-                        value={configs.xfyun_voice || 'xiaoyan'}
-                        onChange={(e) => setConfigs({ ...configs, xfyun_voice: e.target.value })}
+                        value={configs.xfyun_voice || '__custom__'}
+                        onChange={(e) => setConfigs({ ...configs, xfyun_voice: e.target.value === '__custom__' ? '' : e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-amber-500"
                       >
-                        <option value="xiaoyan">小燕 · 女声（标准）</option>
-                        <option value="aisjiuxu">许久 · 男声（标准）</option>
-                        <option value="aisxping">小萍 · 女声（标准）</option>
-                        <option value="aisjinger">小婧 · 女声（标准）</option>
-                        <option value="aisbabyxu">许小宝 · 童声（需开通）</option>
-                        <option value="x4_lingxiaoxuan">聆小璇 · 超拟人（需开通）</option>
+                        {/* 已保存的自定义发音人：显示实际参数值，而不是让老师以为要重填 */}
+                        {configs.xfyun_voice && !xfyunVoices.some((v) => v.id === configs.xfyun_voice) && (
+                          <option value={configs.xfyun_voice}>自定义：{configs.xfyun_voice}</option>
+                        )}
+                        {Array.from(new Set(xfyunVoices.map((v) => v.group || '其他'))).map((g) => (
+                          <optgroup key={g} label={g}>
+                            {xfyunVoices.filter((v) => (v.group || '其他') === g).map((v) => (
+                              <option key={v.id} value={v.id}>{v.name}{v.note ? `（${v.note}）` : ''}</option>
+                            ))}
+                          </optgroup>
+                        ))}
+                        <option value="__custom__">自定义（填控制台里的发音人参数）…</option>
                       </select>
+                      {/* 列表里没有就自己填：讯飞没有「列出发音人」的接口，后台有的这里不一定有 */}
+                      {!xfyunVoices.some((v) => v.id === configs.xfyun_voice) && (
+                        <input
+                          value={configs.xfyun_voice || ''}
+                          onChange={(e) => setConfigs({ ...configs, xfyun_voice: e.target.value.trim() })}
+                          placeholder="例如 x4_xxx，去讯飞控制台 → 语音合成 → 发音人管理里复制"
+                          className="mt-2 w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-amber-500"
+                        />
+                      )}
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">语速（0-100）</label>
@@ -1195,12 +1269,27 @@ export const SystemSettings: React.FC = () => {
                       />
                     </div>
                   </div>
-                  <p className="text-xs text-amber-700">
+                  <div className="mt-3 flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={handleTtsPreview}
+                      disabled={ttsTesting}
+                      className="rounded-lg bg-amber-600 px-3 py-1.5 text-sm text-white disabled:opacity-60"
+                    >
+                      {ttsTesting ? '合成中…' : '试听这句话'}
+                    </button>
+                    <span className="text-xs text-gray-500">用上面选中的发音人试说一句「这是一句试听，我们看这道题。」</span>
+                  </div>
+                  {ttsHint && <p className="mt-1 text-xs text-amber-700">{ttsHint}</p>}
+                  <p className="mt-2 text-xs text-amber-700">
                     保存后进入「AI 语音讲解」，右上角会出现音色下拉框，可临时切换发音人；讲评中如遇额度/网络问题会自动回落本机语音。
                   </p>
                 </div>
               </div>
             </div>
+
+            {/* AI 讲解风格库：讲解器顶部 chip 的来源（迁移 107，独立表 explain_styles，不占 system_config） */}
+            <ExplainStyleManager />
 
             <div className="flex gap-3 mt-8 pt-6 border-t border-gray-200">
               <button

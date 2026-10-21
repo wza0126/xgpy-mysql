@@ -173,7 +173,7 @@ export const StudentManager: React.FC = () => {
           pet_level: Number(s.pet_level) || 0,
           accuracy: Number(s.accuracy) || 0,
           can_exchange_internet_code: student.can_exchange_internet_code ?? true,
-          hidden_features: student.hidden_features ? (typeof student.hidden_features === 'string' ? JSON.parse(student.hidden_features) : student.hidden_features) : ['paint_board', 'roll_call'],
+          hidden_features: student.hidden_features ? (typeof student.hidden_features === 'string' ? JSON.parse(student.hidden_features) : student.hidden_features) : ['paint_board', 'roll_call', 'ai_explain'],
           is_online: !!s.is_online,
         };
       });
@@ -644,7 +644,7 @@ export const StudentManager: React.FC = () => {
   const handleToggleHiddenFeature = async (studentId: string, feature: string, hidden: boolean) => {
     const student = students.find((s) => s.id === studentId);
     if (!student) return;
-    const current = student.hidden_features || ['paint_board', 'roll_call'];
+    const current = student.hidden_features || ['paint_board', 'roll_call', 'ai_explain'];
     let next: string[];
     if (hidden) {
       next = current.includes(feature) ? current : [...current, feature];
@@ -665,7 +665,7 @@ export const StudentManager: React.FC = () => {
     }
     for (const studentId of selectedStudents) {
       const student = students.find((s) => s.id === studentId);
-      const current = student?.hidden_features || ['paint_board', 'roll_call'];
+      const current = student?.hidden_features || ['paint_board', 'roll_call', 'ai_explain'];
       let next: string[];
       if (hidden) {
         next = current.includes(feature) ? current : [...current, feature];
@@ -854,6 +854,22 @@ export const StudentManager: React.FC = () => {
                 批量显示点名 ({selectedStudents.size})
               </button>
               <button
+                onClick={() => handleBatchToggleHiddenFeature('ai_explain', false)}
+                className="px-4 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 transition-colors"
+                title="放开 AI 语音讲解（默认关闭），放开后这些学生桌面出现「AI讲解」图标"
+              >
+                <i className="fa-solid fa-headphones-simple mr-2"></i>
+                批量开启讲解 ({selectedStudents.size})
+              </button>
+              <button
+                onClick={() => handleBatchToggleHiddenFeature('ai_explain', true)}
+                className="px-4 py-2 bg-slate-400 text-white rounded-lg hover:bg-slate-500 transition-colors"
+                title="关闭 AI 语音讲解（学生端图标消失，已生成的讲解缓存保留）"
+              >
+                <i className="fa-solid fa-eye-slash mr-2"></i>
+                批量关闭讲解 ({selectedStudents.size})
+              </button>
+              <button
                 onClick={() => setShowBatchResetPasswordModal(true)}
                 className="px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-colors"
               >
@@ -983,9 +999,9 @@ export const StudentManager: React.FC = () => {
                 <td className="px-4 py-3 text-center">
                   <div className="inline-flex gap-1">
                     <button
-                      onClick={() => handleToggleHiddenFeature(student.id, 'paint_board', !(student.hidden_features || ['paint_board', 'roll_call']).includes('paint_board'))}
+                      onClick={() => handleToggleHiddenFeature(student.id, 'paint_board', !(student.hidden_features || ['paint_board', 'roll_call', 'ai_explain']).includes('paint_board'))}
                       className={`px-2 py-1 rounded-full text-xs transition-colors ${
-                        (student.hidden_features || ['paint_board', 'roll_call']).includes('paint_board')
+                        (student.hidden_features || ['paint_board', 'roll_call', 'ai_explain']).includes('paint_board')
                           ? 'bg-gray-100 text-gray-400 hover:bg-gray-200'
                           : 'bg-indigo-100 text-indigo-600 hover:bg-indigo-200'
                       }`}
@@ -995,9 +1011,9 @@ export const StudentManager: React.FC = () => {
                       画笔
                     </button>
                     <button
-                      onClick={() => handleToggleHiddenFeature(student.id, 'roll_call', !(student.hidden_features || ['paint_board', 'roll_call']).includes('roll_call'))}
+                      onClick={() => handleToggleHiddenFeature(student.id, 'roll_call', !(student.hidden_features || ['paint_board', 'roll_call', 'ai_explain']).includes('roll_call'))}
                       className={`px-2 py-1 rounded-full text-xs transition-colors ${
-                        (student.hidden_features || ['paint_board', 'roll_call']).includes('roll_call')
+                        (student.hidden_features || ['paint_board', 'roll_call', 'ai_explain']).includes('roll_call')
                           ? 'bg-gray-100 text-gray-400 hover:bg-gray-200'
                           : 'bg-purple-100 text-purple-600 hover:bg-purple-200'
                       }`}
@@ -1005,6 +1021,18 @@ export const StudentManager: React.FC = () => {
                     >
                       <i className="fa-solid fa-hand-pointer mr-1"></i>
                       点名
+                    </button>
+                    <button
+                      onClick={() => handleToggleHiddenFeature(student.id, 'ai_explain', !(student.hidden_features || ['paint_board', 'roll_call', 'ai_explain']).includes('ai_explain'))}
+                      className={`px-2 py-1 rounded-full text-xs transition-colors ${
+                        (student.hidden_features || ['paint_board', 'roll_call', 'ai_explain']).includes('ai_explain')
+                          ? 'bg-gray-100 text-gray-400 hover:bg-gray-200'
+                          : 'bg-amber-100 text-amber-700 hover:bg-amber-200'
+                      }`}
+                      title="AI 语音讲解（学生端）：默认关闭，放开后该学生桌面出现「AI讲解」图标，可听自己做错的题"
+                    >
+                      <i className="fa-solid fa-headphones-simple mr-1"></i>
+                      讲解
                     </button>
                   </div>
                 </td>

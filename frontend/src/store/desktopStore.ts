@@ -22,6 +22,8 @@ export const desktopIcons: DesktopIcon[] = [
   { id: 'test', title: '测试', icon: 'fa-clipboard-check', color: 'bg-purple-500' },
   { id: 'wpsOp', title: '操作题', icon: 'fa-file-excel', color: 'bg-emerald-600' },
   { id: 'wrong', title: '错题集', icon: 'fa-circle-xmark', color: 'bg-red-500' },
+  // AI 讲解（学生端）：默认隐藏，老师在「学生管理 → 讲解」里按账号放开
+  { id: 'aiExplain', title: 'AI讲解', icon: 'fa-headphones-simple', color: 'bg-violet-600' },
   { id: 'notebook', title: '记事本', icon: 'fa-note-sticky', color: 'bg-yellow-500' },
   { id: 'python', title: 'Python编程', icon: 'fa-code', color: 'bg-blue-600' },
   { id: 'apps', title: '应用中心', icon: 'fa-rocket', color: 'bg-indigo-500' },

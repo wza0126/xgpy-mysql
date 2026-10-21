@@ -38,7 +38,7 @@ interface Script {
 
 interface TtsConfig {
   configured: boolean;
-  voices: { id: string; name: string; note?: string }[];
+  voices: { id: string; name: string; group?: string; note?: string }[];
   voice: string;
   speed: number;
   volume: number;
@@ -47,14 +47,37 @@ interface TtsConfig {
 interface Props {
   questions: ExplainQuestion[];
   title?: string;
-  /** 传入班级 ID 时，讲完一题自动打「已讲解」标记 */
+  /** 传入班级 ID 时，讲完一题自动打「已讲解」标记（仅教师端） */
   classId?: string;
   onClose: () => void;
+  /**
+   * 端点归属：
+   *  - teacher（默认）：/api/teacher/explain/*（错题排行、试卷按题目查看）
+   *  - student：/api/student/explain/*，只能听自己做错过的题，且需老师放开「讲解」开关
+   */
+  audience?: 'teacher' | 'student';
+  /** 可选风格（学生端由 access 接口下发；教师端不传则组件自己拉） */
+  styles?: ExplainStyleOption[];
+  /**
+   * 本批连播里因题型被跳过的说明，例如「已跳过 2 道综合题」。
+   * 显示在顶栏，避免老师以为漏题（播放器是全屏的，外面的横幅被挡住看不到）。
+   */
+  skipNote?: string;
+}
+
+export interface ExplainStyleOption {
+  style_key: string;
+  name: string;
+  summary?: string;
+  max_chars?: number;
 }
 
 const FONT_KEY = 'xgpy_explain_font_scale';
 const VOICE_KEY = 'xgpy_explain_voice';
+// 上次见到的「系统设置里的默认发音人」：变了说明老师在别处改过，播放器要以新默认为准
+const VOICE_DEFAULT_KEY = 'xgpy_explain_voice_default';
 const GAP_KEY = 'xgpy_explain_gap_sec';
+const STYLE_KEY = 'xgpy_explain_style';
 
 /** 按中文标点切句，供逐句朗读 + 高亮 */
 function splitSentences(text: string): string[] {
@@ -161,8 +184,26 @@ function extractAnswerTexts(raw: unknown): string[] {
  * 语音优先级：讯飞云端（系统配置里填了密钥）→ 浏览器本机语音（Huihui）。云端失败自动回落。
  * 字号、音色都会记住，下次打开沿用。
  */
-export const AiExplainPlayer: React.FC<Props> = ({ questions, title = 'AI 语音讲解', classId, onClose }) => {
+export const AiExplainPlayer: React.FC<Props> = ({
+  questions,
+  title = 'AI 语音讲解',
+  classId,
+  onClose,
+  audience = 'teacher',
+  styles,
+  skipNote,
+}) => {
+  const apiBase = `${API_CONFIG.apiUrl}/api/${audience}/explain`;
   const [idx, setIdx] = useState(0);
+  const [styleList, setStyleList] = useState<ExplainStyleOption[]>(styles || []);
+  const [styleKey, setStyleKey] = useState<string>(() => {
+    const saved = localStorage.getItem(STYLE_KEY) || '';
+    if (styles && styles.length) {
+      // 学生端风格由 access 接口下发：上次保存的风格若已被老师停用，直接用第一个
+      return styles.some((s) => s.style_key === saved) ? saved : styles[0].style_key;
+    }
+    return saved;
+  });
   const [script, setScript] = useState<Script | null>(null);
   const [sceneIdx, setSceneIdx] = useState(0);
   const [sentenceIdx, setSentenceIdx] = useState(0);
@@ -199,6 +240,44 @@ export const AiExplainPlayer: React.FC<Props> = ({ questions, title = 'AI 语音
   useEffect(() => { if (voice) localStorage.setItem(VOICE_KEY, voice); }, [voice]);
   useEffect(() => { localStorage.setItem(GAP_KEY, String(gapSec)); }, [gapSec]);
 
+  // 风格：学生端由父组件传入（access 接口已过滤停用项）；教师端自己拉启用列表。
+  // ⚠️ 依赖用签名字符串而不是数组本身：父组件内联数组每次渲染都是新引用，直接依赖会无限重渲染。
+  const stylesSig = styles ? styles.map((s) => `${s.style_key}:${s.name}`).join('|') : '';
+  useEffect(() => {
+    if (styles && styles.length) {
+      setStyleList((prev) => (
+        prev.length === styles.length && prev.every((p, i) => p.style_key === styles[i].style_key && p.name === styles[i].name)
+          ? prev
+          : styles
+      ));
+      return;
+    }
+    if (audience !== 'teacher') return;
+    (async () => {
+      try {
+        const res = await fetch(`${apiBase}/styles`, { headers: authHeaders() });
+        const json = await res.json().catch(() => null);
+        const list = (json?.data?.styles || []).filter((s: any) => Number(s.enabled) !== 0);
+        setStyleList(list.map((s: any) => ({
+          style_key: s.style_key,
+          name: s.name,
+          summary: s.summary,
+          max_chars: s.max_chars,
+        })));
+      } catch {
+        setStyleList([]);
+      }
+    })();
+  }, [stylesSig, audience, apiBase]);
+
+  // 上次选的风格可能被老师停用/删除了 → 回落到列表第一个，避免请求一个不存在的风格
+  useEffect(() => {
+    if (!styleList.length) return;
+    if (!styleList.some((s) => s.style_key === styleKey)) setStyleKey(styleList[0].style_key);
+  }, [styleList, styleKey]);
+
+  useEffect(() => { if (styleKey) localStorage.setItem(STYLE_KEY, styleKey); }, [styleKey]);
+
   const sentences = useMemo(() => splitSentences(script?.scenes?.[sceneIdx]?.narration || ''), [script, sceneIdx]);
   const scene = script?.scenes?.[sceneIdx];
   const cloudReady = !!ttsConfig?.configured;
@@ -207,17 +286,27 @@ export const AiExplainPlayer: React.FC<Props> = ({ questions, title = 'AI 语音
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch(`${API_CONFIG.apiUrl}/api/teacher/explain/tts/config`, { headers: authHeaders() });
+        const res = await fetch(`${apiBase}/tts/config`, { headers: authHeaders() });
         const json = await res.json().catch(() => null);
         if (json?.data) {
           setTtsConfig(json.data as TtsConfig);
-          setVoice((v) => v || (json.data as TtsConfig).voice || 'xiaoyan');
+          const cfgVoice = (json.data as TtsConfig).voice || 'xiaoyan';
+          // ⛔ 不能简单地「localStorage 有值就用」：老师在系统设置里换了默认发音人，
+          // 讲解器还拿旧缓存就永远不生效。所以记住上次见到的系统默认，一旦它变了就以新默认为准。
+          let lastDefault = '';
+          try { lastDefault = localStorage.getItem(VOICE_DEFAULT_KEY) || ''; } catch { /* ignore */ }
+          if (lastDefault !== cfgVoice) {
+            try { localStorage.setItem(VOICE_DEFAULT_KEY, cfgVoice); } catch { /* ignore */ }
+            setVoice(cfgVoice);
+          } else {
+            setVoice((v) => v || cfgVoice);
+          }
         }
       } catch {
         setTtsConfig({ configured: false, voices: [], voice: '', speed: 50, volume: 50 });
       }
     })();
-  }, []);
+  }, [apiBase]);
 
   // 本机中文语音（云端不可用时用）
   useEffect(() => {
@@ -247,7 +336,7 @@ export const AiExplainPlayer: React.FC<Props> = ({ questions, title = 'AI 语音
     const hit = blobCacheRef.current.get(key);
     if (hit) return hit;
 
-    const res = await fetch(`${API_CONFIG.apiUrl}/api/teacher/explain/tts`, {
+    const res = await fetch(`${apiBase}/tts`, {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ text, voice: voice || undefined, speed }),
@@ -260,7 +349,7 @@ export const AiExplainPlayer: React.FC<Props> = ({ questions, title = 'AI 语音
     if (!blob.size) throw new Error('语音文件为空');
     blobCacheRef.current.set(key, blob);
     return blob;
-  }, [voice, rate]);
+  }, [voice, rate, apiBase]);
 
   const playBlob = useCallback((blob: Blob) => new Promise<void>((resolve, reject) => {
     const url = URL.createObjectURL(blob);
@@ -272,15 +361,16 @@ export const AiExplainPlayer: React.FC<Props> = ({ questions, title = 'AI 语音
   }), []);
 
   const fetchScript = useCallback(async (questionId: string, force = false): Promise<Script> => {
-    const res = await fetch(`${API_CONFIG.apiUrl}/api/teacher/explain/script`, {
+    const res = await fetch(`${apiBase}/script`, {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ question_id: questionId, force }),
+      // style_key 必须每次带上：后端按 (题目, 风格) 取缓存，不带就走默认风格
+      body: JSON.stringify({ question_id: questionId, force, style_key: styleKey || undefined }),
     });
     const json = await res.json().catch(() => null);
     if (!res.ok) throw new Error((json && json.error) || `生成讲解失败（${res.status}）`);
     return json.data.script as Script;
-  }, []);
+  }, [apiBase, styleKey]);
 
   const loadScript = useCallback(async (question: ExplainQuestion | undefined) => {
     if (!question) return;
@@ -318,6 +408,8 @@ export const AiExplainPlayer: React.FC<Props> = ({ questions, title = 'AI 语音
   }, [cloudReady, sentences, sentenceIdx, getBlob]);
 
   const markExplained = useCallback(async (questionId: string) => {
+    // 「已讲解」标记是教师端讲评行为，学生自助听不写这张表
+    if (audience !== 'teacher') return;
     if (!classId || finishedRef.current.has(questionId)) return;
     finishedRef.current.add(questionId);
     try {
@@ -330,7 +422,7 @@ export const AiExplainPlayer: React.FC<Props> = ({ questions, title = 'AI 语音
     } catch {
       // 标记失败不影响讲解
     }
-  }, [classId]);
+  }, [classId, audience]);
 
   const goQuestion = useCallback((nextIdx: number) => {
     // 手动切题时清掉「自动进入下一题」的倒计时，避免连跳两题
@@ -447,6 +539,7 @@ export const AiExplainPlayer: React.FC<Props> = ({ questions, title = 'AI 语音
     ? Math.round(((current.wrong_count || 0) / current.total_attempts) * 100)
     : null;
   const s = fontScale;
+  const currentStyle = styleList.find((st) => st.style_key === styleKey);
 
   return (
     <div className="fixed inset-0 z-[9999] flex flex-col bg-slate-50" style={{ fontSize: `${s}rem` }}>
@@ -455,6 +548,11 @@ export const AiExplainPlayer: React.FC<Props> = ({ questions, title = 'AI 语音
         <div className="flex items-center gap-3">
           <span className="rounded-full bg-indigo-600 px-3 py-1 text-sm font-medium text-white">AI 语音讲解</span>
           <span className="text-base font-semibold text-gray-800">{title}</span>
+          {skipNote && (
+            <span className="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-700" title="连续讲解自动跳过不适合语音讲解的题型">
+              <i className="fa-solid fa-circle-info mr-1"></i>{skipNote}
+            </span>
+          )}
           <span className="text-sm text-gray-500">
             第 {idx + 1} / {questions.length} 题
             {ratePct !== null && <span className="ml-2 text-rose-600">错误率 {ratePct}%</span>}
@@ -465,14 +563,37 @@ export const AiExplainPlayer: React.FC<Props> = ({ questions, title = 'AI 语音
           {/* 音色：仅云端可用时显示 */}
           {cloudReady && ttsConfig && ttsConfig.voices.length > 0 && (
             <select
-              value={voice}
-              onChange={(e) => { setVoice(e.target.value); setDegraded(false); }}
+              value={voice || '__custom__'}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === '__custom__') {
+                  // 讯飞没有「列出发音人」接口 → 允许手填控制台里看到的 vcn
+                  const input = window.prompt('填讯飞控制台 → 语音合成 → 发音人管理 里显示的参数值，例如 x4_xxx / vixm', voice || '');
+                  const vcn = (input || '').trim();
+                  if (!/^[A-Za-z0-9_]{1,40}$/.test(vcn)) return; // 取消或格式不对就保持原音色
+                  setVoice(vcn);
+                  setDegraded(false);
+                  return;
+                }
+                setVoice(v);
+                setDegraded(false);
+              }}
               className="rounded-lg border border-gray-300 px-2 py-1.5 text-sm"
               title="切换发音人"
             >
-              {ttsConfig.voices.map((v) => (
-                <option key={v.id} value={v.id}>{v.name}</option>
+              {/* 系统设置里填的自定义发音人：直接把参数值显示出来，别再逼老师重填一遍 */}
+              {voice && !ttsConfig.voices.some((v) => v.id === voice) && (
+                <option value={voice}>自定义：{voice}</option>
+              )}
+              {Array.from(new Set(ttsConfig.voices.map((v) => v.group || '其他'))).map((g) => (
+                <optgroup key={g} label={g}>
+                  {ttsConfig.voices.filter((v) => (v.group || '其他') === g).map((v) => (
+                    <option key={v.id} value={v.id}>{v.name}{v.note ? `（${v.note}）` : ''}</option>
+                  ))}
+                </optgroup>
               ))}
+              {/* 列表外的发音人：讯飞没有列出发音人的接口，后台开通了但这里没有很正常 */}
+              <option value="__custom__">{voice ? '换一个自定义发音人…' : '自定义发音人…'}</option>
             </select>
           )}
           {!cloudReady && (
@@ -508,6 +629,35 @@ export const AiExplainPlayer: React.FC<Props> = ({ questions, title = 'AI 语音
           <button onClick={onClose} className="rounded-lg bg-gray-800 px-4 py-1.5 text-white hover:bg-gray-900">结束讲解</button>
         </div>
       </div>
+
+      {/* 讲解风格：就地切换（后端按 题目 × 风格 缓存，切过去不重复生成） */}
+      {styleList.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-gray-200 bg-white px-6 py-2">
+          <span className="shrink-0 text-xs text-gray-500">讲解风格</span>
+          {styleList.map((st) => (
+            <button
+              key={st.style_key}
+              onClick={() => {
+                if (st.style_key === styleKey) return;
+                window.speechSynthesis?.cancel();
+                audioRef.current?.pause();
+                tokenRef.current += 1;
+                setStyleKey(st.style_key);
+                setPlaying(true);
+              }}
+              title={st.summary || ''}
+              className={`rounded-full px-3 py-1 text-xs transition-colors ${
+                st.style_key === styleKey ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              {st.name}
+            </button>
+          ))}
+          {currentStyle?.max_chars ? (
+            <span className="ml-auto shrink-0 text-xs text-gray-400">这段讲解约 {currentStyle.max_chars} 字以内</span>
+          ) : null}
+        </div>
+      )}
 
       {/* 主体：左题目 / 右讲解 */}
       <div className="grid min-h-0 flex-1 grid-cols-2 gap-4 p-4">
@@ -662,12 +812,14 @@ export const AiExplainPlayer: React.FC<Props> = ({ questions, title = 'AI 语音
           <button onClick={() => goQuestion(idx + 1)} className="rounded-lg border border-gray-300 px-3 py-1.5 hover:bg-gray-50">
             {idx === questions.length - 1 ? '完成' : '下一题'}
           </button>
-          <button
-            onClick={() => current && markExplained(current.id)}
-            className={`ml-auto rounded-lg px-3 py-1.5 ${marked ? 'bg-emerald-50 text-emerald-700' : 'border border-gray-300 hover:bg-gray-50'}`}
-          >
-            {marked ? '✓ 已标记讲解' : '标记已讲'}
-          </button>
+          {audience === 'teacher' && (
+            <button
+              onClick={() => current && markExplained(current.id)}
+              className={`ml-auto rounded-lg px-3 py-1.5 ${marked ? 'bg-emerald-50 text-emerald-700' : 'border border-gray-300 hover:bg-gray-50'}`}
+            >
+              {marked ? '✓ 已标记讲解' : '标记已讲'}
+            </button>
+          )}
           {gapLeft > 0 && (
             <span className="rounded-lg bg-indigo-50 px-2 py-1 text-indigo-700">
               {gapLeft} 秒后进入下一题

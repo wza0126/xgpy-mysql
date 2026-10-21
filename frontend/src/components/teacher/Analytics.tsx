@@ -10,6 +10,7 @@ import { studentLabel } from '../../utils/studentLabel';
 import { DetailSortKey, sortStudentRows, masteryRate, sortMasteryRows } from '../../utils/tableSort';
 import { LicenseGuard } from '../common/LicenseGuard';
 import { authHeaders } from '../../utils/authToken';
+import { pickExplainQueue } from '../../utils/explainQueue';
 import { AiExplainPlayer, ExplainQuestion } from './AiExplainPlayer';
 
 interface StudentWithStats extends Profile {
@@ -409,6 +410,17 @@ interface WrongQuestionsPage {
   pageSize: number;
 }
 
+/** 错题排行的题型筛选值（与后端白名单一致；op = WPS + Access 操作题合并） */
+type WrongQuestionTypeFilter = 'all' | 'choice' | 'fill_blank' | 'composite' | 'code' | 'op';
+
+const WRONG_QUESTION_TYPE_OPTIONS: { value: WrongQuestionTypeFilter; label: string }[] = [
+  { value: 'all', label: '全部题型' },
+  { value: 'choice', label: '选择题' },
+  { value: 'fill_blank', label: '填空题' },
+  { value: 'composite', label: '综合题' },
+  { value: 'op', label: '操作题（WPS / Access）' },
+];
+
 interface TrendPoint {
   week_start: string;
   answers: number;
@@ -685,6 +697,8 @@ const WrongQuestionsSection: React.FC<{ classId: string }> = ({ classId }) => {
   const [pageData, setPageData] = useState<WrongQuestionsPage>({ items: [], total: 0, page: 1, pageSize: 20 });
   const [page, setPage] = useState(1);
   const [filter, setFilter] = useState<'all' | 'unexplained' | 'explained'>('all');
+  /** 题型筛选（后端白名单：all/choice/fill_blank/composite/code/op，op = WPS+Access 操作题合并） */
+  const [typeFilter, setTypeFilter] = useState<WrongQuestionTypeFilter>('all');
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [tagInput, setTagInput] = useState('');
@@ -695,13 +709,17 @@ const WrongQuestionsSection: React.FC<{ classId: string }> = ({ classId }) => {
   const [explainMenu, setExplainMenu] = useState(false);
   const [explainQueue, setExplainQueue] = useState<ExplainQuestion[] | null>(null);
   const [explainLoading, setExplainLoading] = useState(false);
+  /** 连续讲解时被跳过的综合题数量，讲完提示一下，避免老师以为漏题 */
+  const [explainHint, setExplainHint] = useState<string>('');
+  /** 同一批跳过信息的短版本，塞进播放器顶栏（播放器是全屏的，页面横幅会被挡住） */
+  const [explainSkipNote, setExplainSkipNote] = useState<string>('');
 
   const fetchPage = async (targetPage = page) => {
     if (!classId) return;
     setLoading(true);
     try {
       const data = await analyticsFetch<WrongQuestionsPage>(
-        `/api/teacher/analytics/wrong-questions/${classId}?page=${targetPage}&pageSize=${pageSize}&filter=${filter}`
+        `/api/teacher/analytics/wrong-questions/${classId}?page=${targetPage}&pageSize=${pageSize}&filter=${filter}&type=${typeFilter}`
       );
       setPageData(data);
     } catch (e) {
@@ -715,12 +733,12 @@ const WrongQuestionsSection: React.FC<{ classId: string }> = ({ classId }) => {
   useEffect(() => {
     setPage(1);
     setSelected(new Set());
-  }, [classId, filter]);
+  }, [classId, filter, typeFilter]);
 
   useEffect(() => {
     fetchPage(page);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [classId, page, filter]);
+  }, [classId, page, filter, typeFilter]);
 
   const refresh = async () => {
     setSelected(new Set());
@@ -793,6 +811,8 @@ const WrongQuestionsSection: React.FC<{ classId: string }> = ({ classId }) => {
   const startExplain = async (mode: 'wrong' | 'rate' | 'selected') => {
     setExplainMenu(false);
     setExplainLoading(true);
+    setExplainHint('');
+    setExplainSkipNote('');
     try {
       let ids: string[] = [];
       if (mode === 'selected') {
@@ -803,23 +823,32 @@ const WrongQuestionsSection: React.FC<{ classId: string }> = ({ classId }) => {
         }
       } else {
         // ⛔ 只在「未讲解」里挑：讲过就打标记，下次自动换一批，不会永远重复那 20 题
+        // 题型筛选生效时只在该题型里挑（老师看着「填空题」榜点讲解，理应只讲填空题）
+        const batchType = typeFilter === 'composite' ? 'all' : typeFilter;
         const data = await analyticsFetch<WrongQuestionsPage>(
-          `/api/teacher/analytics/wrong-questions/${classId}?page=1&pageSize=100&filter=unexplained`
+          `/api/teacher/analytics/wrong-questions/${classId}?page=1&pageSize=100&filter=unexplained&type=${batchType}`
         );
-        const scored = (data.items || []).map((it) => ({
-          id: it.question_id,
-          wrong: Number(it.wrong_count) || 0,
-          rate: it.total_attempts ? (Number(it.wrong_count) || 0) / it.total_attempts : 0,
-        }));
-        scored.sort(
-          mode === 'wrong'
-            ? (a, b) => b.wrong - a.wrong || b.rate - a.rate
-            : (a, b) => b.rate - a.rate || b.wrong - a.wrong
-        );
-        ids = scored.slice(0, 20).map((x) => x.id);
+        const allItems = data.items || [];
+        // ⛔ 综合题 / 操作题不进连播（见 utils/explainQueue.ts）：题目太复杂，讲不清。
+        // 过滤在截断到 20 之前完成，否则前 20 的名额会被它们占掉。
+        // 老师在列表里勾选后「讲勾选的」不受此限制（明确意图优先）。
+        const picked = pickExplainQueue(allItems, mode);
+        ids = picked.ids;
         if (!ids.length) {
           alert('该班的错题都已讲解过了，没有新的可讲。\n可以在「已讲解」里取消标记，或直接勾选题讲。');
           return;
+        }
+        if (picked.skipped > 0) {
+          const parts: string[] = [];
+          if (picked.skippedComposite > 0) parts.push(`${picked.skippedComposite} 道综合题`);
+          if (picked.skippedOperation > 0) parts.push(`${picked.skippedOperation} 道操作题`);
+          const why = picked.skippedOperation === 0
+            ? '内含多个小题，逐小题讲反而更糊'
+            : picked.skippedComposite === 0
+              ? '没有选项可辨析，讲也讲不清'
+              : '内含多个小题 / 没有选项可辨析';
+          setExplainHint(`已跳过 ${parts.join('、')}（${why}，不适合连续讲解；需要讲可在列表里勾选后单独讲）`);
+          setExplainSkipNote(`已跳过 ${parts.join('、')}`);
         }
       }
 
@@ -856,6 +885,11 @@ const WrongQuestionsSection: React.FC<{ classId: string }> = ({ classId }) => {
     { key: 'explained', label: '已讲解' },
   ];
 
+  /** 当前题型筛选的显示名，用于「讲前 20」按钮后缀 */
+  const typeLabelOf = WRONG_QUESTION_TYPE_OPTIONS.find((o) => o.value === typeFilter)?.label || '全部题型';
+  /** 综合题不能连播（题目本身含多个小题），筛到综合题时直接禁用批讲入口 */
+  const batchExplainDisabled = typeFilter === 'composite';
+
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
       <div className="flex items-center justify-between flex-wrap gap-2">
@@ -876,12 +910,20 @@ const WrongQuestionsSection: React.FC<{ classId: string }> = ({ classId }) => {
             {explainMenu && (
               <>
                 <div className="fixed inset-0 z-10" onClick={() => setExplainMenu(false)}></div>
-                <div className="absolute right-0 z-20 mt-1 w-56 rounded-lg border border-gray-200 bg-white p-1 shadow-lg">
-                  <button onClick={() => startExplain('wrong')} className="block w-full rounded px-3 py-2 text-left text-sm hover:bg-gray-50">
-                    讲未讲解 · 错次前 20
+                <div className="absolute right-0 z-20 mt-1 w-60 rounded-lg border border-gray-200 bg-white p-1 shadow-lg">
+                  <button
+                    onClick={() => startExplain('wrong')}
+                    disabled={batchExplainDisabled}
+                    className="block w-full rounded px-3 py-2 text-left text-sm hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    讲未讲解 · 错次前 20{typeFilter !== 'all' ? `（${typeLabelOf}）` : ''}
                   </button>
-                  <button onClick={() => startExplain('rate')} className="block w-full rounded px-3 py-2 text-left text-sm hover:bg-gray-50">
-                    讲未讲解 · 错误率前 20
+                  <button
+                    onClick={() => startExplain('rate')}
+                    disabled={batchExplainDisabled}
+                    className="block w-full rounded px-3 py-2 text-left text-sm hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    讲未讲解 · 错误率前 20{typeFilter !== 'all' ? `（${typeLabelOf}）` : ''}
                   </button>
                   <button
                     onClick={() => startExplain('selected')}
@@ -890,10 +932,25 @@ const WrongQuestionsSection: React.FC<{ classId: string }> = ({ classId }) => {
                   >
                     讲勾选的 {selected.size} 题
                   </button>
+                  <p className="px-3 pb-1 pt-1.5 text-[11px] leading-snug text-gray-400 border-t border-gray-100 mt-1">
+                    {batchExplainDisabled
+                      ? '综合题内含多个小题，不适合语音讲解 — 请在列表里勾选后单独讲。'
+                      : '前 20 自动跳过综合题 / 操作题；勾选的题不受限制。'}
+                  </p>
                 </div>
               </>
             )}
           </div>
+          <select
+            value={typeFilter}
+            onChange={(e) => setTypeFilter(e.target.value as WrongQuestionTypeFilter)}
+            className="px-3 py-1.5 rounded-lg border border-gray-300 bg-white text-sm text-gray-700 focus:outline-none focus:border-blue-500"
+            title="按题型筛选错题排行"
+          >
+            {WRONG_QUESTION_TYPE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
           <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
           {filterTabs.map(t => (
             <button
@@ -908,11 +965,22 @@ const WrongQuestionsSection: React.FC<{ classId: string }> = ({ classId }) => {
         </div>
       </div>
 
+      {explainHint && (
+        <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+          <i className="fa-solid fa-circle-info mt-0.5"></i>
+          <span className="flex-1">{explainHint}</span>
+          <button onClick={() => setExplainHint('')} className="text-amber-500 hover:text-amber-700" title="知道了">
+            <i className="fa-solid fa-xmark"></i>
+          </button>
+        </div>
+      )}
+
       {explainQueue && (
         <AiExplainPlayer
           questions={explainQueue}
           title="错题讲评"
           classId={classId}
+          skipNote={explainSkipNote || undefined}
           onClose={() => {
             setExplainQueue(null);
             refresh();

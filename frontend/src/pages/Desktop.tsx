@@ -16,6 +16,7 @@ import { PracticeModule } from '../components/student/PracticeModule';
 import { TestModule } from '../components/student/TestModule';
 import { WpsOpApp } from '../components/student/WpsOpApp';
 import { WrongQuestions } from '../components/student/WrongQuestions';
+import { AiExplainApp } from '../components/student/AiExplainApp';
 import { Notebook } from '../components/student/Notebook';
 import { PetModule } from '../components/student/PetModule';
 import { ExchangeModule } from '../components/student/ExchangeModule';
@@ -70,6 +71,7 @@ const moduleComponents: Record<string, React.ReactNode> = {
   test: <TestModule />,
   wpsOp: <WpsOpApp />,
   wrong: <WrongQuestions />,
+  aiExplain: <AiExplainApp />,
   notebook: <Notebook />,
   python: <PythonProgramming />,
   apps: <AppCenter />,
@@ -143,9 +145,13 @@ export const Desktop: React.FC = () => {
     ? (typeof effectiveProfile.hidden_features === 'string'
         ? (() => { try { return JSON.parse(effectiveProfile.hidden_features); } catch { return []; } })()
         : effectiveProfile.hidden_features)
-    : ['paint_board', 'roll_call'];
+    : ['paint_board', 'roll_call', 'ai_explain'];
   const isPaintBoardHidden = !effectiveProfile || (effectiveProfile?.role === 'student' && hiddenFeatures.includes('paint_board'));
   const isRollCallHidden = !effectiveProfile || (effectiveProfile?.role === 'student' && hiddenFeatures.includes('roll_call'));
+  // AI 讲解：默认关闭（hidden_features 内含 ai_explain），且只对学生开放 —— 教师端没有学生错题
+  const isExplainHidden = !effectiveProfile
+    || effectiveProfile.role !== 'student'
+    || hiddenFeatures.includes('ai_explain');
 
   const applyFsStyle = (enable: boolean) => {
     if (enable) {
@@ -828,9 +834,11 @@ export const Desktop: React.FC = () => {
   const guideAvailable = !!guideUrl && farmState?.world?.guide_enabled !== false;
 
   const getFilteredIcons = () => {
-    const all = guideAvailable
+    const base = guideAvailable
       ? [...desktopIcons, { id: 'farmGuide', title: '农场手册', icon: 'fa-book-open-reader', color: 'bg-lime-600' }]
       : desktopIcons;
+    // AI 讲解按 hidden_features 的 ai_explain 开关显示（默认关闭），与学生管理里的「讲解」按钮联动
+    const all = isExplainHidden ? base.filter((icon) => icon.id !== 'aiExplain') : base;
 
     if (!isFocusModeActive || !focusModeConfig) {
       return all;
