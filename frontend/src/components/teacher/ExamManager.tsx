@@ -6,6 +6,7 @@ import { formatDateTime } from '../../utils/dateUtils';
 import * as XLSX from 'xlsx';
 import { sanitizeHtml, htmlToPlainText } from '../../utils/htmlUtils';
 import { isOperationType } from '../../utils/questionType';
+import { AiExplainPlayer, ExplainQuestion } from './AiExplainPlayer';
 import { PKBattleConfigTab } from './PKBattleConfigTab';
 import { PKStatsTab } from './PKStatsTab';
 
@@ -153,6 +154,8 @@ export const ExamManager: React.FC = () => {
   const [showModal, setShowModal] = useState(false);
   const [editingTest, setEditingTest] = useState<ExamTest | null>(null);
   const [showRecordsModal, setShowRecordsModal] = useState(false);
+  // AI 语音讲评队列（按题目查看里，单题或高频错题）
+  const [explainQueue, setExplainQueue] = useState<ExplainQuestion[] | null>(null);
   const [selectedExam, setSelectedExam] = useState<ExamTest | null>(null);
   const [recordViewMode, setRecordViewMode] = useState<'student' | 'question'>('student');
   const [recordSortField, setRecordSortField] = useState<'username' | 'score'>('username');
@@ -469,6 +472,40 @@ export const ExamManager: React.FC = () => {
           is_absent: true,
         };
       });
+  };
+
+  /**
+   * AI 语音讲评。
+   * 传了 question → 只讲这一题；不传 → 讲本卷「正确率最低」的前 10 题（只算有人作答的题）。
+   */
+  const startExamExplain = (only?: Question) => {
+    if (only) {
+      setExplainQueue([only as unknown as ExplainQuestion]);
+      return;
+    }
+    if (!selectedExam) return;
+    const rows = selectedExam.question_ids
+      .map((qId) => {
+        const q = questionMap[qId];
+        if (!q) return null;
+        const answers = studentAnswersForExam.filter((a: any) => a.question_id === qId);
+        const total = answers.length;
+        const correct = answers.filter((a: any) => a.is_correct).length;
+        return { q, total, correct, rate: total > 0 ? correct / total : 1 };
+      })
+      .filter((x): x is { q: Question; total: number; correct: number; rate: number } => !!x && x.total > 0)
+      .sort((a, b) => a.rate - b.rate)
+      .slice(0, 10)
+      .map((x) => ({
+        ...(x.q as unknown as ExplainQuestion),
+        wrong_count: x.total - x.correct,
+        total_attempts: x.total,
+      }));
+    if (!rows.length) {
+      alert('本卷还没有作答数据，暂时无法讲评');
+      return;
+    }
+    setExplainQueue(rows);
   };
 
   const exportExamRecordsToXlsx = () => {
@@ -1709,6 +1746,16 @@ export const ExamManager: React.FC = () => {
                   </div>
                 ) : (
                   <div className="space-y-4">
+                    <div className="flex items-center justify-between rounded-lg bg-indigo-50 px-4 py-2.5">
+                      <span className="text-sm text-indigo-800">按正确率从低到高排列，可一键让 AI 讲评高频错题</span>
+                      <button
+                        onClick={() => startExamExplain()}
+                        className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-sm text-white hover:bg-indigo-700"
+                      >
+                        <i className="fa-solid fa-volume-high"></i>
+                        AI 讲评高频错题（10 题）
+                      </button>
+                    </div>
                     {selectedExam.question_ids.map((qId, index) => {
                       const question = questionMap[qId];
                       if (!question) return null;
@@ -1744,6 +1791,13 @@ export const ExamManager: React.FC = () => {
                                 </span>
                               </div>
                               <p className="text-gray-800 line-clamp-2">{htmlToPlainText(question.content)}</p>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); startExamExplain(question); }}
+                                className="mt-2 inline-flex items-center gap-1 rounded bg-indigo-50 px-2 py-1 text-xs text-indigo-700 hover:bg-indigo-100"
+                              >
+                                <i className="fa-solid fa-volume-high"></i>
+                                AI 讲解
+                              </button>
                             </div>
                             <div className="text-right ml-4">
                               <div className="text-2xl font-bold text-purple-600">{rate}%</div>
@@ -1804,6 +1858,13 @@ export const ExamManager: React.FC = () => {
                       正确率: <span className="font-bold text-purple-600">{selectedQuestion.stats.rate}%</span>
                       ({selectedQuestion.stats.correct}/{selectedQuestion.stats.total} 人)
                     </span>
+                    <button
+                      onClick={() => startExamExplain(selectedQuestion.question)}
+                      className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-white hover:bg-indigo-700"
+                    >
+                      <i className="fa-solid fa-volume-high"></i>
+                      AI 语音讲解
+                    </button>
                   </div>
                 </div>
               )}
@@ -1820,6 +1881,14 @@ export const ExamManager: React.FC = () => {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {explainQueue && (
+        <AiExplainPlayer
+          questions={explainQueue}
+          title={selectedExam ? `${selectedExam.title} 讲评` : '试卷讲评'}
+          onClose={() => setExplainQueue(null)}
+        />
+      )}
     </div>
   );
 };

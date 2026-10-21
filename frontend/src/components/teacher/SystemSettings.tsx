@@ -90,6 +90,14 @@ export const SystemSettings: React.FC = () => {
 5. 拒绝代写代码、拒绝作业代写、拒绝考试作弊相关请求。
 6. 涉及学考内容，自动补充江苏高频考点和答题技巧。`,
     ai_qa_points_per_question: 5,
+    // 讯飞语音合成（AI 讲解配音）：留空则沿用浏览器本机语音
+    xfyun_app_id: '',
+    xfyun_api_key: '',
+    xfyun_api_secret: '',
+    xfyun_voice: 'xiaoyan',
+    xfyun_speed: 50,
+    xfyun_volume: 50,
+    xfyun_pitch: 50,
     crit_base_rate: 5,
     crit_max_rate: 30,
     honor_perfect_buff_crit: 5,
@@ -627,7 +635,8 @@ export const SystemSettings: React.FC = () => {
 
       for (const [key, value] of Object.entries(configs)) {
         // 跳过关键字段的空值保存（防止覆盖已存在的敏感配置）
-        const isSensitiveField = key === 'ai_api_key' || key === 'ai_api_base_url';
+        const isSensitiveField = key === 'ai_api_key' || key === 'ai_api_base_url'
+          || key === 'xfyun_app_id' || key === 'xfyun_api_key' || key === 'xfyun_api_secret';
         const isEmpty = value === '' || value === null || value === undefined;
         
         if (isEmpty && isSensitiveField && existingMap[key] !== undefined) {
@@ -1097,6 +1106,100 @@ export const SystemSettings: React.FC = () => {
                   <li>• 支持详细的分数 breakdown（语法40%、输出40%、逻辑20%）</li>
                 </ul>
               </div>
+
+              {/* 讯飞语音合成：可选，填了 AI 讲解就用自然音色，不填回落本机语音 */}
+              <div className="mt-6 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+                <h4 className="font-semibold text-amber-800 mb-2 flex items-center gap-2">
+                  <i className="fa-solid fa-volume-high"></i>
+                  讯飞语音合成（AI 讲解配音 · 选填）
+                </h4>
+                <p className="text-sm text-gray-700 mb-2">
+                  填写后，「AI 语音讲解」使用讯飞自然音色；<strong>不填则自动回落浏览器本机语音</strong>（Huihui，较机械但免费离线）。
+                </p>
+                <p className="text-xs text-gray-600 mb-3">
+                  密钥保存在本机数据库，不写进程序也不进代码仓库 —— 换学校/给别人用，各填各的账号即可。
+                </p>
+                <p className="text-xs text-gray-600 mb-3">
+                  获取步骤：xfyun.cn 注册 → 实名认证 → 创建应用 → 开通「语音合成（在线）」→ 复制 APPID / APIKey / APISecret
+                </p>
+
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">APPID</label>
+                    <input
+                      type="text"
+                      placeholder="5xxxxxxxx"
+                      value={configs.xfyun_app_id ?? ''}
+                      onChange={(e) => setConfigs({ ...configs, xfyun_app_id: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-amber-500"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">APIKey</label>
+                      <input
+                        type="password"
+                        placeholder="留空则不启用"
+                        value={configs.xfyun_api_key ?? ''}
+                        onChange={(e) => setConfigs({ ...configs, xfyun_api_key: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-amber-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">APISecret</label>
+                      <input
+                        type="password"
+                        placeholder="留空则不启用"
+                        value={configs.xfyun_api_secret ?? ''}
+                        onChange={(e) => setConfigs({ ...configs, xfyun_api_secret: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-amber-500"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="col-span-1">
+                      <label className="block text-sm font-medium text-gray-700 mb-1">默认发音人</label>
+                      <select
+                        value={configs.xfyun_voice || 'xiaoyan'}
+                        onChange={(e) => setConfigs({ ...configs, xfyun_voice: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-amber-500"
+                      >
+                        <option value="xiaoyan">小燕 · 女声（标准）</option>
+                        <option value="aisjiuxu">许久 · 男声（标准）</option>
+                        <option value="aisxping">小萍 · 女声（标准）</option>
+                        <option value="aisjinger">小婧 · 女声（标准）</option>
+                        <option value="aisbabyxu">许小宝 · 童声（需开通）</option>
+                        <option value="x4_lingxiaoxuan">聆小璇 · 超拟人（需开通）</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">语速（0-100）</label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        value={configs.xfyun_speed ?? 50}
+                        onChange={(e) => setConfigs({ ...configs, xfyun_speed: Number(e.target.value) })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-amber-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">音量（0-100）</label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        value={configs.xfyun_volume ?? 50}
+                        onChange={(e) => setConfigs({ ...configs, xfyun_volume: Number(e.target.value) })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-amber-500"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-xs text-amber-700">
+                    保存后进入「AI 语音讲解」，右上角会出现音色下拉框，可临时切换发音人；讲评中如遇额度/网络问题会自动回落本机语音。
+                  </p>
+                </div>
+              </div>
             </div>
 
             <div className="flex gap-3 mt-8 pt-6 border-t border-gray-200">
@@ -1128,7 +1231,7 @@ export const SystemSettings: React.FC = () => {
                       alert(`❌ AI配置测试失败: ${response.status} - ${error}`);
                     }
                   } catch (error) {
-                    alert(`❌ AI配置测试失败: ${error.message}`);
+                    alert(`❌ AI配置测试失败: ${(error as Error).message}`);
                   }
                 }}
                 className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors"

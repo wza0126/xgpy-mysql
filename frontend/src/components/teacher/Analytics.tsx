@@ -9,6 +9,8 @@ import { sanitizeHtml } from '../../utils/htmlUtils';
 import { studentLabel } from '../../utils/studentLabel';
 import { DetailSortKey, sortStudentRows, masteryRate, sortMasteryRows } from '../../utils/tableSort';
 import { LicenseGuard } from '../common/LicenseGuard';
+import { authHeaders } from '../../utils/authToken';
+import { AiExplainPlayer, ExplainQuestion } from './AiExplainPlayer';
 
 interface StudentWithStats extends Profile {
   class?: Class;
@@ -688,7 +690,11 @@ const WrongQuestionsSection: React.FC<{ classId: string }> = ({ classId }) => {
   const [tagInput, setTagInput] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
   const [detail, setDetail] = useState<{ question: any; knowledgePoint: string | null } | null>(null);
-  const pageSize = 20;
+  const [pageSize] = useState(20);
+  // AI 语音讲解：菜单开关 + 待讲队列（null 表示播放器未打开）
+  const [explainMenu, setExplainMenu] = useState(false);
+  const [explainQueue, setExplainQueue] = useState<ExplainQuestion[] | null>(null);
+  const [explainLoading, setExplainLoading] = useState(false);
 
   const fetchPage = async (targetPage = page) => {
     if (!classId) return;
@@ -780,6 +786,60 @@ const WrongQuestionsSection: React.FC<{ classId: string }> = ({ classId }) => {
     }
   };
 
+  /**
+   * 打开 AI 语音讲解。
+   * mode: wrong = 错得最多的 20 题；rate = 错误率最高的 20 题；selected = 当前勾选的题。
+   */
+  const startExplain = async (mode: 'wrong' | 'rate' | 'selected') => {
+    setExplainMenu(false);
+    setExplainLoading(true);
+    try {
+      let ids: string[] = [];
+      if (mode === 'selected') {
+        ids = Array.from(selected);
+        if (!ids.length) {
+          alert('请先在列表中勾选要讲的题');
+          return;
+        }
+      } else {
+        // ⛔ 只在「未讲解」里挑：讲过就打标记，下次自动换一批，不会永远重复那 20 题
+        const data = await analyticsFetch<WrongQuestionsPage>(
+          `/api/teacher/analytics/wrong-questions/${classId}?page=1&pageSize=100&filter=unexplained`
+        );
+        const scored = (data.items || []).map((it) => ({
+          id: it.question_id,
+          wrong: Number(it.wrong_count) || 0,
+          rate: it.total_attempts ? (Number(it.wrong_count) || 0) / it.total_attempts : 0,
+        }));
+        scored.sort(
+          mode === 'wrong'
+            ? (a, b) => b.wrong - a.wrong || b.rate - a.rate
+            : (a, b) => b.rate - a.rate || b.wrong - a.wrong
+        );
+        ids = scored.slice(0, 20).map((x) => x.id);
+        if (!ids.length) {
+          alert('该班的错题都已讲解过了，没有新的可讲。\n可以在「已讲解」里取消标记，或直接勾选题讲。');
+          return;
+        }
+      }
+
+      // 错题排行只给摘要，这里取完整题干/选项/答案用于讲解器展示
+      const res = await fetch(`${API_CONFIG.apiUrl}/api/teacher/explain/questions`, {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ question_ids: ids }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.data?.questions?.length) throw new Error(json?.error || '取题失败');
+      setExplainQueue(json.data.questions as ExplainQuestion[]);
+    } catch (e) {
+      console.error('准备 AI 讲解失败:', e);
+      alert((e as Error).message || '准备讲解失败，请重试');
+    } finally {
+      setExplainLoading(false);
+    }
+  };
+
   const typeLabel = (t: string | null) => {
     switch (t) {
       case 'choice': return '选择题';
@@ -803,7 +863,38 @@ const WrongQuestionsSection: React.FC<{ classId: string }> = ({ classId }) => {
           <h3 className={sectionTitleCls}>错题排行</h3>
           <p className={sectionSubCls}>全班错误次数最多的题目（最多统计前 100 题），双击行可查看完整题目</p>
         </div>
-        <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="relative">
+            <button
+              onClick={() => setExplainMenu((v) => !v)}
+              disabled={explainLoading}
+              className="px-3 py-1.5 rounded-lg bg-indigo-600 text-white text-sm hover:bg-indigo-700 disabled:opacity-60 flex items-center gap-1.5"
+            >
+              <i className={`fa-solid ${explainLoading ? 'fa-circle-notch fa-spin' : 'fa-volume-high'}`}></i>
+              {explainLoading ? '准备中…' : 'AI 语音讲解'}
+            </button>
+            {explainMenu && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setExplainMenu(false)}></div>
+                <div className="absolute right-0 z-20 mt-1 w-56 rounded-lg border border-gray-200 bg-white p-1 shadow-lg">
+                  <button onClick={() => startExplain('wrong')} className="block w-full rounded px-3 py-2 text-left text-sm hover:bg-gray-50">
+                    讲未讲解 · 错次前 20
+                  </button>
+                  <button onClick={() => startExplain('rate')} className="block w-full rounded px-3 py-2 text-left text-sm hover:bg-gray-50">
+                    讲未讲解 · 错误率前 20
+                  </button>
+                  <button
+                    onClick={() => startExplain('selected')}
+                    disabled={selected.size === 0}
+                    className="block w-full rounded px-3 py-2 text-left text-sm hover:bg-gray-50 disabled:opacity-40"
+                  >
+                    讲勾选的 {selected.size} 题
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+          <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
           {filterTabs.map(t => (
             <button
               key={t.key}
@@ -813,8 +904,21 @@ const WrongQuestionsSection: React.FC<{ classId: string }> = ({ classId }) => {
               {t.label}
             </button>
           ))}
+          </div>
         </div>
       </div>
+
+      {explainQueue && (
+        <AiExplainPlayer
+          questions={explainQueue}
+          title="错题讲评"
+          classId={classId}
+          onClose={() => {
+            setExplainQueue(null);
+            refresh();
+          }}
+        />
+      )}
 
       {selected.size > 0 && (
         <div className="mb-4 flex items-center gap-2 flex-wrap bg-blue-50 border border-blue-200 rounded-lg px-4 py-2.5">

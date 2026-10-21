@@ -30,6 +30,7 @@
     "mysql2": "^3.6.5",
     "socket.io": "^4.8.3",
     "uuid": "^14.0.0",
+    "ws": "^8.21.3",
     "yauzl": "^3.4.0"
   },
   "devDependencies": {

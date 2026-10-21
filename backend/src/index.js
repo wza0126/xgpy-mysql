@@ -8182,6 +8182,341 @@ async function callAiApi(config, messages) {
   return data.choices?.[0]?.message?.content || '';
 }
 
+// ===== AI 语音讲解（教师端讲评用：错题排行 / 试卷按题目查看）=====
+// 生成一段「分镜讲解脚本」：每个场景有旁白（朗读）+ 可视元素（选项辨析/柱状图/要点卡）。
+// 以题库自带解析为底稿，模型只做口语化改写与拆镜，降低编造风险。脚本按题缓存在
+// question_explain_scripts，同一道题第二次讲直接读缓存（零成本、零延迟）。
+
+const EXPLAIN_PROMPT_VERSION = 'v1';
+
+const EXPLAIN_SYSTEM_PROMPT = `你是江苏省高中信息技术老师，正在给学生讲评一道做错的题。你的讲解会被机器念出来并投屏，请遵守：
+1. 只讲这道题涉及的知识，严格依据给定的【正确答案】和【题库解析】，不要编造解析里没有的结论。
+2. 语言口语化、短句，每句不超过 35 个字，适合直接朗读；不要用括号、星号、markdown、序号符号。
+3. 不要说"同学们"之类的称呼，直接讲内容。
+4. 只输出 JSON 对象，不要任何解释文字、不要代码块标记。
+
+JSON 结构：
+{
+  "topic": "该题知识点（给了就原样用，没给留空字符串）",
+  "scenes": [
+    { "kind": "point",   "title": "考点定位", "narration": "一句话点出这题考什么", "bullets": ["要点1", "要点2"] },
+    { "kind": "compare", "title": "逐项辨析", "narration": "讲清为什么错、为什么对", "options": [{ "key": "A", "text": "选项原文（可截断到20字）", "verdict": "correct", "reason": "一句话理由" }] },
+    { "kind": "chart",   "title": "数据对比", "narration": "解释这张图", "chart": { "unit": "次", "items": [{ "label": "标签", "value": 3 }] } },
+    { "kind": "memory",  "title": "记住这一点", "narration": "给出记忆钩子", "bullets": ["记法"] }
+  ]
+}
+
+要求：
+- 3 到 5 个场景；选择题必须有 1 个 compare 场景（正确项 verdict 为 correct，其余为 wrong）。
+- chart 场景可选，只在题里有单位换算、数量对比这类内容时使用，items 最多 5 项。
+- 每个 scene 的 narration 是这句场景要念的话，30 到 120 字，可以两句，用句号断开。
+- bullets 每项不超过 18 字，最多 4 项。`;
+
+/** 从模型输出里抠出 JSON（容忍 ```json 包裹或前后废话） */
+function extractJsonObject(text) {
+  const raw = String(text || '');
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const body = fenced ? fenced[1] : raw;
+  const start = body.indexOf('{');
+  const end = body.lastIndexOf('}');
+  if (start < 0 || end <= start) throw new Error('模型未返回 JSON');
+  return JSON.parse(body.slice(start, end + 1));
+}
+
+const clip = (s, n) => String(s == null ? '' : s).replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim().slice(0, n);
+
+/** 规范化脚本：限制场景数、字段长度，丢掉不合法的场景 */
+function normalizeExplainScript(obj) {
+  const scenes = Array.isArray(obj && obj.scenes) ? obj.scenes : [];
+  const out = [];
+  for (const s of scenes) {
+    if (!s || typeof s !== 'object') continue;
+    const kind = ['point', 'compare', 'chart', 'memory'].includes(s.kind) ? s.kind : 'point';
+    const narration = clip(s.narration, 300);
+    if (!narration) continue;
+    const scene = { kind, title: clip(s.title, 16) || '讲解', narration };
+    if (kind === 'compare') {
+      const options = (Array.isArray(s.options) ? s.options : []).slice(0, 8).map((o) => ({
+        key: clip(o && o.key, 4).toUpperCase(),
+        text: clip(o && o.text, 60),
+        verdict: o && o.verdict === 'correct' ? 'correct' : 'wrong',
+        reason: clip(o && o.reason, 60),
+      }));
+      if (!options.length) continue;
+      scene.options = options;
+    } else if (kind === 'chart') {
+      const items = (Array.isArray(s.chart && s.chart.items) ? s.chart.items : [])
+        .slice(0, 5)
+        .map((it) => ({ label: clip(it && it.label, 8), value: Number(it && it.value) || 0 }))
+        .filter((it) => it.label);
+      if (!items.length) continue;
+      scene.chart = { unit: clip(s.chart && s.chart.unit, 6), items };
+    } else {
+      scene.bullets = (Array.isArray(s.bullets) ? s.bullets : []).slice(0, 4).map((b) => clip(b, 40)).filter(Boolean);
+    }
+    out.push(scene);
+    if (out.length >= 5) break;
+  }
+  if (!out.length) throw new Error('脚本场景为空');
+  return { topic: clip(obj && obj.topic, 40), scenes: out };
+}
+
+// 教师端：批量取讲解用的完整题目（错题排行只返回 120 字摘要，讲解器需要选项/答案/解析）
+app.post('/api/teacher/explain/questions', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body && req.body.question_ids)
+      ? req.body.question_ids.filter((x) => typeof x === 'string' && x.trim()).slice(0, 50)
+      : [];
+    if (!ids.length) return res.status(400).json({ data: null, error: 'question_ids 不能为空' });
+    const [rows] = await pool.query(
+      'SELECT id, type, content, options, answers, explanation, cluster_id FROM questions WHERE id IN (?)',
+      [ids]
+    );
+    const map = new Map(rows.map((r) => [r.id, r]));
+    const questions = ids.map((id) => map.get(id)).filter(Boolean);
+    res.json({ data: { questions }, error: null });
+  } catch (error) {
+    console.error('获取讲解题目失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// ===== 教师端：讯飞语音合成（AI 讲解配音）=====
+// 密钥由使用者在「系统配置 → AI设置」里自行填写（存 system_config），不内置、不进仓库，
+// 这样同一份 exe 给别人用也不会带出你的账号额度。没配置时前端自动回落浏览器本机语音。
+
+const XFYUN_VOICES = [
+  { id: 'xiaoyan', name: '小燕 · 女声（标准）', note: '' },
+  { id: 'aisjiuxu', name: '许久 · 男声（标准）', note: '' },
+  { id: 'aisxping', name: '小萍 · 女声（标准）', note: '' },
+  { id: 'aisjinger', name: '小婧 · 女声（标准）', note: '' },
+  { id: 'aisbabyxu', name: '许小宝 · 童声', note: '需在讯飞控制台开通' },
+  { id: 'x4_lingxiaoxuan', name: '聆小璇 · 超拟人女声', note: '需单独开通，额度另算' },
+];
+
+/** 读讯飞配置（system_config 的 value 是 {value: xxx} JSON） */
+async function getXfyunConfig(db) {
+  const keys = ['xfyun_app_id', 'xfyun_api_key', 'xfyun_api_secret', 'xfyun_voice', 'xfyun_speed', 'xfyun_volume', 'xfyun_pitch'];
+  const [rows] = await db.query('SELECT config_key, value FROM system_config WHERE config_key IN (?)', [keys]);
+  const map = {};
+  for (const r of rows) {
+    let v = r.value;
+    if (typeof v === 'string') {
+      try {
+        const parsed = JSON.parse(v);
+        v = parsed && typeof parsed === 'object' && 'value' in parsed ? parsed.value : parsed;
+      } catch { /* 保持原字符串 */ }
+    }
+    map[r.config_key] = v;
+  }
+  const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+  return {
+    appId: String(map.xfyun_app_id || '').trim(),
+    apiKey: String(map.xfyun_api_key || '').trim(),
+    apiSecret: String(map.xfyun_api_secret || '').trim(),
+    voice: String(map.xfyun_voice || 'xiaoyan').trim(),
+    speed: num(map.xfyun_speed, 50),
+    volume: num(map.xfyun_volume, 50),
+    pitch: num(map.xfyun_pitch, 50),
+  };
+}
+
+// 合成结果缓存：同一句话（音色/语速相同）不重复消耗额度
+const xfyunAudioCache = new Map();
+const XFYUN_CACHE_MAX = 300;
+
+/** 调讯飞在线语音合成 v2（WebSocket），返回 mp3 Buffer */
+function xfyunSynthesize(cfg, text, override = {}) {
+  const WebSocket = require('ws');
+  const host = 'tts-api.xfyun.cn';
+  const date = new Date().toUTCString();
+  const signatureOrigin = `host: ${host}\ndate: ${date}\nGET /v2/tts HTTP/1.1`;
+  const signature = crypto.createHmac('sha256', cfg.apiSecret).update(signatureOrigin).digest('base64');
+  const authorizationOrigin =
+    `api_key="${cfg.apiKey}", algorithm="hmac-sha256", headers="host date request-line", signature="${signature}"`;
+  const authorization = Buffer.from(authorizationOrigin).toString('base64');
+  const url = `wss://${host}/v2/tts?authorization=${encodeURIComponent(authorization)}&date=${encodeURIComponent(date)}&host=${host}`;
+
+  const vcn = String(override.voice || cfg.voice || 'xiaoyan');
+  const speed = Number(override.speed ?? cfg.speed ?? 50);
+  const volume = Number(override.volume ?? cfg.volume ?? 50);
+  const pitch = Number(override.pitch ?? cfg.pitch ?? 50);
+
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let settled = false;
+    const finish = (err, buf) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { ws.close(); } catch { /* ignore */ }
+      if (err) reject(err); else resolve(buf);
+    };
+
+    const ws = new WebSocket(url);
+    const timer = setTimeout(() => finish(new Error('讯飞语音合成超时')), 20000);
+
+    ws.on('open', () => {
+      ws.send(JSON.stringify({
+        common: { app_id: cfg.appId },
+        business: { aue: 'lame', sfl: 1, vcn, speed, volume, pitch, tte: 'UTF8' },
+        data: { status: 2, text: Buffer.from(text, 'utf8').toString('base64') },
+      }));
+    });
+
+    ws.on('message', (raw) => {
+      let msg;
+      try { msg = JSON.parse(raw.toString()); } catch { return; }
+      if (msg.code !== 0) {
+        finish(new Error(`讯飞返回错误 ${msg.code}：${msg.message || ''}`));
+        return;
+      }
+      if (msg.data && msg.data.audio) chunks.push(Buffer.from(msg.data.audio, 'base64'));
+      if (msg.data && msg.data.status === 2) finish(null, Buffer.concat(chunks));
+    });
+
+    ws.on('error', (e) => finish(new Error(`讯飞连接失败：${e.message}`)));
+    ws.on('close', () => { if (!settled) finish(new Error('讯飞连接提前关闭')); });
+  });
+}
+
+// 教师端：语音配置（不含密钥，供讲解器决定用云端还是本机）
+app.get('/api/teacher/explain/tts/config', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const cfg = await getXfyunConfig(pool);
+    const configured = !!(cfg.appId && cfg.apiKey && cfg.apiSecret);
+    res.json({
+      data: { configured, voices: XFYUN_VOICES, voice: cfg.voice, speed: cfg.speed, volume: cfg.volume, pitch: cfg.pitch },
+      error: null,
+    });
+  } catch (error) {
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 教师端：把一句讲解词合成为 mp3（前端按句请求 + 预取下一句）
+app.post('/api/teacher/explain/tts', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const text = String((req.body && req.body.text) || '').trim();
+    if (!text) return res.status(400).json({ data: null, error: 'text 不能为空' });
+    if (text.length > 300) return res.status(400).json({ data: null, error: '单句过长（≤300 字）' });
+
+    const cfg = await getXfyunConfig(pool);
+    if (!(cfg.appId && cfg.apiKey && cfg.apiSecret)) {
+      return res.status(409).json({ data: null, error: '未配置讯飞语音（系统配置 → AI设置）' });
+    }
+
+    const voice = String((req.body && req.body.voice) || cfg.voice || 'xiaoyan');
+    const speed = Number((req.body && req.body.speed) ?? cfg.speed);
+    const cacheKey = `${voice}|${speed}|${text}`;
+    const cached = xfyunAudioCache.get(cacheKey);
+    if (cached) {
+      res.set('Content-Type', 'audio/mpeg').set('X-TTS-Cache', 'hit');
+      return res.send(cached);
+    }
+
+    const audio = await xfyunSynthesize(cfg, text, { voice, speed });
+    if (!audio || !audio.length) throw new Error('讯飞未返回音频');
+    if (xfyunAudioCache.size >= XFYUN_CACHE_MAX) {
+      xfyunAudioCache.delete(xfyunAudioCache.keys().next().value);
+    }
+    xfyunAudioCache.set(cacheKey, audio);
+    res.set('Content-Type', 'audio/mpeg').set('X-TTS-Cache', 'miss').send(audio);
+  } catch (error) {
+    console.error('讯飞语音合成失败:', error);
+    res.status(500).json({ data: null, error: error.message || '语音合成失败' });
+  }
+});
+
+// 教师端：取某题的讲解脚本（有缓存直接返回；没有则调模型生成并缓存；force=1 强制重生）
+app.post('/api/teacher/explain/script', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const licenseResult = await licenseManager.checkFeatureLicense(FEATURES.AI);
+    if (!licenseResult.allowed) {
+      return res.status(403).json({ data: null, error: 'AI 功能需要授权激活后才能使用', licenseStatus: licenseResult.status });
+    }
+
+    const questionId = String((req.body && req.body.question_id) || '').trim();
+    const force = !!(req.body && req.body.force);
+    if (!questionId) return res.status(400).json({ data: null, error: '缺少题目ID' });
+
+    if (!force) {
+      const [cached] = await pool.query(
+        'SELECT script, model, prompt_version FROM question_explain_scripts WHERE question_id = ? LIMIT 1',
+        [questionId]
+      );
+      if (cached.length && cached[0].prompt_version === EXPLAIN_PROMPT_VERSION) {
+        try {
+          return res.json({
+            data: { script: JSON.parse(cached[0].script), cached: true, model: cached[0].model },
+            error: null,
+          });
+        } catch {
+          // 缓存损坏则重新生成
+        }
+      }
+    }
+
+    const [rows] = await pool.query(
+      'SELECT id, type, content, options, answers, explanation, cluster_id FROM questions WHERE id = ? LIMIT 1',
+      [questionId]
+    );
+    if (!rows.length) return res.status(404).json({ data: null, error: '题目不存在' });
+    const q = rows[0];
+
+    const typeLabel = { choice: '单选题', fill: '填空题', composite: '复合题', judge: '判断题' }[q.type] || q.type;
+    let optionsText = '';
+    try {
+      const opts = typeof q.options === 'string' ? JSON.parse(q.options || '[]') : (q.options || []);
+      if (Array.isArray(opts) && opts.length) {
+        optionsText = opts.map((o, i) => `${String.fromCharCode(65 + i)}. ${clip(o, 80)}`).join('\n');
+      }
+    } catch { /* 选项解析失败就只讲题干与解析 */ }
+
+    const userPrompt = [
+      `【题型】${typeLabel}`,
+      `【知识点】${q.cluster_id || '（未标注）'}`,
+      `【题干】${clip(q.content, 500)}`,
+      optionsText ? `【选项】\n${optionsText}` : '',
+      `【正确答案】${clip(q.answers, 120)}`,
+      `【题库解析】${clip(q.explanation, 600) || '（这道题没有现成解析，请依据学科知识谨慎讲解，不要编造具体数据）'}`,
+      '',
+      '请按系统要求输出 JSON。',
+    ].filter(Boolean).join('\n');
+
+    const config = await getAiQaConfig(pool);
+    const raw = await callAiApi(config, [
+      { role: 'system', content: EXPLAIN_SYSTEM_PROMPT },
+      { role: 'user', content: userPrompt },
+    ]);
+
+    const script = normalizeExplainScript(extractJsonObject(raw));
+
+    await pool.query(
+      `INSERT INTO question_explain_scripts (question_id, script, model, prompt_version)
+       VALUES (?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE script = VALUES(script), model = VALUES(model),
+                               prompt_version = VALUES(prompt_version), updated_at = NOW(3)`,
+      [questionId, JSON.stringify(script), config.ai_model || null, EXPLAIN_PROMPT_VERSION]
+    );
+
+    res.json({ data: { script, cached: false, model: config.ai_model || null }, error: null });
+  } catch (error) {
+    console.error('生成讲解脚本失败:', error);
+    res.status(500).json({ data: null, error: error.message || '生成讲解失败' });
+  }
+});
+
+// 教师端：清空某题缓存（改了解析想重新讲时用）
+app.delete('/api/teacher/explain/script/:questionId', authenticate, requireTeacher, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM question_explain_scripts WHERE question_id = ?', [req.params.questionId]);
+    res.json({ data: { deleted: true }, error: null });
+  } catch (error) {
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
 app.post('/api/ai-qa/ask', authenticate, async (req, res) => {
   try {
     const licenseResult = await licenseManager.checkFeatureLicense(FEATURES.AI);
