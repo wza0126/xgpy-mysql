@@ -442,7 +442,7 @@ export const TaskManager: React.FC = () => {
       {/* 顶部标题与新建按钮 */}
       <div className="flex justify-between items-center">
         <h3 className="text-lg font-bold text-gray-800">
-          <i className="fa-solid fa-chalkboard-user mr-2 text-blue-500"></i>备课工作台
+          <i className="fa-solid fa-clipboard-list mr-2 text-blue-500"></i>课堂任务
         </h3>
         <button
           onClick={handleCreate}

@@ -257,7 +257,10 @@ export const AiExplainPlayer: React.FC<Props> = ({
       try {
         const res = await fetch(`${apiBase}/styles`, { headers: authHeaders() });
         const json = await res.json().catch(() => null);
-        const list = (json?.data?.styles || []).filter((s: any) => Number(s.enabled) !== 0);
+        // ⛔ 排除「课堂讲授」（lecture）：它是 AI 讲堂的微课程专用风格，
+        //    口吻是「我们来看一个新东西」这种上课话术，用在单题讲解里很怪。
+        const list = (json?.data?.styles || [])
+          .filter((s: any) => Number(s.enabled) !== 0 && s.style_key !== 'lecture');
         setStyleList(list.map((s: any) => ({
           style_key: s.style_key,
           name: s.name,

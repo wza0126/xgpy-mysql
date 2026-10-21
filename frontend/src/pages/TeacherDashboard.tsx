@@ -21,7 +21,7 @@ import { MessageManager } from '../components/teacher/MessageManager';
 import { PythonManager } from '../components/teacher/PythonManager';
 import { MentalHealthManager } from '../components/teacher/MentalHealthManager';
 import { KnowledgeBaseManager } from '../components/teacher/KnowledgeBaseManager';
-import { TaskManager } from '../components/teacher/TaskManager';
+import { LessonWorkbench } from '../components/teacher/LessonWorkbench';
 import { RollCallApp } from '../components/teacher/RollCallApp';
 import { ProxyManager } from '../components/teacher/ProxyManager';
 import { CreativeWorkshopManager } from '../components/teacher/CreativeWorkshopManager';
@@ -70,7 +70,8 @@ const menuItems = [
 const components: Record<string, React.ReactNode> = {
   notifications: <NotificationManager />,
   messageManager: <MessageManager />,
-  taskManager: <TaskManager />,
+  // 备课工作台 = 课堂任务 + AI 讲堂 两个页签（外壳见 LessonWorkbench）
+  taskManager: <LessonWorkbench />,
   rollCall: <RollCallApp />,
   proxyNet: <ProxyManager />,
   creativeWorkshop: <CreativeWorkshopManager />,

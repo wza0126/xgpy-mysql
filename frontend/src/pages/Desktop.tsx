@@ -17,6 +17,7 @@ import { TestModule } from '../components/student/TestModule';
 import { WpsOpApp } from '../components/student/WpsOpApp';
 import { WrongQuestions } from '../components/student/WrongQuestions';
 import { AiExplainApp } from '../components/student/AiExplainApp';
+import { AiLectureApp } from '../components/student/AiLectureApp';
 import { Notebook } from '../components/student/Notebook';
 import { PetModule } from '../components/student/PetModule';
 import { ExchangeModule } from '../components/student/ExchangeModule';
@@ -72,6 +73,7 @@ const moduleComponents: Record<string, React.ReactNode> = {
   wpsOp: <WpsOpApp />,
   wrong: <WrongQuestions />,
   aiExplain: <AiExplainApp />,
+  aiLecture: <AiLectureApp />,
   notebook: <Notebook />,
   python: <PythonProgramming />,
   apps: <AppCenter />,
@@ -1035,6 +1037,28 @@ export const Desktop: React.FC = () => {
           )}
           <TaskBadge />
         </button>
+        {/* AI 讲堂：与桌面「AI讲解」图标同一个开关（hidden_features 的 ai_explain），只对学生开放。
+            ⛔ 放任务中心右边、点名前面，是因为它和任务中心一样属于「上课时点一下就能用」的入口，
+               而「AI讲解」是要学生自己找错题的，留在桌面上更合适。 */}
+        {!isExplainHidden && effectiveProfile?.role === 'student' && (
+          <button
+            onClick={() => {
+              openWindow({
+                id: 'aiLecture',
+                title: 'AI 讲堂',
+                icon: 'fa-chalkboard-user',
+                isMinimized: false,
+                isMaximized: false,
+                component: moduleComponents['aiLecture'],
+              });
+            }}
+            className="bg-gray-800/80 hover:bg-gray-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors"
+            title="AI 讲堂：老师做好的语音微课程"
+          >
+            <i className="fa-solid fa-chalkboard-user"></i>
+            AI 讲堂
+          </button>
+        )}
         {effectiveProfile?.role === 'teacher' && (
           <button
             onClick={() => {

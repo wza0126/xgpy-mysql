@@ -8150,7 +8150,7 @@ async function getAiQaConfig(pool) {
   }
 }
 
-async function callAiApi(config, messages) {
+async function callAiApi(config, messages, opts = {}) {
   if (!config.ai_api_base_url || !config.ai_api_key) {
     throw new Error('AI API未配置，请联系管理员');
   }
@@ -8184,6 +8184,9 @@ async function callAiApi(config, messages) {
       model: config.ai_model,
       temperature: config.ai_temperature,
       stream: false,
+      // ⛔ 微课程一次要出 7~8 页 JSON（约 2000 字），默认上限必被截断成半截 JSON。
+      //    只在调用方显式传入时才带，避免改动其他已有调用点的行为。
+      ...(opts.max_tokens ? { max_tokens: opts.max_tokens } : {}),
     }),
   });
 
@@ -8804,7 +8807,10 @@ app.get('/api/student/explain/access', authenticate, requireStudent, async (req,
       return res.json({ data: { enabled: false, aiReady: false, styles: [] }, error: null });
     }
     const licenseResult = await licenseManager.checkFeatureLicense(FEATURES.AI);
-    const styles = (await listStyles(pool, false)).map((s) => ({
+    // ⛔ 排除「课堂讲授」（lecture）：微课程专用风格，口吻是上课话术，不适合单题讲解
+    const styles = (await listStyles(pool, false))
+      .filter((s) => s.style_key !== 'lecture')
+      .map((s) => ({
       style_key: s.style_key,
       name: s.name,
       summary: s.summary,
@@ -8890,6 +8896,517 @@ app.post('/api/student/explain/script', authenticate, requireStudent, async (req
     }
     console.error('生成学生讲解脚本失败:', error);
     res.status(500).json({ data: null, error: error.message || '生成讲解失败' });
+  }
+});
+
+// ===== AI 讲堂 · 微课程（迁移 108）=====
+// 与错题讲解的根本区别：
+//   讲解 = 「一道题 × 一种风格」的即时口播稿，用完即弃，可以按 hash 缓存；
+//   微课程 = 老师长期维护的**课件资产**，要能改字、调序、存草稿、发布给学生自学。
+// 所以这里**不复用** explain_scripts 那套「生成即定稿」的缓存：pages 直接存在
+// lectures.pages 里，老师改一个字就存一个字，谁改谁负责。
+const {
+  buildLectureSystemPrompt,
+  buildLecturePagePrompt,
+  normalizeLecturePages,
+  normalizeLecturePage,
+  clampPageTarget,
+  estimateDuration,
+  PAGE_KINDS,
+} = require('./lecture-prompt');
+
+function lectureNewId() {
+  return `lec_${Date.now().toString(36)}_${crypto.randomBytes(4).toString('hex')}`;
+}
+
+/** 字段可能是 JSON 字符串（老驱动/导入数据），统一吃成数组 */
+function parseJsonArrayField(v) {
+  if (Array.isArray(v)) return v;
+  if (typeof v === 'string' && v.trim()) {
+    try { const p = JSON.parse(v); return Array.isArray(p) ? p : []; } catch { return []; }
+  }
+  return [];
+}
+
+/** class_ids 归一化：去空、去重、限长。⛔ [] 表示不限班级（全班可见），不是「谁都看不到」 */
+function normalizeLectureClassIds(v) {
+  const arr = Array.isArray(v) ? v : parseJsonArrayField(v);
+  return Array.from(new Set(arr.map((x) => String(x == null ? '' : x).trim()).filter(Boolean))).slice(0, 100);
+}
+
+/** 首屏摘要：列表卡片只读这一列，避免为了封面把整篇 pages 拉下来 */
+function coverOfPages(pages) {
+  const first = (pages || [])[0];
+  if (!first) return null;
+  return { kind: first.kind || 'lead', title: clip(first.title, 20), kicker: clip(first.kicker, 24) };
+}
+
+function lectureRowOut(row, opts = {}) {
+  if (!row) return null;
+  const withPages = opts.withPages !== false;
+  const pages = withPages ? parseJsonArrayField(row.pages) : null;
+  let cover = null;
+  try { cover = row.cover ? (typeof row.cover === 'string' ? JSON.parse(row.cover) : row.cover) : null; } catch { cover = null; }
+  return {
+    id: row.id,
+    title: row.title,
+    subject: row.subject,
+    chapter: row.chapter,
+    outline: row.outline || '',
+    requirement: row.requirement || '',
+    style_key: row.style_key,
+    ...(withPages ? { pages } : {}),
+    cover: cover || (pages && pages.length ? coverOfPages(pages) : null),
+    page_count: Number(row.page_count) || (pages ? pages.length : 0),
+    duration_sec: Number(row.duration_sec) || 0,
+    status: row.status,
+    class_ids: parseJsonArrayField(row.class_ids),
+    sort_order: Number(row.sort_order) || 0,
+    play_count: Number(row.play_count) || 0,
+    published_at: row.published_at,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+/**
+ * 整篇生成（一次请求出全部页）。
+ * ⛔ 不能逐页请求：每页单独生成会反复重讲同一句开场、页与页之间接不上。
+ * ⛔ 截断是常态：7~8 页 JSON 约 2000 字，max_tokens 给小了必然半个 JSON（实测 1200 时 3 挂 2）。
+ *    这里给 3500 并自动重试一次，仍失败才抛错 —— 不重试会让老师频繁撞「生成失败」。
+ */
+async function generateLecturePages({ title, subject, chapter, outline, requirement, style, pageTarget }) {
+  const cfg = await getAiQaConfig(pool);
+  const systemPrompt = buildLectureSystemPrompt(style, { pageTarget });
+  const userPrompt = [
+    `【教材模块】${subject || '必修1'}`,
+    chapter ? `【章节】${chapter}` : '',
+    `【课程标题】${title || '（未命名）'}`,
+    `【知识点大纲】\n${String(outline || '').slice(0, 2000)}`,
+    `【老师的要求】\n${String(requirement || '').trim() || '（无特别要求）'}`,
+    '',
+    '请按系统要求只输出一个 JSON 对象。',
+  ].filter(Boolean).join('\n');
+
+  const baseTemp = Number(cfg.ai_temperature ?? 0.7);
+  const attempts = [
+    { max_tokens: 3500, temperature: baseTemp },
+    { max_tokens: 4200, temperature: Math.min(baseTemp + 0.15, 1) },
+  ];
+  let lastErr = null;
+  for (let i = 0; i < attempts.length; i += 1) {
+    const att = attempts[i];
+    try {
+      const raw = await callAiApi(
+        { ...cfg, ai_temperature: att.temperature },
+        [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
+        { max_tokens: att.max_tokens },
+      );
+      if (!String(raw || '').trim()) throw new Error('模型返回空内容');
+      const parsed = normalizeLecturePages(extractJsonObject(raw), { outline, pageTarget });
+      return { ...parsed, model: cfg.ai_model || null };
+    } catch (e) {
+      lastErr = e;
+      console.error(`生成微课程失败（第 ${i + 1}/${attempts.length} 次）:`, e.message);
+    }
+  }
+  throw lastErr || new Error('生成微课程失败');
+}
+
+/** 保存整篇页面时统一刷新冗余列（页数/时长/封面），避免各处算法不一致 */
+async function saveLecturePages(id, pages) {
+  const safePages = Array.isArray(pages) ? pages : [];
+  await pool.query(
+    `UPDATE lectures
+        SET pages = ?, cover = ?, page_count = ?, duration_sec = ?, updated_at = NOW(3)
+      WHERE id = ?`,
+    [
+      JSON.stringify(safePages),
+      coverOfPages(safePages) ? JSON.stringify(coverOfPages(safePages)) : null,
+      safePages.length,
+      estimateDuration(safePages),
+      id,
+    ],
+  );
+}
+
+/** 取一条微课程并做归属校验（老师之间不互相改对方的课；管理员不受限） */
+async function loadLectureForTeacher(id, req) {
+  const [rows] = await pool.query('SELECT * FROM lectures WHERE id = ? LIMIT 1', [id]);
+  if (!rows.length) { const e = new Error('微课程不存在'); e.status = 404; throw e; }
+  return rows[0];
+}
+
+// ---------- 教师端 ----------
+app.get('/api/teacher/lectures', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const status = ['draft', 'published'].includes(String(req.query.status || '')) ? String(req.query.status) : '';
+    // ⛔ 列表不查 pages（一篇好几 KB）：封面走 cover 冗余列
+    const [rows] = await pool.query(
+      `SELECT id, title, subject, chapter, style_key, cover, page_count, duration_sec,
+              status, class_ids, sort_order, play_count, published_at, created_at, updated_at
+         FROM lectures
+        ${status ? 'WHERE status = ?' : ''}
+        ORDER BY sort_order ASC, updated_at DESC
+        LIMIT 300`,
+      status ? [status] : [],
+    );
+    res.json({ data: { lectures: rows.map((r) => lectureRowOut(r, { withPages: false })) }, error: null });
+  } catch (error) {
+    console.error('读取微课程列表失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+app.get('/api/teacher/lectures/:id', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const row = await loadLectureForTeacher(req.params.id, req);
+    res.json({ data: { lecture: lectureRowOut(row) }, error: null });
+  } catch (error) {
+    if (error.status === 404) return res.status(404).json({ data: null, error: error.message });
+    console.error('读取微课程失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 新建（只建壳，不生成）：老师可以先填大纲存着，之后再点生成
+app.post('/api/teacher/lectures', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const licenseResult = await licenseManager.checkFeatureLicense(FEATURES.AI);
+    if (!licenseResult.allowed) {
+      return res.status(403).json({ data: null, error: 'AI 功能需要授权激活后才能使用', licenseStatus: licenseResult.status });
+    }
+    const b = req.body || {};
+    const title = clip(b.title, 120);
+    if (!title) return res.status(400).json({ data: null, error: '请填写课程标题' });
+    const outline = String(b.outline || '').slice(0, 4000);
+    if (!outline.trim()) return res.status(400).json({ data: null, error: '请填写知识点大纲' });
+
+    const styleKey = String(b.style_key || 'lecture').trim();
+    const style = await getStyle(pool, styleKey);
+    if (!style) return res.status(400).json({ data: null, error: '讲解风格不存在' });
+
+    const id = lectureNewId();
+    const [maxRow] = await pool.query('SELECT COALESCE(MAX(sort_order), 0) AS m FROM lectures');
+    await pool.query(
+      `INSERT INTO lectures
+        (id, title, subject, chapter, outline, requirement, style_key, pages, cover,
+         page_count, duration_sec, status, class_ids, sort_order, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, '[]', NULL, 0, 0, 'draft', ?, ?, ?)`,
+      [
+        id,
+        title,
+        clip(b.subject, 32) || '必修1',
+        clip(b.chapter, 120),
+        outline,
+        String(b.requirement || '').slice(0, 2000),
+        styleKey,
+        JSON.stringify(normalizeLectureClassIds(b.class_ids)),
+        Math.min(Number(b.sort_order) || 0, 9999) || (Number(maxRow[0].m) || 0) + 10,
+        req.user.userId || null,
+      ],
+    );
+    const row = await loadLectureForTeacher(id, req);
+    res.json({ data: { lecture: lectureRowOut(row) }, error: null });
+  } catch (error) {
+    console.error('新建微课程失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 生成整篇（覆盖 pages）。body: { style_key?, page_target? }
+app.post('/api/teacher/lectures/:id/generate', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const licenseResult = await licenseManager.checkFeatureLicense(FEATURES.AI);
+    if (!licenseResult.allowed) {
+      return res.status(403).json({ data: null, error: 'AI 功能需要授权激活后才能使用', licenseStatus: licenseResult.status });
+    }
+    if (!allowExplainRate(`lecture:${req.user.userId}`, 30, 10 * 60 * 1000)) {
+      return res.status(429).json({ data: null, error: '生成太频繁，休息一下（10 分钟内最多 30 次）' });
+    }
+    const row = await loadLectureForTeacher(req.params.id, req);
+    if (!String(row.outline || '').trim()) {
+      return res.status(400).json({ data: null, error: '这门课还没有知识点大纲，先补上再生成' });
+    }
+
+    const b = req.body || {};
+    const styleKey = String(b.style_key || row.style_key || 'lecture').trim();
+    const style = await getStyle(pool, styleKey);
+    if (!style) return res.status(400).json({ data: null, error: '讲解风格不存在' });
+    const pageTarget = clampPageTarget(b.page_target, 7);
+
+    const result = await generateLecturePages({
+      title: clip(b.title, 120) || row.title,
+      subject: row.subject,
+      chapter: row.chapter,
+      outline: row.outline,
+      requirement: row.requirement,
+      style,
+      pageTarget,
+    });
+
+    // 模型给的标题只在学校没填标题时使用（老师填的优先，别被覆盖）
+    const finalTitle = clip(b.title, 120) || (String(row.title || '').trim() && row.title !== '未命名微课程' ? row.title : clip(result.title, 120)) || row.title;
+    await pool.query(
+      'UPDATE lectures SET title = ?, style_key = ?, updated_at = NOW(3) WHERE id = ?',
+      [finalTitle, styleKey, row.id],
+    );
+    await saveLecturePages(row.id, result.pages);
+    const fresh = await loadLectureForTeacher(row.id, req);
+    res.json({ data: { lecture: lectureRowOut(fresh), model: result.model, style_name: style.name }, error: null });
+  } catch (error) {
+    console.error('生成微课程失败:', error);
+    res.status(500).json({ data: null, error: error.message || '生成失败' });
+  }
+});
+
+// 单页重生成：8 页里通常只有 1~2 页不满意，整篇重来既费钱又会把满意的页改坏
+app.post('/api/teacher/lectures/:id/generate-page', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const licenseResult = await licenseManager.checkFeatureLicense(FEATURES.AI);
+    if (!licenseResult.allowed) {
+      return res.status(403).json({ data: null, error: 'AI 功能需要授权激活后才能使用', licenseStatus: licenseResult.status });
+    }
+    if (!allowExplainRate(`lecture:${req.user.userId}`, 30, 10 * 60 * 1000)) {
+      return res.status(429).json({ data: null, error: '生成太频繁，休息一下（10 分钟内最多 30 次）' });
+    }
+    const row = await loadLectureForTeacher(req.params.id, req);
+    const pages = parseJsonArrayField(row.pages);
+    const index = Number(req.body && req.body.index);
+    if (!Number.isInteger(index) || index < 0 || index >= pages.length) {
+      return res.status(400).json({ data: null, error: '页码超出范围' });
+    }
+
+    const style = await getStyle(pool, String((req.body && req.body.style_key) || row.style_key || 'lecture'));
+    if (!style) return res.status(400).json({ data: null, error: '讲解风格不存在' });
+    // 首末页的角色固定（lead / recap），中间页允许模型换型，但默认沿用原页型
+    const wantKind = String((req.body && req.body.kind) || pages[index].kind || 'point');
+    const allowKinds = index === 0 ? ['lead'] : index === pages.length - 1 ? ['recap'] : PAGE_KINDS.filter((k) => k !== 'lead' && k !== 'recap');
+
+    const cfg = await getAiQaConfig(pool);
+    const systemPrompt = buildLecturePagePrompt(style, { allowKinds });
+    const others = pages
+      .map((p, i) => (i === index ? null : `${i + 1}. ${p.title}`))
+      .filter(Boolean)
+      .join('；');
+    const userPrompt = [
+      `【教材模块】${row.subject || '必修1'}`,
+      row.chapter ? `【章节】${row.chapter}` : '',
+      `【课程标题】${row.title}`,
+      `【知识点大纲】\n${String(row.outline || '').slice(0, 2000)}`,
+      `【老师的要求】\n${String(row.requirement || '').trim() || '（无特别要求）'}`,
+      `【本课其他页（不要重复讲）】${others || '（无）'}`,
+      `【这一页要重写】第 ${index + 1} 页，页型 ${wantKind}，原标题「${pages[index].title || ''}」`,
+      '',
+      '只输出这一个页面对象。',
+    ].filter(Boolean).join('\n');
+
+    const raw = await callAiApi(cfg, [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ], { max_tokens: 1200 });
+    if (!String(raw || '').trim()) throw new Error('模型返回空内容');
+    const page = normalizeLecturePage(extractJsonObject(raw), {
+      outline: row.outline,
+      pageTarget: clampPageTarget(pages.length, 7),
+      title: pages[index].title,
+    });
+    // ⛔ 强制沿用角色：模型偶尔会把首/末页写成 point，导致开课没有引入、结尾没有小结
+    if (index === 0) page.kind = 'lead';
+    if (index === pages.length - 1 && pages.length > 1) page.kind = 'recap';
+
+    const next = pages.slice();
+    next[index] = page;
+    await saveLecturePages(row.id, next);
+    const fresh = await loadLectureForTeacher(row.id, req);
+    res.json({ data: { lecture: lectureRowOut(fresh), index }, error: null });
+  } catch (error) {
+    console.error('重生成单页失败:', error);
+    res.status(500).json({ data: null, error: error.message || '重生成失败' });
+  }
+});
+
+// 保存（老师手改）。⛔ 未传字段必须保留原值：编辑器只保存改动的那几项，
+//    若这里用 `?` 直接覆盖，老师改一句话就会把大纲和班级权限清空。
+app.put('/api/teacher/lectures/:id', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const row = await loadLectureForTeacher(req.params.id, req);
+    const b = req.body || {};
+    const sets = [];
+    const vals = [];
+    const push = (col, val) => { sets.push(`${col} = ?`); vals.push(val); };
+
+    if (b.title !== undefined) {
+      const t = clip(b.title, 120);
+      if (!t) return res.status(400).json({ data: null, error: '课程标题不能为空' });
+      push('title', t);
+    }
+    if (b.subject !== undefined) push('subject', clip(b.subject, 32) || '必修1');
+    if (b.chapter !== undefined) push('chapter', clip(b.chapter, 120));
+    if (b.outline !== undefined) push('outline', String(b.outline || '').slice(0, 4000));
+    if (b.requirement !== undefined) push('requirement', String(b.requirement || '').slice(0, 2000));
+    if (b.style_key !== undefined) {
+      const sk = String(b.style_key || '').trim();
+      if (!(await getStyle(pool, sk))) return res.status(400).json({ data: null, error: '讲解风格不存在' });
+      push('style_key', sk);
+    }
+    if (b.class_ids !== undefined) push('class_ids', JSON.stringify(normalizeLectureClassIds(b.class_ids)));
+    if (b.sort_order !== undefined) push('sort_order', Math.min(Math.max(Number(b.sort_order) || 0, 0), 9999));
+
+    let pagesToSave = null;
+    if (b.pages !== undefined) {
+      if (!Array.isArray(b.pages)) return res.status(400).json({ data: null, error: 'pages 必须是数组' });
+      pagesToSave = b.pages.map((p) => normalizeLecturePage(p, {
+        outline: String(b.outline !== undefined ? b.outline : row.outline || ''),
+        pageTarget: clampPageTarget(b.pages.length, 7),
+        title: clip(p && p.title, 20),
+      })).filter(Boolean);
+      if (!pagesToSave.length) return res.status(400).json({ data: null, error: '至少要保留一页' });
+    }
+
+    if (sets.length) {
+      vals.push(row.id);
+      await pool.query(`UPDATE lectures SET ${sets.join(', ')}, updated_at = NOW(3) WHERE id = ?`, vals);
+    }
+    if (pagesToSave) await saveLecturePages(row.id, pagesToSave);
+
+    const fresh = await loadLectureForTeacher(row.id, req);
+    res.json({ data: { lecture: lectureRowOut(fresh) }, error: null });
+  } catch (error) {
+    if (error.status === 404) return res.status(404).json({ data: null, error: error.message });
+    console.error('保存微课程失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 发布 / 取消发布。⛔ 没有页面的课不许发布 —— 学生端会点开一个空白播放器
+app.post('/api/teacher/lectures/:id/publish', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const row = await loadLectureForTeacher(req.params.id, req);
+    const pages = parseJsonArrayField(row.pages);
+    if (!pages.length) return res.status(400).json({ data: null, error: '这门课还没有生成页面，不能发布' });
+    await pool.query(
+      "UPDATE lectures SET status = 'published', published_at = COALESCE(published_at, NOW(3)), updated_at = NOW(3) WHERE id = ?",
+      [row.id],
+    );
+    const fresh = await loadLectureForTeacher(row.id, req);
+    res.json({ data: { lecture: lectureRowOut(fresh, { withPages: false }) }, error: null });
+  } catch (error) {
+    if (error.status === 404) return res.status(404).json({ data: null, error: error.message });
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+app.post('/api/teacher/lectures/:id/unpublish', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const row = await loadLectureForTeacher(req.params.id, req);
+    await pool.query("UPDATE lectures SET status = 'draft', updated_at = NOW(3) WHERE id = ?", [row.id]);
+    const fresh = await loadLectureForTeacher(row.id, req);
+    res.json({ data: { lecture: lectureRowOut(fresh, { withPages: false }) }, error: null });
+  } catch (error) {
+    if (error.status === 404) return res.status(404).json({ data: null, error: error.message });
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+app.post('/api/teacher/lectures/:id/duplicate', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const row = await loadLectureForTeacher(req.params.id, req);
+    const id = lectureNewId();
+    await pool.query(
+      `INSERT INTO lectures
+        (id, title, subject, chapter, outline, requirement, style_key, pages, cover,
+         page_count, duration_sec, status, class_ids, sort_order, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)`,
+      [
+        id,
+        clip(`${row.title} 副本`, 120),
+        row.subject,
+        row.chapter,
+        row.outline,
+        row.requirement,
+        row.style_key,
+        typeof row.pages === 'string' ? row.pages : JSON.stringify(parseJsonArrayField(row.pages)),
+        row.cover ? (typeof row.cover === 'string' ? row.cover : JSON.stringify(row.cover)) : null,
+        Number(row.page_count) || 0,
+        Number(row.duration_sec) || 0,
+        typeof row.class_ids === 'string' ? row.class_ids : JSON.stringify(parseJsonArrayField(row.class_ids)),
+        (Number(row.sort_order) || 0) + 1,
+        req.user.userId || null,
+      ],
+    );
+    const fresh = await loadLectureForTeacher(id, req);
+    res.json({ data: { lecture: lectureRowOut(fresh, { withPages: false }) }, error: null });
+  } catch (error) {
+    if (error.status === 404) return res.status(404).json({ data: null, error: error.message });
+    console.error('复制微课程失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+app.delete('/api/teacher/lectures/:id', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const row = await loadLectureForTeacher(req.params.id, req);
+    await pool.query('DELETE FROM lectures WHERE id = ?', [row.id]);
+    res.json({ data: { deleted: true }, error: null });
+  } catch (error) {
+    if (error.status === 404) return res.status(404).json({ data: null, error: error.message });
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// ---------- 学生端 ----------
+// 三重限制：ai_explain 开关 + 只发已发布 + 班级匹配。
+// ⛔ 学生端**永远不下发 draft**：草稿是老师还没审过的课，讲错了算谁的。
+app.get('/api/student/lectures', authenticate, requireStudent, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    if (!(await isAiExplainEnabledFor(userId))) {
+      return res.status(403).json({ data: null, error: '老师还没有为你开通 AI 讲解' });
+    }
+    const [prof] = await pool.query('SELECT class_id FROM profiles WHERE id = ? LIMIT 1', [userId]);
+    const classId = prof.length ? String(prof[0].class_id || '') : '';
+
+    const [rows] = await pool.query(
+      `SELECT id, title, subject, chapter, cover, page_count, duration_sec, class_ids, sort_order, play_count
+         FROM lectures
+        WHERE status = 'published'
+        ORDER BY sort_order ASC, published_at DESC
+        LIMIT 200`,
+    );
+    // 班级在 JS 里过滤：class_ids 是 JSON 列，空数组 / NULL 都表示不限班级
+    const visible = rows.filter((r) => {
+      const ids = parseJsonArrayField(r.class_ids);
+      return ids.length === 0 || (classId && ids.includes(classId));
+    });
+    res.json({ data: { lectures: visible.map((r) => lectureRowOut(r, { withPages: false })) }, error: null });
+  } catch (error) {
+    console.error('读取学生微课程列表失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+app.get('/api/student/lectures/:id', authenticate, requireStudent, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    if (!(await isAiExplainEnabledFor(userId))) {
+      return res.status(403).json({ data: null, error: '老师还没有为你开通 AI 讲解' });
+    }
+    const [rows] = await pool.query("SELECT * FROM lectures WHERE id = ? AND status = 'published' LIMIT 1", [req.params.id]);
+    if (!rows.length) return res.status(404).json({ data: null, error: '这门课不存在或还没有发布' });
+
+    const [prof] = await pool.query('SELECT class_id FROM profiles WHERE id = ? LIMIT 1', [userId]);
+    const classId = prof.length ? String(prof[0].class_id || '') : '';
+    const ids = parseJsonArrayField(rows[0].class_ids);
+    if (ids.length && !(classId && ids.includes(classId))) {
+      return res.status(403).json({ data: null, error: '这门课不是给你们班开的' });
+    }
+
+    await pool.query('UPDATE lectures SET play_count = play_count + 1 WHERE id = ?', [rows[0].id]);
+    res.json({ data: { lecture: lectureRowOut(rows[0]) }, error: null });
+  } catch (error) {
+    console.error('读取学生微课程失败:', error);
+    res.status(500).json({ data: null, error: error.message });
   }
 });
 

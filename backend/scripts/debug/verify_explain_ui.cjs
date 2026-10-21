@@ -127,7 +127,7 @@ async function main() {
       const body = document.body.innerText || '';
       return JSON.stringify({
         hasPanel: body.includes('AI 讲解风格'),
-        hasNames: ['接地气唠嗑','极简先给答案','共情不评判','口诀记忆','闯关游戏'].filter(n => body.includes(n)),
+        hasNames: ['接地气唠嗑','极简先给答案','共情不评判','口诀记忆','闯关游戏','课堂讲授'].filter(n => body.includes(n)),
         resetBtns: [...document.querySelectorAll('button')].filter(b => b.textContent.trim() === '恢复默认').length,
         disabledBadges: (body.match(/已停用/g) || []).length,
         hint: body.includes('公共规则不可改'),
@@ -136,8 +136,9 @@ async function main() {
     let p = {};
     try { p = JSON.parse(String(panel)); } catch { /* ignore */ }
     ok('AI 讲解风格面板出现', p.hasPanel === true);
-    ok('5 组内置风格全部列出', (p.hasNames || []).length === 5, (p.hasNames || []).join('/'));
-    ok('内置风格带「恢复默认」按钮', p.resetBtns >= 5, `count=${p.resetBtns}`);
+    // 迁移 108 加了第 6 组「课堂讲授」（AI 讲堂专用），风格库一共 6 组
+    ok('6 组内置风格全部列出', (p.hasNames || []).length === 6, (p.hasNames || []).join('/'));
+    ok('内置风格带「恢复默认」按钮', p.resetBtns >= 6, `count=${p.resetBtns}`);
     // ⛔ 不锁「哪几组默认停用」——老师随时会在界面上启用口诀/闯关去试听，
     // 锁死具体值会让回归在老师正常操作后误报。改为「UI 与库里停用条数一致」。
     const [[disabledCnt]] = await pool.query('SELECT SUM(enabled = 0) AS c FROM explain_styles');

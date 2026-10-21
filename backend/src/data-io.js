@@ -34,7 +34,9 @@ const DOMAIN_DEFS = [
   { id: 'learning', name: '学习活动', tables: ['word_list', 'student_word_progress', 'learn_visited_records', 'studious_checkins', 'keyboard_lesson_progress', 'typing_rooms', 'typing_scores', 'typing_duel_records', 'roll_call_layout', 'roll_call_seating', 'roll_call_attendance'] },
   // ⛔ explain_styles / explain_scripts（迁移 107）必须归域：风格库是老师手写的内容，
   //    不登记会落「其他」域且 defaultOff → 教师默认备份静默丢掉辛苦调好的讲解风格。
-  { id: 'ai', name: 'AI与编程', tables: ['ai_qa_history', 'ai_qa_knowledge_base', 'ai_works', 'ai_workshop_config', 'ai_work_purchases', 'ai_work_ratings', 'ai_work_reviews', 'ai_work_versions', 'explain_styles', 'explain_scripts', 'python_tasks', 'python_submissions', 'python_drafts', 'python_gradings', 'python_wrong_problems', 'python_magic_progress', 'code_realm_progress', 'code_snippets'] },
+  // ⛔ lectures（迁移 108）必须归域：微课程是老师手写的课件资产（大纲/要求/讲解词全是老师的心血），
+  //    不登记会落「其他」域且 defaultOff → 教师默认备份静默丢掉整批课程。
+  { id: 'ai', name: 'AI与编程', tables: ['ai_qa_history', 'ai_qa_knowledge_base', 'ai_works', 'ai_workshop_config', 'ai_work_purchases', 'ai_work_ratings', 'ai_work_reviews', 'ai_work_versions', 'explain_styles', 'explain_scripts', 'lectures', 'python_tasks', 'python_submissions', 'python_drafts', 'python_gradings', 'python_wrong_problems', 'python_magic_progress', 'code_realm_progress', 'code_snippets'] },
   // ⛔ pk_daily_rewards 必须归域：PK 每日奖励领取记录（有真实数据）。
   //    未登记会落「其他」域且 defaultOff → 教师默认备份静默漏掉这张表。
   //    （question_cluster_tasks 故意不归域：它只是聚类任务的临时作业状态，有自动清理逻辑。）
