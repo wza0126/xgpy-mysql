@@ -135,6 +135,22 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
   const [degraded, setDegraded] = useState<null | 'edge' | 'xfyun'>(null);
   const [fadeIn, setFadeIn] = useState(false);
 
+  /**
+   * 切课程（↑↓ / 从列表点另一门）要把播放进度归零。
+   * ⛔ 这里**必须在渲染期间同步重置**：播放器是同一个组件实例被复用（只换 lecture 这个 prop），
+   *    用 useEffect 重置就晚了一拍 —— 这次渲染已经拿旧 pageIdx 取到新课程的同一页码并开始朗读，
+   *    表现为「切过去不是第一页，而是上一篇看到的那一页」。
+   *    这是 React 官方的「props 变化时在渲染中调整 state」写法，会在提交前立刻重渲染。
+   */
+  const prevLectureIdRef = useRef(lecture.id);
+  if (prevLectureIdRef.current !== lecture.id) {
+    prevLectureIdRef.current = lecture.id;
+    setPageIdx(0);
+    setSentenceIdx(0);
+    setRevealed(false);
+    setPlaying(true);
+  }
+
   const page = pages[pageIdx];
   const sentences = useMemo(() => splitSentences(page?.narration || ''), [page?.narration]);
   const isLastPage = pageIdx >= pages.length - 1;
@@ -275,6 +291,15 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
     const t = window.setTimeout(() => setFadeIn(false), 40);
     return () => clearTimeout(t);
   }, [pageIdx]);
+
+  // 换课程：掐掉上一篇还在播的音频，清掉按句子缓存的 mp3 与引擎降级锁
+  //（页面内容已经换了，旧缓存再也命中不了，留着只是占内存）
+  useEffect(() => {
+    stopAll();
+    blobCacheRef.current.clear();
+    engineLockRef.current = null;
+    setDegraded(null);
+  }, [lecture.id, stopAll]);
 
   const markDone = useCallback(() => {
     // 播放次数由学生端详情接口自增；教师投屏不重复计数，这里只在本地标记本课已讲完
