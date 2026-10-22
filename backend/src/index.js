@@ -97,6 +97,8 @@ try {
 } catch { /* version.js 不存在时使用兜底值 */ }
 
 const app = express();
+
+const { createMetrics } = require('./metrics');
 const secureAuth = new SecureAuth(pool);
 const licenseManager = new LicenseManager(pool);
 let notificationScheduler = null;
@@ -199,6 +201,13 @@ const upload = multer({
 });
 
 app.use(cors());
+
+// 运行时埋点：每分钟往 logs/metrics.log 写一行（请求 Top、事件循环延迟、CPU、连接数）。
+// 排查「莫名卡死」时直接看这个文件，就能知道是哪个接口在打服务器。XGPY_METRICS=0 可关闭。
+let liveConnections = 0;
+const runtimeMetrics = createMetrics({ app, getConnections: () => liveConnections });
+app.use(runtimeMetrics.middleware);
+
 // 代理上网模块需要原始请求体转发给上游，verify 里为 /api/web-proxy 路径缓存 rawBody
 app.use(express.json({
   limit: '100mb',
@@ -19096,6 +19105,12 @@ app.get('/api/pk/stats/wrong-questions', authenticate, requireTeacher, async (re
   const server = app.listen(port, host, () => {
     console.log(`XGPY Backend Server running on http://${host}:${port}`);
     console.log(`MariaDB: ${process.env.DB_HOST || '192.168.10.110'}:${process.env.DB_PORT || '3306'}`);
+
+    // 连接数埋点：全程维护一个计数，避免每分钟去异步查 server.getConnections()
+    server.on('connection', (socket) => {
+      liveConnections += 1;
+      socket.on('close', () => { liveConnections = Math.max(0, liveConnections - 1); });
+    });
 
     // 挂载 PK 对战 socket.io
     try {
