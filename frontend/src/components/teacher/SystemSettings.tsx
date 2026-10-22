@@ -7,6 +7,7 @@ import { getAuthToken } from '../../utils/authToken';
 import { applySiteConfig, useSiteConfig } from '../../hooks/useSiteConfig';
 import { DataManager } from './DataManager';
 import { ExplainStyleManager } from './ExplainStyleManager';
+import { normalizeFavorites, normalizeNameList, listZhVoices, splitVoices, shortVoiceLabel } from '../../utils/ttsEngine';
 
 const API_BASE = API_CONFIG.apiUrl;
 
@@ -97,6 +98,10 @@ export const SystemSettings: React.FC = () => {
     xfyun_api_key: '',
     xfyun_api_secret: '',
     xfyun_voice: 'xiaoyan',
+    // 课堂常用发音人：播放器里只摆这几个，其余收进「更多」（空数组 = 全部显示）
+    xfyun_voice_favorites: [] as string[],
+    // Edge 常用音色（短名，如 晓晓）：Edge 音色由浏览器提供，只有用 Edge 打开本页才看得见
+    edge_voice_favorites: [] as string[],
     xfyun_speed: 50,
     xfyun_volume: 50,
     xfyun_pitch: 50,
@@ -189,6 +194,8 @@ export const SystemSettings: React.FC = () => {
   const [xfyunVoices, setXfyunVoices] = useState<Array<{ id: string; name: string; group?: string; note?: string }>>([]);
   const [ttsTesting, setTtsTesting] = useState(false);
   const [ttsHint, setTtsHint] = useState('');
+  /** Edge 在线音色（来自浏览器 getVoices()，只有 Edge 才有；Chrome 这里是空的） */
+  const [edgeVoices, setEdgeVoices] = useState<Array<{ id: string; name: string }>>([]);
 
   useEffect(() => {
     fetchConfigs();
@@ -201,6 +208,25 @@ export const SystemSettings: React.FC = () => {
     fetchStudentBgSettings();
     fetchBackgroundLibrary();
     fetchXfyunVoices();
+  }, []);
+
+  // Edge 在线音色清单：浏览器异步加载，首次 getVoices() 可能是空的 → 监听 voiceschanged
+  useEffect(() => {
+    const pick = () => {
+      const { edge } = splitVoices(listZhVoices());
+      const seen = new Set<string>();
+      const list: Array<{ id: string; name: string }> = [];
+      edge.forEach((v) => {
+        const id = shortVoiceLabel(v.name) || v.name;
+        if (seen.has(id)) return;
+        seen.add(id);
+        list.push({ id, name: id });
+      });
+      setEdgeVoices(list);
+    };
+    pick();
+    if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = pick;
+    return () => { if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = null; };
   }, []);
 
   // 讯飞发音人清单（后端唯一真源）
@@ -253,6 +279,38 @@ export const SystemSettings: React.FC = () => {
     } finally {
       setTtsTesting(false);
     }
+  };
+
+  /** 课堂常用发音人：几十个音色里勾几个，播放器只摆这几个（不勾则显示全部） */
+  const xfyunFavIds = normalizeFavorites(configs.xfyun_voice_favorites);
+  const toggleXfyunFavorite = (id: string) => {
+    if (xfyunFavIds.includes(id)) {
+      setConfigs({ ...configs, xfyun_voice_favorites: xfyunFavIds.filter((x) => x !== id) });
+      setTtsHint('');
+      return;
+    }
+    if (xfyunFavIds.length >= 8) {
+      setTtsHint('最多勾 8 个常用发音人，先取消一个再勾。');
+      return;
+    }
+    setConfigs({ ...configs, xfyun_voice_favorites: [...xfyunFavIds, id] });
+    setTtsHint('');
+  };
+
+  /** Edge 常用音色（最多 6 个；非 Edge 浏览器检测不到，不显示勾选区） */
+  const edgeFavIds = normalizeNameList(configs.edge_voice_favorites, 6);
+  const toggleEdgeFavorite = (id: string) => {
+    if (edgeFavIds.includes(id)) {
+      setConfigs({ ...configs, edge_voice_favorites: edgeFavIds.filter((x) => x !== id) });
+      setTtsHint('');
+      return;
+    }
+    if (edgeFavIds.length >= 6) {
+      setTtsHint('Edge 常用音色最多勾 6 个，先取消一个再勾。');
+      return;
+    }
+    setConfigs({ ...configs, edge_voice_favorites: [...edgeFavIds, id] });
+    setTtsHint('');
   };
 
   const fetchDesktopBackground = async () => {
@@ -1215,8 +1273,8 @@ export const SystemSettings: React.FC = () => {
                       />
                     </div>
                   </div>
-                  <div className="grid grid-cols-3 gap-3">
-                    <div className="col-span-1">
+                  <div className="grid grid-cols-5 gap-3">
+                    <div className="col-span-3">
                       <label className="block text-sm font-medium text-gray-700 mb-1">默认发音人</label>
                       <select
                         value={configs.xfyun_voice || '__custom__'}
@@ -1268,6 +1326,74 @@ export const SystemSettings: React.FC = () => {
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-amber-500"
                       />
                     </div>
+                  </div>
+                  {/* 课堂常用发音人：讯飞清单十几个、Edge 还有一批，全铺进下拉课堂上很难找 */}
+                  <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 p-3">
+                    <div className="mb-1 flex items-center justify-between">
+                      <label className="text-sm font-medium text-gray-700">课堂常用发音人</label>
+                      <span className="text-xs text-gray-500">
+                        Edge 已选 <b className={edgeFavIds.length ? 'text-amber-700' : ''}>{edgeFavIds.length}</b> / 6
+                        <span className="mx-1.5 text-gray-300">·</span>
+                        讯飞已选 <b className={xfyunFavIds.length ? 'text-amber-700' : ''}>{xfyunFavIds.length}</b> / 8（建议 3 个）
+                      </span>
+                    </div>
+                    <p className="mb-2 text-xs text-gray-500">
+                      播放器的音色下拉里只列勾上的，其余收在「更多发音人…」里。Edge 不勾 = 显示内置最常用的 6 个；讯飞不勾 = 全部显示。
+                    </p>
+                    <div className="space-y-1.5">
+                      {/* Edge 在线音色：浏览器提供，只有用 Edge 打开本页才有 */}
+                      <div className="flex flex-wrap items-start gap-1.5">
+                        <span className="w-16 shrink-0 pt-1 text-xs text-gray-400">Edge 免费</span>
+                        {edgeVoices.length > 0 ? edgeVoices.map((v) => {
+                          const on = edgeFavIds.includes(v.id);
+                          return (
+                            <button
+                              key={v.id}
+                              type="button"
+                              onClick={() => toggleEdgeFavorite(v.id)}
+                              title={`Edge 在线音色：${v.id}`}
+                              className={on
+                                ? 'rounded-full border border-emerald-500 bg-emerald-50 px-2 py-0.5 text-xs text-emerald-800'
+                                : 'rounded-full border border-gray-300 bg-white px-2 py-0.5 text-xs text-gray-600 hover:border-emerald-400'}
+                            >
+                              {on && <i className="fa-solid fa-check mr-1 text-[10px]"></i>}
+                              {v.name}
+                            </button>
+                          );
+                        }) : (
+                          <span className="pt-1 text-xs text-gray-400">
+                            当前浏览器没有 Edge 在线音色 —— 用 <b className="text-gray-600">Edge</b> 打开本页才能勾选（Chrome 只有系统老音色，会自动降级讯飞）
+                          </span>
+                        )}
+                      </div>
+                      {Array.from(new Set(xfyunVoices.map((v) => v.group || '其他'))).map((g) => (
+                        <div key={g} className="flex flex-wrap items-start gap-1.5">
+                          <span className="w-16 shrink-0 pt-1 text-xs text-gray-400">{g}</span>
+                          {xfyunVoices.filter((v) => (v.group || '其他') === g).map((v) => {
+                            const on = xfyunFavIds.includes(v.id);
+                            return (
+                              <button
+                                key={v.id}
+                                type="button"
+                                onClick={() => toggleXfyunFavorite(v.id)}
+                                title={v.note || v.id}
+                                className={on
+                                  ? 'rounded-full border border-amber-500 bg-amber-50 px-2 py-0.5 text-xs text-amber-800'
+                                  : 'rounded-full border border-gray-300 bg-white px-2 py-0.5 text-xs text-gray-600 hover:border-amber-400'}
+                              >
+                                {on && <i className="fa-solid fa-check mr-1 text-[10px]"></i>}
+                                {v.name}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                    {(xfyunVoices.length > 0 || edgeVoices.length > 0) && (
+                      <p className="mt-2 text-xs text-gray-400">
+                        Edge 音色由浏览器提供、不花钱；没装 Edge 或用了 Chrome 的电脑会自动用讯飞。默认发音人（{configs.xfyun_voice || '未设置'}）不管有没有勾选都会出现在下拉里，不会因此听不到。
+                      </p>
+                    )}
                   </div>
                   <div className="mt-3 flex items-center gap-3">
                     <button

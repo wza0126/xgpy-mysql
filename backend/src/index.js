@@ -8326,7 +8326,7 @@ const VCN_RE = /^[A-Za-z0-9_]{1,40}$/;
 
 /** 读讯飞配置（system_config 的 value 是 {value: xxx} JSON） */
 async function getXfyunConfig(db) {
-  const keys = ['xfyun_app_id', 'xfyun_api_key', 'xfyun_api_secret', 'xfyun_voice', 'xfyun_speed', 'xfyun_volume', 'xfyun_pitch'];
+  const keys = ['xfyun_app_id', 'xfyun_api_key', 'xfyun_api_secret', 'xfyun_voice', 'xfyun_speed', 'xfyun_volume', 'xfyun_pitch', 'xfyun_voice_favorites'];
   const [rows] = await db.query('SELECT config_key, value FROM system_config WHERE config_key IN (?)', [keys]);
   const map = {};
   for (const r of rows) {
@@ -8348,7 +8348,61 @@ async function getXfyunConfig(db) {
     speed: num(map.xfyun_speed, 50),
     volume: num(map.xfyun_volume, 50),
     pitch: num(map.xfyun_pitch, 50),
+    favorites: normalizeVoiceFavorites(map.xfyun_voice_favorites),
   };
+}
+
+/**
+ * 「课堂常用发音人」归一化：数组 / JSON 字符串 / 逗号分隔都要认（老师可能手改配置）。
+ * 上限 8 个 —— 播放器下拉是给课堂上点一下换人的，超过 8 个又变回一屏乱列表。
+ */
+const VOICE_FAVORITES_MAX = 8;
+function normalizeVoiceFavorites(raw) {
+  let arr = raw;
+  if (typeof arr === 'string') {
+    const s = arr.trim();
+    if (s.startsWith('[')) {
+      try { arr = JSON.parse(s); } catch { arr = s.split(/[,，\s]+/); }
+    } else {
+      arr = s.split(/[,，\s]+/);
+    }
+  }
+  if (!Array.isArray(arr)) return [];
+  const out = [];
+  arr.forEach((v) => {
+    const id = String(v || '').trim();
+    if (!VCN_RE.test(id) || out.includes(id) || out.length >= VOICE_FAVORITES_MAX) return;
+    out.push(id);
+  });
+  return out;
+}
+
+/**
+ * 通用「短名数组」配置读取（Edge 音色名是「晓晓」「云希」这种中文短名，
+ * 来自浏览器 getVoices()，不是讯飞 vcn，所以不能套 VCN_RE）。
+ */
+async function readNameArrayConfig(db, key, max = 8) {
+  let v;
+  try {
+    const [rows] = await db.query('SELECT value FROM system_config WHERE config_key = ? LIMIT 1', [key]);
+    if (!rows.length) return [];
+    v = rows[0].value;
+  } catch { return []; }
+  if (typeof v === 'string') {
+    try {
+      const parsed = JSON.parse(v);
+      v = parsed && typeof parsed === 'object' && 'value' in parsed ? parsed.value : parsed;
+    } catch { /* 保持原字符串 */ }
+  }
+  if (typeof v === 'string') v = v.split(/[,，;；]+/);
+  if (!Array.isArray(v)) return [];
+  const out = [];
+  v.forEach((x) => {
+    const name = String(x || '').trim();
+    if (!name || name.length > 60 || out.includes(name) || out.length >= max) return;
+    out.push(name);
+  });
+  return out;
 }
 
 // 合成结果缓存：同一句话（音色/语速相同）不重复消耗额度
@@ -8463,8 +8517,20 @@ async function explainTtsConfigHandler(req, res) {
   try {
     const cfg = await getXfyunConfig(pool);
     const configured = !!(cfg.appId && cfg.apiKey && cfg.apiSecret);
+    // Edge 音色由浏览器提供，不在服务端清单里；这里只回老师勾的短名，供播放器收窄下拉
+    const edgeFavorites = await readNameArrayConfig(pool, 'edge_voice_favorites');
     res.json({
-      data: { configured, voices: XFYUN_VOICES, voice: cfg.voice, speed: cfg.speed, volume: cfg.volume, pitch: cfg.pitch },
+      data: {
+        configured,
+        voices: XFYUN_VOICES,
+        voice: cfg.voice,
+        // 系统设置里勾的「课堂常用发音人」：播放器只摆这几个，其余的收进「更多」
+        favorites: cfg.favorites,
+        edgeFavorites,
+        speed: cfg.speed,
+        volume: cfg.volume,
+        pitch: cfg.pitch,
+      },
       error: null,
     });
   } catch (error) {

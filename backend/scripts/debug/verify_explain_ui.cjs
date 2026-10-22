@@ -345,13 +345,16 @@ async function main() {
     // 播放器音色下拉：已保存的自定义 vcn 必须显示成「自定义：xxx」，
     // 否则老师会以为系统设置里填的白填了、还得在这儿再填一遍。
     const voiceSel = await cdp.evalJs(`(() => {
+      // 分组名现在是「Edge 在线（免费）/ 讯飞云端（按量计费）/ 本机（兜底）」，
+      // 不再是讯飞自己的「标准 / 超拟人」分组 —— 这里按三家引擎名找。
       const sel = [...document.querySelectorAll('select')]
-        .find(s => [...s.querySelectorAll('optgroup')].some(g => /标准|超拟人/.test(g.label)));
+        .find(s => [...s.querySelectorAll('optgroup')].some(g => /Edge 在线|讯飞云端|本机/.test(g.label)));
       if (!sel) return JSON.stringify({ found: false });
       return JSON.stringify({
         found: true,
         selected: (sel.options[sel.selectedIndex] || {}).textContent || '',
         last: (sel.options[sel.options.length - 1] || {}).textContent || '',
+        groups: [...sel.querySelectorAll('optgroup')].map(g => g.label),
       });
     })()`);
     let vs = {};

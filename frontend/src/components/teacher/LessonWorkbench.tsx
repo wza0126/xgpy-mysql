@@ -16,7 +16,8 @@ type Tab = 'tasks' | 'lectures';
  *    切走再切回若被卸载，老师填了一半的任务就没了。
  */
 export const LessonWorkbench: React.FC = () => {
-  const [tab, setTab] = useState<Tab>('tasks');
+  // 默认落在 AI 讲堂（老师主要用它讲课投屏）；课堂任务仍是第二个页签
+  const [tab, setTab] = useState<Tab>('lectures');
 
   const tabCls = (active: boolean) =>
     `flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition ${

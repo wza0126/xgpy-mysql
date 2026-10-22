@@ -2,6 +2,22 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { API_CONFIG } from '../../api/config';
 import { authHeaders } from '../../utils/authToken';
 import { sanitizeHtml } from '../../utils/htmlUtils';
+import {
+  buildVoiceChoices,
+  findVoiceByName,
+  listZhVoices,
+  normalizeNameList,
+  parseChoice,
+  pickDefaultChoice,
+  pickEdgeVoice,
+  splitVoices,
+  speakUtterance,
+  VOICE_CUSTOM,
+  VOICE_MORE,
+  type TtsEngine,
+  type VoiceChoice,
+  type XfyunVoice,
+} from '../../utils/ttsEngine';
 
 export interface ExplainQuestion {
   id: string;
@@ -40,6 +56,10 @@ interface TtsConfig {
   configured: boolean;
   voices: { id: string; name: string; group?: string; note?: string }[];
   voice: string;
+  /** 系统设置里勾的课堂常用发音人（空 = 全部显示） */
+  favorites?: string[];
+  /** 系统设置里勾的 Edge 常用音色（短名；空 = 用内置最常用的 6 个） */
+  edgeFavorites?: string[];
   speed: number;
   volume: number;
 }
@@ -215,6 +235,13 @@ export const AiExplainPlayer: React.FC<Props> = ({
   const [marked, setMarked] = useState(false);
   const [ttsConfig, setTtsConfig] = useState<TtsConfig | null>(null);
   const [voice, setVoice] = useState<string>(() => localStorage.getItem(VOICE_KEY) || '');
+  // 语音引擎三级降级：Edge 在线（免费）→ 讯飞云端（按量计费）→ 本机。
+  // choice 存的是下拉值：`edge::<voice.name>` / `xfyun::<vcn>` / `local::<voice.name>`
+  const [choice, setChoice] = useState('');
+  const [voiceChoices, setVoiceChoices] = useState<VoiceChoice[]>([]);
+  /** 点过「更多发音人…」→ 本次讲解内展开全部（不记住，下次仍从精简列表开始） */
+  const [showAllVoices, setShowAllVoices] = useState(false);
+  const [sysVoices, setSysVoices] = useState<{ edge: SpeechSynthesisVoice[]; local: SpeechSynthesisVoice[] }>({ edge: [], local: [] });
   // 题与题之间的停留秒数（默认 3 秒），让学生看完上一题再进下一题；同样记住设置
   const [gapSec, setGapSec] = useState<number>(() => {
     const v = Number(localStorage.getItem(GAP_KEY));
@@ -223,7 +250,8 @@ export const AiExplainPlayer: React.FC<Props> = ({
   const [gapLeft, setGapLeft] = useState(0);
   const gapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const gapTickRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const [degraded, setDegraded] = useState(false);
+  /** 哪一级引擎失败降级了（null = 正常），只用于顶栏提示 */
+  const [degraded, setDegraded] = useState<null | 'edge' | 'xfyun'>(null);
   const [fontScale, setFontScale] = useState<number>(() => {
     const v = Number(localStorage.getItem(FONT_KEY));
     return v >= 0.8 && v <= 2 ? v : 1;
@@ -234,10 +262,13 @@ export const AiExplainPlayer: React.FC<Props> = ({
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const blobCacheRef = useRef<Map<string, Blob>>(new Map());
   const tokenRef = useRef(0);
+  /** 本场讲解内某级引擎失败后锁定降级，避免每句都先试一遍再失败 */
+  const engineLockRef = useRef<TtsEngine | null>(null);
   const finishedRef = useRef<Set<string>>(new Set());
 
   useEffect(() => { localStorage.setItem(FONT_KEY, String(fontScale)); }, [fontScale]);
-  useEffect(() => { if (voice) localStorage.setItem(VOICE_KEY, voice); }, [voice]);
+  // ⛔ 不再直接往 localStorage 写 voice：现在存的是 choice（含引擎），由上面的 choice effect 统一写，
+  //    否则 Edge 选项会被系统默认音色覆盖。
   useEffect(() => { localStorage.setItem(GAP_KEY, String(gapSec)); }, [gapSec]);
 
   // 风格：学生端由父组件传入（access 接口已过滤停用项）；教师端自己拉启用列表。
@@ -283,7 +314,10 @@ export const AiExplainPlayer: React.FC<Props> = ({
 
   const sentences = useMemo(() => splitSentences(script?.scenes?.[sceneIdx]?.narration || ''), [script, sceneIdx]);
   const scene = script?.scenes?.[sceneIdx];
+  const picked = useMemo(() => parseChoice(choice), [choice]);
   const cloudReady = !!ttsConfig?.configured;
+  /** 讯飞请求用的 vcn：选了讯飞就用它，否则用系统默认（从 Edge 降级下来时也要能出声） */
+  const xfyunVcn = picked.engine === 'xfyun' ? picked.id : voice;
 
   // 读语音配置（不返回密钥，只告诉前端有没有配）
   useEffect(() => {
@@ -301,6 +335,8 @@ export const AiExplainPlayer: React.FC<Props> = ({
           if (lastDefault !== cfgVoice) {
             try { localStorage.setItem(VOICE_DEFAULT_KEY, cfgVoice); } catch { /* ignore */ }
             setVoice(cfgVoice);
+            // 当前正在用讯飞时跟着系统默认换；用 Edge / 本机的不要被打断
+            setChoice((prev) => (parseChoice(prev).engine === 'xfyun' ? `xfyun::${cfgVoice}` : prev));
           } else {
             setVoice((v) => v || cfgVoice);
           }
@@ -311,19 +347,15 @@ export const AiExplainPlayer: React.FC<Props> = ({
     })();
   }, [apiBase]);
 
-  // 本机中文语音（云端不可用时用）
+  // 系统音色：Edge 的在线自然音色（Azure 神经网络，免费）与本机 SAPI 一起取，供三级降级用
   useEffect(() => {
-    const pick = () => {
-      const voices = window.speechSynthesis?.getVoices?.() || [];
-      const zh = voices.filter((v) => /^zh(-|_)/i.test(v.lang) || /Chinese|Huihui|Kangkang|Yaoyao|Xiaoxiao|Yunxi/i.test(v.name));
-      voiceRef.current =
-        zh.find((v) => /Huihui|Xiaoxiao/i.test(v.name)) ||
-        zh.find((v) => /Yaoyao|Kangkang/i.test(v.name)) ||
-        zh[0] ||
-        null;
+    const load = () => {
+      const { edge, local } = splitVoices(listZhVoices());
+      setSysVoices({ edge, local });
+      voiceRef.current = local.find((v) => /Huihui|Yaoyao|Kangkang/i.test(v.name)) || local[0] || null;
     };
-    pick();
-    if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = pick;
+    load();
+    if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = load;
     return () => {
       if (window.speechSynthesis) {
         window.speechSynthesis.onvoiceschanged = null;
@@ -332,17 +364,51 @@ export const AiExplainPlayer: React.FC<Props> = ({
     };
   }, []);
 
+  // 下拉选项：Edge 在前、讯飞其次（含老师手填的自定义 vcn）、本机兜底。
+  // 没有 Edge 音色时自动落到讯飞 —— 这就是「没 Edge 就用小露」。
+  // ⛔ 没有 Edge 音色时必须等讯飞配置加载完再定默认，否则会先落成「本机」并记住，配置回来后不再升级。
+  useEffect(() => {
+    const list = buildVoiceChoices(
+      sysVoices.edge,
+      (ttsConfig?.voices || []) as XfyunVoice[],
+      sysVoices.local,
+      {
+        favoriteIds: ttsConfig?.favorites,
+        edgeFavoriteIds: ttsConfig?.edgeFavorites,
+        keepId: ttsConfig?.voice || voice,
+        showAll: showAllVoices,
+      },
+    );
+    setVoiceChoices(list);
+    if (!sysVoices.edge.length && !ttsConfig) return;
+    setChoice((prev) => pickDefaultChoice(list, prev || localStorage.getItem(VOICE_KEY) || '', {
+      xfyunDefaultId: ttsConfig?.voice || voice,
+      preferEdge: normalizeNameList(ttsConfig?.edgeFavorites)[0] || '晓晓',
+    }));
+  }, [sysVoices, ttsConfig, voice, showAllVoices]);
+
+  useEffect(() => { if (choice) localStorage.setItem(VOICE_KEY, choice); }, [choice]);
+
+  const choiceGroups = useMemo(() => {
+    const map = new Map<string, VoiceChoice[]>();
+    voiceChoices.forEach((c) => {
+      if (!map.has(c.group)) map.set(c.group, []);
+      map.get(c.group)!.push(c);
+    });
+    return Array.from(map.entries());
+  }, [voiceChoices]);
+
   /** 取一句的音频 blob（带内存缓存，重讲同一句不再消耗额度） */
   const getBlob = useCallback(async (text: string): Promise<Blob> => {
     const speed = Math.max(0, Math.min(100, Math.round(50 * rate)));
-    const key = `${voice}|${speed}|${text}`;
+    const key = `${xfyunVcn}|${speed}|${text}`;
     const hit = blobCacheRef.current.get(key);
     if (hit) return hit;
 
     const res = await fetch(`${apiBase}/tts`, {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ text, voice: voice || undefined, speed }),
+      body: JSON.stringify({ text, voice: xfyunVcn || undefined, speed }),
     });
     if (!res.ok) {
       const json = await res.json().catch(() => null);
@@ -352,7 +418,7 @@ export const AiExplainPlayer: React.FC<Props> = ({
     if (!blob.size) throw new Error('语音文件为空');
     blobCacheRef.current.set(key, blob);
     return blob;
-  }, [voice, rate, apiBase]);
+  }, [xfyunVcn, rate, apiBase]);
 
   const playBlob = useCallback((blob: Blob) => new Promise<void>((resolve, reject) => {
     const url = URL.createObjectURL(blob);
@@ -498,7 +564,29 @@ export const AiExplainPlayer: React.FC<Props> = ({
     };
 
     (async () => {
-      if (cloudReady) {
+      let engine: TtsEngine = engineLockRef.current || picked.engine;
+
+      // ① Edge 在线自然音色（Azure 神经网络，免费、无额度）
+      if (engine === 'edge') {
+        const v = findVoiceByName(sysVoices.edge, picked.id) || pickEdgeVoice(sysVoices.edge);
+        if (v) {
+          try {
+            await speakUtterance(text, v, rate);
+            if (!cancelled && token === tokenRef.current) advance();
+            return;
+          } catch {
+            engineLockRef.current = cloudReady ? 'xfyun' : 'local';
+            setDegraded('edge');
+            engine = engineLockRef.current;
+          }
+        } else {
+          engineLockRef.current = cloudReady ? 'xfyun' : 'local';
+          engine = engineLockRef.current;
+        }
+      }
+
+      // ② 讯飞云端（按量计费，后端有内存缓存）
+      if (engine === 'xfyun' && cloudReady) {
         try {
           const blob = await getBlob(text);
           if (cancelled || token !== tokenRef.current) return;
@@ -506,9 +594,12 @@ export const AiExplainPlayer: React.FC<Props> = ({
           advance();
           return;
         } catch {
-          setDegraded(true); // 额度/网络/音色未开通 → 回落本机，不打断讲课
+          engineLockRef.current = 'local';
+          setDegraded('xfyun'); // 额度/网络/音色未开通 → 回落本机，不打断讲课
         }
       }
+
+      // ③ 本机 SAPI
       if (!cancelled && token === tokenRef.current) speakLocal();
     })();
 
@@ -517,7 +608,7 @@ export const AiExplainPlayer: React.FC<Props> = ({
       window.speechSynthesis?.cancel();
       try { audioRef.current?.pause(); } catch { /* ignore */ }
     };
-  }, [playing, loading, script, scene, sentences, sentenceIdx, sceneIdx, rate, idx, current, questions.length, cloudReady, getBlob, playBlob, markExplained, goQuestion, gapSec]);
+  }, [playing, loading, script, scene, sentences, sentenceIdx, sceneIdx, rate, idx, current, questions.length, cloudReady, picked, sysVoices, getBlob, playBlob, markExplained, goQuestion, gapSec]);
 
   // 键盘：空格暂停、左右切场景、Esc 退出
   useEffect(() => {
@@ -563,48 +654,57 @@ export const AiExplainPlayer: React.FC<Props> = ({
           </span>
         </div>
         <div className="flex items-center gap-2 text-sm">
-          {/* 音色：仅云端可用时显示 */}
-          {cloudReady && ttsConfig && ttsConfig.voices.length > 0 && (
+          {/* 音色：Edge 在线（免费）/ 讯飞（按量计费）/ 本机，三组一起放，没有 Edge 就没有 Edge 组 */}
+          {voiceChoices.length > 0 && (
             <select
-              value={voice || '__custom__'}
+              value={choice || ''}
               onChange={(e) => {
                 const v = e.target.value;
-                if (v === '__custom__') {
+                // 「更多发音人…」不是音色，选中它只是把折叠的项展开
+                if (v === VOICE_MORE) { setShowAllVoices(true); return; }
+                if (v === VOICE_CUSTOM) {
                   // 讯飞没有「列出发音人」接口 → 允许手填控制台里看到的 vcn
                   const input = window.prompt('填讯飞控制台 → 语音合成 → 发音人管理 里显示的参数值，例如 x4_xxx / vixm', voice || '');
                   const vcn = (input || '').trim();
                   if (!/^[A-Za-z0-9_]{1,40}$/.test(vcn)) return; // 取消或格式不对就保持原音色
                   setVoice(vcn);
-                  setDegraded(false);
+                  setChoice(`xfyun::${vcn}`);
+                  engineLockRef.current = null;
+                  setDegraded(null);
                   return;
                 }
-                setVoice(v);
-                setDegraded(false);
+                setChoice(v);
+                engineLockRef.current = null;
+                setDegraded(null);
               }}
-              className="rounded-lg border border-gray-300 px-2 py-1.5 text-sm"
-              title="切换发音人"
+              className="max-w-[12rem] rounded-lg border border-gray-300 px-2 py-1.5 text-sm"
+              title="发音人：Edge 在线免费 / 讯飞按量计费 / 本机兜底"
             >
-              {/* 系统设置里填的自定义发音人：直接把参数值显示出来，别再逼老师重填一遍 */}
-              {voice && !ttsConfig.voices.some((v) => v.id === voice) && (
-                <option value={voice}>自定义：{voice}</option>
-              )}
-              {Array.from(new Set(ttsConfig.voices.map((v) => v.group || '其他'))).map((g) => (
-                <optgroup key={g} label={g}>
-                  {ttsConfig.voices.filter((v) => (v.group || '其他') === g).map((v) => (
-                    <option key={v.id} value={v.id}>{v.name}{v.note ? `（${v.note}）` : ''}</option>
-                  ))}
+              {choiceGroups.map(([group, list]) => (
+                <optgroup key={group} label={group}>
+                  {list.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
                 </optgroup>
               ))}
-              {/* 列表外的发音人：讯飞没有列出发音人的接口，后台开通了但这里没有很正常 */}
-              <option value="__custom__">{voice ? '换一个自定义发音人…' : '自定义发音人…'}</option>
+              {/* 老师手填的 vcn 不在清单里时单独回显，否则下拉会显示成空白 */}
+              {picked.engine === 'xfyun' && !voiceChoices.some((c) => c.value === choice) && (
+                <option value={choice}>自定义：{picked.id}</option>
+              )}
+              <option value={VOICE_CUSTOM}>{picked.engine === 'xfyun' ? '换一个自定义发音人…' : '自定义讯飞发音人…'}</option>
             </select>
           )}
-          {!cloudReady && (
-            <span className="rounded-lg bg-gray-100 px-2 py-1 text-xs text-gray-500" title="在系统配置 → AI设置 里填讯飞密钥可换成自然音色">
-              本机语音
+          {!voiceChoices.length && (
+            <span className="rounded-lg bg-gray-100 px-2 py-1 text-xs text-gray-500">本机语音</span>
+          )}
+          {degraded && (
+            <span
+              className="rounded-lg bg-amber-50 px-2 py-1 text-xs text-amber-700"
+              title={degraded === 'edge'
+                ? 'Edge 在线语音不可用（断网或非 Edge 浏览器），已降级到讯飞 / 本机'
+                : '讯飞语音不可用（额度、密钥或发音人未开通），已改用本机朗读'}
+            >
+              {degraded === 'edge' ? '已降级' : '本机语音'}
             </span>
           )}
-          {degraded && <span className="rounded-lg bg-amber-50 px-2 py-1 text-xs text-amber-700">已回落本机语音</span>}
 
           {/* 题间隔：讲完一题停留多久再进下一题 */}
           <div className="flex items-center gap-1 rounded-lg border border-gray-300 px-2 py-1 text-xs">

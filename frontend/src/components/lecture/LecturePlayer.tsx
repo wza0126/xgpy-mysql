@@ -1,6 +1,21 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { authHeaders } from '../../utils/authToken';
+import {
+  buildVoiceChoices,
+  findVoiceByName,
+  listZhVoices,
+  normalizeNameList,
+  parseChoice,
+  pickDefaultChoice,
+  pickEdgeVoice,
+  splitVoices,
+  speakUtterance,
+  VOICE_MORE,
+  type TtsEngine,
+  type VoiceChoice,
+  type XfyunVoice,
+} from '../../utils/ttsEngine';
 
 export type LecturePageKind = 'lead' | 'point' | 'steps' | 'table' | 'chart' | 'code' | 'example' | 'recap';
 
@@ -37,6 +52,10 @@ interface TtsConfig {
   configured: boolean;
   voices: { id: string; name: string; group?: string; note?: string }[];
   voice: string;
+  /** 系统设置里勾的课堂常用发音人（空 = 全部显示） */
+  favorites?: string[];
+  /** 系统设置里勾的 Edge 常用音色（短名；空 = 用内置最常用的 6 个） */
+  edgeFavorites?: string[];
   speed: number;
 }
 
@@ -94,11 +113,19 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
   const [playing, setPlaying] = useState(true);
   const [ttsConfig, setTtsConfig] = useState<TtsConfig | null>(null);
   const [voice, setVoice] = useState('');
+  // 语音引擎三级降级：Edge 在线（免费）→ 讯飞云端（按量计费）→ 本机。
+  // choice 是下拉里的值：`edge::<voice.name>` / `xfyun::<vcn>` / `local::<voice.name>`
+  const [choice, setChoice] = useState('');
+  const [voiceChoices, setVoiceChoices] = useState<VoiceChoice[]>([]);
+  /** 点过「更多发音人…」→ 这次播放期间展开全部（不记住，下次仍从精简列表开始） */
+  const [showAllVoices, setShowAllVoices] = useState(false);
+  const [sysVoices, setSysVoices] = useState<{ edge: SpeechSynthesisVoice[]; local: SpeechSynthesisVoice[] }>({ edge: [], local: [] });
   const [rate, setRate] = useState(() => readNum(RATE_KEY, 1));
   const [fontScale, setFontScale] = useState(() => readNum(FONT_KEY, 1));
   const [autoNext, setAutoNext] = useState(() => localStorage.getItem(AUTONEXT_KEY) !== '0');
   const [revealed, setRevealed] = useState(false);
-  const [degraded, setDegraded] = useState(false);
+  /** 哪一级引擎失败降级了（null = 一切正常），只用于顶栏提示 */
+  const [degraded, setDegraded] = useState<null | 'edge' | 'xfyun'>(null);
   const [fadeIn, setFadeIn] = useState(false);
 
   const page = pages[pageIdx];
@@ -109,6 +136,8 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const blobCacheRef = useRef<Map<string, Blob>>(new Map());
   const voiceRef = useRef<SpeechSynthesisVoice | null>(null);
+  /** 本课内一旦某级引擎失败就锁定降级，避免每句都先去试一遍再失败（每句白等 200~500ms） */
+  const engineLockRef = useRef<TtsEngine | null>(null);
   const nextTimerRef = useRef<number | null>(null);
   const markedRef = useRef<Set<string>>(new Set());
 
@@ -139,29 +168,62 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
   useEffect(() => { localStorage.setItem(FONT_KEY, String(fontScale)); }, [fontScale]);
   useEffect(() => { localStorage.setItem(AUTONEXT_KEY, autoNext ? '1' : '0'); }, [autoNext]);
 
-  // 本机音色（云端不可用时回落）
+  // 系统音色：Edge 的在线自然音色（Azure 神经网络，免费）与本机 SAPI 音色一起取，
+  // 用于「Edge 优先 → 讯飞 → 本机」三级降级。getVoices 异步填充，所以 onvoiceschanged 再取一次。
   useEffect(() => {
     if (!window.speechSynthesis) return;
-    const pick = () => {
-      const list = window.speechSynthesis.getVoices() || [];
-      voiceRef.current = list.find((v) => /zh[-_]CN/i.test(v.lang)) || null;
+    const load = () => {
+      const { edge, local } = splitVoices(listZhVoices());
+      setSysVoices({ edge, local });
+      // 本机兜底音色：优先老牌中文音色
+      voiceRef.current = local.find((v) => /Huihui|Xiaoxiao|Yaoyao|Kangkang/i.test(v.name)) || local[0] || null;
     };
-    pick();
-    window.speechSynthesis.onvoiceschanged = pick;
+    load();
+    window.speechSynthesis.onvoiceschanged = load;
     return () => { window.speechSynthesis.onvoiceschanged = null; };
   }, []);
 
+  // 下拉选项：Edge 在前、讯飞其次、本机兜底。没有 Edge 音色时列表里就没有 Edge 组，
+  // 默认值自动落到讯飞 —— 这就是老师要的「没 Edge 就用小露」。
+  // ⛔ 没有 Edge 音色时**必须等讯飞配置加载完**再定默认：否则第一次渲染时讯飞列表还是空的，
+  //    默认会落成「本机」并记住，配置回来以后也再不会被升级成讯飞（实测踩过）。
+  useEffect(() => {
+    const list = buildVoiceChoices(
+      sysVoices.edge,
+      (ttsConfig?.voices || []) as XfyunVoice[],
+      sysVoices.local,
+      {
+        favoriteIds: ttsConfig?.favorites,
+        edgeFavoriteIds: ttsConfig?.edgeFavorites,
+        keepId: ttsConfig?.voice || voice,
+        showAll: showAllVoices,
+      },
+    );
+    setVoiceChoices(list);
+    if (!sysVoices.edge.length && !ttsConfig) return;
+    setChoice((prev) => pickDefaultChoice(list, prev || localStorage.getItem(VOICE_KEY) || '', {
+      xfyunDefaultId: ttsConfig?.voice || voice,
+      preferEdge: normalizeNameList(ttsConfig?.edgeFavorites)[0] || '晓晓',
+    }));
+  }, [sysVoices, ttsConfig, voice, showAllVoices]);
+
+  useEffect(() => { if (choice) localStorage.setItem(VOICE_KEY, choice); }, [choice]);
+
+  const picked = useMemo(() => parseChoice(choice), [choice]);
+
   const cloudReady = !!ttsConfig?.configured;
+  /** 讯飞请求用的 vcn：下拉选了讯飞就用它，否则用系统默认（Edge 降级下来时也要能出声） */
+  const xfyunVcn = picked.engine === 'xfyun' ? picked.id : voice;
 
   const getBlob = useCallback(async (text: string): Promise<Blob> => {
     const speed = Math.max(0, Math.min(100, Math.round(50 * rate)));
-    const key = `${voice}|${speed}|${text}`;
+    const key = `${xfyunVcn}|${speed}|${text}`;
     const hit = blobCacheRef.current.get(key);
     if (hit) return hit;
     const res = await fetch(`${apiBase}/tts`, {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ text, voice: voice || undefined, speed }),
+      body: JSON.stringify({ text, voice: xfyunVcn || undefined, speed }),
     });
     if (!res.ok) {
       const json = await res.json().catch(() => null);
@@ -171,7 +233,7 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
     if (!blob.size) throw new Error('语音文件为空');
     blobCacheRef.current.set(key, blob);
     return blob;
-  }, [voice, rate, apiBase]);
+  }, [xfyunVcn, rate, apiBase]);
 
   const playBlob = useCallback((blob: Blob) => new Promise<void>((resolve, reject) => {
     const url = URL.createObjectURL(blob);
@@ -250,7 +312,30 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
     };
 
     (async () => {
-      if (cloudReady && voice) {
+      let engine: TtsEngine = engineLockRef.current || picked.engine;
+
+      // ① Edge 在线自然音色（Azure 神经网络，免费、无额度）
+      if (engine === 'edge') {
+        const v = findVoiceByName(sysVoices.edge, picked.id) || pickEdgeVoice(sysVoices.edge);
+        if (v) {
+          try {
+            await speakUtterance(text, v, rate);
+            if (!cancelled && token === tokenRef.current) advance();
+            return;
+          } catch {
+            // 断网 / Edge 朗读通道不可用 → 降一级，别把课卡住
+            engineLockRef.current = cloudReady ? 'xfyun' : 'local';
+            setDegraded('edge');
+            engine = engineLockRef.current;
+          }
+        } else {
+          engineLockRef.current = cloudReady ? 'xfyun' : 'local';
+          engine = engineLockRef.current;
+        }
+      }
+
+      // ② 讯飞云端（按量计费，后端有内存缓存）
+      if (engine === 'xfyun' && cloudReady) {
         try {
           const blob = await getBlob(text);
           if (cancelled || token !== tokenRef.current) return;
@@ -258,9 +343,12 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
           advance();
           return;
         } catch {
-          setDegraded(true); // 额度/网络/音色未开通 → 回落本机，别把课卡住
+          engineLockRef.current = 'local';
+          setDegraded('xfyun'); // 额度/网络/音色未开通 → 回落本机
         }
       }
+
+      // ③ 本机 SAPI
       if (!cancelled && token === tokenRef.current) speakLocal();
     })();
 
@@ -269,16 +357,17 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
       window.speechSynthesis?.cancel();
       try { audioRef.current?.pause(); } catch { /* ignore */ }
     };
-  }, [playing, page, sentences, sentenceIdx, pageIdx, isLastPage, autoNext, cloudReady, voice, rate, getBlob, playBlob, goPage, markDone]);
+  }, [playing, page, sentences, sentenceIdx, pageIdx, isLastPage, autoNext, cloudReady, picked, sysVoices, rate, getBlob, playBlob, goPage, markDone]);
 
-  // 预取下一句：讲这句时下一句已经在合成，听感连贯
+  // 预取下一句：只在走讯飞（有网络往返）时预取；Edge 是边播边合成，预取没意义
   useEffect(() => {
-    if (!cloudReady || !voice) return;
+    const engine = engineLockRef.current || picked.engine;
+    if (!cloudReady || engine !== 'xfyun') return;
     const next = sentences[sentenceIdx + 1];
     if (!next) return;
     const t = window.setTimeout(() => { getBlob(next).catch(() => {}); }, 250);
     return () => window.clearTimeout(t);
-  }, [cloudReady, voice, sentences, sentenceIdx, getBlob]);
+  }, [cloudReady, picked, sentences, sentenceIdx, getBlob]);
 
   // 键盘：空格暂停 / 左右翻页 / Esc 退出
   useEffect(() => {
@@ -308,15 +397,14 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
 
   const s = fontScale;
   const totalSentences = sentences.length;
-  const voiceGroups = useMemo(() => {
-    const map = new Map<string, TtsConfig['voices']>();
-    (ttsConfig?.voices || []).forEach((v) => {
-      const g = v.group || '其他';
-      if (!map.has(g)) map.set(g, []);
-      map.get(g)!.push(v);
+  const choiceGroups = useMemo(() => {
+    const map = new Map<string, VoiceChoice[]>();
+    voiceChoices.forEach((c) => {
+      if (!map.has(c.group)) map.set(c.group, []);
+      map.get(c.group)!.push(c);
     });
     return Array.from(map.entries());
-  }, [ttsConfig]);
+  }, [voiceChoices]);
 
   const body = (
     <div className="fixed inset-0 z-[9999] flex flex-col bg-slate-50" style={{ fontSize: `${s}rem` }}>
@@ -329,23 +417,33 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
           <span className="truncate text-base font-semibold text-gray-800" title={lecture.title}>{lecture.title}</span>
           {lecture.chapter && <span className="shrink-0 text-sm text-gray-400">{lecture.chapter}</span>}
           {degraded && (
-            <span className="shrink-0 rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-700" title="云端语音不可用，已自动改用本机朗读">
-              本机语音
+            <span
+              className="shrink-0 rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-700"
+              title={degraded === 'edge'
+                ? 'Edge 在线语音不可用（断网或非 Edge 浏览器），已降级到讯飞 / 本机'
+                : '讯飞语音不可用（额度、密钥或发音人未开通），已改用本机朗读'}
+            >
+              {degraded === 'edge' ? '已降级' : '本机语音'}
             </span>
           )}
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <span className="text-sm text-gray-500">第 {pageIdx + 1} / {pages.length} 页</span>
-          {ttsConfig?.configured && (
+          {voiceChoices.length > 0 && (
             <select
-              value={voice}
-              onChange={(e) => { setVoice(e.target.value); setDegraded(false); }}
-              className="max-w-[9rem] rounded-lg border border-gray-300 px-2 py-1 text-xs"
-              title="发音人"
+              value={choice}
+              onChange={(e) => {
+                const v = e.target.value;
+                // 「更多发音人…」不是音色，选中它只是把折叠的项展开
+                if (v === VOICE_MORE) { setShowAllVoices(true); return; }
+                setChoice(v); engineLockRef.current = null; setDegraded(null);
+              }}
+              className="max-w-[11rem] rounded-lg border border-gray-300 px-2 py-1 text-xs"
+              title="发音人：Edge 在线免费 / 讯飞按量计费 / 本机兜底"
             >
-              {voiceGroups.map(([group, list]) => (
+              {choiceGroups.map(([group, list]) => (
                 <optgroup key={group} label={group}>
-                  {list.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+                  {list.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
                 </optgroup>
               ))}
             </select>

@@ -107,11 +107,17 @@ async function main() {
       return { tasks: has('课堂任务'), lectures: has('AI 讲堂') };
     })()`);
     ok('出现了「课堂任务 / AI 讲堂」两个页签', !!tabs.tasks && !!tabs.lectures, JSON.stringify(tabs));
-    ok('默认停在「课堂任务」页签', await cdp.evalJs(`(() => (document.body.innerText || '').includes('新建任务')) ()`));
+    // 老师要求默认落在 AI 讲堂：进去就能看到微课程列表 / 新建入口
+    ok('默认停在「AI 讲堂」页签', await cdp.evalJs(`(() => (document.body.innerText || '').includes('新建微课程')) ()`));
+
+    // 另一个页签仍要能正常切回（TaskManager 是 CSS 隐藏而非卸载，别被默认页签挡住）
+    await cdp.evalJs(CLICK_TEXT('课堂任务'));
+    await cdp.sleep(900);
+    ok('切到「课堂任务」页签仍可用', await cdp.evalJs(`(() => (document.body.innerText || '').includes('新建任务')) ()`));
+    await cdp.evalJs(CLICK_TEXT('AI 讲堂'));
+    await cdp.sleep(900);
 
     console.log('\n== B. 新建向导 → 生成 → 编辑器 ==');
-    await cdp.evalJs(CLICK_TEXT('AI 讲堂'));
-    await cdp.sleep(1200);
     const enter = await cdp.evalJs(CLICK_TEXT('新建微课程'));
     ok('进入 AI 讲堂并找到「新建微课程」', enter === 'ok', `click=${enter}`);
 
