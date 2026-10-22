@@ -829,16 +829,13 @@ export const PythonProgramming: React.FC = () => {
                       <i className="fa fa-paper-plane mr-1"></i>提交作业
                     </button>
                   )}
-                  {/* AI 语音讲解：只在老师放开「讲解」、且是编程填空题时出现 */}
+                  {/* AI 语音讲解：只在老师放开「讲解」、且是编程填空题时出现。
+                      ⛔ 不弹「会显示答案」的确认框：吴老主要用学生账号投屏演示，
+                         每次多一步确认反而打断讲解节奏。 */}
                   {explainEnabled && selectedTask?.task_type === 'fill_blank' && selectedTask.blank_template && (
                     <button
                       className="px-3 py-1 bg-amber-500 text-white rounded hover:bg-amber-600 text-sm"
-                      onClick={() => {
-                        const unsubmitted = submission?.status !== 'submitted' && submission?.status !== 'graded';
-                        // 讲解会把每个空的正确答案显示在空里 —— 没交作业时先提醒一句，避免手滑看答案
-                        if (unsubmitted && !confirm('AI 讲解会逐个空显示正确答案。\n还没提交，确定要先看讲解吗？')) return;
-                        setFillExplainOpen(true);
-                      }}
+                      onClick={() => setFillExplainOpen(true)}
                       title="全屏讲解这道题的填空技巧（老师已为你开通）"
                     >
                       <i className="fa-solid fa-headphones mr-1"></i>AI 语音讲解

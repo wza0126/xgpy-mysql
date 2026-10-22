@@ -28,6 +28,13 @@ import {
  */
 const PLACEHOLDER_CHARS = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳';
 const VOICE_KEY = 'xgpy_fillblank_voice';
+const FONT_KEY = 'xgpy_fillblank_font';
+const RATE_KEY = 'xgpy_fillblank_rate';
+
+const readNum = (key: string, fallback: number) => {
+  const v = Number(localStorage.getItem(key));
+  return Number.isFinite(v) && v > 0 ? v : fallback;
+};
 
 interface ScriptBlank {
   index: number;
@@ -106,7 +113,11 @@ export const FillBlankExplainPlayer: React.FC<Props> = ({
   const [stepIdx, setStepIdx] = useState(0);
   const [sentenceIdx, setSentenceIdx] = useState(0);
   const [playing, setPlaying] = useState(true);
-  const [rate, setRate] = useState(1);
+  const [rate, setRate] = useState(() => readNum(RATE_KEY, 0.8));
+  /** 字号倍率（投屏/近距离都照顾到），调完记住 */
+  const [fontScale, setFontScale] = useState(() => readNum(FONT_KEY, 1));
+  /** 自动进下一步的倒计时（开场页停留 5 秒时显示给学生看） */
+  const [waitLeft, setWaitLeft] = useState(0);
 
   const [ttsConfig, setTtsConfig] = useState<TtsConfig | null>(null);
   const [voice, setVoice] = useState('');
@@ -230,10 +241,21 @@ export const FillBlankExplainPlayer: React.FC<Props> = ({
   const goStep = useCallback((next: number) => {
     if (next < 0 || next >= steps.length) return;
     stopAll();
+    setWaitLeft(0);
     setStepIdx(next);
     setSentenceIdx(0);
     setPlaying(true);
   }, [steps.length, stopAll]);
+
+  useEffect(() => { localStorage.setItem(FONT_KEY, String(fontScale)); }, [fontScale]);
+  useEffect(() => { localStorage.setItem(RATE_KEY, String(rate)); }, [rate]);
+
+  // 自动进下一步的倒计时（只在开场页停留时出现，让学生多看一会儿题）
+  useEffect(() => {
+    if (waitLeft <= 0) return;
+    const t = window.setInterval(() => setWaitLeft((v) => (v > 0 ? v - 1 : 0)), 1000);
+    return () => window.clearInterval(t);
+  }, [waitLeft > 0]);
 
   const getBlob = useCallback(async (text: string): Promise<Blob> => {
     const key = `${xfyunVcn}|${text}`;
@@ -277,9 +299,14 @@ export const FillBlankExplainPlayer: React.FC<Props> = ({
       if (cancelled || token !== tokenRef.current) return;
       if (sentenceIdx < sentences.length - 1) { setSentenceIdx(sentenceIdx + 1); return; }
       if (stepIdx < steps.length - 1) {
+        // 开场页讲完多停 5 秒：题目长，学生要时间看图看代码；
+        // 其余步骤（逐空讲解）只停 0.9 秒，节奏才不拖沓。
+        const isIntro = steps[stepIdx] && steps[stepIdx].kind === 'intro';
+        const waitMs = isIntro ? 5000 : 900;
+        setWaitLeft(Math.ceil(waitMs / 1000));
         nextTimerRef.current = window.setTimeout(() => {
-          if (token === tokenRef.current) goStep(stepIdx + 1);
-        }, 900);
+          if (!cancelled && token === tokenRef.current) { setWaitLeft(0); goStep(stepIdx + 1); }
+        }, waitMs);
       } else {
         setPlaying(false);
       }
@@ -307,7 +334,7 @@ export const FillBlankExplainPlayer: React.FC<Props> = ({
       window.speechSynthesis?.cancel();
       try { audioRef.current?.pause(); } catch { /* ignore */ }
     };
-  }, [playing, stepIdx, sentenceIdx, sentences, steps.length, edgeVoice, localVoice, cloudReady, rate, getBlob, playBlob, goStep]);
+  }, [playing, stepIdx, sentenceIdx, sentences, steps, edgeVoice, localVoice, cloudReady, rate, getBlob, playBlob, goStep]);
 
   // 预取下一句（讯飞有网络往返，预取听感更连贯）
   useEffect(() => {
@@ -358,15 +385,11 @@ export const FillBlankExplainPlayer: React.FC<Props> = ({
 
         nodes.push(
           <span key={`b-${li}-${ci}`} className="relative inline-block align-baseline">
-            {isActive && (
-              <span className="absolute -top-6 left-1/2 z-10 -translate-x-1/2 whitespace-nowrap rounded bg-amber-400 px-1.5 py-0.5 text-[0.6em] font-bold text-amber-950 shadow">
-                第 {blankNo + 1} 空
-              </span>
-            )}
+            {/* ⛔ 不加放大、不加浮标：放大和上方标签都会压到相邻代码行，投屏时挡字 */}
             <span
-              className={`mx-0.5 inline-block rounded px-1.5 py-0.5 font-mono transition-all ${
+              className={`mx-0.5 inline-block rounded px-1.5 py-0.5 font-mono transition-colors ${
                 isActive
-                  ? 'scale-105 bg-amber-300 text-[0.95em] font-bold text-amber-950 shadow-lg ring-4 ring-amber-400/50'
+                  ? 'bg-amber-300 font-bold text-amber-950 ring-4 ring-amber-400/60'
                   : 'border border-dashed border-amber-400/70 bg-amber-400/10 text-amber-200'
               }`}
             >
@@ -374,7 +397,7 @@ export const FillBlankExplainPlayer: React.FC<Props> = ({
               {isActive ? (right || `${blankNo + 1}`) : (mine || ch)}
             </span>
             {isActive && wrong && (
-              <span className="ml-1 inline-block rounded bg-rose-500/20 px-1 py-0.5 text-[0.62em] text-rose-300 line-through">
+              <span className="ml-1 inline-block rounded bg-rose-500/20 px-1 py-0.5 font-mono text-rose-300 line-through">
                 你填{mine}
               </span>
             )}
@@ -394,7 +417,7 @@ export const FillBlankExplainPlayer: React.FC<Props> = ({
   const cur = Math.min(stepIdx + 1, total);
 
   const body = (
-    <div className="fixed inset-0 z-[9999] flex flex-col bg-slate-950 text-slate-100">
+    <div className="fixed inset-0 z-[9999] flex flex-col bg-slate-950 text-slate-100" style={{ fontSize: `${fontScale}rem` }}>
       {/* 顶栏 */}
       <div className="flex shrink-0 items-center justify-between border-b border-slate-800 bg-slate-900 px-5 py-2.5">
         <div className="flex min-w-0 items-center gap-3">
@@ -434,11 +457,27 @@ export const FillBlankExplainPlayer: React.FC<Props> = ({
             className="rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs text-slate-200"
             title="语速"
           >
+            <option value="0.7">0.7×</option>
             <option value="0.8">0.8×</option>
+            <option value="0.9">0.9×</option>
             <option value="1">1.0×</option>
             <option value="1.15">1.15×</option>
             <option value="1.3">1.3×</option>
           </select>
+          {/* 字号可调：机房/投屏/手机三种距离差很多，调完记住 */}
+          <div className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-1 py-0.5">
+            <button
+              onClick={() => setFontScale((v) => Math.max(0.8, +(v - 0.1).toFixed(2)))}
+              className="px-1.5 text-xs text-slate-300 hover:text-white"
+              title="缩小字号"
+            >A-</button>
+            <span className="text-[11px] text-slate-500">{Math.round(fontScale * 100)}%</span>
+            <button
+              onClick={() => setFontScale((v) => Math.min(2, +(v + 0.1).toFixed(2)))}
+              className="px-1.5 text-sm text-slate-300 hover:text-white"
+              title="放大字号（投屏用）"
+            >A+</button>
+          </div>
           <button onClick={onClose} className="rounded-lg px-2.5 py-1.5 text-slate-400 hover:bg-slate-800 hover:text-slate-100" title="退出（Esc）">
             <i className="fa-solid fa-xmark"></i>
           </button>
@@ -459,23 +498,23 @@ export const FillBlankExplainPlayer: React.FC<Props> = ({
       ) : (
         <div className="flex min-h-0 flex-1">
           {/* 左：题目（全程显示） */}
-          <div className="flex min-w-0 flex-[3] flex-col border-r border-slate-800">
+          <div className="flex min-w-0 flex-1 flex-col border-r border-slate-800">
             <div className="flex shrink-0 items-center gap-2 border-b border-slate-800 bg-slate-900/60 px-4 py-1.5 text-xs text-slate-400">
               <i className="fa-solid fa-file-code"></i>题目
               <span className="ml-auto text-slate-500">琥珀色是空位 · 讲到哪个空，那个空就亮起来</span>
             </div>
             {description && (
-              <div className="max-h-32 shrink-0 overflow-auto border-b border-slate-800 px-4 py-2 text-sm leading-6 text-slate-300">
+              <div className="max-h-32 shrink-0 overflow-auto border-b border-slate-800 px-4 py-2 text-[0.9em] leading-7 text-slate-300">
                 {description}
               </div>
             )}
-            <div className="min-h-0 flex-1 overflow-auto px-5 py-5 font-mono text-[1.05rem] text-slate-100">
+            <div className="min-h-0 flex-1 overflow-auto px-5 py-5 font-mono text-[1.08em] text-slate-100">
               {codeView}
             </div>
           </div>
 
           {/* 右：讲解卡 */}
-          <div className="flex w-[26rem] shrink-0 flex-col bg-slate-900">
+          <div className="flex min-w-0 flex-1 flex-col border-l border-slate-800 bg-slate-900">
             <div className="flex shrink-0 items-center justify-between border-b border-slate-800 px-4 py-1.5 text-xs text-slate-400">
               <span><i className="fa-solid fa-chalkboard mr-1"></i>讲解</span>
               <span>{step?.kind === 'blank' ? `第 ${(step.idx + 1)} 空 / 共 ${script?.blanks.length} 空` : step?.kind === 'intro' ? '先看整体' : '小结'}</span>
@@ -485,7 +524,7 @@ export const FillBlankExplainPlayer: React.FC<Props> = ({
               {step?.kind === 'blank' && activeBlank ? (
                 <div>
                   <p className="text-xs uppercase tracking-wide text-amber-400">正确答案</p>
-                  <p className="mt-1 break-all rounded-xl bg-amber-400/15 px-4 py-3 font-mono text-2xl font-bold text-amber-300 ring-1 ring-amber-400/40">
+                  <p className="mt-1 break-all rounded-xl bg-amber-400/15 px-4 py-3 font-mono text-[2em] font-bold text-amber-300 ring-1 ring-amber-400/40">
                     {activeBlank.answers[0] || '（题库未配置）'}
                   </p>
                   {activeBlank.answers.length > 1 && (
@@ -505,7 +544,7 @@ export const FillBlankExplainPlayer: React.FC<Props> = ({
                   })()}
 
                   <p className="mt-5 text-xs uppercase tracking-wide text-slate-500">为什么这么填</p>
-                  <p className="mt-1 text-[1.02rem] leading-7 text-slate-200">{activeBlank.why}</p>
+                  <p className="mt-1 text-[1.02em] leading-8 text-slate-200">{activeBlank.why}</p>
 
                   {activeBlank.tip && (
                     <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2">
@@ -519,7 +558,7 @@ export const FillBlankExplainPlayer: React.FC<Props> = ({
                   <p className="text-xs uppercase tracking-wide text-slate-500">
                     {step?.kind === 'intro' ? '这道题考什么' : '小结'}
                   </p>
-                  <p className="mt-2 text-[1.05rem] leading-8 text-slate-200">
+                  <p className="mt-2 text-[1.05em] leading-9 text-slate-200">
                     {step?.kind === 'intro' ? script?.intro : script?.summary}
                   </p>
                   {step?.kind === 'intro' && script && (
@@ -528,7 +567,7 @@ export const FillBlankExplainPlayer: React.FC<Props> = ({
                         <button
                           key={i}
                           onClick={() => goStep(i + 1)}
-                          className="flex w-full items-center gap-2 rounded-lg border border-slate-700 bg-slate-800/60 px-3 py-2 text-left text-sm text-slate-300 hover:border-amber-500/50 hover:text-amber-200"
+                          className="flex w-full items-center gap-2 rounded-lg border border-slate-700 bg-slate-800/60 px-3 py-2 text-left text-[0.88em] text-slate-300 hover:border-amber-500/50 hover:text-amber-200"
                         >
                           <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-amber-500/20 text-[11px] font-bold text-amber-300">{b.index}</span>
                           <span className="truncate">{b.line.trim() || '（这一行只有空）'}</span>
@@ -543,7 +582,7 @@ export const FillBlankExplainPlayer: React.FC<Props> = ({
 
             {/* 字幕：当前句高亮 */}
             <div className="shrink-0 border-t border-slate-800 bg-slate-950/60 px-4 py-3">
-              <p className="text-sm leading-7">
+              <p className="text-[0.92em] leading-7">
                 {sentences.map((s, i) => (
                   <span key={i} className={i === sentenceIdx ? 'rounded bg-amber-400/25 px-0.5 font-medium text-amber-200' : i < sentenceIdx ? 'text-slate-600' : 'text-slate-400'}>
                     {s}
@@ -551,6 +590,17 @@ export const FillBlankExplainPlayer: React.FC<Props> = ({
                 ))}
                 {!sentences.length && <span className="text-slate-600">（这一步没有讲解词）</span>}
               </p>
+              {/* 开场页讲完要停 5 秒：给个倒计时，学生知道什么时候进入第一个空。
+                  普通步骤只停 0.9 秒，不显示（1 秒倒计时反而闪得晃眼）。 */}
+              {waitLeft > 1 && (
+                <p className="mt-1.5 text-xs text-amber-400">
+                  <i className="fa-solid fa-hourglass-half mr-1"></i>
+                  {waitLeft} 秒后进入
+                  {steps[stepIdx + 1]?.kind === 'blank'
+                    ? `第 ${(steps[stepIdx + 1] as { idx: number }).idx + 1} 空`
+                    : steps[stepIdx + 1]?.kind === 'summary' ? '小结' : '下一步'}
+                </p>
+              )}
             </div>
           </div>
         </div>
@@ -572,7 +622,7 @@ export const FillBlankExplainPlayer: React.FC<Props> = ({
           {playing ? <><i className="fa-solid fa-pause mr-1"></i>暂停</> : <><i className="fa-solid fa-play mr-1"></i>继续</>}
         </button>
         <button
-          onClick={() => { stopAll(); setSentenceIdx(0); setPlaying(true); }}
+          onClick={() => { stopAll(); setWaitLeft(0); setSentenceIdx(0); setPlaying(true); }}
           className="rounded-lg border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:bg-slate-800"
           title="从这一步开头重讲"
         >
