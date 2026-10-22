@@ -99,6 +99,8 @@ try {
 const app = express();
 
 const { createMetrics } = require('./metrics');
+// 模型输出 JSON 的容错解析：偶发裸引号/漏逗号/被截断时也能救回来
+const { extractJsonObject, salvageJsonObjects } = require('./json-repair');
 const secureAuth = new SecureAuth(pool);
 const licenseManager = new LicenseManager(pool);
 let notificationScheduler = null;
@@ -8230,16 +8232,7 @@ const {
   builtinDefaultsOf,
 } = require('./explain-styles');
 
-/** 从模型输出里抠出 JSON（容忍 ```json 包裹或前后废话） */
-function extractJsonObject(text) {
-  const raw = String(text || '');
-  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const body = fenced ? fenced[1] : raw;
-  const start = body.indexOf('{');
-  const end = body.lastIndexOf('}');
-  if (start < 0 || end <= start) throw new Error('模型未返回 JSON');
-  return JSON.parse(body.slice(start, end + 1));
-}
+/** 从模型输出里抠出 JSON（容忍 ```json 包裹或前后废话）——实现见 json-repair.js */
 
 const clip = (s, n) => String(s == null ? '' : s).replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim().slice(0, n);
 
@@ -9072,13 +9065,27 @@ async function generateLecturePages({ title, subject, chapter, outline, requirem
   for (let i = 0; i < attempts.length; i += 1) {
     const att = attempts[i];
     try {
+      // 第二次起追加纠错提醒：模型上一条输出 JSON 不合法
+      const askPrompt = i === 0
+        ? userPrompt
+        : `${userPrompt}\n\n【重要】上一次输出不是合法 JSON（常见原因：字符串里出现了未转义的引号、数组元素之间漏了逗号）。这次请务必输出严格合法的 JSON，不要输出代码块标记。`;
       const raw = await callAiApi(
         { ...cfg, ai_temperature: att.temperature },
-        [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
+        [{ role: 'system', content: systemPrompt }, { role: 'user', content: askPrompt }],
         { max_tokens: att.max_tokens },
       );
       if (!String(raw || '').trim()) throw new Error('模型返回空内容');
-      const parsed = normalizeLecturePages(extractJsonObject(raw), { outline, pageTarget });
+      let parsed;
+      try {
+        parsed = normalizeLecturePages(extractJsonObject(raw), { outline, pageTarget });
+      } catch (parseErr) {
+        // 抢救模式：数组被截断/某页坏了，逐页解析，能救回几页就用几页
+        const pages = salvageJsonObjects(raw)
+          .filter((o) => o && (o.kind || (o.narration && !o.pages)));
+        if (pages.length < 3) throw parseErr;
+        console.warn(`微课程 JSON 不合法，已按页抢救回 ${pages.length} 页：${parseErr.message}`);
+        parsed = normalizeLecturePages({ title: '', pages }, { outline, pageTarget });
+      }
       return { ...parsed, model: cfg.ai_model || null };
     } catch (e) {
       lastErr = e;
