@@ -99,6 +99,13 @@ try {
 const app = express();
 
 const { createMetrics } = require('./metrics');
+const {
+  analyzeTemplate: analyzeFillBlankTemplate,
+  assembleCode: assembleFillBlankCode,
+  buildPrompt: buildFillBlankPrompt,
+  normalizeScript: normalizeFillBlankScript,
+  buildFallbackScript: buildFillBlankFallback,
+} = require('./fillblank-explain');
 // 模型输出 JSON 的容错解析：偶发裸引号/漏逗号/被截断时也能救回来
 const { extractJsonObject, salvageJsonObjects } = require('./json-repair');
 const secureAuth = new SecureAuth(pool);
@@ -8608,6 +8615,113 @@ app.post('/api/student/explain/tts', authenticate, requireStudent, async (req, r
     return explainTtsHandler(req, res);
   } catch (error) {
     next(error);
+  }
+});
+
+// ===== 学生端：编程填空题 AI 讲解 =====
+// 前置条件与「AI 讲堂」一致：老师在 学生管理 → 隐藏功能 → 讲解 里放开 ai_explain。
+app.get('/api/student/explain/enabled', authenticate, requireStudent, async (req, res) => {
+  try {
+    const enabled = await isAiExplainEnabledFor(req.user.userId);
+    res.json({ data: { enabled }, error: null });
+  } catch (error) {
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+/**
+ * 生成（或读缓存）某道编程填空题的讲解脚本。
+ * body: { task_id, force? }
+ *
+ * ⛔ 正确答案由题库注入，模型只产出「为什么 / 易错点」——见 fillblank-explain.js 顶部说明。
+ * ⛔ 模型失败不能让功能不可用：走 buildFallbackScript 兜底（不缓存），学生照样能听到
+ *    「这一空要填 X、填上之后整行变成什么」这种最小可用讲解。
+ */
+app.post('/api/student/explain/fill-blank', authenticate, requireStudent, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    if (!(await isAiExplainEnabledFor(userId))) {
+      return res.status(403).json({ data: null, error: '老师还没有为你开通 AI 讲解' });
+    }
+    const taskId = String((req.body && req.body.task_id) || '').trim();
+    const force = !!(req.body && req.body.force);
+    if (!taskId) return res.status(400).json({ data: null, error: '缺少题目ID' });
+
+    const [rows] = await pool.query(
+      `SELECT id, title, description, hint, blank_template, blank_answers
+         FROM python_tasks WHERE id = ? AND task_type = 'fill_blank' AND is_active = TRUE LIMIT 1`,
+      [taskId],
+    );
+    if (!rows.length) return res.status(404).json({ data: null, error: '这道填空题不存在或已下线' });
+    const t = rows[0];
+    const blanks = analyzeFillBlankTemplate(t.blank_template, t.blank_answers);
+    if (!blanks.length) return res.status(400).json({ data: null, error: '这道题没有可讲解的空' });
+
+    const task = { id: t.id, title: t.title, description: t.description, hint: t.hint, template: t.blank_template };
+    const contentHash = require('crypto').createHash('sha1')
+      .update([t.title || '', t.description || '', t.blank_template || '', JSON.stringify(t.blank_answers || '')].join('\u0001'))
+      .digest('hex');
+
+    if (!force) {
+      const [cached] = await pool.query(
+        'SELECT content_hash, script, model FROM python_explain_scripts WHERE task_id = ? LIMIT 1',
+        [taskId],
+      );
+      if (cached.length && cached[0].content_hash === contentHash) {
+        try {
+          const script = JSON.parse(cached[0].script);
+          // 答案实时从题库取，缓存里只有 why/tip —— 万一老师改了答案，这里也不会给学生旧答案
+          const withAnswers = {
+            ...script,
+            blanks: (script.blanks || []).map((b, i) => ({ ...b, ...(blanks[i] ? { answers: blanks[i].answers, char: blanks[i].char, line: blanks[i].line } : {}) })),
+          };
+          return res.json({
+            data: { task_id: taskId, title: t.title, template: t.blank_template, script: withAnswers, cached: true, model: cached[0].model },
+            error: null,
+          });
+        } catch { /* 缓存坏了，重新生成 */ }
+      }
+    }
+
+    if (!allowExplainRate(`fbexplain:${userId}`, 20, 10 * 60 * 1000)) {
+      return res.status(429).json({ data: null, error: '讲解生成太频繁，歇一会儿再点（10 分钟内最多 20 次）' });
+    }
+
+    const { systemPrompt, userPrompt, promptVersion } = buildFillBlankPrompt(task, blanks);
+    let script;
+    let model = null;
+    let degraded = false;
+    try {
+      const config = await getAiQaConfig(pool);
+      const raw = await callAiApi(config, [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ]);
+      script = normalizeFillBlankScript(extractJsonObject(raw), task, blanks);
+      model = config.ai_model || null;
+    } catch (e) {
+      console.error('生成编程填空讲解失败，改用兜底脚本:', e.message);
+      script = buildFillBlankFallback(task, blanks);
+      degraded = true;
+    }
+
+    if (!degraded) {
+      await pool.query(
+        `INSERT INTO python_explain_scripts (task_id, content_hash, script, model)
+         VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE content_hash = VALUES(content_hash), script = VALUES(script),
+                                 model = VALUES(model), updated_at = NOW(3)`,
+        [taskId, contentHash, JSON.stringify({ intro: script.intro, summary: script.summary, blanks: script.blanks.map((b) => ({ index: b.index, why: b.why, tip: b.tip })) }), model],
+      );
+    }
+
+    res.json({
+      data: { task_id: taskId, title: t.title, template: t.blank_template, script, cached: false, degraded, model, prompt_version: promptVersion },
+      error: null,
+    });
+  } catch (error) {
+    console.error('编程填空讲解失败:', error);
+    res.status(500).json({ data: null, error: error.message || '生成讲解失败' });
   }
 });
 

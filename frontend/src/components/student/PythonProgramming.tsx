@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../../hooks/useAuth';
 import { backendClient } from '../../api/backendClient';
 import { LatexRenderer } from '../common/LatexRenderer';
+import FillBlankExplainPlayer from './FillBlankExplainPlayer';
+import { authHeaders } from '../../utils/authToken';
 
 interface PythonTask {
   id: string;
@@ -75,7 +77,28 @@ export const PythonProgramming: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [blankAnswers, setBlankAnswers] = useState<string[]>([]);
   const [hoverBlank, setHoverBlank] = useState<number | null>(null);
+  /** 老师是否给本班放开了「隐藏功能 → 讲解」（决定 AI 语音讲解按钮出不出现） */
+  const [explainEnabled, setExplainEnabled] = useState(false);
+  /** 全屏讲解器开关 */
+  const [fillExplainOpen, setFillExplainOpen] = useState(false);
   const codeEditorRef = useRef<HTMLTextAreaElement>(null);
+
+  // 讲解开关：与「AI 讲堂」同一个 ai_explain 开关，由老师按班级/学生控制。
+  // ⛔ 只探测一次，失败就当没开通（按钮不出现，不影响写作业）。
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const res = await fetch('/api/student/explain/enabled', { headers: authHeaders() });
+        const json = await res.json().catch(() => null);
+        if (alive && res.ok) setExplainEnabled(!!json?.data?.enabled);
+      } catch { /* 探测失败就静默隐藏 */ }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  // 换题时关掉讲解器，避免停在上一条题的讲解里
+  useEffect(() => { setFillExplainOpen(false); }, [selectedTask?.id]);
 
   // 扫描代码中的 input() 调用次数（忽略注释行）
   const inputCount = (() => {
@@ -806,6 +829,21 @@ export const PythonProgramming: React.FC = () => {
                       <i className="fa fa-paper-plane mr-1"></i>提交作业
                     </button>
                   )}
+                  {/* AI 语音讲解：只在老师放开「讲解」、且是编程填空题时出现 */}
+                  {explainEnabled && selectedTask?.task_type === 'fill_blank' && selectedTask.blank_template && (
+                    <button
+                      className="px-3 py-1 bg-amber-500 text-white rounded hover:bg-amber-600 text-sm"
+                      onClick={() => {
+                        const unsubmitted = submission?.status !== 'submitted' && submission?.status !== 'graded';
+                        // 讲解会把每个空的正确答案显示在空里 —— 没交作业时先提醒一句，避免手滑看答案
+                        if (unsubmitted && !confirm('AI 讲解会逐个空显示正确答案。\n还没提交，确定要先看讲解吗？')) return;
+                        setFillExplainOpen(true);
+                      }}
+                      title="全屏讲解这道题的填空技巧（老师已为你开通）"
+                    >
+                      <i className="fa-solid fa-headphones mr-1"></i>AI 语音讲解
+                    </button>
+                  )}
                 </div>
               </div>
               {selectedTask?.task_type === 'fill_blank' && selectedTask.blank_template ? (
@@ -867,6 +905,19 @@ export const PythonProgramming: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* 编程填空 · AI 语音讲解（全屏） */}
+      {fillExplainOpen && selectedTask?.blank_template && (
+        <FillBlankExplainPlayer
+          key={selectedTask.id}
+          taskId={selectedTask.id}
+          title={selectedTask.title}
+          description={selectedTask.description}
+          template={selectedTask.blank_template}
+          studentAnswers={blankAnswers}
+          onClose={() => setFillExplainOpen(false)}
+        />
+      )}
     </div>
   );
 };
