@@ -9006,6 +9006,18 @@ function normalizeLectureClassIds(v) {
   return Array.from(new Set(arr.map((x) => String(x == null ? '' : x).trim()).filter(Boolean))).slice(0, 100);
 }
 
+/**
+ * 微课程分类（唯一真源）：前端只做展示，改这里就够了。
+ * ⛔ 不用 subject（教材模块）承载分类：老版本 exe 还在 select subject，改语义会造成两版显示不一致。
+ */
+const LECTURE_CATEGORIES = ['python精讲', '真题讲评', '易错点', '程序填空题策略', '其他'];
+
+/** 分类归一：认不出的一律落「其他」，避免前端筛选出现一个点不掉的野值 */
+function normalizeLectureCategory(v) {
+  const t = String(v == null ? '' : v).trim();
+  return LECTURE_CATEGORIES.includes(t) ? t : '其他';
+}
+
 /** 首屏摘要：列表卡片只读这一列，避免为了封面把整篇 pages 拉下来 */
 function coverOfPages(pages) {
   const first = (pages || [])[0];
@@ -9022,6 +9034,7 @@ function lectureRowOut(row, opts = {}) {
   return {
     id: row.id,
     title: row.title,
+    category: normalizeLectureCategory(row.category),
     subject: row.subject,
     chapter: row.chapter,
     outline: row.outline || '',
@@ -9033,6 +9046,7 @@ function lectureRowOut(row, opts = {}) {
     duration_sec: Number(row.duration_sec) || 0,
     status: row.status,
     class_ids: parseJsonArrayField(row.class_ids),
+    viewed_classes: parseJsonArrayField(row.viewed_classes),
     sort_order: Number(row.sort_order) || 0,
     play_count: Number(row.play_count) || 0,
     published_at: row.published_at,
@@ -9128,17 +9142,25 @@ async function loadLectureForTeacher(id, req) {
 app.get('/api/teacher/lectures', authenticate, requireTeacher, async (req, res) => {
   try {
     const status = ['draft', 'published'].includes(String(req.query.status || '')) ? String(req.query.status) : '';
+    const category = LECTURE_CATEGORIES.includes(String(req.query.category || '')) ? String(req.query.category) : '';
+    const where = [];
+    const params = [];
+    if (status) { where.push('status = ?'); params.push(status); }
+    if (category) { where.push('category = ?'); params.push(category); }
     // ⛔ 列表不查 pages（一篇好几 KB）：封面走 cover 冗余列
     const [rows] = await pool.query(
-      `SELECT id, title, subject, chapter, style_key, cover, page_count, duration_sec,
-              status, class_ids, sort_order, play_count, published_at, created_at, updated_at
+      `SELECT id, title, category, subject, chapter, style_key, cover, page_count, duration_sec,
+              status, class_ids, viewed_classes, sort_order, play_count, published_at, created_at, updated_at
          FROM lectures
-        ${status ? 'WHERE status = ?' : ''}
+        ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
         ORDER BY sort_order ASC, updated_at DESC
         LIMIT 300`,
-      status ? [status] : [],
+      params,
     );
-    res.json({ data: { lectures: rows.map((r) => lectureRowOut(r, { withPages: false })) }, error: null });
+    res.json({
+      data: { lectures: rows.map((r) => lectureRowOut(r, { withPages: false })), categories: LECTURE_CATEGORIES },
+      error: null,
+    });
   } catch (error) {
     console.error('读取微课程列表失败:', error);
     res.status(500).json({ data: null, error: error.message });
@@ -9177,12 +9199,13 @@ app.post('/api/teacher/lectures', authenticate, requireTeacher, async (req, res)
     const [maxRow] = await pool.query('SELECT COALESCE(MAX(sort_order), 0) AS m FROM lectures');
     await pool.query(
       `INSERT INTO lectures
-        (id, title, subject, chapter, outline, requirement, style_key, pages, cover,
+        (id, title, category, subject, chapter, outline, requirement, style_key, pages, cover,
          page_count, duration_sec, status, class_ids, sort_order, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, '[]', NULL, 0, 0, 'draft', ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', NULL, 0, 0, 'draft', ?, ?, ?)`,
       [
         id,
         title,
+        normalizeLectureCategory(b.category),
         clip(b.subject, 32) || '必修1',
         clip(b.chapter, 120),
         outline,
@@ -9329,6 +9352,14 @@ app.put('/api/teacher/lectures/:id', authenticate, requireTeacher, async (req, r
       push('title', t);
     }
     if (b.subject !== undefined) push('subject', clip(b.subject, 32) || '必修1');
+    if (b.category !== undefined) push('category', normalizeLectureCategory(b.category));
+    if (b.viewed_classes !== undefined) {
+      // 班级名数组：老师手工标记「该班已看过」，跟 class_ids（开放给谁看）是两回事
+      const names = (Array.isArray(b.viewed_classes) ? b.viewed_classes : [])
+        .map((x) => String(x == null ? '' : x).trim())
+        .filter(Boolean);
+      push('viewed_classes', JSON.stringify(Array.from(new Set(names)).slice(0, 64)));
+    }
     if (b.chapter !== undefined) push('chapter', clip(b.chapter, 120));
     if (b.outline !== undefined) push('outline', String(b.outline || '').slice(0, 4000));
     if (b.requirement !== undefined) push('requirement', String(b.requirement || '').slice(0, 2000));
@@ -9442,6 +9473,77 @@ app.delete('/api/teacher/lectures/:id', authenticate, requireTeacher, async (req
   }
 });
 
+/**
+ * 批量操作：发布 / 取消发布 / 删除 / 归类 / 开放班级。
+ *
+ * ⛔ 发布规则与单条完全一致：没有页面的课不许发布（否则学生端点开是空白），
+ *    这类课不报错、只进 skipped，前端提示「几门因为还没生成页面被跳过」。
+ * ⛔ 一次最多 200 条：老师全选时也不会拼出一条超长 SQL。
+ */
+app.post('/api/teacher/lectures/batch', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const op = String(b.op || '');
+    const ids = Array.from(new Set((Array.isArray(b.ids) ? b.ids : []).map((x) => String(x || '').trim()).filter(Boolean))).slice(0, 200);
+    if (!ids.length) return res.status(400).json({ data: null, error: '请先选择微课程' });
+    const inSql = ids.map(() => '?').join(',');
+
+    if (op === 'publish') {
+      const [noPage] = await pool.query(
+        `SELECT id FROM lectures WHERE id IN (${inSql}) AND (page_count <= 0 OR pages IS NULL OR pages IN ('', '[]'))`,
+        ids,
+      );
+      const blocked = noPage.map((r) => r.id);
+      const ok = ids.filter((id) => !blocked.includes(id));
+      if (ok.length) {
+        await pool.query(
+          `UPDATE lectures
+              SET status = 'published', published_at = COALESCE(published_at, NOW(3)), updated_at = NOW(3)
+            WHERE id IN (${ok.map(() => '?').join(',')})`,
+          ok,
+        );
+      }
+      return res.json({ data: { op, affected: ok.length, skipped: blocked, total: ids.length }, error: null });
+    }
+
+    if (op === 'unpublish') {
+      const [r] = await pool.query(
+        `UPDATE lectures SET status = 'draft', updated_at = NOW(3) WHERE id IN (${inSql})`,
+        ids,
+      );
+      return res.json({ data: { op, affected: r.affectedRows, skipped: [], total: ids.length }, error: null });
+    }
+
+    if (op === 'delete') {
+      const [r] = await pool.query(`DELETE FROM lectures WHERE id IN (${inSql})`, ids);
+      return res.json({ data: { op, affected: r.affectedRows, skipped: [], total: ids.length }, error: null });
+    }
+
+    if (op === 'category') {
+      const category = normalizeLectureCategory(b.category);
+      const [r] = await pool.query(
+        `UPDATE lectures SET category = ?, updated_at = NOW(3) WHERE id IN (${inSql})`,
+        [category, ...ids],
+      );
+      return res.json({ data: { op, affected: r.affectedRows, category, skipped: [], total: ids.length }, error: null });
+    }
+
+    if (op === 'classes') {
+      const classIds = JSON.stringify(normalizeLectureClassIds(b.class_ids));
+      const [r] = await pool.query(
+        `UPDATE lectures SET class_ids = ?, updated_at = NOW(3) WHERE id IN (${inSql})`,
+        [classIds, ...ids],
+      );
+      return res.json({ data: { op, affected: r.affectedRows, skipped: [], total: ids.length }, error: null });
+    }
+
+    return res.status(400).json({ data: null, error: `不支持的批量操作：${op}` });
+  } catch (error) {
+    console.error('批量操作微课程失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
 // ---------- 学生端 ----------
 // 三重限制：ai_explain 开关 + 只发已发布 + 班级匹配。
 // ⛔ 学生端**永远不下发 draft**：草稿是老师还没审过的课，讲错了算谁的。
@@ -9455,7 +9557,7 @@ app.get('/api/student/lectures', authenticate, requireStudent, async (req, res) 
     const classId = prof.length ? String(prof[0].class_id || '') : '';
 
     const [rows] = await pool.query(
-      `SELECT id, title, subject, chapter, cover, page_count, duration_sec, class_ids, sort_order, play_count
+      `SELECT id, title, category, subject, chapter, cover, page_count, duration_sec, class_ids, sort_order, play_count
          FROM lectures
         WHERE status = 'published'
         ORDER BY sort_order ASC, published_at DESC

@@ -69,6 +69,9 @@ interface Props {
   audience?: 'teacher' | 'student';
   onClose: () => void;
   onEditPage?: (index: number) => void;
+  /** 上一门 / 下一门微课程（按当前列表顺序）；不传 = 没有相邻课程，上下键无动作 */
+  onPrevLecture?: () => void;
+  onNextLecture?: () => void;
 }
 
 const VOICE_KEY = 'xgpy_lecture_voice';
@@ -108,7 +111,7 @@ const readNum = (key: string, fallback: number) => {
  * ⛔ 全屏层只许动 opacity：以前给整屏层加 transform 缩放，暴击后直接合成层卡死。
  *    翻页动画因此只用淡入淡出，缩放一律不下放到全屏容器。
  */
-export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', onClose, onEditPage }) => {
+export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', onClose, onEditPage, onPrevLecture, onNextLecture }) => {
   const pages = useMemo(() => (Array.isArray(lecture.pages) ? lecture.pages : []), [lecture.pages]);
   const apiBase = `/api/${audience === 'teacher' ? 'teacher' : 'student'}/explain`;
 
@@ -373,17 +376,20 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
     return () => window.clearTimeout(t);
   }, [cloudReady, picked, sentences, sentenceIdx, getBlob]);
 
-  // 键盘：空格暂停 / 左右翻页 / Esc 退出
+  // 键盘：空格暂停 / 左右翻页 / 上下切课程 / Esc 退出
+  // ⛔ 上下键不绑翻页：翻页已有左右键，上下键留给「上一门 / 下一门」，投屏连着讲好几节课才顺。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.code === 'Space') { e.preventDefault(); setPlaying((p) => !p); return; }
       if (e.key === 'Escape') { onClose(); return; }
       if (e.key === 'ArrowRight' || e.key === 'PageDown') { e.preventDefault(); goPage(pageIdx + 1); }
       if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); goPage(pageIdx - 1); }
+      if (e.key === 'ArrowDown') { e.preventDefault(); onNextLecture?.(); }
+      if (e.key === 'ArrowUp') { e.preventDefault(); onPrevLecture?.(); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [goPage, pageIdx, onClose]);
+  }, [goPage, pageIdx, onClose, onPrevLecture, onNextLecture]);
 
   useEffect(() => () => { stopAll(); }, [stopAll]);
 
@@ -548,6 +554,27 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
             <input type="checkbox" checked={autoNext} onChange={(e) => setAutoNext(e.target.checked)} className="accent-violet-600" />
             讲完自动翻页
           </label>
+          {(onPrevLecture || onNextLecture) && (
+            <div className="ml-1 flex items-center gap-0.5 rounded-lg border border-gray-300 px-0.5 py-0.5" title="切换课程：↑ 上一门 / ↓ 下一门">
+              <button
+                onClick={onPrevLecture}
+                disabled={!onPrevLecture}
+                className="rounded px-1.5 py-0.5 text-xs text-gray-600 hover:bg-gray-100 disabled:opacity-30"
+                title="上一门课程（↑）"
+              >
+                <i className="fa-solid fa-angles-up"></i>
+              </button>
+              <span className="text-[11px] text-gray-400">课程</span>
+              <button
+                onClick={onNextLecture}
+                disabled={!onNextLecture}
+                className="rounded px-1.5 py-0.5 text-xs text-gray-600 hover:bg-gray-100 disabled:opacity-30"
+                title="下一门课程（↓）"
+              >
+                <i className="fa-solid fa-angles-down"></i>
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="flex items-center gap-3">

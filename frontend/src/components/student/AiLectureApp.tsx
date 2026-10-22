@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { authHeaders } from '../../utils/authToken';
 import LecturePlayer, { Lecture } from '../lecture/LecturePlayer';
 
@@ -10,11 +10,13 @@ import LecturePlayer, { Lecture } from '../lecture/LecturePlayer';
  *
  * ⛔ 学生端不给任何编辑入口：微课程是老师的课件资产，学生只能看、只能播。
  * ⛔ 播放次数由后端在学生打开详情时自增，前端不做统计上报。
+ * ⛔ 分类筛选在前端做：学生端一屏最多 200 门，多打一次接口反而更慢；分类值后端已归一到 5 个。
  */
 
 interface LectureCard {
   id: string;
   title: string;
+  category: string;
   subject: string;
   chapter: string;
   cover: { kind: string; title: string; kicker?: string } | null;
@@ -22,6 +24,8 @@ interface LectureCard {
   duration_sec: number;
   play_count: number;
 }
+
+const CATEGORIES = ['python精讲', '真题讲评', '易错点', '程序填空题策略', '其他'];
 
 const KIND_ICON: Record<string, string> = {
   lead: 'fa-lightbulb',
@@ -47,6 +51,8 @@ export const AiLectureApp: React.FC = () => {
   const [err, setErr] = useState('');
   const [playing, setPlaying] = useState<Lecture | null>(null);
   const [opening, setOpening] = useState('');
+  /** 分类筛选：'' = 全部（默认） */
+  const [category, setCategory] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -81,6 +87,19 @@ export const AiLectureApp: React.FC = () => {
       setOpening('');
     }
   };
+
+  const filtered = useMemo(
+    () => (category ? list.filter((x) => (x.category || '其他') === category) : list),
+    [list, category],
+  );
+  const categoryCounts = useMemo(() => {
+    const m: Record<string, number> = {};
+    list.forEach((x) => { const k = x.category || '其他'; m[k] = (m[k] || 0) + 1; });
+    return m;
+  }, [list]);
+
+  // 播放器里的 ↑↓ 按**当前筛选后的顺序**切课程，与屏幕上看到的顺序一致
+  const playIdx = playing ? filtered.findIndex((x) => x.id === playing.id) : -1;
 
   if (loading) {
     return (
@@ -118,21 +137,52 @@ export const AiLectureApp: React.FC = () => {
 
   return (
     <div className="h-full overflow-auto bg-gray-50 p-4">
-      <div className="mb-4">
+      <div className="mb-3">
         <h2 className="flex items-center gap-2 text-lg font-bold text-gray-800">
           <i className="fa-solid fa-chalkboard-user text-violet-600"></i>AI 讲堂
         </h2>
         <p className="mt-1 text-xs text-gray-500">老师做好的微课程，点开就能边看边听。</p>
       </div>
 
+      {list.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-1.5">
+          {['', ...CATEGORIES].map((c) => {
+            const on = category === c;
+            const n = c ? (categoryCounts[c] || 0) : list.length;
+            return (
+              <button
+                key={c || '__all__'}
+                onClick={() => setCategory(c)}
+                className={`rounded-full border px-2.5 py-1 text-xs transition ${
+                  on
+                    ? 'border-violet-500 bg-violet-600 text-white'
+                    : 'border-gray-300 bg-white text-gray-600 hover:border-violet-300 hover:text-violet-700'
+                }`}
+              >
+                {c || '全部'}
+                <span className={`ml-1 ${on ? 'text-violet-100' : 'text-gray-400'}`}>{n}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {list.length === 0 ? (
         <div className="rounded-xl border-2 border-dashed border-gray-300 bg-white py-14 text-center">
           <i className="fa-solid fa-chalkboard-user mb-3 text-3xl text-gray-300"></i>
           <p className="text-gray-500">老师还没有发布微课程</p>
         </div>
+      ) : filtered.length === 0 ? (
+        <div className="rounded-xl border-2 border-dashed border-gray-300 bg-white py-14 text-center">
+          <i className="fa-solid fa-folder-open mb-3 text-3xl text-gray-300"></i>
+          <p className="text-gray-500">「{category}」下还没有课程</p>
+          <button onClick={() => setCategory('')} className="mt-3 rounded-lg border border-violet-300 px-3 py-1.5 text-xs text-violet-700 hover:bg-violet-50">
+            看全部课程
+          </button>
+        </div>
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          {list.map((item) => (
+          {filtered.map((item) => (
             <button
               key={item.id}
               onClick={() => play(item.id)}
@@ -146,7 +196,10 @@ export const AiLectureApp: React.FC = () => {
               </div>
               <div className="min-w-0 flex-1">
                 <p className="truncate font-semibold text-gray-800">{item.title}</p>
-                <p className="mt-0.5 truncate text-xs text-gray-500">{item.chapter || item.subject || ''}</p>
+                <p className="mt-1 flex items-center gap-1.5 truncate text-xs">
+                  <span className="shrink-0 rounded-full bg-violet-50 px-1.5 py-0.5 text-[11px] text-violet-700">{item.category || '其他'}</span>
+                  <span className="truncate text-gray-500">{item.chapter || ''}</span>
+                </p>
                 <p className="mt-1 text-xs text-gray-400">
                   {item.page_count} 页 · 约 {fmtDuration(item.duration_sec)}
                 </p>
@@ -158,7 +211,13 @@ export const AiLectureApp: React.FC = () => {
       )}
 
       {playing && (
-        <LecturePlayer lecture={playing} audience="student" onClose={() => { setPlaying(null); load(); }} />
+        <LecturePlayer
+          lecture={playing}
+          audience="student"
+          onPrevLecture={playIdx > 0 ? () => play(filtered[playIdx - 1].id) : undefined}
+          onNextLecture={playIdx >= 0 && playIdx < filtered.length - 1 ? () => play(filtered[playIdx + 1].id) : undefined}
+          onClose={() => { setPlaying(null); load(); }}
+        />
       )}
     </div>
   );

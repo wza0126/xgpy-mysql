@@ -6,6 +6,7 @@ import LecturePlayer, { Lecture, LecturePage, LecturePageKind } from '../lecture
 interface LectureCard {
   id: string;
   title: string;
+  category: string;
   subject: string;
   chapter: string;
   style_key: string;
@@ -14,10 +15,21 @@ interface LectureCard {
   duration_sec: number;
   status: 'draft' | 'published';
   class_ids: string[];
+  viewed_classes: string[];
   sort_order: number;
   play_count: number;
   updated_at?: string;
 }
+
+/** 课程分类（与后端 LECTURE_CATEGORIES 一致；后端是唯一真源，这里只做展示与筛选） */
+const CATEGORIES = ['python精讲', '真题讲评', '易错点', '程序填空题策略', '其他'];
+
+/** 观课标记用的固定班级名：高一 1~16 + 高二 1~16。
+ *  ⛔ 按**名字**存不按 class_id：高二7~16 还没建进系统，用 id 就标记不了。 */
+const ALL_CLASS_NAMES = [
+  ...Array.from({ length: 16 }, (_, i) => `高一${i + 1}`),
+  ...Array.from({ length: 16 }, (_, i) => `高二${i + 1}`),
+];
 
 interface ClassInfo {
   id: string;
@@ -95,6 +107,15 @@ export const LectureManager: React.FC = () => {
   const [editing, setEditing] = useState<Lecture | null>(null);
   const [playing, setPlaying] = useState<Lecture | null>(null);
   const [editPageIdx, setEditPageIdx] = useState(0);
+
+  /** 分类筛选：'' = 全部（默认） */
+  const [category, setCategory] = useState('');
+  /** 多选（批量操作）。跨分类筛选也保留，方便先勾几门再切分类继续勾 */
+  const [selected, setSelected] = useState<string[]>([]);
+  /** 鼠标悬停的课程：用来弹「32 个班的观课标记」面板 */
+  const [hoverId, setHoverId] = useState('');
+  /** 批量归类的目标分类 */
+  const [batchCat, setBatchCat] = useState(CATEGORIES[0]);
 
   // ---------- 数据加载 ----------
   const loadList = useCallback(async () => {
@@ -176,6 +197,79 @@ export const LectureManager: React.FC = () => {
     }
   };
 
+  // ---------- 分类筛选 ----------
+  const filtered = useMemo(
+    () => (category ? list.filter((x) => x.category === category) : list),
+    [list, category],
+  );
+  const categoryCounts = useMemo(() => {
+    const m: Record<string, number> = {};
+    list.forEach((x) => { const k = x.category || '其他'; m[k] = (m[k] || 0) + 1; });
+    return m;
+  }, [list]);
+  const allInViewSelected = filtered.length > 0 && filtered.every((x) => selected.includes(x.id));
+
+  const toggleSelect = (id: string) => {
+    setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+  const toggleSelectAllInView = () => {
+    if (allInViewSelected) {
+      const ids = new Set(filtered.map((x) => x.id));
+      setSelected((prev) => prev.filter((id) => !ids.has(id)));
+    } else {
+      setSelected((prev) => Array.from(new Set([...prev, ...filtered.map((x) => x.id)])));
+    }
+  };
+
+  // ---------- 批量操作 ----------
+  const batchOp = async (op: 'publish' | 'unpublish' | 'delete' | 'category' | 'classes', extra?: Record<string, any>) => {
+    if (!selected.length) return;
+    const label = {
+      publish: '发布', unpublish: '取消发布', delete: '删除', category: '归类', classes: '设置开放班级',
+    }[op];
+    if (op === 'delete' && !window.confirm(`删除选中的 ${selected.length} 门微课程？删除后无法恢复。\n（已发布的话学生端也会一起消失）`)) return;
+    if (op !== 'delete' && !window.confirm(`对选中的 ${selected.length} 门微课程执行「${label}」？`)) return;
+    setBusy('batch');
+    setBusyText(`正在${label}…`);
+    try {
+      const res = await backendClient.post('/api/teacher/lectures/batch', { op, ids: selected, ...extra });
+      const d = res?.data || {};
+      setSelected([]);
+      await loadList();
+      if (op === 'publish' && d.skipped?.length) {
+        alert(`已发布 ${d.affected} 门。\n有 ${d.skipped.length} 门还没生成页面，已跳过（学生端点开会是空白）。`);
+      }
+    } catch (e) {
+      alert((e as Error).message || `${label}失败`);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  // ---------- 班级观课标记（点击即存） ----------
+  const toggleViewed = async (item: LectureCard, name: string) => {
+    const cur = item.viewed_classes || [];
+    const next = cur.includes(name) ? cur.filter((x) => x !== name) : [...cur, name];
+    // 先本地生效：连点十几个班时不等网络
+    setList((prev) => prev.map((x) => (x.id === item.id ? { ...x, viewed_classes: next } : x)));
+    try {
+      await backendClient.put(`/api/teacher/lectures/${item.id}`, { viewed_classes: next });
+    } catch (e) {
+      alert(`标记失败：${(e as Error).message || '请重试'}`);
+      await loadList();
+    }
+  };
+
+  // ---------- 播放器里上下键切课程 ----------
+  const playlist = filtered.length ? filtered : list;
+  const playIdx = playing ? playlist.findIndex((x) => x.id === playing.id) : -1;
+  const playByOffset = async (dir: -1 | 1) => {
+    const idx = playing ? playlist.findIndex((x) => x.id === playing.id) : -1;
+    const target = idx < 0 ? null : playlist[idx + dir];
+    if (!target) return;
+    await playItem(target.id);
+  };
+
   return (
     <div className="h-full overflow-auto bg-gray-50 p-6">
       {/* 顶部 */}
@@ -202,76 +296,209 @@ export const LectureManager: React.FC = () => {
         </div>
       )}
 
+      {/* 分类筛选 */}
+      <div className="mb-3 flex flex-wrap items-center gap-1.5">
+        {['', ...CATEGORIES].map((c) => {
+          const on = category === c;
+          const n = c ? (categoryCounts[c] || 0) : list.length;
+          return (
+            <button
+              key={c || '__all__'}
+              onClick={() => setCategory(c)}
+              className={`rounded-full border px-3 py-1 text-xs transition ${
+                on
+                  ? 'border-violet-500 bg-violet-600 text-white'
+                  : 'border-gray-300 bg-white text-gray-600 hover:border-violet-300 hover:text-violet-700'
+              }`}
+            >
+              {c || '全部'}
+              <span className={`ml-1 ${on ? 'text-violet-100' : 'text-gray-400'}`}>{n}</span>
+            </button>
+          );
+        })}
+        {filtered.length > 0 && (
+          <label className="ml-2 flex cursor-pointer select-none items-center gap-1.5 text-xs text-gray-500">
+            <input type="checkbox" checked={allInViewSelected} onChange={toggleSelectAllInView} className="accent-violet-600" />
+            全选当前 {filtered.length} 门
+          </label>
+        )}
+      </div>
+
+      {/* 批量操作条 */}
+      {selected.length > 0 && (
+        <div className="sticky top-0 z-20 mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-violet-300 bg-violet-50 px-3 py-2 shadow-sm">
+          <span className="text-sm font-medium text-violet-800">
+            <i className="fa-solid fa-square-check mr-1.5"></i>已选 {selected.length} 门
+          </span>
+          <button onClick={() => batchOp('publish')} className="rounded-lg bg-emerald-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-emerald-700">
+            <i className="fa-solid fa-upload mr-1"></i>批量发布
+          </button>
+          <button onClick={() => batchOp('unpublish')} className="rounded-lg border border-gray-300 bg-white px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-50">
+            <i className="fa-solid fa-eye-slash mr-1"></i>取消发布
+          </button>
+          <span className="ml-1 flex items-center gap-1 rounded-lg border border-gray-300 bg-white pl-2">
+            <i className="fa-solid fa-folder-tree text-[11px] text-gray-400"></i>
+            <select value={batchCat} onChange={(e) => setBatchCat(e.target.value)} className="rounded-r-lg py-1.5 pl-1 pr-1 text-xs">
+              {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <button onClick={() => batchOp('category', { category: batchCat })} className="rounded-lg bg-violet-600 px-2 py-1.5 text-xs text-white hover:bg-violet-700">归类</button>
+          </span>
+          <span className="flex items-center gap-1 rounded-lg border border-gray-300 bg-white pl-2">
+            <i className="fa-solid fa-users text-[11px] text-gray-400"></i>
+            <select
+              value=""
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === '__all__') batchOp('classes', { class_ids: [] });
+                else if (v) batchOp('classes', { class_ids: [v] });
+                e.target.value = '';
+              }}
+              className="rounded-r-lg py-1.5 pl-1 pr-1 text-xs"
+            >
+              <option value="">开放班级…</option>
+              <option value="__all__">全部班级（不限）</option>
+              {classes.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </span>
+          <button onClick={() => batchOp('delete')} className="rounded-lg border border-rose-300 bg-white px-2.5 py-1.5 text-xs text-rose-600 hover:bg-rose-50">
+            <i className="fa-solid fa-trash mr-1"></i>批量删除
+          </button>
+          <button onClick={() => setSelected([])} className="ml-auto text-xs text-gray-500 underline hover:text-gray-700">取消选择</button>
+        </div>
+      )}
+
       {loading ? (
         <div className="py-16 text-center text-gray-400">
           <i className="fa-solid fa-spinner fa-spin mr-2"></i>加载中…
         </div>
-      ) : list.length === 0 ? (
+      ) : filtered.length === 0 ? (
         <div className="rounded-xl border-2 border-dashed border-gray-300 bg-white py-16 text-center">
           <i className="fa-solid fa-chalkboard-user mb-3 text-4xl text-gray-300"></i>
-          <p className="text-gray-500">还没有微课程</p>
-          <p className="mt-1 text-sm text-gray-400">点右上角「新建微课程」，填上知识点大纲就行</p>
+          <p className="text-gray-500">{list.length ? `「${category}」下还没有微课程` : '还没有微课程'}</p>
+          <p className="mt-1 text-sm text-gray-400">
+            {list.length ? '换个分类看看，或用批量「归类」把已有课程移过来' : '点右上角「新建微课程」，填上知识点大纲就行'}
+          </p>
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {list.map((item) => (
-            <div key={item.id} className="flex flex-col rounded-xl border border-gray-200 bg-white shadow-sm transition hover:shadow-md">
-              <div className="flex items-start gap-3 p-4">
-                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 text-white">
-                  <i className={`fa-solid ${KIND_ICON[item.cover?.kind || 'lead'] || 'fa-lightbulb'}`}></i>
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <h3 className="truncate font-semibold text-gray-800" title={item.title}>{item.title}</h3>
-                    {item.status === 'published' ? (
-                      <span className="shrink-0 rounded bg-emerald-100 px-1.5 py-0.5 text-[11px] text-emerald-700">已发布</span>
-                    ) : (
-                      <span className="shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500">草稿</span>
-                    )}
+          {filtered.map((item) => {
+            const isSel = selected.includes(item.id);
+            const viewed = item.viewed_classes || [];
+            return (
+              <div
+                key={item.id}
+                onMouseEnter={() => setHoverId(item.id)}
+                onMouseLeave={() => setHoverId('')}
+                className={`relative flex flex-col rounded-xl border bg-white shadow-sm transition hover:shadow-md ${
+                  isSel ? 'border-violet-400 ring-1 ring-violet-300' : 'border-gray-200'
+                }`}
+              >
+                <div className="flex items-start gap-3 p-4">
+                  <input
+                    type="checkbox"
+                    checked={isSel}
+                    onChange={() => toggleSelect(item.id)}
+                    className="mt-1.5 h-4 w-4 shrink-0 accent-violet-600"
+                    title="选中后用上方的批量操作"
+                  />
+                  <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 text-white">
+                    <i className={`fa-solid ${KIND_ICON[item.cover?.kind || 'lead'] || 'fa-lightbulb'}`}></i>
                   </div>
-                  <p className="mt-0.5 truncate text-xs text-gray-500">
-                    {item.chapter || item.subject || '未填章节'}
-                  </p>
-                  <p className="mt-1 text-xs text-gray-400">
-                    {item.page_count} 页 · 约 {fmtDuration(item.duration_sec)}
-                    {item.play_count > 0 && <span className="ml-2">播放 {item.play_count} 次</span>}
-                  </p>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <h3 className="truncate font-semibold text-gray-800" title={item.title}>{item.title}</h3>
+                      {item.status === 'published' ? (
+                        <span className="shrink-0 rounded bg-emerald-100 px-1.5 py-0.5 text-[11px] text-emerald-700">已发布</span>
+                      ) : (
+                        <span className="shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500">草稿</span>
+                      )}
+                    </div>
+                    <p className="mt-1 flex items-center gap-1.5 truncate text-xs">
+                      <span className="shrink-0 rounded-full bg-violet-50 px-1.5 py-0.5 text-[11px] text-violet-700">{item.category || '其他'}</span>
+                      <span className="truncate text-gray-500">{item.chapter || '未填章节'}</span>
+                    </p>
+                    <p className="mt-1 text-xs text-gray-400">
+                      {item.page_count} 页 · 约 {fmtDuration(item.duration_sec)}
+                      {item.play_count > 0 && <span className="ml-2">播放 {item.play_count} 次</span>}
+                      {viewed.length > 0 && (
+                        <span className="ml-2 rounded bg-sky-50 px-1.5 py-0.5 text-[11px] text-sky-700">
+                          已看 {viewed.length} 个班
+                        </span>
+                      )}
+                    </p>
+                  </div>
                 </div>
-              </div>
 
-              <div className="mt-auto flex items-center gap-1.5 border-t border-gray-100 px-3 py-2">
-                <button
-                  onClick={() => playItem(item.id)}
-                  disabled={!item.page_count}
-                  className="rounded-lg bg-violet-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-violet-700 disabled:opacity-40"
-                  title="全屏投屏播放"
-                >
-                  <i className="fa-solid fa-play mr-1"></i>播放
-                </button>
-                <button onClick={() => openEditor(item.id)} className="rounded-lg border border-gray-300 px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-50">
-                  <i className="fa-solid fa-pen mr-1"></i>编辑
-                </button>
-                <button
-                  onClick={() => doPublish(item)}
-                  className={`rounded-lg px-2.5 py-1.5 text-xs ${
-                    item.status === 'published'
-                      ? 'border border-gray-300 text-gray-600 hover:bg-gray-50'
-                      : 'border border-emerald-300 text-emerald-700 hover:bg-emerald-50'
-                  }`}
-                >
-                  {item.status === 'published' ? '取消发布' : '发布'}
-                </button>
-                <div className="ml-auto flex items-center gap-1">
-                  <button onClick={() => doDuplicate(item)} className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700" title="复制一份">
-                    <i className="fa-solid fa-clone text-xs"></i>
+                <div className="mt-auto flex items-center gap-1.5 border-t border-gray-100 px-3 py-2">
+                  <button
+                    onClick={() => playItem(item.id)}
+                    disabled={!item.page_count}
+                    className="rounded-lg bg-violet-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-violet-700 disabled:opacity-40"
+                    title="全屏投屏播放"
+                  >
+                    <i className="fa-solid fa-play mr-1"></i>播放
                   </button>
-                  <button onClick={() => doDelete(item)} className="rounded p-1.5 text-gray-400 hover:bg-rose-50 hover:text-rose-600" title="删除">
-                    <i className="fa-solid fa-trash text-xs"></i>
+                  <button onClick={() => openEditor(item.id)} className="rounded-lg border border-gray-300 px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-50">
+                    <i className="fa-solid fa-pen mr-1"></i>编辑
                   </button>
+                  <button
+                    onClick={() => doPublish(item)}
+                    className={`rounded-lg px-2.5 py-1.5 text-xs ${
+                      item.status === 'published'
+                        ? 'border border-gray-300 text-gray-600 hover:bg-gray-50'
+                        : 'border border-emerald-300 text-emerald-700 hover:bg-emerald-50'
+                    }`}
+                  >
+                    {item.status === 'published' ? '取消发布' : '发布'}
+                  </button>
+                  <div className="ml-auto flex items-center gap-1">
+                    <button onClick={() => doDuplicate(item)} className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700" title="复制一份">
+                      <i className="fa-solid fa-clone text-xs"></i>
+                    </button>
+                    <button onClick={() => doDelete(item)} className="rounded p-1.5 text-gray-400 hover:bg-rose-50 hover:text-rose-600" title="删除">
+                      <i className="fa-solid fa-trash text-xs"></i>
+                    </button>
+                  </div>
                 </div>
+
+                {/* 悬停：32 个班级的观课标记面板 */}
+                {hoverId === item.id && (
+                  <div className="absolute left-0 right-0 top-full z-30 mt-1 rounded-xl border border-gray-200 bg-white p-3 shadow-2xl">
+                    <div className="mb-2 flex items-center justify-between">
+                      <p className="text-xs font-medium text-gray-700">
+                        <i className="fa-solid fa-eye mr-1 text-sky-500"></i>点班级名标记「该班已看过」
+                      </p>
+                      <span className="text-[11px] text-gray-400">已标记 {viewed.length} / 32</span>
+                    </div>
+                    {[['高一', ALL_CLASS_NAMES.slice(0, 16)], ['高二', ALL_CLASS_NAMES.slice(16)]].map(([label, names]) => (
+                      <div key={label as string} className="mb-1.5 last:mb-0">
+                        <p className="mb-1 text-[11px] text-gray-400">{label}年级</p>
+                        <div className="grid grid-cols-8 gap-1">
+                          {(names as string[]).map((name) => {
+                            const on = viewed.includes(name);
+                            return (
+                              <button
+                                key={name}
+                                onClick={() => toggleViewed(item, name)}
+                                className={`rounded px-1 py-1 text-[11px] transition ${
+                                  on
+                                    ? 'bg-sky-500 text-white'
+                                    : 'border border-gray-200 bg-gray-50 text-gray-600 hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700'
+                                }`}
+                                title={on ? `取消「${name}」的已看标记` : `标记「${name}」已看过`}
+                              >
+                                {name}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -305,6 +532,8 @@ export const LectureManager: React.FC = () => {
         <LecturePlayer
           lecture={playing}
           audience="teacher"
+          onPrevLecture={playIdx > 0 ? () => playByOffset(-1) : undefined}
+          onNextLecture={playIdx >= 0 && playIdx < playlist.length - 1 ? () => playByOffset(1) : undefined}
           onClose={() => setPlaying(null)}
           onEditPage={(i) => {
             // 投屏时发现某页不对 → 直接回编辑器定位到那一页
@@ -335,7 +564,7 @@ const NewLectureWizard: React.FC<{
   onCreated: (lecture: Lecture) => void;
 }> = ({ classes, styles, onClose, onCreated }) => {
   const [title, setTitle] = useState('');
-  const [subject, setSubject] = useState('必修1');
+  const [category, setCategory] = useState(CATEGORIES[0]);
   const [chapter, setChapter] = useState('');
   const [outline, setOutline] = useState('');
   const [requirement, setRequirement] = useState('');
@@ -352,7 +581,7 @@ const NewLectureWizard: React.FC<{
     setPhase('creating');
     try {
       const created = await backendClient.post('/api/teacher/lectures', {
-        title: title.trim(), subject, chapter: chapter.trim(), outline, requirement,
+        title: title.trim(), category, chapter: chapter.trim(), outline, requirement,
         style_key: styleKey, class_ids: classIds, page_target: pageTarget,
       });
       const lec = created?.data?.lecture;
@@ -407,14 +636,13 @@ const NewLectureWizard: React.FC<{
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block text-sm font-medium text-gray-700">教材模块</label>
+                  <label className="mb-1 block text-sm font-medium text-gray-700">分类</label>
                   <select
-                    value={subject}
-                    onChange={(e) => setSubject(e.target.value)}
+                    value={category}
+                    onChange={(e) => setCategory(e.target.value)}
                     className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
                   >
-                    <option value="必修1">必修1</option>
-                    <option value="必修2">必修2</option>
+                    {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
                   </select>
                 </div>
               </div>
