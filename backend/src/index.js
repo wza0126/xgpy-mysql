@@ -8328,7 +8328,7 @@ const VCN_RE = /^[A-Za-z0-9_]{1,40}$/;
 
 /** 读讯飞配置（system_config 的 value 是 {value: xxx} JSON） */
 async function getXfyunConfig(db) {
-  const keys = ['xfyun_app_id', 'xfyun_api_key', 'xfyun_api_secret', 'xfyun_voice', 'xfyun_speed', 'xfyun_volume', 'xfyun_pitch', 'xfyun_voice_favorites'];
+  const keys = ['xfyun_app_id', 'xfyun_api_key', 'xfyun_api_secret', 'xfyun_voice', 'xfyun_speed', 'xfyun_volume', 'xfyun_pitch', 'xfyun_voice_favorites', 'edge_default_voice'];
   const [rows] = await db.query('SELECT config_key, value FROM system_config WHERE config_key IN (?)', [keys]);
   const map = {};
   for (const r of rows) {
@@ -8351,6 +8351,8 @@ async function getXfyunConfig(db) {
     volume: num(map.xfyun_volume, 50),
     pitch: num(map.xfyun_pitch, 50),
     favorites: normalizeVoiceFavorites(map.xfyun_voice_favorites),
+    // 默认 Edge 音色（浏览器免费音色里的短名，如「晓晓」）
+    edgeVoice: String(map.edge_default_voice || '晓晓').trim(),
   };
 }
 
@@ -8520,7 +8522,7 @@ async function explainTtsConfigHandler(req, res) {
     const cfg = await getXfyunConfig(pool);
     const configured = !!(cfg.appId && cfg.apiKey && cfg.apiSecret);
     // Edge 音色由浏览器提供，不在服务端清单里；这里只回老师勾的短名，供播放器收窄下拉
-    const edgeFavorites = await readNameArrayConfig(pool, 'edge_voice_favorites');
+    const edgeFavorites = await readNameArrayConfig(pool, 'edge_voice_favorites', 10);
     res.json({
       data: {
         configured,
@@ -8529,6 +8531,8 @@ async function explainTtsConfigHandler(req, res) {
         // 系统设置里勾的「课堂常用发音人」：播放器只摆这几个，其余的收进「更多」
         favorites: cfg.favorites,
         edgeFavorites,
+        // 播放器打开时优先落到这个 Edge 音色（老师可在系统设置里指定，默认晓晓）
+        edgeDefault: cfg.edgeVoice,
         speed: cfg.speed,
         volume: cfg.volume,
         pitch: cfg.pitch,

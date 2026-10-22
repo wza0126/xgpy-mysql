@@ -98,6 +98,8 @@ export const SystemSettings: React.FC = () => {
     xfyun_api_key: '',
     xfyun_api_secret: '',
     xfyun_voice: 'xiaoyan',
+    // 默认 Edge 音色（浏览器免费音色，优先使用；不可用时落回讯飞）
+    edge_default_voice: '晓晓',
     // 课堂常用发音人：播放器里只摆这几个，其余收进「更多」（空数组 = 全部显示）
     xfyun_voice_favorites: [] as string[],
     // Edge 常用音色（短名，如 晓晓）：Edge 音色由浏览器提供，只有用 Edge 打开本页才看得见
@@ -281,6 +283,17 @@ export const SystemSettings: React.FC = () => {
     }
   };
 
+  /** 默认 Edge 音色的候选：优先用浏览器真的检测到的，再补常见名字兜底（Chrome 下检测不到也能选） */
+  const edgeDefaultOptions = (() => {
+    const set = new Set<string>(['晓晓', '晓伊', '晓北', '晓涵', '晓辰', '云希', '云扬', '云健', '云野']);
+    edgeVoices.forEach((v) => {
+      const short = String(v.name || '').replace(/^Microsoft\s*/i, '').replace(/\s*Online.*$/i, '').trim();
+      if (short) set.add(short);
+    });
+    if (configs.edge_default_voice) set.add(String(configs.edge_default_voice));
+    return Array.from(set);
+  })();
+
   /** 课堂常用发音人：几十个音色里勾几个，播放器只摆这几个（不勾则显示全部） */
   const xfyunFavIds = normalizeFavorites(configs.xfyun_voice_favorites);
   const toggleXfyunFavorite = (id: string) => {
@@ -298,15 +311,15 @@ export const SystemSettings: React.FC = () => {
   };
 
   /** Edge 常用音色（最多 6 个；非 Edge 浏览器检测不到，不显示勾选区） */
-  const edgeFavIds = normalizeNameList(configs.edge_voice_favorites, 6);
+  const edgeFavIds = normalizeNameList(configs.edge_voice_favorites, 10);
   const toggleEdgeFavorite = (id: string) => {
     if (edgeFavIds.includes(id)) {
       setConfigs({ ...configs, edge_voice_favorites: edgeFavIds.filter((x) => x !== id) });
       setTtsHint('');
       return;
     }
-    if (edgeFavIds.length >= 6) {
-      setTtsHint('Edge 常用音色最多勾 6 个，先取消一个再勾。');
+    if (edgeFavIds.length >= 10) {
+      setTtsHint(`Edge 常用音色最多勾 10 个，先取消一个再勾（当前 ${edgeFavIds.length} 个）。`);
       return;
     }
     setConfigs({ ...configs, edge_voice_favorites: [...edgeFavIds, id] });
@@ -1275,34 +1288,19 @@ export const SystemSettings: React.FC = () => {
                   </div>
                   <div className="grid grid-cols-5 gap-3">
                     <div className="col-span-3">
-                      <label className="block text-sm font-medium text-gray-700 mb-1">默认发音人</label>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">默认 Edge 音色（免费，优先用）</label>
                       <select
-                        value={configs.xfyun_voice || '__custom__'}
-                        onChange={(e) => setConfigs({ ...configs, xfyun_voice: e.target.value === '__custom__' ? '' : e.target.value })}
+                        value={configs.edge_default_voice || '晓晓'}
+                        onChange={(e) => setConfigs({ ...configs, edge_default_voice: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-amber-500"
                       >
-                        {/* 已保存的自定义发音人：显示实际参数值，而不是让老师以为要重填 */}
-                        {configs.xfyun_voice && !xfyunVoices.some((v) => v.id === configs.xfyun_voice) && (
-                          <option value={configs.xfyun_voice}>自定义：{configs.xfyun_voice}</option>
-                        )}
-                        {Array.from(new Set(xfyunVoices.map((v) => v.group || '其他'))).map((g) => (
-                          <optgroup key={g} label={g}>
-                            {xfyunVoices.filter((v) => (v.group || '其他') === g).map((v) => (
-                              <option key={v.id} value={v.id}>{v.name}{v.note ? `（${v.note}）` : ''}</option>
-                            ))}
-                          </optgroup>
+                        {edgeDefaultOptions.map((n) => (
+                          <option key={n} value={n}>{n}</option>
                         ))}
-                        <option value="__custom__">自定义（填控制台里的发音人参数）…</option>
                       </select>
-                      {/* 列表里没有就自己填：讯飞没有「列出发音人」的接口，后台有的这里不一定有 */}
-                      {!xfyunVoices.some((v) => v.id === configs.xfyun_voice) && (
-                        <input
-                          value={configs.xfyun_voice || ''}
-                          onChange={(e) => setConfigs({ ...configs, xfyun_voice: e.target.value.trim() })}
-                          placeholder="例如 x4_xxx，去讯飞控制台 → 语音合成 → 发音人管理里复制"
-                          className="mt-2 w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-amber-500"
-                        />
-                      )}
+                      <p className="mt-1 text-xs text-gray-500">
+                        讲解器打开时优先落到这个 Edge 音色；不是 Edge 浏览器、或这台机器没这个音色，自动用下面的讯飞音色。
+                      </p>
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">语速（0-100）</label>
@@ -1327,12 +1325,47 @@ export const SystemSettings: React.FC = () => {
                       />
                     </div>
                   </div>
+                  <div className="mt-3">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">默认讯飞音色（备用，Edge 不可用时才用）</label>
+                    <select
+                      value={configs.xfyun_voice || '__custom__'}
+                      onChange={(e) => setConfigs({ ...configs, xfyun_voice: e.target.value === '__custom__' ? '' : e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-amber-500"
+                    >
+                      {configs.xfyun_voice && !xfyunVoices.some((v) => v.id === configs.xfyun_voice) && (
+                        <option value={configs.xfyun_voice}>自定义：{configs.xfyun_voice}</option>
+                      )}
+                      {Array.from(new Set(xfyunVoices.map((v) => v.group || '其他'))).map((g) => (
+                        <optgroup key={g} label={g}>
+                          {xfyunVoices.filter((v) => (v.group || '其他') === g).map((v) => (
+                            <option key={v.id} value={v.id}>{v.name}{v.note ? `（${v.note}）` : ''}</option>
+                          ))}
+                        </optgroup>
+                      ))}
+                      <option value="__custom__">自定义（填控制台里的发音人参数）…</option>
+                    </select>
+                    {!xfyunVoices.some((v) => v.id === configs.xfyun_voice) && (
+                      <input
+                        value={configs.xfyun_voice || ''}
+                        onChange={(e) => setConfigs({ ...configs, xfyun_voice: e.target.value.trim() })}
+                        placeholder="例如 x4_xxx，去讯飞控制台 → 语音合成 → 发音人管理里复制"
+                        className="mt-2 w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-amber-500"
+                      />
+                    )}
+                  </div>
                   {/* 课堂常用发音人：讯飞清单十几个、Edge 还有一批，全铺进下拉课堂上很难找 */}
                   <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 p-3">
                     <div className="mb-1 flex items-center justify-between">
                       <label className="text-sm font-medium text-gray-700">课堂常用发音人</label>
                       <span className="text-xs text-gray-500">
-                        Edge 已选 <b className={edgeFavIds.length ? 'text-amber-700' : ''}>{edgeFavIds.length}</b> / 6
+                        Edge 已选 <b className={edgeFavIds.length ? 'text-amber-700' : ''}>{edgeFavIds.length}</b> / 10
+                        {edgeFavIds.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => { setConfigs({ ...configs, edge_voice_favorites: [] }); setTtsHint(''); }}
+                            className="ml-1.5 text-xs text-gray-400 underline hover:text-gray-600"
+                          >清空</button>
+                        )}
                         <span className="mx-1.5 text-gray-300">·</span>
                         讯飞已选 <b className={xfyunFavIds.length ? 'text-amber-700' : ''}>{xfyunFavIds.length}</b> / 8（建议 3 个）
                       </span>

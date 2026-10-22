@@ -58,6 +58,8 @@ interface TtsConfig {
   favorites?: string[];
   /** 系统设置里勾的 Edge 常用音色（短名；空 = 用内置最常用的 6 个） */
   edgeFavorites?: string[];
+  /** 系统设置的默认 Edge 音色（短名，如「晓晓」） */
+  edgeDefault?: string;
   speed: number;
 }
 
@@ -205,7 +207,7 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
     if (!sysVoices.edge.length && !ttsConfig) return;
     setChoice((prev) => pickDefaultChoice(list, prev || localStorage.getItem(VOICE_KEY) || '', {
       xfyunDefaultId: ttsConfig?.voice || voice,
-      preferEdge: normalizeNameList(ttsConfig?.edgeFavorites)[0] || '晓晓',
+      preferEdge: ttsConfig?.edgeDefault || normalizeNameList(ttsConfig?.edgeFavorites)[0] || '晓晓',
     }));
   }, [sysVoices, ttsConfig, voice, showAllVoices]);
 
