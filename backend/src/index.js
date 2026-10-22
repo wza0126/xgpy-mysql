@@ -9057,9 +9057,10 @@ async function generateLecturePages({ title, subject, chapter, outline, requirem
   ].filter(Boolean).join('\n');
 
   const baseTemp = Number(cfg.ai_temperature ?? 0.7);
+  // 6~8 页讲解约 2500~3500 token，留足预算避免写到一半被截断（截断后只能按页抢救，页数会变少）
   const attempts = [
-    { max_tokens: 3500, temperature: baseTemp },
-    { max_tokens: 4200, temperature: Math.min(baseTemp + 0.15, 1) },
+    { max_tokens: 4500, temperature: baseTemp },
+    { max_tokens: 6000, temperature: Math.min(baseTemp + 0.15, 1) },
   ];
   let lastErr = null;
   for (let i = 0; i < attempts.length; i += 1) {
