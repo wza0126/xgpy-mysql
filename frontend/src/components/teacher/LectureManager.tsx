@@ -530,8 +530,13 @@ export const LectureManager: React.FC = () => {
 
       {playing && (
         <LecturePlayer
+          // ⛔ 必须带 key：换课程时强制重新挂载，页数/句子/揭晓全部归零。
+          //    没有 key 时 React 复用同一实例，只换 lecture 参数，页码会留在上一篇看到的那一页。
+          key={playing.id}
           lecture={playing}
           audience="teacher"
+          courseIndex={playIdx >= 0 ? playIdx + 1 : undefined}
+          courseTotal={playlist.length}
           onPrevLecture={playIdx > 0 ? () => playByOffset(-1) : undefined}
           onNextLecture={playIdx >= 0 && playIdx < playlist.length - 1 ? () => playByOffset(1) : undefined}
           onClose={() => setPlaying(null)}

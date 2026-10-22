@@ -72,6 +72,9 @@ interface Props {
   /** 上一门 / 下一门微课程（按当前列表顺序）；不传 = 没有相邻课程，上下键无动作 */
   onPrevLecture?: () => void;
   onNextLecture?: () => void;
+  /** 当前是第几门 / 共几门（顶栏显示，也用来确认上下键确实换了课程） */
+  courseIndex?: number;
+  courseTotal?: number;
 }
 
 const VOICE_KEY = 'xgpy_lecture_voice';
@@ -111,7 +114,7 @@ const readNum = (key: string, fallback: number) => {
  * ⛔ 全屏层只许动 opacity：以前给整屏层加 transform 缩放，暴击后直接合成层卡死。
  *    翻页动画因此只用淡入淡出，缩放一律不下放到全屏容器。
  */
-export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', onClose, onEditPage, onPrevLecture, onNextLecture }) => {
+export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', onClose, onEditPage, onPrevLecture, onNextLecture, courseIndex, courseTotal }) => {
   const pages = useMemo(() => (Array.isArray(lecture.pages) ? lecture.pages : []), [lecture.pages]);
   const apiBase = `/api/${audience === 'teacher' ? 'teacher' : 'student'}/explain`;
 
@@ -450,6 +453,11 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
             <i className="fa-solid fa-chalkboard-user mr-1.5"></i>AI 讲堂
           </span>
           <span className="truncate text-base font-semibold text-gray-800" title={lecture.title}>{lecture.title}</span>
+          {courseIndex && courseTotal ? (
+            <span className="shrink-0 rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-500" title="↑ 上一门 / ↓ 下一门">
+              第 {courseIndex} / {courseTotal} 门
+            </span>
+          ) : null}
           {lecture.chapter && <span className="shrink-0 text-sm text-gray-400">{lecture.chapter}</span>}
           {degraded && (
             <span

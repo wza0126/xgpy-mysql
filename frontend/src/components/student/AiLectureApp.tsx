@@ -212,8 +212,12 @@ export const AiLectureApp: React.FC = () => {
 
       {playing && (
         <LecturePlayer
+          // ⛔ key 必填：换课程时重新挂载，页码从第一页开始（见 LecturePlayer 里的说明）
+          key={playing.id}
           lecture={playing}
           audience="student"
+          courseIndex={playIdx >= 0 ? playIdx + 1 : undefined}
+          courseTotal={filtered.length}
           onPrevLecture={playIdx > 0 ? () => play(filtered[playIdx - 1].id) : undefined}
           onNextLecture={playIdx >= 0 && playIdx < filtered.length - 1 ? () => play(filtered[playIdx + 1].id) : undefined}
           onClose={() => { setPlaying(null); load(); }}
