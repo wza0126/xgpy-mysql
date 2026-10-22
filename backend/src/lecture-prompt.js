@@ -11,15 +11,18 @@
 //     模型极爱自己编「1000 个数比较 10 次」这种数据，画出来与知识点对不上，比不画更糟。
 //  ③ narration 一律 clip 到 400 字：TTS 单句上限 300，超了会 400 报错导致整页没声音。
 
-const PAGE_KINDS = ['lead', 'point', 'steps', 'table', 'chart', 'code', 'example', 'recap'];
+const PAGE_KINDS = ['lead', 'point', 'steps', 'flow', 'table', 'chart', 'code', 'example', 'recap'];
 
 /** 每种页型在提示词里的说明（也是前端渲染的字段约定） */
 const PAGE_KIND_DOC = `- lead（引入，每课第一页）：kicker 一句钩子（≤20 字，写「为什么学这个」），narration 把学生带进来。
 - point（要点）：bullets 2 到 4 条，每条 ≤24 字，是这一页的骨架。
-- steps（流程）：steps 2 到 4 步，每步 {label: 动作名 ≤10 字, text: 一句说明 ≤20 字}。
+- steps（并列步骤）：steps 2 到 4 步，每步 {label: 动作名 ≤10 字, text: 一句说明 ≤20 字}。
+- flow（流程图，会画成真正的图形）：flow.nodes 3 到 8 个 {id: n1/n2..., type: start|io|process|decision|end, text: 框内文字 ≤14 字}，flow.edges 2 到 10 条 {from: 节点id, to: 节点id, label: 是/否 或空}。**讲流程图、讲循环路径、讲条件判断走向时必须用这个页型**，不要用 steps 或 point 糊过去。
 - table（对比）：table.columns 2 到 3 列（≤12 字），table.rows 2 到 4 行，每行与列数一致（≤12 字）。
 - chart（柱状图）：只在**大纲里本身就有数字对比**时用；chart.unit ≤6 字，chart.items ≤5 项，label ≤8 字，value 必须是数字。
 - code（代码）：code.lang 取 python / sql / text 之一，code.text 不超过 12 行，note 一句说明 ≤40 字。
+  **凡是讲语句、运算符、循环、分支、输入输出的课，必须有一页 code，且 text 是可运行的真实代码，
+  符号（冒号、缩进、括号、引号、= == < > // %）必须原样写出来，绝不能用中文复述代码。**
 - example（例子）：scenario 情景 ≤60 字，question 设问 ≤40 字，answer 答案 ≤60 字（会被"揭晓式"呈现）。
 - recap（小结，每课最后一页）：bullets 2 到 3 条，每条 ≤24 字，收束全课。`;
 
@@ -37,7 +40,12 @@ const LECTURE_RULES = `【公共规则，任何风格都不许违反】
 2. 每个专业名词第一次出现时，紧跟一句大白话解释，例如「RAM 就是临时桌面，一断电就清空」。
 3. 讲解词每句不超过 35 个字，短句为主，适合直接朗读；一页讲清一件事。
 4. 禁止否定式评价（这都不会、这么简单、太粗心），禁止网络烂梗，禁止「同学们」这类称呼。
-5. 禁止在讲解词里念出页型名称（不要说「这一页是流程图」）。`;
+5. 禁止在讲解词里念出页型名称（不要说「这一页是流程图」）。
+6. 【视觉要求，必须满足】每节课至少 **2 页**是 flow / code / table / chart 之一，不能整节课都是纯文字页（lead / point / recap）：
+   讲流程图、循环、条件走向 → 用 flow 画出来；讲代码、运算符、语句 → 用 code 写真实代码；
+   有对比 → 用 table；有数量对比 → 用 chart。
+7. 讲解词不要逐字念代码或符号（不念「a 等于 a 加 1」「大于号小于号」），改成指屏幕：「看屏幕上这一行」，
+   再用大白话说这行在干什么。代码和符号交给画面显示。`;
 
 const LECTURE_STRUCTURE = `【输出结构】只输出一个 JSON 对象，不要解释文字、不要代码块标记：
 {
@@ -46,6 +54,7 @@ const LECTURE_STRUCTURE = `【输出结构】只输出一个 JSON 对象，不�
     { "kind": "lead", "title": "页标题", "kicker": "为什么学这个", "narration": "要念的话" },
     { "kind": "point", "title": "页标题", "narration": "要念的话", "bullets": ["要点1", "要点2"] },
     { "kind": "steps", "title": "页标题", "narration": "要念的话", "steps": [{ "label": "步骤名", "text": "一句说明" }] },
+    { "kind": "flow", "title": "页标题", "narration": "要念的话", "flow": { "nodes": [{ "id": "n1", "type": "start", "text": "开始" }, { "id": "n2", "type": "decision", "text": "条件成立吗" }], "edges": [{ "from": "n1", "to": "n2" }, { "from": "n2", "to": "n3", "label": "是" }] } },
     { "kind": "table", "title": "页标题", "narration": "要念的话", "table": { "columns": ["列1", "列2"], "rows": [["格1", "格2"]] } },
     { "kind": "chart", "title": "页标题", "narration": "要念的话", "chart": { "unit": "单位", "items": [{ "label": "标签", "value": 3 }] } },
     { "kind": "code", "title": "页标题", "narration": "要念的话", "code": { "lang": "python", "text": "代码" }, "note": "一句说明" },
@@ -159,6 +168,30 @@ function normalizeLecturePages(obj, opts = {}) {
         page.kind = 'point';
         page.bullets = page.steps.map((s) => `${s.label}${s.text ? '：' + s.text : ''}`.slice(0, 24));
         delete page.steps;
+      }
+    } else if (kind === 'flow') {
+      // 真流程图：节点 + 连线。结构不完整就降级成步骤页，别画半张图
+      const rawNodes = (Array.isArray(p.flow && p.flow.nodes) ? p.flow.nodes : []).slice(0, 8);
+      const nodes = rawNodes
+        .map((n, i) => ({
+          id: clip(n && n.id, 8) || `n${i + 1}`,
+          type: ['start', 'io', 'process', 'decision', 'end'].includes(n && n.type) ? n.type : 'process',
+          text: clip(n && n.text, 20),
+        }))
+        .filter((n) => n.text);
+      const ids = new Set(nodes.map((n) => n.id));
+      const edges = (Array.isArray(p.flow && p.flow.edges) ? p.flow.edges : [])
+        .slice(0, 12)
+        .map((e) => ({ from: clip(e && e.from, 8), to: clip(e && e.to, 8), label: clip(e && e.label, 4) }))
+        .filter((e) => ids.has(e.from) && ids.has(e.to));
+
+      if (nodes.length < 3 || edges.length < 2) {
+        page.kind = 'steps';
+        page.steps = nodes.slice(0, 4).map((n) => ({ label: n.text.slice(0, 12), text: '' }));
+      } else {
+        if (!nodes.some((n) => n.type === 'start')) nodes.unshift({ id: 'start', type: 'start', text: '开始' });
+        if (!nodes.some((n) => n.type === 'end')) nodes.push({ id: 'end', type: 'end', text: '结束' });
+        page.flow = { nodes, edges };
       }
     } else if (kind === 'table') {
       const cols = (Array.isArray(p.table && p.table.columns) ? p.table.columns : [])

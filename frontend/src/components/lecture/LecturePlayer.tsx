@@ -16,8 +16,9 @@ import {
   type VoiceChoice,
   type XfyunVoice,
 } from '../../utils/ttsEngine';
+import { CourseFlowDiagram } from './CourseFlowDiagram';
 
-export type LecturePageKind = 'lead' | 'point' | 'steps' | 'table' | 'chart' | 'code' | 'example' | 'recap';
+export type LecturePageKind = 'lead' | 'point' | 'steps' | 'flow' | 'table' | 'chart' | 'code' | 'example' | 'recap';
 
 export interface LecturePage {
   kind: LecturePageKind;
@@ -26,6 +27,7 @@ export interface LecturePage {
   kicker?: string;
   bullets?: string[];
   steps?: { label: string; text: string }[];
+  flow?: { nodes: { id: string; type: 'start' | 'io' | 'process' | 'decision' | 'end'; text: string }[]; edges: { from: string; to: string; label?: string }[] };
   table?: { columns: string[]; rows: string[][] };
   chart?: { unit?: string; items: { label: string; value: number }[] };
   code?: { lang?: string; text: string };
@@ -631,6 +633,16 @@ const PageBody: React.FC<{
             <p className="text-[1.35em] leading-relaxed text-gray-800">{b}</p>
           </div>
         ))}
+      </div>
+    );
+  }
+
+  if (page.kind === 'flow' && page.flow) {
+    return (
+      <div className="pt-2">
+        <div className="rounded-xl border border-gray-200 bg-white px-3 py-2 shadow-sm">
+          <CourseFlowDiagram flow={page.flow} />
+        </div>
       </div>
     );
   }
