@@ -250,103 +250,143 @@ export const Desktop: React.FC = () => {
       if (!isProxyMode) {
         checkAndEnforceLoginRestriction();
       }
-      checkAppAccessPermission();
-      checkAiAccessPermission();
-      checkExchangePermission();
-      checkPythonAccessPermission();
-      fetchFocusModeConfig();
+      // 权限一次拿齐（原来这里是 4 个 check + 专注模式，共 6~7 次查询）
+      syncDesktopPermissions();
       fetchFarmState();
       fetchGalaxy();
 
+      // ⛔ 30 秒不再是 10 秒：这一轮原来要打 7 次查询（profiles ×4、classes、pet_config、
+      // 各自独立），实测一节课占全部请求的 62%。现在 1 次请求，且频率降到 1/3。
+      // 老师禁用某项权限后最多 30 秒生效，对课堂场景足够。
       const interval = setInterval(() => {
         if (!isProxyMode) {
           checkAndEnforceLoginRestriction();
         }
-        checkAppAccessPermission();
-        checkAiAccessPermission();
-        checkExchangePermission();
-        checkPythonAccessPermission();
-        fetchFocusModeConfig();
+        syncDesktopPermissions();
         fetchFarmState();
         fetchGalaxy();
-      }, 10000);
+      }, 30000);
 
       return () => clearInterval(interval);
     }
   }, [effectiveProfile, isProxyMode]);
 
-  const fetchFocusModeConfig = async () => {
-    try {
-      const { data } = await backendClient.from('pet_config').select('*').maybeSingle();
-      if (data) {
-        const quickAccess = data.focus_mode_quick_access 
-          ? (typeof data.focus_mode_quick_access === 'string' 
-              ? JSON.parse(data.focus_mode_quick_access) 
-              : data.focus_mode_quick_access)
-          : ['apps', 'ai_qa', 'notebook'];
-      
-        const focusClasses = data.focus_mode_classes
-          ? (typeof data.focus_mode_classes === 'string'
-              ? JSON.parse(data.focus_mode_classes)
-              : data.focus_mode_classes)
-          : [];
-        
-        const toBool = (v: any) => v !== false && v !== 0 && v !== '0' && v !== null && v !== undefined;
+  /**
+   * 把 pet_config 的一行（或 null）落到组件状态：专注模式开关 + 各入口显隐。
+   * 抽成纯函数，好让「一次拉齐权限」的轮询复用同一套解析，避免两处逻辑漂移。
+   */
+  const applyFocusConfig = (data: any | null) => {
+    if (data) {
+      const quickAccess = data.focus_mode_quick_access
+        ? (typeof data.focus_mode_quick_access === 'string'
+            ? JSON.parse(data.focus_mode_quick_access)
+            : data.focus_mode_quick_access)
+        : ['apps', 'ai_qa', 'notebook'];
 
-        const config: FocusModeConfig = {
-          focus_mode_enabled: data.focus_mode_enabled === true || data.focus_mode_enabled === 1 || data.focus_mode_enabled === '1',
-          focus_mode_show_learn: toBool(data.focus_mode_show_learn),
-          focus_mode_show_practice: toBool(data.focus_mode_show_practice),
-          focus_mode_show_test: toBool(data.focus_mode_show_test),
-          focus_mode_show_wrong: toBool(data.focus_mode_show_wrong),
-          focus_mode_show_notebook: toBool(data.focus_mode_show_notebook),
-          focus_mode_show_python: toBool(data.focus_mode_show_python),
-          focus_mode_show_apps: toBool(data.focus_mode_show_apps),
-          focus_mode_show_pet: toBool(data.focus_mode_show_pet),
-          focus_mode_show_exchange: toBool(data.focus_mode_show_exchange),
-          focus_mode_show_leaderboard: toBool(data.focus_mode_show_leaderboard),
-          focus_mode_show_profile: toBool(data.focus_mode_show_profile),
-          focus_mode_show_security: toBool(data.focus_mode_show_security),
-          focus_mode_show_proxyBrowser: toBool(data.focus_mode_show_proxyBrowser),
-          focus_mode_show_creative: toBool(data.focus_mode_show_creative),
-          focus_mode_quick_access: quickAccess,
-          focus_mode_classes: focusClasses,
-        };
-        
-        setFocusModeConfig(config);
-        
-        if (config.focus_mode_enabled && effectiveProfile) {
-          const studentClassId = effectiveProfile.class_id;
-          const isInFocusClass = config.focus_mode_classes.length === 0 || 
-            config.focus_mode_classes.includes(studentClassId);
-          setIsFocusModeActive(isInFocusClass);
-        } else {
-          setIsFocusModeActive(false);
-        }
+      const focusClasses = data.focus_mode_classes
+        ? (typeof data.focus_mode_classes === 'string'
+            ? JSON.parse(data.focus_mode_classes)
+            : data.focus_mode_classes)
+        : [];
+
+      const toBool = (v: any) => v !== false && v !== 0 && v !== '0' && v !== null && v !== undefined;
+
+      const config: FocusModeConfig = {
+        focus_mode_enabled: data.focus_mode_enabled === true || data.focus_mode_enabled === 1 || data.focus_mode_enabled === '1',
+        focus_mode_show_learn: toBool(data.focus_mode_show_learn),
+        focus_mode_show_practice: toBool(data.focus_mode_show_practice),
+        focus_mode_show_test: toBool(data.focus_mode_show_test),
+        focus_mode_show_wrong: toBool(data.focus_mode_show_wrong),
+        focus_mode_show_notebook: toBool(data.focus_mode_show_notebook),
+        focus_mode_show_python: toBool(data.focus_mode_show_python),
+        focus_mode_show_apps: toBool(data.focus_mode_show_apps),
+        focus_mode_show_pet: toBool(data.focus_mode_show_pet),
+        focus_mode_show_exchange: toBool(data.focus_mode_show_exchange),
+        focus_mode_show_leaderboard: toBool(data.focus_mode_show_leaderboard),
+        focus_mode_show_profile: toBool(data.focus_mode_show_profile),
+        focus_mode_show_security: toBool(data.focus_mode_show_security),
+        focus_mode_show_proxyBrowser: toBool(data.focus_mode_show_proxyBrowser),
+        focus_mode_show_creative: toBool(data.focus_mode_show_creative),
+        focus_mode_quick_access: quickAccess,
+        focus_mode_classes: focusClasses,
+      };
+
+      setFocusModeConfig(config);
+
+      if (config.focus_mode_enabled && effectiveProfile) {
+        const studentClassId = effectiveProfile.class_id;
+        const isInFocusClass = config.focus_mode_classes.length === 0 ||
+          config.focus_mode_classes.includes(studentClassId);
+        setIsFocusModeActive(isInFocusClass);
       } else {
-        setFocusModeConfig({
-          focus_mode_enabled: false,
-          focus_mode_show_learn: true,
-          focus_mode_show_practice: true,
-          focus_mode_show_test: true,
-          focus_mode_show_wrong: true,
-          focus_mode_show_notebook: true,
-          focus_mode_show_python: true,
-          focus_mode_show_apps: true,
-          focus_mode_show_pet: true,
-          focus_mode_show_exchange: true,
-          focus_mode_show_leaderboard: true,
-          focus_mode_show_profile: true,
-          focus_mode_show_security: true,
-          focus_mode_show_proxyBrowser: true,
-          focus_mode_show_creative: true,
-          focus_mode_quick_access: ['apps', 'ai_qa', 'notebook'],
-          focus_mode_classes: [],
-        });
         setIsFocusModeActive(false);
       }
+    } else {
+      setFocusModeConfig({
+        focus_mode_enabled: false,
+        focus_mode_show_learn: true,
+        focus_mode_show_practice: true,
+        focus_mode_show_test: true,
+        focus_mode_show_wrong: true,
+        focus_mode_show_notebook: true,
+        focus_mode_show_python: true,
+        focus_mode_show_apps: true,
+        focus_mode_show_pet: true,
+        focus_mode_show_exchange: true,
+        focus_mode_show_leaderboard: true,
+        focus_mode_show_profile: true,
+        focus_mode_show_security: true,
+        focus_mode_show_proxyBrowser: true,
+        focus_mode_show_creative: true,
+        focus_mode_quick_access: ['apps', 'ai_qa', 'notebook'],
+        focus_mode_classes: [],
+      });
+      setIsFocusModeActive(false);
+    }
+  };
+
+  /**
+   * 一次拉齐「可能被老师随时关掉」的所有权限，替代原来每 10 秒 7 次独立查询。
+   *
+   * 原来 Desktop 每轮要查：profiles(can_use_app) / profiles(can_exchange_internet_code) /
+   * profiles(class_id) + classes(ai_enabled) / profiles(python_enabled) / pet_config。
+   * 实测一节课 14.7 万次 profiles 查询（占全部请求 38%）、三张静态表合计 62%。
+   * 现在一次 /api/student/desktop-permissions 全拿到，轮询也从 10 秒放宽到 30 秒。
+   */
+  const syncDesktopPermissions = async () => {
+    if (!effectiveProfile?.id) return;
+    try {
+      const res: any = await backendClient.get('/api/student/desktop-permissions');
+      const perm = res?.data ?? res;
+      if (!perm) return;
+
+      const { closeWindow, windows } = useDesktopStore.getState();
+      const isOn = (v: any) => !(v === 0 || v === false || v === '0');
+
+      if (!isOn(perm.can_use_app) && windows.some((w) => w.id === 'apps' && w.isOpen)) {
+        closeWindow('apps');
+        alert('您的应用访问权限已被管理员禁用');
+      }
+      if (!isOn(perm.can_exchange_internet_code) && windows.some((w) => w.id === 'exchange' && w.isOpen)) {
+        closeWindow('exchange');
+        alert('您的积分兑换权限已被管理员禁用');
+      }
+      // AI 答疑是班级级开关：没有班级时不判断（与原逻辑一致）
+      if (perm.class_id && !perm.ai_enabled) {
+        if (windows.some((w) => (w.id === 'app_ai_qa' || w.id === 'app_app_ai_qa') && w.isOpen)) {
+          closeWindow('app_ai_qa');
+          closeWindow('app_app_ai_qa');
+          alert('AI答疑功能已被老师关闭');
+        }
+      }
+      if (!isOn(perm.python_enabled) && windows.some((w) => w.id === 'python' && w.isOpen)) {
+        closeWindow('python');
+        alert('您的 Python 编程权限已被管理员禁用');
+      }
+
+      applyFocusConfig(perm.focus || null);
     } catch (error) {
-      console.error('获取专注模式配置失败:', error);
+      console.error('同步桌面权限失败:', error);
     }
   };
 
@@ -404,122 +444,6 @@ export const Desktop: React.FC = () => {
       setGalaxy(null);
     } finally {
       setGalaxyLoaded(true);
-    }
-  };
-
-  const checkAppAccessPermission = async () => {
-    const { closeWindow, windows } = useDesktopStore.getState();
-
-    if (!effectiveProfile) return;
-
-    try {
-      const result = await backendClient.from('profiles').select('can_use_app').eq('id', effectiveProfile.id).maybeSingle();
-
-      if (result.error || !result.data) return;
-
-      const canUseAppValue = result.data.can_use_app;
-      let canUseApp: boolean;
-      if (canUseAppValue === 0 || canUseAppValue === false) {
-        canUseApp = false;
-      } else {
-        canUseApp = true;
-      }
-
-      const appsWindowOpen = windows.some(w => w.id === 'apps' && w.isOpen);
-
-      if (!canUseApp && appsWindowOpen) {
-        closeWindow('apps');
-        alert('您的应用访问权限已被管理员禁用');
-      }
-    } catch (error) {
-      console.error('检查应用权限失败:', error);
-    }
-  };
-
-  const checkExchangePermission = async () => {
-    const { closeWindow, windows } = useDesktopStore.getState();
-
-    if (!effectiveProfile) return;
-
-    try {
-      const result = await backendClient.from('profiles').select('can_exchange_internet_code').eq('id', effectiveProfile.id).maybeSingle();
-
-      if (result.error || !result.data) return;
-
-      const canExchangeValue = result.data.can_exchange_internet_code;
-      let canExchange: boolean;
-      if (canExchangeValue === 0 || canExchangeValue === false) {
-        canExchange = false;
-      } else {
-        canExchange = true;
-      }
-
-      const exchangeWindowOpen = windows.some(w => w.id === 'exchange' && w.isOpen);
-
-      if (!canExchange && exchangeWindowOpen) {
-        closeWindow('exchange');
-        alert('您的积分兑换权限已被管理员禁用');
-      }
-    } catch (error) {
-      console.error('检查兑换权限失败:', error);
-    }
-  };
-
-  const checkAiAccessPermission = async () => {
-    const { closeWindow, windows } = useDesktopStore.getState();
-    if (!effectiveProfile) return;
-
-    try {
-      const { data: profileData } = await backendClient
-        .from('profiles')
-        .select('class_id')
-        .eq('id', effectiveProfile.id)
-        .maybeSingle();
-      if (!profileData?.class_id) return;
-
-      const { data } = await backendClient
-        .from('classes')
-        .select('ai_enabled')
-        .eq('id', profileData.class_id)
-        .maybeSingle();
-
-      if (data && !data.ai_enabled) {
-        const aiWindowOpen = windows.some(w => (w.id === 'app_ai_qa' || w.id === 'app_app_ai_qa') && w.isOpen);
-        if (aiWindowOpen) {
-          closeWindow('app_ai_qa');
-          closeWindow('app_app_ai_qa');
-          alert('AI答疑功能已被老师关闭');
-        }
-      }
-    } catch (error) {
-      console.error('检查AI答疑权限失败:', error);
-    }
-  };
-
-  const checkPythonAccessPermission = async () => {
-    const { closeWindow, windows } = useDesktopStore.getState();
-    if (!effectiveProfile) return;
-
-    try {
-      const result = await backendClient
-        .from('profiles')
-        .select('python_enabled')
-        .eq('id', effectiveProfile.id)
-        .maybeSingle();
-
-      if (result.error || !result.data) return;
-
-      const pythonEnabledValue = result.data.python_enabled;
-      const pythonEnabled = pythonEnabledValue !== 0 && pythonEnabledValue !== false;
-
-      const pythonWindowOpen = windows.some(w => w.id === 'python' && w.isOpen);
-
-      if (!pythonEnabled && pythonWindowOpen) {
-        closeWindow('python');
-        alert('您的 Python 编程权限已被管理员禁用');
-      }
-    } catch (error) {
-      console.error('检查 Python 编程权限失败:', error);
     }
   };
 

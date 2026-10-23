@@ -10994,6 +10994,65 @@ async function getTestQualificationRule(testId) {
   return rows[0];
 }
 
+// 学生桌面轮询：**一次**返回所有「老师可能随时关掉」的权限，替代原来的 7 次查询。
+//
+// 背景（2026-10-23 实测）：Desktop 每 10 秒跑一轮权限检查，里面串行查了
+//   profiles(can_use_app) / profiles(can_exchange_internet_code) / profiles(class_id) +
+//   classes(ai_enabled) / profiles(python_enabled) / pet_config(专注模式) = 7 次
+// 一节课下来 /api/query[profiles] 打了 14.7 万次（占全部请求 38%），
+// 加上 pet_config 与 classes 合计 62% 的请求都花在这三张几乎不变的表上。
+//
+// pet_config 是全校单行、极少改，这里给 30 秒缓存（老师改完最多 30 秒生效）。
+let desktopPetCfgCache = { at: 0, row: null };
+const DESKTOP_PET_CFG_TTL = 30 * 1000;
+
+app.get('/api/student/desktop-permissions', authenticate, requireStudent, async (req, res) => {
+  try {
+    const studentId = req.user.userId;
+    const [rows] = await pool.query(
+      `SELECT p.can_use_app, p.can_exchange_internet_code, p.can_open_exchange_module,
+              p.python_enabled, p.class_id, c.ai_enabled
+         FROM profiles p
+         LEFT JOIN classes c ON c.id = p.class_id
+        WHERE p.id = ? LIMIT 1`,
+      [studentId]
+    );
+    if (!rows.length) return res.status(404).json({ data: null, error: '学生不存在' });
+    const r = rows[0];
+
+    const now = Date.now();
+    if (!desktopPetCfgCache.row || now - desktopPetCfgCache.at > DESKTOP_PET_CFG_TTL) {
+      const [cfg] = await pool.query(
+        `SELECT focus_mode_enabled, focus_mode_show_learn, focus_mode_show_practice,
+                focus_mode_show_test, focus_mode_show_wrong, focus_mode_show_notebook,
+                focus_mode_show_python, focus_mode_show_apps, focus_mode_show_pet,
+                focus_mode_show_exchange, focus_mode_show_leaderboard, focus_mode_show_profile,
+                focus_mode_show_security, focus_mode_show_proxyBrowser, focus_mode_show_creative,
+                focus_mode_quick_access, focus_mode_classes
+           FROM pet_config LIMIT 1`
+      );
+      desktopPetCfgCache = { at: now, row: cfg.length ? cfg[0] : null };
+    }
+
+    res.json({
+      data: {
+        can_use_app: r.can_use_app,
+        can_exchange_internet_code: r.can_exchange_internet_code,
+        can_open_exchange_module: r.can_open_exchange_module,
+        python_enabled: r.python_enabled,
+        ai_enabled: r.ai_enabled,
+        class_id: r.class_id,
+        // 专注模式配置原样回传，前端沿用原有解析逻辑（字符串 / 布尔都可能）
+        focus: desktopPetCfgCache.row,
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('读取桌面权限失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
 // 教师端：系统仪表台快照（进程 / 系统 CPU / 内存 / 磁盘 / 实时流量 / 最近 30 分钟趋势）
 // 纯只读采集，任何一项拿不到都降级为 null，不影响页面
 app.get('/api/teacher/system-status', authenticate, requireTeacher, async (req, res) => {
