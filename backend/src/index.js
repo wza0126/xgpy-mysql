@@ -3003,6 +3003,17 @@ app.post('/api/business/exchange-prize', authenticate, async (req, res) => {
   }
 });
 
+// ============== 练习「闭眼连点」防护参数 ==============
+// 背景（2026-10-23 实测）：学生 25010403 在 56 分钟内提交 963 次练习，中位间隔 2 秒，
+// 正确率 29%（全班约 65%），40% 的作答都落在第一个选项 A 上 —— 因为选项顺序固定，
+// 手指停在第一个按钮上连点即可。练习量因此变成「刷次数」而不是「做题」。
+// 对策分三层：① 前端每题最短读题时间；② 答错后「下一题」延迟；③ 最近 10 题正确率
+// 低于阈值时提醒先看知识点并扣分（本文件负责服务端复核与扣分，前端删代码也绕不过）。
+const LOW_ACC_THRESHOLD = 60;     // 正确率阈值（%）
+const LOW_ACC_MIN_SAMPLE = 10;    // 判定所需最少样本（题）
+const LOW_ACC_PENALTY = 50;       // 触发时扣分（正数表示扣多少）
+const LOW_ACC_COOLDOWN_MIN = 10;  // 冷却时间（分钟），避免一次连错被反复扣
+
 // ============== 业务API：提交答题（带幂等性和防重复）==============
 app.post('/api/business/submit-answer', authenticate, async (req, res) => {
   console.log('[SUBMIT-ANSWER CALLED]', { student_id: req.body.student_id, source: req.body.source });
@@ -3461,6 +3472,24 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
       [student_id]
     );
 
+    // 最近 10 题正确率：仅用于前端判断「连续蒙题」并弹学习提醒，
+    // 真正的扣分复核在 /api/student/practice/low-accuracy-penalty（服务端重算，前端绕不过）。
+    // 这里只多一次按索引取 10 行的查询，不改动任何积分/游戏逻辑。
+    let recent10 = { n: 0, ok: 0, rate: 0 };
+    try {
+      const [recentRows] = await connection.query(
+        `SELECT is_correct FROM student_answers
+          WHERE student_id = ? AND source = 'practice'
+          ORDER BY created_at DESC, id DESC LIMIT ?`,
+        [student_id, LOW_ACC_MIN_SAMPLE]
+      );
+      const n = recentRows.length;
+      const ok = recentRows.filter((r) => Number(r.is_correct) === 1).length;
+      recent10 = { n, ok, rate: n ? Math.round((ok / n) * 100) : 0 };
+    } catch (recentErr) {
+      console.warn('[SUBMIT-ANSWER] 统计最近10题正确率失败（不影响本次提交）:', recentErr.message);
+    }
+
     res.json({ 
       data: { 
         success: true, 
@@ -3468,6 +3497,7 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
         // 服务端判分结果：前端应以它为准刷新「对/错」展示与连对状态
         is_correct,
         server_judged: judgement.judged,
+        recent10,
         // 答案与解析只在「提交之后」随回执下发（题目本身已对学生脱敏），
         // 供前端答后展示正确答案与讲解；复合题额外给逐小题对错。
         correct_answers: questionRows[0].answers,
@@ -3507,6 +3537,242 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
     });
   } finally {
     connection.release();
+  }
+});
+
+// ============== 练习「低正确率」提醒 + 扣分（服务端复核）==============
+// 前端在收到 submit-answer 回执的 recent10 后会调这里。可信度靠服务端自己重算：
+//   ① 必须已答满 LOW_ACC_MIN_SAMPLE 题；
+//   ② 最近 N 题正确率低于 LOW_ACC_THRESHOLD 才扣；
+//   ③ 同一学生 LOW_ACC_COOLDOWN_MIN 分钟内只扣一次（防止一次连错被连扣）；
+//   ④ 扣到 0 为止，不会出现负积分（与 submit-answer 的「积分不足」口径一致）。
+// 返回 { triggered, points, rate, n, ok, cooldown, cooldown_seconds }：
+//   triggered=true  → 前端弹「先看知识点」对话框并显示扣分
+//   cooldown=true   → 冷却中，前端只提示不弹扣分
+app.post('/api/student/practice/low-accuracy-penalty', authenticate, async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    const requesterRole = req.user?.role;
+    const isTeacher = requesterRole && requesterRole !== 'student';
+    const studentId = isTeacher && req.body?.student_id ? String(req.body.student_id) : req.user?.userId;
+    if (!studentId) {
+      return res.status(400).json({ data: null, error: '缺少学生标识' });
+    }
+
+    await connection.beginTransaction();
+
+    const [recentRows] = await connection.query(
+      `SELECT is_correct FROM student_answers
+        WHERE student_id = ? AND source = 'practice'
+        ORDER BY created_at DESC, id DESC LIMIT ?`,
+      [studentId, LOW_ACC_MIN_SAMPLE]
+    );
+    const n = recentRows.length;
+    const ok = recentRows.filter((r) => Number(r.is_correct) === 1).length;
+    const rate = n ? Math.round((ok / n) * 100) : 100;
+
+    if (n < LOW_ACC_MIN_SAMPLE || rate >= LOW_ACC_THRESHOLD) {
+      await connection.rollback();
+      return res.json({ data: { triggered: false, points: 0, rate, n, ok, cooldown: false }, error: null });
+    }
+
+    // 冷却检查：同一学生最近一次因「练习正确率过低」被扣分的时间
+    const [lastPenalty] = await connection.query(
+      `SELECT created_at, TIMESTAMPDIFF(SECOND, created_at, NOW()) AS ago
+         FROM point_transactions
+        WHERE student_id = ? AND reason = '练习正确率过低'
+        ORDER BY created_at DESC LIMIT 1`,
+      [studentId]
+    );
+    if (lastPenalty.length > 0) {
+      const ago = Number(lastPenalty[0].ago) || 0;
+      const cooldownSec = LOW_ACC_COOLDOWN_MIN * 60;
+      if (ago < cooldownSec) {
+        await connection.rollback();
+        return res.json({
+          data: {
+            triggered: false, points: 0, rate, n, ok,
+            cooldown: true, cooldown_seconds: cooldownSec - ago,
+          },
+          error: null,
+        });
+      }
+    }
+
+    const [students] = await connection.query(
+      'SELECT id, current_points FROM profiles WHERE id = ? FOR UPDATE',
+      [studentId]
+    );
+    if (students.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ data: null, error: '学生不存在' });
+    }
+
+    const curPts = Number(students[0].current_points) || 0;
+    const deduct = Math.min(LOW_ACC_PENALTY, curPts); // 不扣成负数
+    if (deduct > 0) {
+      await connection.query(
+        'UPDATE profiles SET current_points = ? WHERE id = ?',
+        [curPts - deduct, studentId]
+      );
+      await connection.query(
+        `INSERT INTO point_transactions (student_id, amount, reason, source_type, created_at)
+         VALUES (?, ?, '练习正确率过低', 'practice', NOW())`,
+        [studentId, -deduct]
+      );
+    }
+
+    await connection.commit();
+    console.log('[LOW-ACC] 学生', studentId, '最近', n, '题正确率', rate + '%', '扣', deduct, '分');
+    res.json({
+      data: {
+        triggered: true,
+        points: -deduct,
+        current_points: curPts - deduct,
+        rate, n, ok,
+        cooldown: false,
+        threshold: LOW_ACC_THRESHOLD,
+      },
+      error: null,
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error('[LOW-ACC] 扣分失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  } finally {
+    connection.release();
+  }
+});
+
+// ============== 教师端：练习「疑似闭眼连点」名单 ==============
+// 判定不靠单一指标，而是四个信号叠加，避免误伤「做得快但确实会」的学生：
+//   ① 正确率明显偏低（低于 60%，越低分越高）
+//   ② 提交间隔异常密集（≤2 秒的占比高 —— 快速模式点选项即交的典型特征）
+//   ③ 同一道题在当天被反复提交（正常复习不会同题 5 次以上）
+//   ④ 题量本身异常大
+// 只做「发现 + 提示」，不自动处罚；是否约谈、是否让他先看知识点，由老师判断。
+app.get('/api/teacher/practice-suspicious', authenticate, async (req, res) => {
+  try {
+    const role = req.user?.role;
+    if (role !== 'teacher' && role !== 'admin') {
+      return res.status(403).json({ data: null, error: '无权访问' });
+    }
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const dateStr = String(req.query.date || '').trim();
+    const day = /^\d{4}-\d{2}-\d{2}$/.test(dateStr) ? dateStr : todayStr;
+    const start = `${day} 00:00:00`;
+    const end = `${day} 23:59:59`;
+
+    // ① 基础聚合
+    const [base] = await pool.query(
+      `SELECT student_id, COUNT(*) AS n, SUM(is_correct = 1) AS ok,
+              COUNT(DISTINCT question_id) AS q
+         FROM student_answers
+        WHERE source = 'practice' AND created_at BETWEEN ? AND ?
+        GROUP BY student_id
+        HAVING n >= 60`,
+      [start, end]
+    );
+    if (base.length === 0) {
+      return res.json({ data: { date: day, items: [], total: 0 }, error: null });
+    }
+
+    // ② 同题最多被提交几次
+    const [repRows] = await pool.query(
+      `SELECT student_id, MAX(c) AS max_rep FROM (
+         SELECT student_id, question_id, COUNT(*) AS c
+           FROM student_answers
+          WHERE source = 'practice' AND created_at BETWEEN ? AND ?
+          GROUP BY student_id, question_id
+       ) t GROUP BY student_id`,
+      [start, end]
+    );
+    const repMap = new Map(repRows.map((r) => [r.student_id, Number(r.max_rep) || 0]));
+
+    // ③ 提交间隔：≤2 秒的占比（窗口函数算相邻两条的时间差）
+    const [gapRows] = await pool.query(
+      `SELECT student_id, SUM(gap IS NOT NULL) AS gn,
+              SUM(CASE WHEN gap IS NOT NULL AND gap <= 2 THEN 1 ELSE 0 END) AS fast
+         FROM (
+           SELECT student_id,
+                  TIMESTAMPDIFF(SECOND,
+                    LAG(created_at) OVER (PARTITION BY student_id ORDER BY created_at, id),
+                    created_at) AS gap
+             FROM student_answers
+            WHERE source = 'practice' AND created_at BETWEEN ? AND ?
+         ) t
+        GROUP BY student_id`,
+      [start, end]
+    );
+    const gapMap = new Map(gapRows.map((r) => [r.student_id, {
+      gn: Number(r.gn) || 0,
+      fast: Number(r.fast) || 0,
+    }]));
+
+    // ④ 学生信息
+    const ids = base.map((r) => r.student_id);
+    const [profiles] = await pool.query(
+      `SELECT id, username, real_name, class_id FROM profiles WHERE id IN (?)`,
+      [ids]
+    );
+    const profileMap = new Map(profiles.map((p) => [p.id, p]));
+    const classIds = [...new Set(profiles.map((p) => p.class_id).filter(Boolean))];
+    let classMap = new Map();
+    if (classIds.length) {
+      const [cls] = await pool.query('SELECT id, name FROM classes WHERE id IN (?)', [classIds]);
+      classMap = new Map(cls.map((c) => [c.id, c.name]));
+    }
+
+    const items = base.map((r) => {
+      const n = Number(r.n) || 0;
+      const ok = Number(r.ok) || 0;
+      const rate = n ? Math.round((ok / n) * 100) : 0;
+      const maxRep = repMap.get(r.student_id) || 0;
+      const g = gapMap.get(r.student_id) || { gn: 0, fast: 0 };
+      const fastRatio = g.gn > 0 ? Math.round((g.fast / g.gn) * 100) : 0;
+      const p = profileMap.get(r.student_id) || {};
+
+      // 打分：以「连点」为主信号（这是无脑刷的直接证据），题量/正确率/重复为辅。
+      // 只看正确率会误伤「学得慢但确实在思考」的学生（实测：某生 42 题、正确率 38%、
+      // 相邻提交 ≤2 秒只占 5%，那是困难不是刷题），所以连点权重最高，且题量设门槛。
+      let score = 0;
+      // ① 连点（核心）
+      if (fastRatio >= 70) score += 4;
+      else if (fastRatio >= 50) score += 3;
+      else if (fastRatio >= 30) score += 1;
+      // ② 正确率偏低
+      if (rate < 40) score += 2;
+      else if (rate < 55) score += 1;
+      // ③ 题量异常
+      if (n >= 300) score += 2;
+      else if (n >= 150) score += 1;
+      // ④ 同题反复（辅助）
+      if (maxRep >= 10) score += 1;
+
+      return {
+        student_id: r.student_id,
+        username: p.username || '',
+        real_name: p.real_name || '',
+        class_id: p.class_id || '',
+        class_name: classMap.get(p.class_id) || '',
+        answers: n,
+        distinct_questions: Number(r.q) || 0,
+        correct: ok,
+        accuracy: rate,
+        max_repeat: maxRep,
+        fast_ratio: fastRatio,
+        score,
+        level: score >= 7 ? 'high' : (score >= 5 ? 'mid' : 'low'),
+      };
+    })
+      .filter((it) => it.score >= 5)
+      .sort((a, b) => b.score - a.score || b.answers - a.answers);
+
+    res.json({ data: { date: day, items, total: base.length }, error: null });
+  } catch (error) {
+    console.error('[SUSPICIOUS] 统计失败:', error);
+    res.status(500).json({ data: null, error: error.message });
   }
 });
 

@@ -178,6 +178,19 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
   // 快速模式：单选点选项即交 / 填空回车即交 / 结果页回车进下一题（默认开，偏好全局共享）
   const [quickMode, toggleQuickMode] = useQuickMode();
   const SUBMIT_COOLDOWN_MS = 1500;
+  // ===== 防「闭眼连点」三道闸 =====
+  // 背景：快速模式「点选项即交」把一道题的作答压缩到 1 秒内，被去掉的正是「读题」这一环。
+  // 实测有学生 56 分钟提交 963 次、中位间隔 2 秒、正确率 29%、40% 的作答都落在第一个选项上
+  // —— 选项顺序固定，手指停在第一个按钮连点即可。三道闸分别卡「读题」「看解析」「懂没懂」。
+  //
+  // 闸① 最短读题时间：题干出现后按正文字数自适应 3~8 秒，期间选项/输入框/提交按钮全部禁用。
+  const [readGateLeft, setReadGateLeft] = useState(0);
+  // 闸② 答错后「下一题」延迟：强制在解析页停留几秒，避免错了立刻翻页（答对不延迟）。
+  const [nextGateLeft, setNextGateLeft] = useState(0);
+  const NEXT_GATE_SECONDS = 3;
+  // 闸③ 最近 10 题正确率过低：弹窗提醒先看知识点；扣分由服务端复核执行，这里只负责提示。
+  const [lowAccNotice, setLowAccNotice] = useState<{ rate: number; n: number; ok: number; points: number } | null>(null);
+  const lowAccWarnedRef = useRef(false);
   // 提交反馈提示（已掌握/重复提交等）
   const [submitNotice, setSubmitNotice] = useState('');
   const { profile, refreshProfile } = useAuth();
@@ -433,12 +446,41 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
   // 答过之后把回执里的答案/解析合并进题目对象，原有渲染逻辑（正确答案高亮、解析、填空参考答案）无需改动
   const currentQuestion = baseQuestion && revealed ? { ...baseQuestion, ...revealed } : baseQuestion;
 
+  // 闸①：每题出现时启动最短读题时间。按题干正文字数自适应：
+  //   约 30 字/秒的阅读速度 + 2 秒缓冲，夹在 3~8 秒之间（短题干 3 秒，长题干最多 8 秒）。
+  useEffect(() => {
+    if (!currentQuestion?.id || showResult) return;
+    const plain = htmlToPlainText(currentQuestion.content || '');
+    const seconds = Math.min(8, Math.max(3, Math.ceil(plain.length / 30) + 2));
+    setReadGateLeft(seconds);
+  }, [currentQuestion?.id, showResult]);
+
+  // 读题倒计时
+  useEffect(() => {
+    if (readGateLeft <= 0) return;
+    const timer = setTimeout(() => setReadGateLeft((v) => (v > 0 ? v - 1 : 0)), 1000);
+    return () => clearTimeout(timer);
+  }, [readGateLeft]);
+
+  // 闸②：答错后的「下一题」延迟倒计时
+  useEffect(() => {
+    if (nextGateLeft <= 0) return;
+    const timer = setTimeout(() => setNextGateLeft((v) => (v > 0 ? v - 1 : 0)), 1000);
+    return () => clearTimeout(timer);
+  }, [nextGateLeft]);
+
+  // 闸①/② 的总开关：任何触发方式（点选项、回车、点提交按钮）在锁定期间都不生效
+  const answerLocked = showResult || readGateLeft > 0;
+
   // overrideAnswer：快速作答（点选项即交 / 填空回车即交）时，答案还没来得及进 state，
   // 由调用方直接传入，避免读到闭包里的旧值。「提交答案」按钮的 onClick 会把事件对象
   // 当第一个参数传进来，所以这里用 typeof 过滤，只认字符串。
   // 防重复三道闸（submittingRef / answeredQuestionIdRef / 冷却）都在下面入口处，任何触发方式都生效。
   const handleSubmit = async (overrideAnswer?: unknown) => {
     if (!currentQuestion || !profile) return;
+
+    // 闸①：最短读题时间内一律不受理（选项已被禁用，这里再拦一次，防键盘/程序化触发）
+    if (readGateLeft > 0) return;
 
     // 同步拦截（不依赖 state 是否已刷新）：
     // 1) 已有提交在途 → 直接忽略
@@ -532,6 +574,8 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
         // API成功后再显示结果
         setIsCorrect(correct);
         setShowResult(true);
+        // 闸②：答错后强制在解析页停留 3 秒（答对不延迟，不打断正确节奏）
+        setNextGateLeft(correct ? 0 : NEXT_GATE_SECONDS);
         // 标记"当前这一屏题已提交"，未切题前不再允许提交
         answeredQuestionIdRef.current = currentQuestion.id;
 
@@ -563,6 +607,28 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
           );
         }
         
+        // 闸③：最近 10 题正确率过低 → 弹「先看知识点」提醒。
+        // 服务端复核后才真正扣分（10 分钟冷却，避免一次连错被反复扣），前端只负责展示结果。
+        // 每轮练习只提示一次，避免同一轮里反复弹窗打断学生。
+        const recent = (result.data as any)?.recent10;
+        if (recent && recent.n >= 10 && recent.rate < 60 && !lowAccWarnedRef.current) {
+          lowAccWarnedRef.current = true;
+          try {
+            const penalty: any = await backendClient.post('/api/student/practice/low-accuracy-penalty');
+            if (penalty?.data?.triggered) {
+              setLowAccNotice({
+                rate: recent.rate,
+                n: recent.n,
+                ok: recent.ok,
+                points: Number(penalty.data.points) || 0,
+              });
+              refreshProfile();
+            }
+          } catch (penaltyErr) {
+            console.warn('低正确率提醒接口失败（忽略，不影响本次作答）:', penaltyErr);
+          }
+        }
+
         // 更新本地用户信息
         if (result.data?.student) {
           refreshProfile();
@@ -662,6 +728,8 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
   };
 
   const handleNext = () => {
+    // 闸②：答错后的解析停留时间还没走完，不允许翻页（键盘 Enter/空格也会走到这里，一并拦住）
+    if (nextGateLeft > 0) return;
     setSelectedAnswer('');
     setCompositeAnswers({});
     setCompositeBlankAnswers({});
@@ -670,6 +738,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
     setSubmitNotice('');
     // 切题后解锁：新的一屏题目允许提交一次
     answeredQuestionIdRef.current = null;
+    setNextGateLeft(0);
 
     const remainingQuestions = filteredQuestions.filter((q) => !masteredQuestionIds.has(q.id));
     if (remainingQuestions.length === 0) {
@@ -1036,6 +1105,13 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                 animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: -20 }}
               >
+                {/* 闸①：最短读题时间提示（倒计时结束前选项/输入框均不可操作） */}
+                {!showResult && readGateLeft > 0 && (
+                  <div className="mb-4 flex items-center gap-2 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                    <i className="fa-solid fa-hourglass-half"></i>
+                    <span>请先认真读题，<span className="font-semibold">{readGateLeft} 秒</span>后可作答</span>
+                  </div>
+                )}
                 <div className="flex items-start gap-2 mb-4">
                   {parseTags(currentQuestion.tags).map((tag, idx) => (
                     <span key={idx} className="px-2 py-1 bg-gray-100 text-gray-600 text-xs rounded">
@@ -1054,12 +1130,13 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                         key={index}
                         onClick={() => {
                           // 快速作答：单选题选中即提交判分（防重复闸门在 handleSubmit 入口处）
-                          if (showResult) return;
+                          // 闸①：读题时间内不得作答（按钮已 disabled，这里再兜一层）
+                          if (answerLocked) return;
                           const letter = String.fromCharCode(65 + index);
                           setSelectedAnswer(letter);
                           if (quickMode) handleSubmit(letter);
                         }}
-                        disabled={showResult}
+                        disabled={answerLocked}
                         className={`w-full p-4 rounded-lg border-2 text-left transition-all ${
                           selectedAnswer === String.fromCharCode(65 + index)
                             ? 'border-blue-500 bg-blue-50'
@@ -1078,7 +1155,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                     <input
                       type="text"
                       value={selectedAnswer}
-                      onChange={(e) => !showResult && setSelectedAnswer(e.target.value)}
+                      onChange={(e) => !answerLocked && setSelectedAnswer(e.target.value)}
                       onKeyDown={(e) => {
                         // 快速作答：填空题输入完按回车即提交判分。
                         // 必须过滤中文输入法合成态：选字时的回车不能当成提交。
@@ -1090,7 +1167,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                         e.preventDefault();
                         handleSubmit(val);
                       }}
-                      disabled={showResult}
+                      disabled={answerLocked}
                       placeholder="请输入答案"
                       className="w-full p-4 border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:outline-none"
                     />
@@ -1160,7 +1237,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                                   <button
                                     key={oIdx}
                                     onClick={() => {
-                                      if (showResult) return;
+                                      if (answerLocked) return;
                                       if (sq.multiple) {
                                         const current = (compositeAnswers[sqIdx] || '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
                                         const idx = current.indexOf(optionLetter);
@@ -1175,7 +1252,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                                         setCompositeAnswers({ ...compositeAnswers, [sqIdx]: optionLetter });
                                       }
                                     }}
-                                    disabled={showResult}
+                                    disabled={answerLocked}
                                     className={`w-full p-3 rounded-lg border-2 text-left transition-all ${borderClass} ${bgClass} ${showResult ? 'cursor-not-allowed' : ''}`}
                                   >
                                     <span className="font-medium mr-2 align-top">{optionLetter}.</span>
@@ -1198,12 +1275,12 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                                       type="text"
                                       value={currentBlankAnswers[bIdx] || ''}
                                       onChange={(e) => {
-                                        if (showResult) return;
+                                        if (answerLocked) return;
                                         const newAnswers = [...currentBlankAnswers];
                                         newAnswers[bIdx] = e.target.value;
                                         setCompositeBlankAnswers({ ...compositeBlankAnswers, [sqIdx]: newAnswers });
                                       }}
-                                      disabled={showResult}
+                                      disabled={answerLocked}
                                       placeholder="请输入答案"
                                       className="flex-1 p-2 border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:outline-none"
                                     />
@@ -1365,6 +1442,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                   onClick={handleSubmit}
                   disabled={
                     isSubmitting ||
+                    readGateLeft > 0 ||
                     (currentQuestion.type !== 'composite' && !selectedAnswer) ||
                       (currentQuestion.type === 'composite' && (() => {
                         const subQs = getCompositeSubQuestions(currentQuestion.answers);
@@ -1385,6 +1463,8 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                       <i className="fa-solid fa-circle-notch fa-spin"></i>
                       提交中...
                     </>
+                  ) : readGateLeft > 0 ? (
+                    `请先读题 ${readGateLeft}s`
                   ) : (
                     '提交答案'
                   )}
@@ -1392,9 +1472,11 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
               ) : (
                 <button
                   onClick={handleNext}
-                  className="px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
+                  disabled={nextGateLeft > 0}
+                  title={nextGateLeft > 0 ? '请先看完解析' : '进入下一题'}
+                  className="px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  下一题
+                  {nextGateLeft > 0 ? `请先看解析 ${nextGateLeft}s` : '下一题'}
                 </button>
               )}
             </div>
@@ -1416,6 +1498,55 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
           </div>
         </div>
       </div>
+
+      {/* 闸③：最近 10 题正确率过低 → 提醒先看知识点（扣分已由服务端执行） */}
+      {lowAccNotice && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+          <div className="w-full max-w-md bg-white rounded-2xl shadow-xl p-6">
+            <div className="flex items-center gap-3 mb-3">
+              <i className="fa-solid fa-triangle-exclamation text-2xl text-amber-500"></i>
+              <h3 className="text-lg font-bold text-gray-800">正确率过低，先别急着往下点</h3>
+            </div>
+            <p className="text-sm text-gray-700 leading-relaxed mb-3">
+              你最近 <span className="font-semibold">{lowAccNotice.n}</span> 题只答对{' '}
+              <span className="font-semibold">{lowAccNotice.ok}</span> 题（
+              <span className="font-semibold text-red-600">{lowAccNotice.rate}%</span>）。
+              说明这类知识点还没弄懂，继续点下去只会反复错同一批题。
+            </p>
+            {lowAccNotice.points < 0 && (
+              <p className="text-sm text-red-600 mb-3">
+                本次扣除 {Math.abs(lowAccNotice.points)} 积分，正确率回到 60% 以上就不会再触发。
+              </p>
+            )}
+            <p className="text-sm text-gray-600 mb-5">
+              建议先花几分钟看知识点讲解，弄懂后再回来练，正确率会明显提高。
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  const cid = currentQuestion?.cluster_id ? String(currentQuestion.cluster_id) : '';
+                  setLowAccNotice(null);
+                  if (cid) {
+                    const parts = cid.split('/');
+                    (window as any).openLearnChapter?.(parts[0], parts[1] || undefined);
+                  } else {
+                    (window as any).openWindow?.('learn');
+                  }
+                }}
+                className="flex-1 px-4 py-2 bg-emerald-500 text-white rounded-lg hover:bg-emerald-600 transition-colors"
+              >
+                先看知识点
+              </button>
+              <button
+                onClick={() => setLowAccNotice(null)}
+                className="flex-1 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors"
+              >
+                我懂了，继续练
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

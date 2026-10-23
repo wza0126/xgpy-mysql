@@ -378,6 +378,9 @@ export const Analytics: React.FC = () => {
         <StudentTrendSection classId={selectedClass} students={students} />
       </div>
       <div className="mt-6">
+        <PracticeAbuseSection classId={selectedClass} />
+      </div>
+      <div className="mt-6">
         <AtRiskSection classId={selectedClass} />
       </div>
       <div className="mt-6">
@@ -1628,6 +1631,128 @@ const ExamDistributionSection: React.FC<{ classId: string }> = ({ classId }) => 
           )}
         </>
       ) : null}
+    </div>
+  );
+};
+// 4. 疑似刷题名单（闭眼连点）
+// 判定口径见后端 /api/teacher/practice-suspicious：正确率偏低 + 提交间隔过密 + 同题反复提交，
+// 三路信号叠加打分，只提示不自动处罚。老师可据此约谈，或让学生先去看知识点。
+interface PracticeAbuseItem {
+  student_id: string;
+  username: string;
+  real_name: string;
+  class_id: string;
+  class_name: string;
+  answers: number;
+  distinct_questions: number;
+  correct: number;
+  accuracy: number;
+  max_repeat: number;
+  fast_ratio: number;
+  score: number;
+  level: 'high' | 'mid' | 'low';
+}
+
+const PracticeAbuseSection: React.FC<{ classId: string }> = ({ classId }) => {
+  const [date, setDate] = useState(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  });
+  const [items, setItems] = useState<PracticeAbuseItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    setLoading(true);
+    setError('');
+    analyticsFetch<{ date: string; items: PracticeAbuseItem[]; total: number }>(
+      `/api/teacher/practice-suspicious?date=${date}`
+    )
+      .then((d) => {
+        setItems(Array.isArray(d?.items) ? d.items : []);
+        setTotal(Number(d?.total) || 0);
+      })
+      .catch((e) => {
+        console.error('获取疑似刷题名单失败:', e);
+        setError(e?.message || '加载失败');
+        setItems([]);
+      })
+      .finally(() => setLoading(false));
+  }, [date]);
+
+  // 按班级过滤（后端返回全校，前端只显示当前班级）
+  const rows = classId ? items.filter((it) => it.class_id === classId) : items;
+
+  const levelBadge = (level: PracticeAbuseItem['level']) => {
+    if (level === 'high') return <span className="px-2 py-0.5 bg-red-100 text-red-700 rounded-full text-xs font-medium">高度疑似</span>;
+    if (level === 'mid') return <span className="px-2 py-0.5 bg-amber-100 text-amber-700 rounded-full text-xs font-medium">可疑</span>;
+    return <span className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded-full text-xs">关注</span>;
+  };
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+      <div className="flex items-start justify-between mb-4">
+        <div>
+          <h3 className={sectionTitleCls}>疑似刷题名单</h3>
+          <p className={sectionSubCls}>
+            当天练习中提交过密、正确率偏低、同题反复提交的学生（判定信号：正确率 &lt; 60%、相邻提交 ≤2 秒占比高、同题最多提交 5 次以上）。只做提示，不自动处罚。
+          </p>
+        </div>
+        <label className="flex items-center gap-2 text-sm text-gray-600 flex-shrink-0">
+          <input
+            type="date"
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
+            className="p-1.5 border border-gray-300 rounded-lg"
+          />
+        </label>
+      </div>
+
+      {loading ? (
+        <SectionSpinner />
+      ) : error ? (
+        <p className="text-sm text-red-500">{error}</p>
+      ) : rows.length === 0 ? (
+        <p className="text-sm text-gray-400 py-6 text-center">
+          {total === 0 ? '当天还没有练习记录' : '当前班级没有发现异常刷题行为'}
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full">
+            <thead>
+              <tr className="border-b border-gray-200 bg-gray-50">
+                <th className="h-10 px-4 text-left text-sm font-medium text-gray-600">账号 姓名</th>
+                <th className="h-10 px-4 text-center text-sm font-medium text-gray-600">提交次数</th>
+                <th className="h-10 px-4 text-center text-sm font-medium text-gray-600">不同题</th>
+                <th className="h-10 px-4 text-center text-sm font-medium text-gray-600">正确率</th>
+                <th className="h-10 px-4 text-center text-sm font-medium text-gray-600">同题最多</th>
+                <th className="h-10 px-4 text-center text-sm font-medium text-gray-600">≤2秒占比</th>
+                <th className="h-10 px-4 text-center text-sm font-medium text-gray-600">判定</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-200">
+              {rows.map((it) => (
+                <tr key={it.student_id} className="hover:bg-gray-50">
+                  <td className="h-12 px-4 text-gray-800 whitespace-nowrap">
+                    {it.username} {it.real_name}
+                  </td>
+                  <td className="h-12 px-4 text-center text-gray-700 font-medium">{it.answers}</td>
+                  <td className="h-12 px-4 text-center text-gray-600">{it.distinct_questions}</td>
+                  <td className={`h-12 px-4 text-center font-semibold ${it.accuracy < 45 ? 'text-red-600' : 'text-gray-700'}`}>
+                    {it.accuracy}%
+                  </td>
+                  <td className="h-12 px-4 text-center text-gray-600">{it.max_repeat} 次</td>
+                  <td className={`h-12 px-4 text-center ${it.fast_ratio >= 70 ? 'text-red-600 font-semibold' : 'text-gray-600'}`}>
+                    {it.fast_ratio}%
+                  </td>
+                  <td className="h-12 px-4 text-center">{levelBadge(it.level)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 };
