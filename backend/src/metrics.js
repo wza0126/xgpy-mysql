@@ -44,6 +44,8 @@ function createMetrics({ app, getConnections, logDir }) {
   let lastCpu = process.cpuUsage();
   let lastCpuAt = Date.now();
   let lastElu = { p99: 0, max: 0 };
+  /** 最近一个窗口的快照（教师端仪表台读它；CPU / ELU 只在整分钟采样时算，避免频繁读扰动） */
+  let lastSnapshot = null;
 
   /** 把具体 id 归一化，避免 /api/x/123 和 /api/x/456 各占一行 */
   function normalize(req) {
@@ -136,6 +138,26 @@ function createMetrics({ app, getConnections, logDir }) {
       fs.appendFileSync(logFile, line + '\n');
     } catch { /* 日志写不了也不能影响服务 */ }
 
+    // 留一份最近窗口的快照，供教师端仪表台直接读（不必等下一分钟的日志行）
+    lastSnapshot = {
+      at: now,
+      req: total,
+      perSec: Number((total / secs).toFixed(1)),
+      slow,
+      errors,
+      errTop,
+      eluP99,
+      eluMax,
+      cpuPct,
+      rssMb: Math.round(mem.rss / 1048576),
+      heapMb: Math.round(mem.heapUsed / 1048576),
+      conns,
+      top: [...bucket.entries()]
+        .sort((a, b) => b[1].n - a[1].n)
+        .slice(0, 10)
+        .map(([k, v]) => ({ key: k, n: v.n, avgMs: Math.round(v.sumMs / v.n), maxMs: Math.round(v.maxMs) })),
+    };
+
     bucket = new Map();
     total = 0;
     slow = 0;
@@ -149,6 +171,37 @@ function createMetrics({ app, getConnections, logDir }) {
 
   return {
     middleware,
+    /**
+     * 当前窗口的实时快照（供教师端仪表台 5 秒轮询）。
+     * 请求数/慢请求/5xx/Top 接口都是实时的；
+     * CPU 与事件循环延迟只在整分钟采样时测定（取上一次的值），避免每次读取都推进基准。
+     */
+    snapshot: () => {
+      const now = Date.now();
+      const secs = Math.max(1, (now - windowStart) / 1000);
+      const mem = process.memoryUsage();
+      let conns = 0;
+      try { conns = typeof getConnections === 'function' ? getConnections() : 0; } catch { /* ignore */ }
+      return {
+        at: now,
+        windowSecs: Math.round(secs),
+        req: total,
+        perSec: Number((total / secs).toFixed(1)),
+        slow,
+        errors,
+        eluP99: lastSnapshot ? lastSnapshot.eluP99 : 0,
+        eluMax: lastSnapshot ? lastSnapshot.eluMax : 0,
+        cpuPct: lastSnapshot ? lastSnapshot.cpuPct : 0,
+        rssMb: Math.round(mem.rss / 1048576),
+        heapMb: Math.round(mem.heapUsed / 1048576),
+        heapTotalMb: Math.round(mem.heapTotal / 1048576),
+        conns,
+        top: [...bucket.entries()]
+          .sort((a, b) => b[1].n - a[1].n)
+          .slice(0, 10)
+          .map(([k, v]) => ({ key: k, n: v.n, avgMs: Math.round(v.sumMs / v.n), maxMs: Math.round(v.maxMs) })),
+      };
+    },
     stop: () => { clearInterval(timer); try { h.disable(); } catch { /* ignore */ } },
   };
 }

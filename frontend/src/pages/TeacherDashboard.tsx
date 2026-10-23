@@ -26,6 +26,7 @@ import { LessonWorkbench } from '../components/teacher/LessonWorkbench';
 import { RollCallApp } from '../components/teacher/RollCallApp';
 import { ProxyManager } from '../components/teacher/ProxyManager';
 import { CreativeWorkshopManager } from '../components/teacher/CreativeWorkshopManager';
+import { SystemMonitor } from '../components/teacher/SystemMonitor';
 
 const API_BASE = API_CONFIG.apiUrl;
 
@@ -391,7 +392,12 @@ export const TeacherDashboard: React.FC = () => {
         </div>
       </div>
 
-      {/* 授权提醒弹窗 */}
+      {/* 运行状态仪表台：固定右上角，默认折叠成一个胶囊，点开看详情。
+          用 fixed 而不是塞进布局里，是不想给每个标签页都加一条工具条（也免得挤占内容）。 */}
+      <div className={`fixed right-3 z-40 md:right-5 ${isMobile ? 'top-16' : 'top-3'}`}>
+        <SystemMonitor />
+      </div>
+
       <AnimatePresence>
         {showLicenseAlert && licenseStatus && (
           <motion.div

@@ -99,6 +99,7 @@ try {
 const app = express();
 
 const { createMetrics } = require('./metrics');
+const systemStatus = require('./system-status');
 const {
   analyzeTemplate: analyzeFillBlankTemplate,
   assembleCode: assembleFillBlankCode,
@@ -10992,6 +10993,24 @@ async function getTestQualificationRule(testId) {
   if (!rows.length) return null;
   return rows[0];
 }
+
+// 教师端：系统仪表台快照（进程 / 系统 CPU / 内存 / 磁盘 / 实时流量 / 最近 30 分钟趋势）
+// 纯只读采集，任何一项拿不到都降级为 null，不影响页面
+app.get('/api/teacher/system-status', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const installDir = path.dirname(process.execPath);
+    const data = systemStatus.collect({
+      metricsSnapshot: typeof runtimeMetrics.snapshot === 'function' ? runtimeMetrics.snapshot() : null,
+      pool,
+      logFile: path.join(installDir, 'logs', 'metrics.log'),
+      installDir,
+    });
+    res.json({ data, error: null });
+  } catch (error) {
+    console.error('读取系统状态失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
 
 // 教师端：查询各一级类目 / 二级类目可练习题量（供「已掌握题数」资格设置时参考上限）
 // 返回 { total, by_primary: {章名: 题量}, by_cluster: {"章名/小节名": 题量} }；全部范围 = total
