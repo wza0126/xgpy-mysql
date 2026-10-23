@@ -509,14 +509,52 @@ async function getProgress(pool, metric, studentId, params) {
 }
 
 /**
- * 批量计算：一个学生 + 多个任务（每个任务一次查询）
- * 任务数很少（几十个），串行足够；如需可并发。
+ * 批量计算：一个学生 + 多个任务。
+ *
+ * 2026-10-23 优化（原实现是「每个任务串行一次查询」，27 个任务就是 27 次串行 RTT，
+ * 实测 pending-count 均耗时 202ms、峰值 7.7s，是全场最慢的常规接口）：
+ *   1) **按指标去重**：key = metric + params。任务表里 total_correct 一项就占了 4 个任务，
+ *      原来同一个数被查了 4 遍；去重后 27 个任务只需 15 次查询。
+ *   2) **有限并发**：单学生内并发跑，但限 6 路 —— 上课高峰 50 人同时刷新时，
+ *      若一次性放 27 个并发会把连接池（100）瞬间打满，排队反而更慢。
+ * 口径完全不变：同一个 key 的多个任务共用一个结果对象（buildStudentItem 只读不写）。
  */
+const PROGRESS_CONCURRENCY = Math.max(1, Number(process.env.XGPY_PROGRESS_CONCURRENCY) || 6);
+
 async function getProgressBatch(pool, tasks, studentId) {
   const out = {};
+  if (!Array.isArray(tasks) || tasks.length === 0) return out;
+
+  // 1) 去重：同 metric + 同 params 只算一次
+  const groups = new Map(); // key -> { metric, params, taskIds }
   for (const t of tasks) {
-    out[t.id] = await getProgress(pool, t.metric, studentId, t.metric_params || {});
+    const params = t.metric_params || {};
+    const key = `${t.metric}|${JSON.stringify(params)}`;
+    const g = groups.get(key);
+    if (g) g.taskIds.push(t.id);
+    else groups.set(key, { metric: t.metric, params, taskIds: [t.id] });
   }
+
+  // 2) 有限并发执行
+  const entries = [...groups.values()];
+  let cursor = 0;
+  const workerCount = Math.min(PROGRESS_CONCURRENCY, entries.length);
+  const workers = Array.from({ length: workerCount }, async () => {
+    for (;;) {
+      const i = cursor;
+      cursor += 1;
+      if (i >= entries.length) return;
+      const g = entries[i];
+      let r;
+      try {
+        r = await getProgress(pool, g.metric, studentId, g.params);
+      } catch (e) {
+        r = { value: 0, text: '', error: e && e.message ? e.message : String(e) };
+      }
+      for (const id of g.taskIds) out[id] = r;
+    }
+  });
+  await Promise.all(workers);
   return out;
 }
 

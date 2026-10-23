@@ -48,6 +48,13 @@ function createMetrics({ app, getConnections, logDir }) {
   /** 把具体 id 归一化，避免 /api/x/123 和 /api/x/456 各占一行 */
   function normalize(req) {
     let p = req.originalUrl.split('?')[0];
+    // /api/query 是前端 backendClient 的通用查询代理（Supabase 风格，body 带 table）。
+    // 不区分表名的话，学生端所有 select/insert/update 全挤成一个 key，
+    // 日志上只看到「POST /api/query 打了很多次」，根本定位不到是谁在打库。
+    // res.on('finish') 在 express.json() 之后触发，此时 req.body 已解析可用。
+    if (p === '/api/query' && req.body && req.body.table) {
+      p = `/api/query[${String(req.body.table).slice(0, 40)}]`;
+    }
     p = p.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, ':id');
     p = p.replace(/\/\d+(?=\/|$)/g, '/:n');
     p = p.replace(/\/local_[A-Za-z0-9_]+/g, '/:qid');
@@ -102,7 +109,9 @@ function createMetrics({ app, getConnections, logDir }) {
       .sort((a, b) => b[1].n - a[1].n)
       .slice(0, 10)
       .map(([k, v]) => `${k}×${v.n}(${Math.round(v.sumMs / v.n)}ms,max${Math.round(v.maxMs)}ms)`)
-      .join(' ');
+      // ⛔ 分隔符用 ' | '：key 里本身含空格（如 "POST /api/query"），
+      //    用单个空格 join 会让日志没法被无歧义地切分，排查时还得猜。
+      .join(' | ');
 
     const errTop = [...errBucket.entries()]
       .sort((a, b) => b[1] - a[1])

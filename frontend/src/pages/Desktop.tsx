@@ -526,15 +526,27 @@ export const Desktop: React.FC = () => {
   useEffect(() => {
     if (effectiveProfile?.role === 'student') {
       checkForNewNotifications(effectiveProfile.id);
-      // 任务中心红点（有奖励可领的数量），与通知红点同一轮询节奏
+      // 任务中心红点（有奖励可领的数量）
       useTaskStore.getState().fetchPendingCount();
 
+      // ⛔ 两个节奏必须分开：
+      //   · 通知要「及时」→ 30 秒
+      //   · 任务红点只表示「有没有奖可领」，5 分钟一次完全够（2026-10-23 吴老确认）
+      //   原来两者共用一个 30 秒定时器：pending-count 每次要跑十几次查询
+      //   （27 个任务串行算进度），40 人在线就是每分钟 80 次刷新，
+      //   实测它是全场最慢的常规接口（均 202ms、峰值 7.7s）。
       const notificationInterval = setInterval(() => {
         checkForNewNotifications(effectiveProfile.id);
-        useTaskStore.getState().fetchPendingCount();
       }, 30000);
 
-      return () => clearInterval(notificationInterval);
+      const taskBadgeInterval = setInterval(() => {
+        useTaskStore.getState().fetchPendingCount();
+      }, 5 * 60 * 1000);
+
+      return () => {
+        clearInterval(notificationInterval);
+        clearInterval(taskBadgeInterval);
+      };
     }
   }, [effectiveProfile, checkForNewNotifications]);
 

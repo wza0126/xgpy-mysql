@@ -272,9 +272,25 @@ async function grantRewards(conn, { studentId, studentUsername, task, rewards, c
 
 /**
  * 取某学生当前可见的启用中任务（按班级过滤）
- * @param type 'daily' | 'once' | null(全部)
+ *
+ * 2026-10-23 优化：任务清单与班级归属都是「极低频变化、全校共用」的数据，
+ * 但原来 每个学生每 30 秒刷新红点都要全表查一次 game_tasks + 一次 profiles。
+ * 40 人在线 = 每分钟 80 次全表扫描。改为：
+ *   · 任务清单按 type 缓存 30 秒（全校共用一份）
+ *   · 学生班级缓存 60 秒（调班极少，最多 1 分钟生效）
+ * 教师改任务后最多 30 秒生效，对红点这种「延迟几百毫秒也无所谓」的场景完全够用。
  */
-async function loadVisibleTasks(pool, studentId, type) {
+const TASK_LIST_TTL_MS = 30 * 1000;
+const CLASS_ID_TTL_MS = 60 * 1000;
+const taskListCache = new Map();   // type('all'|'daily'|'once') -> { at, rows }
+const classIdCache = new Map();    // studentId -> { at, classId }
+
+async function loadTaskRowsCached(pool, type) {
+  const key = type === 'daily' || type === 'once' ? type : 'all';
+  const hit = taskListCache.get(key);
+  const now = Date.now();
+  if (hit && now - hit.at < TASK_LIST_TTL_MS) return hit.rows;
+
   let sql = 'SELECT * FROM game_tasks WHERE is_active = 1';
   const args = [];
   if (type === 'daily' || type === 'once') {
@@ -283,9 +299,25 @@ async function loadVisibleTasks(pool, studentId, type) {
   }
   sql += ' ORDER BY sort_order ASC, created_at ASC';
   const [rows] = await pool.query(sql, args);
+  taskListCache.set(key, { at: now, rows });
+  return rows;
+}
 
+async function loadClassIdCached(pool, studentId) {
+  const hit = classIdCache.get(studentId);
+  const now = Date.now();
+  if (hit && now - hit.at < CLASS_ID_TTL_MS) return hit.classId;
   const [pr] = await pool.query('SELECT class_id FROM profiles WHERE id = ? LIMIT 1', [studentId]);
   const classId = pr.length ? pr[0].class_id : null;
+  classIdCache.set(studentId, { at: now, classId });
+  // 简单防膨胀：超过 2000 条就整表清掉（学生数远达不到，纯保险）
+  if (classIdCache.size > 2000) classIdCache.clear();
+  return classId;
+}
+
+async function loadVisibleTasks(pool, studentId, type) {
+  const rows = await loadTaskRowsCached(pool, type);
+  const classId = await loadClassIdCached(pool, studentId);
 
   return rows
     .map(normalizeTaskRow)
