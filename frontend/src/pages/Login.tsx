@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import { useAuth } from '../hooks/useAuth';
 import { useSiteConfig } from '../hooks/useSiteConfig';
 import { useNavigate } from 'react-router-dom';
+import { loadBaiduAnalytics, trackPageview } from '../utils/analytics';
 
 export const Login: React.FC = () => {
   const [username, setUsername] = useState('');
@@ -20,6 +21,12 @@ export const Login: React.FC = () => {
     if (hash.includes('reason=class_disabled')) {
       setError('平台暂未开放，请联系老师');
     }
+  }, []);
+
+  // 百度统计：仅登录页（学生端不上报）
+  useEffect(() => {
+    loadBaiduAnalytics();
+    trackPageview('/login');
   }, []);
 
   useEffect(() => {

@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useAuth } from '../hooks/useAuth';
 import { useSiteConfig } from '../hooks/useSiteConfig';
 import { API_CONFIG } from '../api/config';
+import { loadBaiduAnalytics, trackPageview } from '../utils/analytics';
 import { ClassManager } from '../components/teacher/ClassManager';
 import { StudentManager } from '../components/teacher/StudentManager';
 import { QuestionBank } from '../components/teacher/QuestionBank';
@@ -110,6 +111,12 @@ export const TeacherDashboard: React.FC = () => {
       document.title = siteConfig.site_title;
     }
   }, [siteConfig.site_title]);
+
+  // 百度统计：仅教师后台（学生端不上报）
+  useEffect(() => {
+    loadBaiduAnalytics();
+    trackPageview('/teacher');
+  }, []);
 
   const fetchLicenseStatus = async () => {
     try {
