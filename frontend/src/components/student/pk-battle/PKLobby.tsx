@@ -4,6 +4,7 @@ import { motion } from 'framer-motion';
 import { backendClient } from '../../../api/backendClient';
 import { useAuth } from '../../../hooks/useAuth';
 import { getRankInfo, renderStars, getRankColorClass } from './utils/pkHelpers';
+import { clusterLabel } from '../../../data/chapterTaxonomy';
 
 const HISTORY_PAGE_SIZE = 10;
 
@@ -471,7 +472,9 @@ export const PKLobby: React.FC<{
               {qual.mastered?.enabled && (
                 <p className="pl-6">
                   · 掌握 <b>{qual.mastered.required}</b> 道题
-                  {qual.mastered.clusters?.length > 0 ? `（范围：${qual.mastered.clusters.join('/')}）` : '（全部范围）'}
+                  {qual.mastered.clusters?.length > 0
+                    ? `（范围：${qual.mastered.clusters.map(clusterLabel).join('、')}）`
+                    : '（全部范围）'}
                   （当前 <b>{qual.mastered.current}</b> 道）
                   {qual.mastered.passed ? ' ✓' : ''}
                 </p>

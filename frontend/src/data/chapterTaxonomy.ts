@@ -182,6 +182,48 @@ export const CHAPTER_ALLOW_SELF: Record<string, boolean> = Object.fromEntries(
   CHAPTER_TAXONOMY.flatMap((p) => p.chapters.map((c) => [c.name, !!c.allowChapter]))
 );
 
+/**
+ * 小节编号（"章名/小节名" -> "1.1.1"）：按词表里的**书写顺序**编号，与教材 / 学习模块一致。
+ * 与 backend/src/chapter-taxonomy.js 的 SECTION_CODES 同一条规则（章 code + "." + 序号），
+ * 两边必须保持同步，否则同一小节在配置页和学习模块里编号会不一样。
+ */
+export const SECTION_CODES: Record<string, string> = Object.fromEntries(
+  CHAPTER_TAXONOMY.flatMap((p) =>
+    p.chapters.flatMap((c) => c.sections.map((s, i) => [`${c.name}/${s}`, `${c.code}.${i + 1}`]))
+  )
+);
+
+/** 章名 -> 章编号（如「数据编码」-> "1.2"） */
+export const CHAPTER_CODES: Record<string, string> = Object.fromEntries(
+  CHAPTER_TAXONOMY.flatMap((p) => p.chapters.map((c) => [c.name, c.code]))
+);
+
+/** 取小节编号：sectionCode('数据与信息', '大数据') -> '1.1.3'；不在词表返回空串 */
+export function sectionCode(chapterName: string, sectionName: string): string {
+  return SECTION_CODES[`${chapterName}/${sectionName}`] || '';
+}
+
+/**
+ * 把 cluster_id（章名 或「章名/小节名」）格式化成带教材编号的展示名。
+ *   '数据编码/文本数据的编码' -> '1.2.2 文本数据的编码'
+ *   '数据编码'               -> '1.2 数据编码'
+ *   '其他' / 不在词表的值      -> 原样返回
+ * 教师端配置页与学生端资格展示共用，保证两处看到的编号一致。
+ */
+export function clusterLabel(clusterId: string): string {
+  const raw = String(clusterId || '').trim();
+  if (!raw) return '';
+  const idx = raw.indexOf('/');
+  if (idx === -1) {
+    const code = CHAPTER_CODES[raw];
+    return code ? `${code} ${raw}` : raw;
+  }
+  const chapter = raw.slice(0, idx);
+  const section = raw.slice(idx + 1);
+  const code = SECTION_CODES[raw];
+  return code ? `${code} ${section}` : raw;
+}
+
 /** 校验一个 cluster_id 是否合法（不在词表内返回 false） */
 export function isValidClusterId(id: string): boolean {
   if (!id) return false;

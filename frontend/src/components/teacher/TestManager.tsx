@@ -6,6 +6,7 @@ import { useAuth } from '../../hooks/useAuth';
 import { ExamManager } from './ExamManager';
 import { ClusterFilter, buildClusterTree, type ClusterTree } from '../common/ClusterFilter';
 import { CHAPTER_TAXONOMY } from '../../data/chapterTaxonomy';
+import { MasteredScopePicker, countInScope } from './MasteredScopePicker';
 import { isOperationType } from '../../utils/questionType';
 
 const parseTags = (tags: any): string[] => {
@@ -69,9 +70,6 @@ export const TestManager: React.FC = () => {
     by_primary: Record<string, number>;
     by_cluster: Record<string, number>;
   }>({ total: 0, by_primary: {}, by_cluster: {} });
-
-  /** 「已掌握题数」范围选择器里已展开小节的章（二级类目折叠树） */
-  const [expandedChapters, setExpandedChapters] = useState<string[]>([]);
 
   useEffect(() => {
     if (profile) {
@@ -299,59 +297,11 @@ export const TestManager: React.FC = () => {
   };
 
   // 当前「已掌握题数」统计范围内可练习题量（用于提示上限；不选 = 全部范围）
-  const clusterPracticable = (name: string) =>
-    name.includes('/')
-      ? (practicableCounts.by_cluster?.[name] || 0)
-      : (practicableCounts.by_primary[name] || 0);
-
-  const selPracticable = formData.qualification_mastered_clusters.length === 0
-    ? practicableCounts.total
-    : formData.qualification_mastered_clusters.reduce((s, n) => s + clusterPracticable(n), 0);
-
-  /**
-   * 选/取消「整章」（一级类目）：选整章时清掉该章下已勾选的小节 ——
-   * 整章已覆盖全部小节，留着只会让计数与显示重复。
-   */
-  const toggleMasteredChapter = (chapterName: string) => {
-    setFormData((prev) => {
-      const list = prev.qualification_mastered_clusters;
-      if (list.includes(chapterName)) {
-        return { ...prev, qualification_mastered_clusters: list.filter((n) => n !== chapterName) };
-      }
-      return {
-        ...prev,
-        qualification_mastered_clusters: [
-          ...list.filter((n) => !n.startsWith(`${chapterName}/`)),
-          chapterName,
-        ],
-      };
-    });
-  };
-
-  /**
-   * 选/取消「小节」（二级类目）：若已选中整章，则自动改为只选这一小节
-   * （老师的直觉是「从整章收窄到这个小节」，不是叠加上去）。
-   */
-  const toggleMasteredSection = (chapterName: string, section: string) => {
-    const path = `${chapterName}/${section}`;
-    setFormData((prev) => {
-      const list = prev.qualification_mastered_clusters;
-      if (list.includes(path)) {
-        return { ...prev, qualification_mastered_clusters: list.filter((n) => n !== path) };
-      }
-      return {
-        ...prev,
-        qualification_mastered_clusters: [...list.filter((n) => n !== chapterName), path],
-      };
-    });
-  };
-
-  /** 展开 / 收起某章的小节列表 */
-  const toggleChapterExpand = (chapterName: string) => {
-    setExpandedChapters((prev) =>
-      prev.includes(chapterName) ? prev.filter((n) => n !== chapterName) : [...prev, chapterName]
-    );
-  };
+  // 与选择器共用同一套口径（countInScope），避免两处算法漂移
+  const selPracticable = countInScope(
+    practicableCounts,
+    formData.qualification_mastered_clusters
+  );
 
   if (loading) {
     return (
@@ -725,142 +675,13 @@ export const TestManager: React.FC = () => {
                         已超过该范围可练习题量（{selPracticable}），学生将无法达到
                       </p>
                     )}
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <p className="text-xs text-gray-600">
-                          统计范围（不选 = 全部范围，共 {practicableCounts.total} 道可练习题）
-                        </p>
-                        {formData.qualification_mastered_clusters.length > 0 && (
-                          <span className="shrink-0 text-xs text-blue-600">
-                            已选 {formData.qualification_mastered_clusters.length} 项 · {selPracticable} 题
-                          </span>
-                        )}
-                      </div>
-                      <div className="max-h-[280px] overflow-y-auto border border-gray-200 rounded-lg bg-white">
-                        {CHAPTER_TAXONOMY.map((part) => (
-                          <div key={part.part}>
-                            <p className="sticky top-0 z-10 border-b border-gray-200 bg-gray-50 px-2 py-1 text-[11px] font-medium text-gray-500">
-                              {part.group} · {part.partName}（{part.part}）
-                            </p>
-                            {part.chapters.map((ch) => {
-                              const on = formData.qualification_mastered_clusters.includes(ch.name);
-                              const secPicked = formData.qualification_mastered_clusters.filter((n) =>
-                                n.startsWith(`${ch.name}/`)
-                              ).length;
-                              const expanded = expandedChapters.includes(ch.name);
-                              const cnt = practicableCounts.by_primary[ch.name] || 0;
-                              return (
-                                <div key={ch.name} className="border-b border-gray-100 last:border-0">
-                                  <div
-                                    className={`flex items-center gap-1 pl-1 pr-2 py-1.5 hover:bg-blue-50/50 ${
-                                      on || secPicked > 0 ? 'bg-blue-50/30' : ''
-                                    }`}
-                                  >
-                                    <button
-                                      type="button"
-                                      onClick={() => toggleChapterExpand(ch.name)}
-                                      className="w-5 shrink-0 text-gray-400 hover:text-blue-600"
-                                      title={expanded ? '收起小节' : '展开小节（可选到二级类目）'}
-                                    >
-                                      <i className={`fa-solid ${expanded ? 'fa-caret-down' : 'fa-caret-right'} text-xs`}></i>
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => toggleMasteredChapter(ch.name)}
-                                      title={`${ch.name}：${cnt} 道可练习题（含该章全部小节）`}
-                                      className="flex min-w-0 flex-1 items-center justify-between gap-2 text-left"
-                                    >
-                                      <span className="flex min-w-0 items-center gap-1.5">
-                                        <span
-                                          className={`inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border ${
-                                            on
-                                              ? 'border-blue-500 bg-blue-500 text-white'
-                                              : 'border-gray-300 bg-white'
-                                          }`}
-                                        >
-                                          {on && <i className="fa-solid fa-check text-[9px]"></i>}
-                                        </span>
-                                        <span
-                                          className={`truncate text-xs ${
-                                            on ? 'font-medium text-blue-700' : 'text-gray-700'
-                                          }`}
-                                        >
-                                          {ch.name}
-                                        </span>
-                                        {secPicked > 0 && (
-                                          <span className="shrink-0 rounded bg-blue-100 px-1 text-[10px] text-blue-700">
-                                            已选 {secPicked} 小节
-                                          </span>
-                                        )}
-                                      </span>
-                                      <span className="shrink-0 text-[11px] text-gray-400">{cnt}</span>
-                                    </button>
-                                  </div>
-                                  {expanded && (
-                                    <div className="pb-1 pl-9 pr-2">
-                                      {ch.sections.length === 0 ? (
-                                        <p className="py-1 text-[11px] text-gray-400">该章无二级类目</p>
-                                      ) : (
-                                        ch.sections.map((sec) => {
-                                          const path = `${ch.name}/${sec}`;
-                                          const sOn = formData.qualification_mastered_clusters.includes(path);
-                                          const sCnt = practicableCounts.by_cluster[path] || 0;
-                                          return (
-                                            <button
-                                              key={path}
-                                              type="button"
-                                              onClick={() => toggleMasteredSection(ch.name, sec)}
-                                              title={`${path}：${sCnt} 道可练习题`}
-                                              className={`mt-0.5 flex w-full items-center justify-between gap-2 rounded px-1.5 py-1 text-left hover:bg-blue-50 ${
-                                                sOn ? 'bg-blue-50' : ''
-                                              }`}
-                                            >
-                                              <span className="flex min-w-0 items-center gap-1.5">
-                                                <span
-                                                  className={`inline-flex h-3 w-3 shrink-0 items-center justify-center rounded-full border ${
-                                                    sOn
-                                                      ? 'border-blue-500 bg-blue-500 text-white'
-                                                      : 'border-gray-300 bg-white'
-                                                  }`}
-                                                >
-                                                  {sOn && <i className="fa-solid fa-check text-[8px]"></i>}
-                                                </span>
-                                                <span
-                                                  className={`truncate text-[11px] ${
-                                                    sOn ? 'font-medium text-blue-700' : 'text-gray-600'
-                                                  }`}
-                                                >
-                                                  {sec}
-                                                </span>
-                                              </span>
-                                              <span className="shrink-0 text-[10px] text-gray-400">{sCnt}</span>
-                                            </button>
-                                          );
-                                        })
-                                      )}
-                                    </div>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        ))}
-                      </div>
-                      <div className="flex items-center justify-between mt-1">
-                        <p className="text-xs text-gray-400">
-                          勾章名 = 该章<b>全部小节</b>；展开选小节 = 只统计该<b>小节</b>
-                        </p>
-                        {formData.qualification_mastered_clusters.length > 0 && (
-                          <button
-                            type="button"
-                            onClick={() => setFormData({ ...formData, qualification_mastered_clusters: [] })}
-                            className="text-xs text-blue-600 hover:underline shrink-0 ml-2"
-                          >
-                            清空（改回全部范围）
-                          </button>
-                        )}
-                      </div>
-                    </div>
+                    <MasteredScopePicker
+                      value={formData.qualification_mastered_clusters}
+                      onChange={(next) =>
+                        setFormData((prev) => ({ ...prev, qualification_mastered_clusters: next }))
+                      }
+                      counts={practicableCounts}
+                    />
                   </div>
 
                   {/* 条件三：WPS 操作题累计得分 */}

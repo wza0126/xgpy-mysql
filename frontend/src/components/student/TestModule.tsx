@@ -7,6 +7,7 @@ import { usePoints } from '../../hooks/usePoints';
 import { toDatabaseDateTime } from '../../utils/dateUtils';
 import { sanitizeHtml, htmlToPlainText } from '../../utils/htmlUtils';
 import { parseDbClusterFilters, matchDbClusterFilters } from '../../utils/clusterFilters';
+import { clusterLabel } from '../../data/chapterTaxonomy';
 import { isOperationType } from '../../utils/questionType';
 import { EquipmentDropEffect } from './game/EquipmentDropEffect';
 import { useGameEventStore } from '../../store/gameEventStore';
@@ -976,7 +977,10 @@ export const TestModule: React.FC = () => {
         parts.push(`做对 ${qualCheck.correct.required} 道题（当前 ${qualCheck.correct.current} 道）`);
       }
       if (qualCheck.mastered?.enabled && !qualCheck.mastered.passed) {
-        parts.push(`掌握 ${qualCheck.mastered.required} 道题（当前 ${qualCheck.mastered.current} 道）`);
+        const scope = qualCheck.mastered.clusters?.length
+          ? `（范围：${qualCheck.mastered.clusters.map(clusterLabel).join('、')}）`
+          : '（全部范围）';
+        parts.push(`掌握 ${qualCheck.mastered.required} 道题（当前 ${qualCheck.mastered.current} 道）${scope}`);
       }
       if (qualCheck.wps_op?.enabled && !qualCheck.wps_op.passed) {
         parts.push(`WPS操作题累计得 ${qualCheck.wps_op.required} 分（当前 ${qualCheck.wps_op.current} 分）`);
@@ -2066,7 +2070,9 @@ export const TestModule: React.FC = () => {
                       <i className={`fa-solid fa-graduation-cap ${qual.mastered.passed ? 'text-green-500' : 'text-amber-500'}`}></i>
                       <span className={qual.mastered.passed ? 'text-green-600' : 'text-amber-600'}>
                         需掌握 {qual.mastered.required} 道题
-                        {qual.mastered.clusters?.length > 0 ? `（${qual.mastered.clusters.join('/')}）` : '（全部范围）'}
+                        {qual.mastered.clusters?.length > 0
+                          ? `（${qual.mastered.clusters.map(clusterLabel).join('、')}）`
+                          : '（全部范围）'}
                         {qual.mastered.passed
                           ? ' ✓ 已达标'
                           : `（当前 ${qual.mastered.current} 道）`}

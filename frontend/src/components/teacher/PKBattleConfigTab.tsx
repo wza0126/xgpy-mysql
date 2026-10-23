@@ -1,13 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
-import { CHAPTER_NAMES, CHAPTER_TAXONOMY } from '../../data/chapterTaxonomy';
+import { MasteredScopePicker, countInScope } from './MasteredScopePicker';
 import { useAuth } from '../../hooks/useAuth';
-
-// 章名 → 该章的知识点（二级类目/小节）清单。词表与后端 chapter-taxonomy 同源。
-const ALL_CHAPTERS = CHAPTER_TAXONOMY.flatMap((p) => p.chapters);
-const chapterSections = (ch: string): string[] =>
-  ALL_CHAPTERS.find((c) => c.name === ch)?.sections || [];
 
 interface ClassInfo {
   id: string;
@@ -138,8 +133,6 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
 
   /** 各一级类目「可练习题量」：供「已掌握题数」资格设置时参考上限（口径 = 练习可用题） */
   const [practicableCounts, setPracticableCounts] = useState<{ total: number; by_primary: Record<string, number>; by_cluster?: Record<string, number> }>({ total: 0, by_primary: {} });
-  // 「已掌握范围」里展开到知识点（二级类目）的章
-  const [expandedChapters, setExpandedChapters] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     fetchConfigs();
@@ -448,39 +441,8 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
 
   // 当前「已掌握题数」统计范围内可练习题量（用于提示上限；不选 = 全部范围）
   // 选中项可能是「章名」（整章，用 by_primary）或「章名/小节名」（知识点，用 by_cluster）
-  const selPracticable = (() => {
-    const sel = formData.qualification_mastered_clusters;
-    if (sel.length === 0) return practicableCounts.total;
-    return sel.reduce((s, n) => {
-      const v = n.includes('/')
-        ? (practicableCounts.by_cluster?.[n] || 0)
-        : (practicableCounts.by_primary[n] || 0);
-      return s + v;
-    }, 0);
-  })();
-
-  // 选/取消「整章」：选中时顺手清掉该章下已选的知识点，避免重复计数
-  const toggleChapterInScope = (ch: string) =>
-    setFormData((prev) => {
-      const cur = prev.qualification_mastered_clusters;
-      const on = cur.includes(ch);
-      const next = on
-        ? cur.filter((n) => n !== ch)
-        : [...cur.filter((n) => n !== ch && !n.startsWith(ch + '/')), ch];
-      return { ...prev, qualification_mastered_clusters: next };
-    });
-
-  // 选/取消单个「知识点」：先把整章选择去掉（子集优先），否则整章会盖住它
-  const toggleSectionInScope = (ch: string, sec: string) =>
-    setFormData((prev) => {
-      const path = `${ch}/${sec}`;
-      const cur = prev.qualification_mastered_clusters;
-      const on = cur.includes(path);
-      const base = cur.filter((n) => n !== ch);
-      const next = on ? base.filter((n) => n !== path) : [...base, path];
-      return { ...prev, qualification_mastered_clusters: next };
-    });
-
+  // 当前「已掌握题数」统计范围内可练习题量（与选择器共用同一套口径 countInScope）
+  const selPracticable = countInScope(practicableCounts, formData.qualification_mastered_clusters);
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -873,102 +835,13 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
                         已超过该范围可练习题量（{selPracticable}），学生将无法达到
                       </p>
                     )}
-                    <div>
-                      <p className="text-xs text-gray-600 mb-1">
-                        统计范围（不选 = 全部范围，共 {practicableCounts.total} 道可练习题）
-                      </p>
-                      <div className="max-h-[176px] overflow-y-auto border border-gray-200 rounded-lg bg-white p-2">
-                        {CHAPTER_NAMES.map((name) => {
-                          const sections = chapterSections(name);
-                          const chapterOn = formData.qualification_mastered_clusters.includes(name);
-                          const expanded = expandedChapters.has(name);
-                          const pickedSections = sections.filter((s) =>
-                            formData.qualification_mastered_clusters.includes(`${name}/${s}`)
-                          ).length;
-                          const cnt = practicableCounts.by_primary[name] || 0;
-                          return (
-                            <div key={name} className="border-b border-gray-100 last:border-0 py-0.5">
-                              <div className="flex items-center gap-1">
-                                <button
-                                  type="button"
-                                  onClick={() => setExpandedChapters((prev) => {
-                                    const next = new Set(prev);
-                                    if (next.has(name)) next.delete(name); else next.add(name);
-                                    return next;
-                                  })}
-                                  className="w-5 h-5 flex items-center justify-center text-gray-400 hover:text-gray-700 shrink-0"
-                                  title={expanded ? '收起知识点' : '展开知识点（二级类目）'}
-                                >
-                                  <i className={`fa-solid fa-chevron-${expanded ? 'down' : 'right'} text-[10px]`}></i>
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => toggleChapterInScope(name)}
-                                  title={`${name}（整章）：${cnt} 道可练习题`}
-                                  className={`px-2.5 py-1 rounded-full text-xs border transition-colors ${
-                                    chapterOn
-                                      ? 'bg-blue-500 text-white border-blue-500'
-                                      : 'bg-white text-gray-600 border-gray-300 hover:border-blue-400'
-                                  }`}
-                                >
-                                  {name}
-                                  <span className={`ml-1 ${chapterOn ? 'text-white/80' : 'text-gray-400'}`}>{cnt}</span>
-                                </button>
-                                {pickedSections > 0 && (
-                                  <span className="text-[11px] text-emerald-600 shrink-0">
-                                    已选 {pickedSections} 个知识点
-                                  </span>
-                                )}
-                              </div>
-                              {expanded && (
-                                <div className="ml-6 my-1 flex flex-wrap gap-1.5">
-                                  {sections.length === 0 ? (
-                                    <span className="text-[11px] text-gray-400">该章无细分知识点</span>
-                                  ) : (
-                                    sections.map((sec) => {
-                                      const path = `${name}/${sec}`;
-                                      const on = formData.qualification_mastered_clusters.includes(path);
-                                      const c = practicableCounts.by_cluster?.[path] || 0;
-                                      return (
-                                        <button
-                                          key={path}
-                                          type="button"
-                                          onClick={() => toggleSectionInScope(name, sec)}
-                                          title={`${path}：${c} 道可练习题`}
-                                          className={`px-2 py-0.5 rounded text-[11px] border transition-colors ${
-                                            on
-                                              ? 'bg-emerald-500 text-white border-emerald-500'
-                                              : 'bg-white text-gray-600 border-gray-300 hover:border-emerald-400'
-                                          }`}
-                                        >
-                                          {sec}
-                                          <span className={`ml-1 ${on ? 'text-white/80' : 'text-gray-400'}`}>{c}</span>
-                                        </button>
-                                      );
-                                    })
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                      <div className="flex items-center justify-between mt-1">
-                        <p className="text-xs text-gray-400">
-                          选章 = 整章（含全部知识点）；点 <b>▸</b> 展开可选单个<b>知识点（二级类目）</b>，
-                          此时只统计该知识点下的题
-                        </p>
-                        {formData.qualification_mastered_clusters.length > 0 && (
-                          <button
-                            type="button"
-                            onClick={() => setFormData({ ...formData, qualification_mastered_clusters: [] })}
-                            className="text-xs text-blue-600 hover:underline shrink-0 ml-2"
-                          >
-                            清空（改回全部范围）
-                          </button>
-                        )}
-                      </div>
-                    </div>
+                    <MasteredScopePicker
+                      value={formData.qualification_mastered_clusters}
+                      onChange={(next) =>
+                        setFormData((prev) => ({ ...prev, qualification_mastered_clusters: next }))
+                      }
+                      counts={practicableCounts}
+                    />
                   </div>
 
                   {/* 条件三：WPS 操作题累计得分 */}
