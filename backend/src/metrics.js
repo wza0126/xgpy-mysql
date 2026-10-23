@@ -32,13 +32,16 @@ function createMetrics({ app, getConnections, logDir }) {
   let total = 0;
   let slow = 0;
   let errors = 0;
+  let errBucket = new Map();   // 5xx 按接口分组：只记总数没法定位是谁在报错
   let windowStart = Date.now();
 
   // 事件循环延迟直方图：p99 超过 200ms 基本就能感觉到卡
   const h = monitorEventLoopDelay({ resolution: 20 });
   h.enable();
 
-  const lastCpu = process.cpuUsage();
+  // ⛔ lastCpu 必须每窗口往前走：写成 const 就永远拿开机至今的累计值，
+  //    算出来的 cpu% 会变成「累计 CPU ÷ 60 秒」（几百上千 %），完全不能用。
+  let lastCpu = process.cpuUsage();
   let lastCpuAt = Date.now();
   let lastElu = { p99: 0, max: 0 };
 
@@ -65,7 +68,10 @@ function createMetrics({ app, getConnections, logDir }) {
       bucket.set(key, cur);
       total += 1;
       if (ms > 1000) slow += 1;
-      if (res.statusCode >= 500) errors += 1;
+      if (res.statusCode >= 500) {
+        errors += 1;
+        errBucket.set(key, (errBucket.get(key) || 0) + 1);
+      }
       if (bucket.size > MAX_KEYS) {
         // 超限就淘汰最小的 20 个，保持内存有界
         const sorted = [...bucket.entries()].sort((a, b) => a[1].n - b[1].n).slice(0, 20);
@@ -83,6 +89,7 @@ function createMetrics({ app, getConnections, logDir }) {
     const cpu = process.cpuUsage(lastCpu);
     const wall = now - lastCpuAt;
     const cpuPct = wall > 0 ? Math.round(((cpu.user + cpu.system) / 1000) / wall * 100) : 0;
+    lastCpu = { user: lastCpu.user + cpu.user, system: lastCpu.system + cpu.system };
     lastCpuAt = now;
 
     // 事件循环延迟（纳秒），取完即重置
@@ -97,12 +104,18 @@ function createMetrics({ app, getConnections, logDir }) {
       .map(([k, v]) => `${k}×${v.n}(${Math.round(v.sumMs / v.n)}ms,max${Math.round(v.maxMs)}ms)`)
       .join(' ');
 
+    const errTop = [...errBucket.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([k, n]) => `${k}×${n}`)
+      .join(' ');
+
     let conns = 0;
     try { conns = typeof getConnections === 'function' ? getConnections() : 0; } catch { /* ignore */ }
 
     const line =
       `${new Date(now).toLocaleString('zh-CN', { hour12: false })} | ` +
-      `req=${total} (${(total / secs).toFixed(1)}/s, slow>1s=${slow}, 5xx=${errors}) | ` +
+      `req=${total} (${(total / secs).toFixed(1)}/s, slow>1s=${slow}, 5xx=${errors}${errTop ? `[${errTop}]` : ''}) | ` +
       `elu p99=${eluP99}ms max=${eluMax}ms | ` +
       `cpu=${cpuPct}% rss=${Math.round(mem.rss / 1048576)}MB heap=${Math.round(mem.heapUsed / 1048576)}MB | ` +
       `conns=${conns} | top: ${top || '(无)'}`;
@@ -118,6 +131,7 @@ function createMetrics({ app, getConnections, logDir }) {
     total = 0;
     slow = 0;
     errors = 0;
+    errBucket = new Map();
     windowStart = now;
   }
 
