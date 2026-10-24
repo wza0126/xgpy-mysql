@@ -459,5 +459,9 @@ module.exports = [
   {
     "version": "112_focus_mode_per_student.sql",
     "sql": "-- 专注模式相关字段（2026-10-24）\n--\n-- ① profiles.focus_force_enabled：学生个人的「强制专注」开关（默认 0 停用）。\n--    用于对练习不认真的学生单独开专注模式 —— 即使班级没开、或不在班级名单里，\n--    只要这个学生个人开着，他登录后就进入专注模式（惩罚性质，由「学生管理」控制）。\n--    判定在 Desktop 里做：个人强制优先于班级开关，是「并集」不是「交集」。\n--\n-- ② pet_config.focus_mode_show_wpsOp / focus_mode_show_aiExplain：\n--    专注模式的「桌面图标显示设置」原先只覆盖 14 个图标，漏了「操作题」和「AI讲解」，\n--    这两项在专注模式下无法被隐藏（图标列表里根本没得选）。补上后与 desktopIcons 对齐。\n\nALTER TABLE `profiles`\n  ADD COLUMN IF NOT EXISTS `focus_force_enabled` TINYINT(1) NOT NULL DEFAULT 0\n    COMMENT '个人强制专注模式（1=该学生单独进入专注，与班级开关取并集）';\n\nALTER TABLE `pet_config`\n  ADD COLUMN IF NOT EXISTS `focus_mode_show_wpsOp`     TINYINT(1) NOT NULL DEFAULT 1 COMMENT '专注模式是否显示「操作题」图标',\n  ADD COLUMN IF NOT EXISTS `focus_mode_show_aiExplain` TINYINT(1) NOT NULL DEFAULT 1 COMMENT '专注模式是否显示「AI讲解」图标';\n"
+  },
+  {
+    "version": "113_galaxy_low_motion.sql",
+    "sql": "-- 学习星域：低动效模式开关（2026-10-24）\n--\n-- 背景：第 5 档（累计练习 ≥1000）单层 SVG 里同时跑 130+ 个 CSS 动画，\n-- 而 SVG 内部元素无法像 HTML 元素那样交给合成器独立成层，每个动效都会让整块\n-- 1600×900 重新光栅化 —— 实测学生桌面因此吃掉 16%+ CPU（Edge 单标签）。\n--\n-- low_motion = 1 时，前端把 anim 参数置 false：星空、星座、行星全部保留（静态），\n-- 只关掉「闪烁/呼吸/流星/流光」这类持续动画。视觉上从「活的星河」变成「静的星图」，\n-- CPU 基本回到 0。给机房老机器或临时卡顿时一个一键开关。\n\nALTER TABLE `study_galaxy_config`\n  ADD COLUMN IF NOT EXISTS `low_motion` TINYINT(1) NOT NULL DEFAULT 0\n    COMMENT '低动效模式（1=关闭星域持续动画，只保留静态星空）';\n"
   }
 ];

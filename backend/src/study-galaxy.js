@@ -314,6 +314,8 @@ function registerStudyGalaxy(app, { pool, authenticate, requireTeacher, requireS
     return {
       enabled: true,
       tier,
+      // 低动效开关：前端据此把持续动画关掉（星空仍静态显示）
+      low_motion: Number(cfg.low_motion) === 1 ? 1 : 0,
       tier_name: TIER_NAMES[tier - 1],
       tiers,
       tier_names: TIER_NAMES,
@@ -359,6 +361,7 @@ function registerStudyGalaxy(app, { pool, authenticate, requireTeacher, requireS
             tiers,
             tier_names: TIER_NAMES,
             lit_ratio: num(cfg.lit_ratio, 0.5),
+            low_motion: Number(cfg.low_motion) === 1,
           },
           stats: {
             today_students: num(stat && stat[0] && stat[0].today_students, 0),
@@ -414,10 +417,15 @@ function registerStudyGalaxy(app, { pool, authenticate, requireTeacher, requireS
       const litRatio =
         b.lit_ratio === undefined ? num(cfg.lit_ratio, 0.5) : clamp(num(b.lit_ratio, 0.5), 0.05, 1);
 
+      // 低动效：未传则保留原值，避免老调用方把开关冲掉
+      const lowMotion = b.low_motion === undefined
+        ? (Number(cfg.low_motion) === 1 ? 1 : 0)
+        : (b.low_motion === true || b.low_motion === 1 || b.low_motion === '1' ? 1 : 0);
+
       await pool.query(
         'UPDATE study_galaxy_config SET enabled=?, class_ids=?, daily_goal=?, tier_2=?, tier_3=?, tier_4=?, ' +
-          'tier_5=?, lit_ratio=?, updated_by=? WHERE id = 1',
-        [enabled, classIds.length ? JSON.stringify(classIds) : null, dailyGoal, t2, t3, t4, t5, litRatio, teacherId]
+          'tier_5=?, lit_ratio=?, low_motion=?, updated_by=? WHERE id = 1',
+        [enabled, classIds.length ? JSON.stringify(classIds) : null, dailyGoal, t2, t3, t4, t5, litRatio, lowMotion, teacherId]
       );
       cache.clear();
 

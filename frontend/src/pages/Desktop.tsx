@@ -953,7 +953,7 @@ export const Desktop: React.FC = () => {
           与农场同层（z-[5]）且互斥：农场开着时不叠星域，避免两层抢屏。
           专注模式退化为「只留星点 + 进度线」，关掉一切动画。 */}
       {galaxyOn && !(farmState?.enabled && !farmDismissed) ? (
-        <StudyGalaxyLayer data={galaxy as GalaxyData} simple={isFocusModeActive} onOpenChapter={handleOpenLearnChapter} />
+        <StudyGalaxyLayer data={galaxy as GalaxyData} simple={isFocusModeActive || Number(galaxy?.low_motion) === 1} onOpenChapter={handleOpenLearnChapter} />
       ) : null}
 
       <DesktopPet 

@@ -54,6 +54,8 @@ export interface GalaxyData {
   reason?: string;
   tier: number;
   tier_name: string;
+  /** 1 = 低动效模式（老师在星域配置里开的），前端把持续动画全关，只留静态星空 */
+  low_motion?: number;
   tiers: number[];
   tier_names: string[];
   total_answer: number;
@@ -106,12 +108,17 @@ const VISUAL = [
 ];
 
 /** 动效强度：档位越高，动的元素越多、节奏越快。低档也保留少量闪烁，避免「死屏」 */
+// ⛔ 2026-10-24 大幅收缩：SVG 内部元素的 CSS 动画无法交给合成器独立成层，
+//    每个动效都会让整块 1600×900 重新光栅化。第 5 档原来有 130+ 个动效元素，
+//    实测学生桌面单标签吃掉 16%+ CPU（a 账号累计 1070 次练习正好踩在第 5 档）。
+//    这里把「会动的」压到约 1/3：星空密度不变（静态星点全保留），只是闪烁的少了。
+//    需要彻底静态时用「低动效模式」开关（study_galaxy_config.low_motion）。
 const MOTION = [
-  { sparkle: 8, meteor: 0, aurora: 0, beat: 0, trace: 0, baseEvery: 0 },
-  { sparkle: 12, meteor: 0, aurora: 0, beat: 0, trace: 1, baseEvery: 12 },
-  { sparkle: 18, meteor: 1, aurora: 0, beat: 0, trace: 1, baseEvery: 9 },
-  { sparkle: 26, meteor: 3, aurora: 0, beat: 1, trace: 1, baseEvery: 7 },
-  { sparkle: 34, meteor: 5, aurora: 1, beat: 1, trace: 1, baseEvery: 5 },
+  { sparkle: 5, meteor: 0, aurora: 0, beat: 0, trace: 0, baseEvery: 0 },
+  { sparkle: 7, meteor: 0, aurora: 0, beat: 0, trace: 1, baseEvery: 22 },
+  { sparkle: 9, meteor: 1, aurora: 0, beat: 0, trace: 1, baseEvery: 20 },
+  { sparkle: 11, meteor: 2, aurora: 0, beat: 1, trace: 1, baseEvery: 26 },
+  { sparkle: 13, meteor: 3, aurora: 1, beat: 1, trace: 1, baseEvery: 24 },
 ];
 
 const STATE_COLOR = {

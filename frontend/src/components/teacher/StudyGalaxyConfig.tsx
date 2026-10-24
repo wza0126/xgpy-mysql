@@ -18,6 +18,8 @@ interface GalaxyCfg {
   tiers: number[];
   tier_names: string[];
   lit_ratio: number;
+  /** 低动效模式：关掉星域持续动画，只留静态星空 */
+  low_motion: boolean;
 }
 
 const TIER_HINT = [
@@ -35,6 +37,7 @@ const EMPTY: GalaxyCfg = {
   tiers: [0, 50, 200, 500, 1000],
   tier_names: ['星尘', '初亮', '成图', '银河', '星海'],
   lit_ratio: 0.5,
+  low_motion: false,
 };
 
 export const StudyGalaxyConfig: React.FC = () => {
@@ -61,6 +64,7 @@ export const StudyGalaxyConfig: React.FC = () => {
           tiers: t.map((x: any) => Number(x) || 0),
           tier_names: Array.isArray(d.config.tier_names) ? d.config.tier_names : EMPTY.tier_names,
           lit_ratio: Number(d.config.lit_ratio) || 0.5,
+        low_motion: !!d.config.low_motion,
         });
       }
       if (d.stats) setStats(d.stats);
@@ -121,6 +125,7 @@ export const StudyGalaxyConfig: React.FC = () => {
         class_ids: cfg.class_ids,
         daily_goal: cfg.daily_goal,
         tiers: cfg.tiers,
+        low_motion: cfg.low_motion,
       });
       if (r?.error) throw new Error(r.error);
       setMsg({
@@ -175,6 +180,33 @@ export const StudyGalaxyConfig: React.FC = () => {
           <i className="fa-solid fa-circle-info mr-1.5" />
           星域开启时，学生桌面<b>不再请求背景图</b>（改用内置深空底色），可省掉每台机器每 30 秒一次的图片流量。
           老机房想保留原壁纸，就别把该班选进来。
+        </div>
+      </div>
+
+      {/* 低动效模式：机房机器卡顿时的应急开关（2026-10-24 加） */}
+      <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h4 className="mb-1 text-sm font-semibold text-gray-800">低动效模式</h4>
+            <p className="text-xs text-gray-500">
+              开启后关掉星域的闪烁、呼吸、流星、极光等持续动画，只保留静态星空与星座。
+              星星密度和档位颜色都不变，只是「不动了」。
+              <b className="text-amber-700">上课时学生电脑明显卡顿时，打开这个能立刻省掉一大截 CPU。</b>
+            </p>
+          </div>
+          <button
+            onClick={() => setCfg((c) => ({ ...c, low_motion: !c.low_motion }))}
+            className={`relative h-7 w-12 shrink-0 rounded-full transition-colors ${
+              cfg.low_motion ? 'bg-sky-500' : 'bg-gray-300'
+            }`}
+            aria-label="切换低动效模式"
+          >
+            <span
+              className={`absolute top-0.5 h-6 w-6 rounded-full bg-white shadow transition-all ${
+                cfg.low_motion ? 'left-[22px]' : 'left-0.5'
+              }`}
+            />
+          </button>
         </div>
       </div>
 

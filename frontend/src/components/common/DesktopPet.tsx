@@ -380,13 +380,11 @@ export const DesktopPet: React.FC<DesktopPetProps> = ({
         >
           <motion.div
             className="absolute inset-0 rounded-full"
-            animate={{
-              background: [
-                'radial-gradient(circle at 30% 30%, rgba(255,255,255,0.4) 0%, transparent 50%)',
-                'radial-gradient(circle at 35% 25%, rgba(255,255,255,0.5) 0%, transparent 50%)',
-                'radial-gradient(circle at 30% 30%, rgba(255,255,255,0.4) 0%, transparent 50%)',
-              ],
-            }}
+            // ⛔ 别再用 background 数组做动画：framer-motion 会逐帧插值 CSS 渐变字符串，
+            //    浏览器每帧都要重新生成并光栅化整块渐变，是纯 CPU 开销。
+            //    改成 opacity 呼吸，视觉几乎一样，且能走合成器（2026-10-24 性能优化）。
+            style={{ background: 'radial-gradient(circle at 32% 28%, rgba(255,255,255,0.45) 0%, transparent 50%)' }}
+            animate={{ opacity: [0.55, 1, 0.55] }}
             transition={{ repeat: Infinity, duration: 3, ease: 'easeInOut' }}
           />
           {petImage ? (
