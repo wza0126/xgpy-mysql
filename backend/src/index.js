@@ -964,7 +964,7 @@ app.get('/api/teacher/students/overview', authenticate, requireTeacher, async (r
     }
 
     const [students] = await pool.query(
-      `SELECT p.id, p.username, p.real_name, p.class_id, p.current_points
+      `SELECT p.id, p.username, p.real_name, p.class_id, p.current_points, p.focus_force_enabled
          FROM profiles p
         WHERE ${where.join(' AND ')}`,
       params
@@ -1041,6 +1041,7 @@ app.get('/api/teacher/students/overview', authenticate, requireTeacher, async (r
         wrong_answers: Math.max(0, total - correct),
         accuracy: total > 0 ? Math.round((correct / total) * 100) : 0,
         total_mastered: masteredMap.get(sid) || 0,
+        focus_force_enabled: Number(s.focus_force_enabled) === 1 ? 1 : 0,
         wrong_open: wrongMap.get(sid) || 0,
         has_pet: petLevel > 0,
         pet_level: petLevel,
@@ -1804,6 +1805,10 @@ app.put('/api/tables/:tableName/:id', authenticate, async (req, res) => {
       const IDENTITY_FIELDS = [
         'role', 'password_hash', 'username', 'class_id',
         'can_open_exchange_module', 'can_use_app', 'can_use_browser', 'can_exchange_internet_code',
+        // 模块开关与「强制专注」：只能由老师通过班级管理 / 学生管理改。
+        // 不加这里的话，学生可以用通用表接口把自己的练习开关重新打开、或关掉自己的强制专注。
+        'python_enabled', 'practice_enabled', 'test_enabled', 'op_enabled', 'pet_enabled',
+        'focus_force_enabled',
       ];
       const PROTECTED_FIELDS = [...POINT_FIELDS, ...IDENTITY_FIELDS];
 
@@ -11283,6 +11288,7 @@ app.get('/api/student/desktop-permissions', authenticate, requireStudent, async 
     const [rows] = await pool.query(
       `SELECT p.can_use_app, p.can_exchange_internet_code, p.can_open_exchange_module,
               p.python_enabled, p.practice_enabled, p.test_enabled, p.op_enabled, p.pet_enabled,
+              p.focus_force_enabled,
               p.class_id, c.ai_enabled
          FROM profiles p
          LEFT JOIN classes c ON c.id = p.class_id
@@ -11300,6 +11306,7 @@ app.get('/api/student/desktop-permissions', authenticate, requireStudent, async 
                 focus_mode_show_python, focus_mode_show_apps, focus_mode_show_pet,
                 focus_mode_show_exchange, focus_mode_show_leaderboard, focus_mode_show_profile,
                 focus_mode_show_security, focus_mode_show_proxyBrowser, focus_mode_show_creative,
+                focus_mode_show_wpsOp, focus_mode_show_aiExplain,
                 focus_mode_quick_access, focus_mode_classes
            FROM pet_config LIMIT 1`
       );
@@ -11317,6 +11324,8 @@ app.get('/api/student/desktop-permissions', authenticate, requireStudent, async 
         test_enabled: r.test_enabled,
         op_enabled: r.op_enabled,
         pet_enabled: r.pet_enabled,
+        // 个人强制专注：与班级开关取并集，老师可用它单独「罚」某个学生进专注模式
+        focus_force_enabled: r.focus_force_enabled,
         ai_enabled: r.ai_enabled,
         class_id: r.class_id,
         // 专注模式配置原样回传，前端沿用原有解析逻辑（字符串 / 布尔都可能）

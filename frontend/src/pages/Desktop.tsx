@@ -62,6 +62,9 @@ interface FocusModeConfig {
   focus_mode_show_security: boolean;
   focus_mode_show_proxyBrowser: boolean;
   focus_mode_show_creative: boolean;
+  // 2026-10-24 补全：原先漏了这两个，导致「操作题」「AI讲解」在专注模式下无法隐藏
+  focus_mode_show_wpsOp: boolean;
+  focus_mode_show_aiExplain: boolean;
   focus_mode_quick_access: string[];
   focus_mode_classes: string[];
 }
@@ -307,7 +310,11 @@ export const Desktop: React.FC = () => {
    * 把 pet_config 的一行（或 null）落到组件状态：专注模式开关 + 各入口显隐。
    * 抽成纯函数，好让「一次拉齐权限」的轮询复用同一套解析，避免两处逻辑漂移。
    */
-  const applyFocusConfig = (data: any | null) => {
+  // forceFocus：学生个人的「强制专注」开关（profiles.focus_force_enabled）。
+  // 语义是「并集」不是「交集」—— 班级没开、甚至不在班级名单里，只要这个人被开了，
+  // 他登录后就进专注模式。老师用它单独处理练习不认真的学生。
+  const applyFocusConfig = (data: any | null, forceFocus?: any) => {
+    const forced = forceFocus === 1 || forceFocus === true || forceFocus === '1';
     if (data) {
       const quickAccess = data.focus_mode_quick_access
         ? (typeof data.focus_mode_quick_access === 'string'
@@ -339,19 +346,24 @@ export const Desktop: React.FC = () => {
         focus_mode_show_security: toBool(data.focus_mode_show_security),
         focus_mode_show_proxyBrowser: toBool(data.focus_mode_show_proxyBrowser),
         focus_mode_show_creative: toBool(data.focus_mode_show_creative),
+        focus_mode_show_wpsOp: toBool(data.focus_mode_show_wpsOp),
+        focus_mode_show_aiExplain: toBool(data.focus_mode_show_aiExplain),
         focus_mode_quick_access: quickAccess,
         focus_mode_classes: focusClasses,
       };
 
       setFocusModeConfig(config);
 
-      if (config.focus_mode_enabled && effectiveProfile) {
+      if (effectiveProfile) {
         const studentClassId = effectiveProfile.class_id;
-        const isInFocusClass = config.focus_mode_classes.length === 0 ||
-          config.focus_mode_classes.includes(studentClassId);
-        setIsFocusModeActive(isInFocusClass);
+        const isInFocusClass = config.focus_mode_enabled && (
+          config.focus_mode_classes.length === 0 ||
+          config.focus_mode_classes.includes(studentClassId)
+        );
+        // 个人强制专注优先：班级没开也会进
+        setIsFocusModeActive(isInFocusClass || forced);
       } else {
-        setIsFocusModeActive(false);
+        setIsFocusModeActive(forced);
       }
     } else {
       setFocusModeConfig({
@@ -370,10 +382,13 @@ export const Desktop: React.FC = () => {
         focus_mode_show_security: true,
         focus_mode_show_proxyBrowser: true,
         focus_mode_show_creative: true,
+        focus_mode_show_wpsOp: true,
+        focus_mode_show_aiExplain: true,
         focus_mode_quick_access: ['apps', 'ai_qa', 'notebook'],
         focus_mode_classes: [],
       });
-      setIsFocusModeActive(false);
+      // 配置行缺失时也要尊重个人强制专注（此时图标全显示，只是萌宠收成小按钮）
+      setIsFocusModeActive(forced);
     }
   };
 
@@ -443,7 +458,7 @@ export const Desktop: React.FC = () => {
         alert(`${closedLabels.join('、')}功能已被老师关闭`);
       }
 
-      applyFocusConfig(perm.focus || null);
+      applyFocusConfig(perm.focus || null, perm.focus_force_enabled);
     } catch (error) {
       console.error('同步桌面权限失败:', error);
     }

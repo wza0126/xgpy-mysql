@@ -153,23 +153,6 @@ export const PetConfig: React.FC = () => {
         level_base_threshold: petConfig.level_base_threshold,
         level_threshold_increment: petConfig.level_threshold_increment,
         max_stage: petConfig.max_stage,
-        focus_mode_enabled: petConfig.focus_mode.focus_mode_enabled,
-        focus_mode_show_learn: petConfig.focus_mode.focus_mode_show_learn,
-        focus_mode_show_practice: petConfig.focus_mode.focus_mode_show_practice,
-        focus_mode_show_test: petConfig.focus_mode.focus_mode_show_test,
-        focus_mode_show_wrong: petConfig.focus_mode.focus_mode_show_wrong,
-        focus_mode_show_notebook: petConfig.focus_mode.focus_mode_show_notebook,
-        focus_mode_show_python: petConfig.focus_mode.focus_mode_show_python,
-        focus_mode_show_apps: petConfig.focus_mode.focus_mode_show_apps,
-        focus_mode_show_pet: petConfig.focus_mode.focus_mode_show_pet,
-        focus_mode_show_exchange: petConfig.focus_mode.focus_mode_show_exchange,
-        focus_mode_show_leaderboard: petConfig.focus_mode.focus_mode_show_leaderboard,
-        focus_mode_show_profile: petConfig.focus_mode.focus_mode_show_profile,
-        focus_mode_show_security: petConfig.focus_mode.focus_mode_show_security,
-        focus_mode_show_proxyBrowser: petConfig.focus_mode.focus_mode_show_proxyBrowser,
-        focus_mode_show_creative: petConfig.focus_mode.focus_mode_show_creative,
-        focus_mode_quick_access: JSON.stringify(petConfig.focus_mode.focus_mode_quick_access),
-        focus_mode_classes: JSON.stringify(petConfig.focus_mode.focus_mode_classes),
       };
 
       console.log('保存萌宠配置:', updateData);
@@ -288,7 +271,6 @@ export const PetConfig: React.FC = () => {
       ...petConfig,
       focus_mode: {
         ...petConfig.focus_mode,
-        focus_mode_quick_access: newList,
       },
     });
   };
@@ -317,7 +299,6 @@ export const PetConfig: React.FC = () => {
       ...petConfig,
       focus_mode: {
         ...petConfig.focus_mode,
-        focus_mode_classes: newList,
       },
     });
   };
@@ -406,14 +387,6 @@ export const PetConfig: React.FC = () => {
             }`}
           >
             桌面设置
-          </button>
-          <button
-            onClick={() => setActiveTab('focus')}
-            className={`px-4 py-2 rounded-lg transition-colors ${
-              activeTab === 'focus' ? 'bg-purple-500 text-white' : 'bg-gray-200 text-gray-700'
-            }`}
-          >
-            专注模式
           </button>
         </div>
       </div>
@@ -685,149 +658,6 @@ export const PetConfig: React.FC = () => {
           >
             保存设置
           </button>
-        </div>
-      )}
-
-      {activeTab === 'focus' && petConfig && (
-        <div className="space-y-6">
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-            <div className="flex items-center justify-between mb-6">
-              <div className="flex-1">
-                <h3 className="text-lg font-bold text-gray-800">专注模式</h3>
-                <p className="text-sm text-gray-500 mt-1">开启后，学生桌面将只显示指定的图标，萌宠将变为侧边悬浮小按钮</p>
-              </div>
-              <label className="relative inline-flex items-center cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={petConfig.focus_mode.focus_mode_enabled}
-                  onChange={(e) => setPetConfig({
-                    ...petConfig,
-                    focus_mode: {
-                      ...petConfig.focus_mode,
-                      focus_mode_enabled: e.target.checked,
-                    },
-                  })}
-                  className="sr-only peer"
-                />
-                <div className="w-14 h-7 bg-gray-300 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-purple-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[4px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-6 after:w-6 after:transition-all peer-checked:bg-purple-500"></div>
-              </label>
-            </div>
-
-            <div className="mb-6">
-              <h4 className="text-sm font-medium text-gray-700 mb-3">应用班级（多选）</h4>
-              <p className="text-xs text-gray-500 mb-3">只有选中的班级在开启专注模式后，学生端才会起效</p>
-              <div className="flex items-center gap-2 mb-3">
-                <button
-                  onClick={toggleSelectAllClasses}
-                  className="px-3 py-1 text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 transition-colors"
-                >
-                  {petConfig.focus_mode.focus_mode_classes.length === classes.length ? '取消全选' : '全选'}
-                </button>
-                <span className="text-sm text-gray-500">
-                  已选择 {petConfig.focus_mode.focus_mode_classes.length} 个班级
-                </span>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {classes.map((cls) => {
-                  const isSelected = petConfig.focus_mode.focus_mode_classes.includes(cls.id);
-                  return (
-                    <label
-                      key={cls.id}
-                      className={`px-3 py-2 rounded-full text-sm cursor-pointer transition-all ${
-                        isSelected
-                          ? 'bg-purple-100 text-purple-700 border-2 border-purple-300'
-                          : 'bg-gray-100 text-gray-600 border-2 border-transparent hover:bg-gray-200'
-                      }`}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={isSelected}
-                        onChange={() => toggleFocusClass(cls.id)}
-                        className="sr-only"
-                      />
-                      {cls.name}
-                    </label>
-                  );
-                })}
-              </div>
-            </div>
-
-            <button
-              onClick={handleSaveConfig}
-              className="w-full py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 transition-colors"
-            >
-              保存专注模式设置
-            </button>
-          </div>
-
-          {petConfig.focus_mode.focus_mode_enabled && (
-            <>
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-                <h3 className="text-lg font-bold text-gray-800 mb-4">桌面图标显示设置</h3>
-                <p className="text-sm text-gray-500 mb-4">选择专注模式下学生桌面显示的图标</p>
-                <div className="grid grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
-                  {iconOptions.map((icon) => {
-                    const fieldName = `focus_mode_show_${icon.id}` as keyof Omit<FocusModeConfig, 'focus_mode_enabled' | 'focus_mode_quick_access' | 'focus_mode_classes'>;
-                    const isEnabled = petConfig.focus_mode[fieldName] as boolean;
-                    return (
-                      <label
-                        key={icon.id}
-                        className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-all ${
-                          isEnabled
-                            ? 'border-purple-500 bg-purple-50'
-                            : 'border-gray-200 bg-gray-50 hover:bg-gray-100'
-                        }`}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={isEnabled}
-                          onChange={() => toggleFocusIcon(fieldName)}
-                          className="sr-only"
-                        />
-                        <i className={`fa-solid ${icon.icon} text-lg ${isEnabled ? 'text-purple-600' : 'text-gray-400'}`}></i>
-                        <span className={`text-sm ${isEnabled ? 'text-gray-800 font-medium' : 'text-gray-500'}`}>{icon.label}</span>
-                        {isEnabled && (
-                          <i className="fa-solid fa-check-circle text-purple-500 ml-auto"></i>
-                        )}
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-                <h3 className="text-lg font-bold text-gray-800 mb-4">快捷入口设置</h3>
-                <p className="text-sm text-gray-500 mb-4">点击萌宠小按钮后显示的快捷入口（可多选）</p>
-                <div className="grid grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
-                  {iconOptions.map((icon) => {
-                    const isSelected = petConfig.focus_mode.focus_mode_quick_access.includes(icon.id);
-                    return (
-                      <label
-                        key={icon.id}
-                        className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-all ${
-                          isSelected
-                            ? 'border-green-500 bg-green-50'
-                            : 'border-gray-200 bg-gray-50 hover:bg-gray-100'
-                        }`}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={isSelected}
-                          onChange={() => toggleQuickAccess(icon.id)}
-                          className="sr-only"
-                        />
-                        <i className={`fa-solid ${icon.icon} text-lg ${isSelected ? 'text-green-600' : 'text-gray-400'}`}></i>
-                        <span className={`text-sm ${isSelected ? 'text-gray-800 font-medium' : 'text-gray-500'}`}>{icon.label}</span>
-                        {isSelected && (
-                          <i className="fa-solid fa-check-circle text-green-500 ml-auto"></i>
-                        )}
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-            </>
-          )}
         </div>
       )}
 

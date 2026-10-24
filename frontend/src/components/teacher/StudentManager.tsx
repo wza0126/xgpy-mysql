@@ -13,9 +13,13 @@ interface StudentWithStats extends Profile {
   pet_level?: number;
   can_exchange_internet_code?: boolean;
   hidden_features?: string[];
+  /** 已掌握题数（同一道题答对达到阈值次数，与学情分析同口径） */
+  total_mastered?: number;
+  /** 个人强制专注（1=该学生单独进入专注模式，与班级开关取并集） */
+  focus_force_enabled?: boolean | number;
 }
 
-type SortField = 'real_name' | 'username' | 'current_points' | 'max_points' | 'total_answers' | 'accuracy' | 'is_online';
+type SortField = 'real_name' | 'username' | 'current_points' | 'max_points' | 'total_answers' | 'accuracy' | 'total_mastered' | 'is_online';
 type SortOrder = 'asc' | 'desc';
 
 // 删除学生时需清理的关联表（按 student_id 字段关联）
@@ -172,6 +176,8 @@ export const StudentManager: React.FC = () => {
           has_pet: !!s.has_pet,
           pet_level: Number(s.pet_level) || 0,
           accuracy: Number(s.accuracy) || 0,
+          total_mastered: Number(s.total_mastered) || 0,
+          focus_force_enabled: Number(s.focus_force_enabled) === 1,
           can_exchange_internet_code: student.can_exchange_internet_code ?? true,
           hidden_features: student.hidden_features ? (typeof student.hidden_features === 'string' ? JSON.parse(student.hidden_features) : student.hidden_features) : ['paint_board', 'roll_call', 'ai_explain'],
           is_online: !!s.is_online,
@@ -199,6 +205,11 @@ export const StudentManager: React.FC = () => {
     if (sortField === 'accuracy') {
       aVal = a.accuracy || 0;
       bVal = b.accuracy || 0;
+    }
+
+    if (sortField === 'total_mastered') {
+      aVal = Number(a.total_mastered) || 0;
+      bVal = Number(b.total_mastered) || 0;
     }
     
     if (sortField === 'is_online') {
@@ -625,6 +636,23 @@ export const StudentManager: React.FC = () => {
     fetchStudents();
   };
 
+  // 个人强制专注：默认停用，打开后该学生即使所在班级没开专注模式也会进入。
+  // 用乐观更新，避免整表重新拉取导致页面跳回顶部。
+  const handleToggleFocus = async (studentId: string, next: boolean) => {
+    const apply = (v: boolean) => setStudents((prev) => prev.map((s) => (
+      s.id === studentId ? ({ ...s, focus_force_enabled: v } as StudentWithStats) : s
+    )));
+    apply(next);
+    const { error } = await backendClient
+      .from('profiles')
+      .update({ focus_force_enabled: next ? 1 : 0 })
+      .eq('id', studentId);
+    if (error) {
+      apply(!next);
+      alert('设置失败：' + (error.message || '未知错误'));
+    }
+  };
+
   const handleBatchToggleExchange = async (canExchange: boolean) => {
     if (selectedStudents.size === 0) {
       alert('请先选择学生');
@@ -920,9 +948,16 @@ export const StudentManager: React.FC = () => {
               <SortHeader field="current_points">当前积分</SortHeader>
               <SortHeader field="total_answers">做题量</SortHeader>
               <SortHeader field="accuracy">正确率</SortHeader>
+              <SortHeader field="total_mastered">掌握</SortHeader>
               <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">萌宠</th>
               <SortHeader field="is_online">在线</SortHeader>
               <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">兑换</th>
+              <th
+                className="px-4 py-3 text-center text-sm font-medium text-gray-600"
+                title="单独把某个学生强制切进专注模式（班级没开也生效），用于惩罚练习不认真的学生"
+              >
+                专注
+              </th>
               <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">
                 <span
                   className="relative cursor-help group"
@@ -961,6 +996,7 @@ export const StudentManager: React.FC = () => {
                 <td className="px-4 py-3 text-center text-yellow-600 font-medium">{student.current_points || 0}</td>
                 <td className="px-4 py-3 text-center text-gray-600">{student.total_answers || 0}</td>
                 <td className="px-4 py-3 text-center text-gray-600">{student.accuracy || 0}%</td>
+                <td className="px-4 py-3 text-center font-semibold text-indigo-600">{student.total_mastered || 0}</td>
                 <td className="px-4 py-3 text-center">
                   {student.has_pet ? (
                     <span className="px-2 py-1 bg-pink-100 text-pink-600 rounded-full text-xs">
@@ -994,6 +1030,24 @@ export const StudentManager: React.FC = () => {
                   >
                     <i className={`fa-solid ${student.can_exchange_internet_code ? 'fa-check' : 'fa-ban'} mr-1`}></i>
                     {student.can_exchange_internet_code ? '允许' : '禁止'}
+                  </button>
+                </td>
+                <td className="px-4 py-3 text-center">
+                  <button
+                    onClick={() => handleToggleFocus(student.id, !student.focus_force_enabled)}
+                    title={
+                      student.focus_force_enabled
+                        ? '该学生已被强制专注，点击解除'
+                        : '点击强制该学生进入专注模式（班级没开也生效）'
+                    }
+                    className={`px-2 py-1 rounded-full text-xs transition-colors ${
+                      student.focus_force_enabled
+                        ? 'bg-purple-100 text-purple-700 hover:bg-purple-200'
+                        : 'bg-gray-100 text-gray-400 hover:bg-gray-200'
+                    }`}
+                  >
+                    <i className={`fa-solid ${student.focus_force_enabled ? 'fa-moon' : 'fa-circle-minus'} mr-1`}></i>
+                    {student.focus_force_enabled ? '专注中' : '停用'}
                   </button>
                 </td>
                 <td className="px-4 py-3 text-center">

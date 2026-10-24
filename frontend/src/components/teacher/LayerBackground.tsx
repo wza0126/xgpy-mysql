@@ -1,19 +1,23 @@
 import React, { useEffect, useState } from 'react';
 import { FarmConfig } from './FarmConfig';
 import { StudyGalaxyConfig } from './StudyGalaxyConfig';
+import { FocusModePanel } from './FocusModePanel';
 
 // ===== 教师后台 · 图层背景 =====
 // 「壁纸之上、桌面图标之下」的装饰层统一入口。
 // 目前两层：
 //   1) 代码农场 —— 桌面即游戏场，学生写 Python 照顾地块
 //   2) 学习星域 —— 随练习量成长的反馈层（星座 = 章，星点 = 小节）
+//   3) 专注模式 —— 控制学生桌面上「能显示哪些图标」（2026-10-24 从「萌宠配置」搬来：
+//      它本质是课堂纪律工具，不是萌宠玩法，放在这里更符合「桌面上显示什么」的定位）
 // 两层互斥显示（农场开启时星域隐藏），所以放在同一个页面里配置最不容易漏。
 
-type TabKey = 'farm' | 'galaxy';
+type TabKey = 'farm' | 'galaxy' | 'focus';
 
 const TABS: { key: TabKey; label: string; icon: string; desc: string }[] = [
   { key: 'farm', label: '代码农场', icon: 'fa-seedling', desc: '桌面即游戏场：播种、浇水、施肥、收获' },
   { key: 'galaxy', label: '学习星域', icon: 'fa-star', desc: '随练习量成长的星域，点亮知识点星座' },
+  { key: 'focus', label: '专注模式', icon: 'fa-moon', desc: '上课做题时只显示指定图标，减少干扰' },
 ];
 
 const STORAGE_KEY = 'xgpy:layer-bg-tab';
@@ -22,7 +26,7 @@ export const LayerBackground: React.FC = () => {
   const [tab, setTab] = useState<TabKey>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
-      return saved === 'galaxy' || saved === 'farm' ? saved : 'farm';
+      return saved === 'galaxy' || saved === 'farm' || saved === 'focus' ? saved : 'farm';
     } catch {
       return 'farm';
     }
@@ -64,7 +68,9 @@ export const LayerBackground: React.FC = () => {
         <p className="mt-2 text-xs text-gray-500">{TABS.find((t) => t.key === tab)?.desc}</p>
       </div>
 
-      {tab === 'farm' ? <FarmConfig /> : <StudyGalaxyConfig />}
+      {tab === 'farm' && <FarmConfig />}
+      {tab === 'galaxy' && <StudyGalaxyConfig />}
+      {tab === 'focus' && <FocusModePanel />}
     </div>
   );
 };

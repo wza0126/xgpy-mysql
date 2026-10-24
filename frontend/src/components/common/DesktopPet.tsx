@@ -476,7 +476,49 @@ export const DesktopPet: React.FC<DesktopPetProps> = ({
             </motion.div>
           )}
         </motion.div>
-        
+
+        {/* 专注模式下的萌宠公告（2026-10-24 修复）：
+            原来这个分支在 425 行直接 return 小按钮，走不到下面正常模式的公告渲染，
+            于是教师在专注模式课堂上发的公告学生完全看不到 —— 而那正是上课最需要广播的时候。
+            公告数据本来就是无条件拉取的（第 100 行 effect），这里只是把它显示出来。
+            定位放在小按钮右侧，避免遮住左下角本身。 */}
+        <AnimatePresence>
+          {announcements.length > 0 && (
+            <motion.div
+              initial={{ opacity: 0, x: -12, scale: 0.9 }}
+              animate={{ opacity: 1, x: 0, scale: 1 }}
+              exit={{ opacity: 0, x: -12, scale: 0.9 }}
+              className="absolute left-[64px] bottom-0 w-[280px] space-y-2 z-20"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {announcements.slice(0, 2).map((a) => (
+                <div
+                  key={a.id}
+                  className="rounded-2xl bg-gradient-to-br from-rose-500 via-orange-500 to-amber-400 p-[2px] shadow-2xl shadow-rose-500/40"
+                >
+                  <div className="rounded-2xl bg-white/95 px-3 py-2">
+                    <div className="mb-1 flex items-center justify-between gap-2">
+                      <span className="flex items-center gap-1 text-[11px] font-bold text-rose-600">
+                        <i className="fa-solid fa-bullhorn animate-pulse text-[10px]"></i>
+                        公告
+                      </span>
+                      <span className="rounded-full bg-rose-500 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                        {a.remaining_seconds} 秒后关闭
+                      </span>
+                    </div>
+                    <p className="whitespace-pre-wrap text-sm font-medium leading-relaxed text-gray-800">
+                      {a.content}
+                    </p>
+                    {a.created_by_name && (
+                      <p className="mt-0.5 text-right text-[10px] text-gray-400">—— {a.created_by_name}</p>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         <motion.div
           className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-10 h-2 rounded-full"
           style={{
