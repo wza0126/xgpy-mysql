@@ -1,8 +1,21 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
 import { Class } from '../../types';
 import { useAuth } from '../../hooks/useAuth';
+
+/** 班级快捷开关的键：每个都对应 classes 表一列，切换后会同步到该班所有学生的 profiles */
+type ClassSwitchKey =
+  | 'app_center_enabled' | 'exchange_enabled' | 'internet_enabled' | 'pk_battle_enabled' | 'python_enabled'
+  | 'practice_enabled' | 'test_enabled' | 'op_enabled' | 'pet_enabled';
+
+/** 2026-10-24 新增的四个模块开关（控制学生端能否打开对应窗口），默认启用 */
+const MODULE_SWITCHES: { key: ClassSwitchKey; label: string }[] = [
+  { key: 'practice_enabled', label: '练习' },
+  { key: 'test_enabled', label: '测试' },
+  { key: 'op_enabled', label: '操作题' },
+  { key: 'pet_enabled', label: '萌宠' },
+];
 
 export const ClassManager: React.FC = () => {
   const [classes, setClasses] = useState<Class[]>([]);
@@ -19,9 +32,13 @@ export const ClassManager: React.FC = () => {
     }
   }, [profile]);
 
+  // 只有「首次进入页面」才显示整页 loading。
+  // 之后所有刷新都走静默：原来每次点开关都 setLoading(true)，整页被替换成一个转圈图标，
+  // 页面高度瞬间塌陷，滚动条直接回到顶部 —— 表格一长就得重新往下翻，非常难用。
+  const initialLoadedRef = useRef(false);
   const fetchClasses = async () => {
     if (!profile) return;
-    setLoading(true);
+    if (!initialLoadedRef.current) setLoading(true);
     console.log('=== fetchClasses ===');
     const { data } = await backendClient
       .from('classes')
@@ -34,6 +51,7 @@ export const ClassManager: React.FC = () => {
       console.log('Updated classes state:', data);
     }
     setLoading(false);
+    initialLoadedRef.current = true;
   };
 
   const handleCreate = async () => {
@@ -79,12 +97,16 @@ export const ClassManager: React.FC = () => {
     }
 
     // 应用中心/兑换/上网/PK对战/Python编程 开关：走统一批量接口，同步改学生 profiles
-    const quickKeys: Array<'app_center_enabled' | 'exchange_enabled' | 'internet_enabled' | 'pk_battle_enabled' | 'python_enabled'> = [
+    const quickKeys: ClassSwitchKey[] = [
       'app_center_enabled',
       'exchange_enabled',
       'internet_enabled',
       'pk_battle_enabled',
       'python_enabled',
+      'practice_enabled',
+      'test_enabled',
+      'op_enabled',
+      'pet_enabled',
     ];
     const quickToggles: Record<string, boolean> = {};
     for (const k of quickKeys) {
@@ -196,18 +218,28 @@ export const ClassManager: React.FC = () => {
   };
 
   // 班级快捷开关（应用中心/兑换/上网/PK对战/Python编程）—— 走统一批量接口，同步改学生 profiles 对应字段
-  const toggleClassQuickSwitch = async (cls: Class, key: 'app_center_enabled' | 'exchange_enabled' | 'internet_enabled' | 'pk_battle_enabled' | 'python_enabled') => {
+  const toggleClassQuickSwitch = async (cls: Class, key: ClassSwitchKey) => {
     const cur = isClassBoolEnabled(cls, key);
     const newValue = !cur;
+    // 乐观更新：先让按钮立刻变色，不等接口往返，页面不闪、不跳。
+    // 失败再回滚到原值，避免「看着已启用、其实没存上」。
+    const applyLocal = (v: boolean) => {
+      setClasses((prev) => prev.map((c) => (
+        c.id === cls.id ? ({ ...c, [key]: v ? 1 : 0 } as Class) : c
+      )));
+    };
+    applyLocal(newValue);
     try {
       const { error } = await backendClient.put(`/api/classes/${cls.id}/toggles`, { [key]: newValue });
       if (error) {
         console.error(`切换班级开关 ${key} 失败:`, error);
+        applyLocal(cur);
         alert('更新失败: ' + (error.message || JSON.stringify(error)));
         return;
       }
     } catch (e) {
       console.error(`切换班级开关 ${key} 异常:`, e);
+      applyLocal(cur);
       alert('更新失败: ' + ((e as Error).message || String(e)));
       return;
     }
@@ -308,6 +340,10 @@ export const ClassManager: React.FC = () => {
               <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">上网</th>
               <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">PK对战</th>
               <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">编程</th>
+              <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">练习</th>
+              <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">测试</th>
+              <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">操作题</th>
+              <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">萌宠</th>
               <th className="px-6 py-4 text-left text-sm font-medium text-gray-600">创建时间</th>
               <th className="px-6 py-4 text-right text-sm font-medium text-gray-600">操作</th>
             </tr>
@@ -583,6 +619,35 @@ export const ClassManager: React.FC = () => {
                     </button>
                   )}
                 </td>
+                {MODULE_SWITCHES.map(({ key }) => (
+                  <td key={key} className="px-6 py-4 text-center">
+                    {editingClass?.id === cls.id ? (
+                      <label className="flex items-center justify-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={isClassBoolEnabled(editingClass!, key)}
+                          onChange={(e) => setEditingClass({ ...editingClass!, [key]: e.target.checked } as Class)}
+                          className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        />
+                        <span className="text-sm text-gray-600">
+                          {isClassBoolEnabled(editingClass!, key) ? '启用' : '禁用'}
+                        </span>
+                      </label>
+                    ) : (
+                      <button
+                        onClick={() => toggleClassQuickSwitch(cls, key)}
+                        className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
+                          isClassBoolEnabled(cls, key)
+                            ? 'bg-green-100 text-green-700 hover:bg-green-200'
+                            : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                        }`}
+                      >
+                        <i className={`fa-solid mr-2 ${isClassBoolEnabled(cls, key) ? 'fa-check' : 'fa-times'}`}></i>
+                        {isClassBoolEnabled(cls, key) ? '已启用' : '已禁用'}
+                      </button>
+                    )}
+                  </td>
+                ))}
                 <td className="px-6 py-4 text-gray-600">
                   {new Date(cls.created_at || '').toLocaleDateString()}
                 </td>

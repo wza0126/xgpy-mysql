@@ -1440,6 +1440,11 @@ app.put('/api/classes/:id/toggles', authenticate, async (req, res) => {
       { key: 'workshop_enabled',   profileField: null,                        label: '工坊开关' },
       { key: 'pk_battle_enabled',  profileField: null,                        label: 'PK对战' },
       { key: 'python_enabled',     profileField: 'python_enabled',            label: 'Python编程' },
+      // 2026-10-24 新增：四个模块的班级级开关，与 python_enabled 同机制（同步到 profiles）
+      { key: 'practice_enabled',   profileField: 'practice_enabled',          label: '练习' },
+      { key: 'test_enabled',       profileField: 'test_enabled',              label: '测试' },
+      { key: 'op_enabled',         profileField: 'op_enabled',                label: '操作题' },
+      { key: 'pet_enabled',        profileField: 'pet_enabled',               label: '萌宠' },
     ];
 
     const classSets = [];
@@ -11277,7 +11282,8 @@ app.get('/api/student/desktop-permissions', authenticate, requireStudent, async 
     const studentId = req.user.userId;
     const [rows] = await pool.query(
       `SELECT p.can_use_app, p.can_exchange_internet_code, p.can_open_exchange_module,
-              p.python_enabled, p.class_id, c.ai_enabled
+              p.python_enabled, p.practice_enabled, p.test_enabled, p.op_enabled, p.pet_enabled,
+              p.class_id, c.ai_enabled
          FROM profiles p
          LEFT JOIN classes c ON c.id = p.class_id
         WHERE p.id = ? LIMIT 1`,
@@ -11306,6 +11312,11 @@ app.get('/api/student/desktop-permissions', authenticate, requireStudent, async 
         can_exchange_internet_code: r.can_exchange_internet_code,
         can_open_exchange_module: r.can_open_exchange_module,
         python_enabled: r.python_enabled,
+        // 四个模块开关（练习 / 测试 / 操作题 / 萌宠），学生端据此拦入口并关闭已开窗口
+        practice_enabled: r.practice_enabled,
+        test_enabled: r.test_enabled,
+        op_enabled: r.op_enabled,
+        pet_enabled: r.pet_enabled,
         ai_enabled: r.ai_enabled,
         class_id: r.class_id,
         // 专注模式配置原样回传，前端沿用原有解析逻辑（字符串 / 布尔都可能）

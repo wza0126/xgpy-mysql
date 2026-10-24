@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import { useSiteConfig } from '../hooks/useSiteConfig';
 import { getAuthToken } from '../utils/authToken';
-import { useDesktopStore, desktopIcons } from '../store/desktopStore';
+import { useDesktopStore, desktopIcons, setModuleGuard } from '../store/desktopStore';
 import { useNotificationStore } from '../store/notificationStore';
 import { useTaskStore } from '../store/taskStore';
 import { TaskBadge } from '../components/common/TaskBadge';
@@ -89,6 +89,16 @@ const moduleComponents: Record<string, React.ReactNode> = {
   rollCall: <RollCallApp onClose={() => { const { closeWindow } = useDesktopStore.getState(); closeWindow('rollCall'); }} />,
 };
 
+/** 受班级开关控制的模块：桌面图标 id → profiles 上的开关字段（2026-10-24 新增） */
+type ModuleGuardKey = 'practice_enabled' | 'test_enabled' | 'op_enabled' | 'pet_enabled';
+
+const MODULE_GUARD_MAP: Record<string, ModuleGuardKey> = {
+  practice: 'practice_enabled',
+  test: 'test_enabled',
+  wpsOp: 'op_enabled',
+  pet: 'pet_enabled',
+};
+
 export const Desktop: React.FC = () => {
   const { profile, signOut, checkAndEnforceLoginRestriction, isProxyMode, loading, proxyError } = useAuth();
   const { windows, background, openWindow, activateWindow, setBackground } = useDesktopStore();
@@ -111,6 +121,28 @@ export const Desktop: React.FC = () => {
   const [galaxy, setGalaxy] = useState<GalaxyData | null>(null);
   const [galaxyLoaded, setGalaxyLoaded] = useState(false);
   const galaxyOn = !!galaxy;
+  // 班级模块开关（练习 / 测试 / 操作题 / 萌宠）：老师在「班级管理」里关掉后，
+  // 桌面图标双击直接拦住，已打开的窗口在下一轮权限轮询里强制关闭。
+  // 数据来自 /api/student/desktop-permissions（同一次请求，不额外加轮询）。
+  const [moduleSwitches, setModuleSwitches] = useState<Record<ModuleGuardKey, boolean>>({
+    practice_enabled: true,
+    test_enabled: true,
+    op_enabled: true,
+    pet_enabled: true,
+  });
+
+  // 把当前开关注册到 store：openWindow 统一拦截，覆盖桌面图标 / 学习模块跳转 / 宠物点击等所有入口
+  useEffect(() => {
+    setModuleGuard((id) => {
+      const k = MODULE_GUARD_MAP[id];
+      if (!k || moduleSwitches[k]) return null;
+      const titles: Record<string, string> = {
+        practice: '练习', test: '测试', wpsOp: '操作题', pet: '萌宠',
+      };
+      return `${titles[id] || '该功能'}已被老师关闭`;
+    });
+    return () => setModuleGuard(null);
+  }, [moduleSwitches]);
 
   // 代理模式下 profile 由 useAuth 直接设置为目标学生
   const effectiveProfile = profile;
@@ -384,6 +416,33 @@ export const Desktop: React.FC = () => {
         alert('您的 Python 编程权限已被管理员禁用');
       }
 
+      // 班级模块开关（练习 / 测试 / 操作题 / 萌宠）：老师关掉后，已打开的窗口立即关闭。
+      // 多个模块同时被关只弹一次提示，避免连环弹窗挡屏。
+      const moduleSwitchState: Record<ModuleGuardKey, boolean> = {
+        practice_enabled: isOn(perm.practice_enabled),
+        test_enabled: isOn(perm.test_enabled),
+        op_enabled: isOn(perm.op_enabled),
+        pet_enabled: isOn(perm.pet_enabled),
+      };
+      setModuleSwitches(moduleSwitchState);
+      const guardLabels: Record<ModuleGuardKey, string> = {
+        practice_enabled: '练习',
+        test_enabled: '测试',
+        op_enabled: '操作题',
+        pet_enabled: '萌宠',
+      };
+      const closedLabels: string[] = [];
+      Object.keys(MODULE_GUARD_MAP).forEach((winId) => {
+        const k = MODULE_GUARD_MAP[winId];
+        if (!moduleSwitchState[k] && windows.some((w) => w.id === winId && w.isOpen)) {
+          closeWindow(winId);
+          closedLabels.push(guardLabels[k]);
+        }
+      });
+      if (closedLabels.length > 0) {
+        alert(`${closedLabels.join('、')}功能已被老师关闭`);
+      }
+
       applyFocusConfig(perm.focus || null);
     } catch (error) {
       console.error('同步桌面权限失败:', error);
@@ -559,6 +618,13 @@ export const Desktop: React.FC = () => {
   const handleIconDoubleClick = async (icon: typeof desktopIcons[0]) => {
     if (isPaidFeature(icon.id) && !canUseFeature(icon.id)) {
       alert(`${icon.title}功能需要系统授权后才能使用，请联系管理员激活授权。`);
+      return;
+    }
+
+    // 班级模块开关（练习 / 测试 / 操作题 / 萌宠）：老师关掉后直接在入口拦住，窗口根本不打开
+    const guardKey = MODULE_GUARD_MAP[icon.id];
+    if (guardKey && !moduleSwitches[guardKey]) {
+      alert(`${icon.title}功能已被老师关闭`);
       return;
     }
 
@@ -879,6 +945,11 @@ export const Desktop: React.FC = () => {
         onOpenPetModule={() => {
           if (isPaidFeature('pet') && !canUseFeature('pet')) {
             alert('萌宠功能需要系统授权后才能使用，请联系管理员激活授权。');
+            return;
+          }
+          // 班级萌宠开关：点桌面宠物也不能打开萌宠窗口
+          if (!moduleSwitches.pet_enabled) {
+            alert('萌宠功能已被老师关闭');
             return;
           }
           openWindow({

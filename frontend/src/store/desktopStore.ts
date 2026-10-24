@@ -36,6 +36,17 @@ export const desktopIcons: DesktopIcon[] = [
   { id: 'profile', title: '我的', icon: 'fa-user', color: 'bg-cyan-500' },
 ];
 
+/**
+ * 模块守卫（2026-10-24）：老师在「班级管理」里关掉某个模块后，任何入口——
+ * 桌面图标、学习模块里的「去练习」、点桌面宠物打开萌宠——都必须拦住。
+ * 逐个入口打补丁必然会漏，所以统一挂在 openWindow 这一道口子上。
+ * Desktop 拿到 /api/student/desktop-permissions 后注册；返回字符串=拦截原因，null=放行。
+ */
+let moduleGuard: ((id: string) => string | null) | null = null;
+export const setModuleGuard = (fn: ((id: string) => string | null) | null) => {
+  moduleGuard = fn;
+};
+
 export const useDesktopStore = create<DesktopState>((set, get) => ({
   windows: [],
   activeWindowId: null,
@@ -45,6 +56,14 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   setBackground: (url) => set({ background: url }),
 
   openWindow: (window) => {
+    // 守卫必须在一切之前：被拦的模块连窗口都不创建，避免「开一半又关」的闪动
+    if (moduleGuard) {
+      const reason = moduleGuard(window.id);
+      if (reason) {
+        globalThis.alert?.(reason);
+        return;
+      }
+    }
     const { windows, zIndexCounter } = get();
     const existing = windows.find((w) => w.id === window.id);
 
