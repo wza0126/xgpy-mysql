@@ -58,7 +58,9 @@ export const TestManager: React.FC = () => {
   const [clusterTree, setClusterTree] = useState<ClusterTree>({});
   const [filterClusterPrimary, setFilterClusterPrimary] = useState<string[]>([]);
   const [filterClusterSecondary, setFilterClusterSecondary] = useState<string[]>([]);
-  const [activeSubTab, setActiveSubTab] = useState<'tests' | 'exams'>('tests');
+  // 默认打开「试卷」不是「普通测试」：老师进这个页面十次有九次是去排考试，
+  // 老是先落在普通测试上再点一次，2026-10-24 吴老要求改默认。
+  const [activeSubTab, setActiveSubTab] = useState<'tests' | 'exams'>('exams');
   const { profile } = useAuth();
 
   /**

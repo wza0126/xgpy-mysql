@@ -145,7 +145,9 @@ export const TestModule: React.FC = () => {
   const [selectedExamRecord, setSelectedExamRecord] = useState<ExamRecord | null>(null);
   const [examDetailData, setExamDetailData] = useState<{ questions: Question[]; answers: Record<string, string> } | null>(null);
   const [loading, setLoading] = useState(true);
-  const [showExamList, setShowExamList] = useState(false);
+  // 默认落在「考试列表」：考试成绩才是学生最关心的，而且普通测试和考试长得像，
+  // 先看到测试列表容易误以为是考试（2026-10-24 吴老反馈学生几次搞混）。
+  const [showExamList, setShowExamList] = useState(true);
   const [showPKBattle, setShowPKBattle] = useState(false);
   const [currentExamTest, setCurrentExamTest] = useState<any>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -690,7 +692,8 @@ export const TestModule: React.FC = () => {
       if (isClosedResult?.data?.isClosed) {
         alert('考试已结束，无法提交');
         setActiveExam(null);
-        setShowExamList(false);
+        // 考试结束应回到「考试列表」，不是测试列表（顺手统一，2026-10-24）
+        setShowExamList(true);
         fetchExams();
         setIsSubmitting(false);
         return;

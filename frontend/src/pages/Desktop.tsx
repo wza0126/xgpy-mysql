@@ -134,6 +134,22 @@ export const Desktop: React.FC = () => {
     pet_enabled: true,
   });
 
+  // 考试期间自动关闭学习模块：学生可能先开着学习再进考试，
+  // openWindow 的互斥只拦「新打开」，已经开着的要在这里收掉。
+  const learnAutoClosedRef = useRef(false);
+  useEffect(() => {
+    const testOpen = windows.some((w) => w.id === 'test' && w.isOpen);
+    const learnOpen = windows.some((w) => w.id === 'learn' && w.isOpen);
+    if (testOpen && learnOpen) {
+      useDesktopStore.getState().closeWindow('learn');
+      if (!learnAutoClosedRef.current) {
+        learnAutoClosedRef.current = true;
+        alert('考试期间不能查看学习模块，已自动关闭');
+      }
+    }
+    if (!testOpen) learnAutoClosedRef.current = false;
+  }, [windows]);
+
   // 把当前开关注册到 store：openWindow 统一拦截，覆盖桌面图标 / 学习模块跳转 / 宠物点击等所有入口
   useEffect(() => {
     setModuleGuard((id) => {

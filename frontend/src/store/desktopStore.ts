@@ -65,6 +65,15 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       }
     }
     const { windows, zIndexCounter } = get();
+
+    // 考试期间互斥（2026-10-24）：测试窗口开着时不允许再打开「学习」模块，
+    // 防止学生考试时翻知识点。口径与 AI 答疑的暂停一致 —— 都是窗口级，
+    // 只要测试窗口开着（哪怕只是停在列表页）就算在考试场景里。
+    if (window.id === 'learn' && windows.some((w) => w.id === 'test' && w.isOpen)) {
+      globalThis.alert?.('考试期间不能打开学习模块，请先完成考试');
+      return;
+    }
+
     const existing = windows.find((w) => w.id === window.id);
 
     if (existing) {
