@@ -48,6 +48,10 @@ export const DesktopPet: React.FC<DesktopPetProps> = ({
   const [showEntranceEffect, setShowEntranceEffect] = useState(false);
   const [position, setPosition] = useState({ x: 20, y: window.innerHeight - 140 });
   const [isDragging, setIsDragging] = useState(false);
+  // 桌面宠物默认折叠成左下角小图标（2026-10-25 吴老要求）：
+  // 练习窗口里已经有一只萌宠，桌面上再来一只 120×120 带一堆持续动画的，
+  // 等于白烧一份 CPU。折叠态只保留静态图片 + 公告，所有无限动画全部停掉。
+  const [collapsed, setCollapsed] = useState(true);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [tipInterval, setTipInterval] = useState(30);
   const [tipDisplayTime, setTipDisplayTime] = useState(5);
@@ -86,7 +90,9 @@ export const DesktopPet: React.FC<DesktopPetProps> = ({
 
   useEffect(() => {
     // 公告生效期间不弹提示语（公告优先）
-    if (!focusModeEnabled && announcements.length === 0 && studentPet && tips.length > 0 && tipInterval > 0) {
+    // 折叠态也停掉：提示语渲染在展开态的 120×120 容器里，折叠时根本看不见，
+    // 开着定时器只是每 30 秒空跑一次 state 更新（2026-10-25）。
+    if (!focusModeEnabled && !collapsed && announcements.length === 0 && studentPet && tips.length > 0 && tipInterval > 0) {
       const interval = setInterval(() => {
         const randomTip = tips[Math.floor(Math.random() * tips.length)];
         setCurrentTip(randomTip.content);
@@ -95,7 +101,7 @@ export const DesktopPet: React.FC<DesktopPetProps> = ({
       }, tipInterval * 1000);
       return () => clearInterval(interval);
     }
-  }, [studentPet, tips, tipInterval, tipDisplayTime, focusModeEnabled, announcements.length]);
+  }, [studentPet, tips, tipInterval, tipDisplayTime, focusModeEnabled, collapsed, announcements.length]);
 
   // 萌宠公告：进入拉一次 + 每 20 秒对齐（教师随时可能发布）
   useEffect(() => {
@@ -532,6 +538,86 @@ export const DesktopPet: React.FC<DesktopPetProps> = ({
     );
   }
 
+  // ---------- 折叠态：左下角小图标，零持续动画 ----------
+  // ⛔ 这里刻意不写任何 repeat: Infinity —— 折叠的全部意义就是省 CPU。
+  //    只保留 hover 的一次性缩放（合成器可处理）和公告气泡。
+  if (collapsed) {
+    return (
+      <motion.div
+        ref={containerRef}
+        className="fixed z-[9998] cursor-pointer group"
+        style={{ left: 20, bottom: 40, width: 56, height: 56 }}
+        initial={{ scale: 0, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        whileHover={{ scale: 1.08 }}
+        onClick={() => setCollapsed(false)}
+        title="点击展开宠物"
+      >
+        <div
+          className="relative w-full h-full rounded-full overflow-hidden"
+          style={{
+            background: 'linear-gradient(135deg, #f9a8d4 0%, #c4b5fd 100%)',
+            boxShadow: '0 2px 10px rgba(0,0,0,0.12)',
+          }}
+        >
+          {petImage ? (
+            <img src={petImage} alt={petDetails.name} className="w-full h-full object-contain" />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center">
+              <i className="fa-solid fa-paw text-white text-2xl"></i>
+            </div>
+          )}
+        </div>
+
+        {/* 未读红点：静态，不做浮动动画 */}
+        {profile?.role === 'student' && unreadCount > 0 && (
+          <div className="absolute -top-1 -right-1 z-30 flex h-5 w-5 items-center justify-center rounded-full border-2 border-white bg-red-500 text-[10px] font-bold text-white shadow">
+            {unreadCount > 99 ? '99+' : unreadCount}
+          </div>
+        )}
+
+        {/* 公告：必须照常显示 —— 折叠的是宠物，不是通知能力。
+            放在图标右侧，避免遮挡左下角本身。 */}
+        <AnimatePresence>
+          {announcements.length > 0 && (
+            <motion.div
+              initial={{ opacity: 0, x: -12, scale: 0.9 }}
+              animate={{ opacity: 1, x: 0, scale: 1 }}
+              exit={{ opacity: 0, x: -12, scale: 0.9 }}
+              className="absolute left-[64px] bottom-0 w-[280px] space-y-2 z-20"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {announcements.slice(0, 2).map((a) => (
+                <div
+                  key={a.id}
+                  className="rounded-2xl bg-gradient-to-br from-rose-500 via-orange-500 to-amber-400 p-[2px] shadow-2xl shadow-rose-500/40"
+                >
+                  <div className="rounded-2xl bg-white/95 px-3 py-2">
+                    <div className="mb-1 flex items-center justify-between gap-2">
+                      <span className="flex items-center gap-1 text-[11px] font-bold text-rose-600">
+                        <i className="fa-solid fa-bullhorn animate-pulse text-[10px]"></i>
+                        公告
+                      </span>
+                      <span className="rounded-full bg-rose-500 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                        {a.remaining_seconds} 秒后关闭
+                      </span>
+                    </div>
+                    <p className="whitespace-pre-wrap text-sm font-medium leading-relaxed text-gray-800">
+                      {a.content}
+                    </p>
+                    {a.created_by_name && (
+                      <p className="mt-0.5 text-right text-[10px] text-gray-400">—— {a.created_by_name}</p>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </motion.div>
+    );
+  }
+
   return (
     <motion.div
       ref={containerRef}
@@ -677,6 +763,20 @@ export const DesktopPet: React.FC<DesktopPetProps> = ({
         </AnimatePresence>
 
         {renderPetContent(112, 112, true)}
+
+        {/* 收起按钮（2026-10-25）：展开后要能回到左下角的折叠态。
+            默认半透明，hover 才明显；stopPropagation 避免误触发拖动。 */}
+        <button
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            setCollapsed(true);
+          }}
+          title="收起宠物"
+          className="absolute -top-1 right-0 z-40 flex h-6 w-6 items-center justify-center rounded-full border border-gray-200 bg-white/90 text-[10px] text-gray-500 opacity-40 shadow transition-opacity hover:opacity-100 hover:text-gray-700"
+        >
+          <i className="fa-solid fa-compress"></i>
+        </button>
 
         {profile?.role === 'student' && unreadCount > 0 && (
           <motion.div
