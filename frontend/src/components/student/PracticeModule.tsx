@@ -1101,15 +1101,20 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
             <AnimatePresence mode="wait">
               <motion.div
                 key={currentQuestion.id}
+                className="relative"
                 initial={{ opacity: 0, x: 20 }}
                 animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: -20 }}
               >
-                {/* 闸①：最短读题时间提示（倒计时结束前选项/输入框均不可操作） */}
+                {/* 闸①：最短读题时间提示。
+                    ⛔ 必须用 absolute 浮层，不能用普通 div ——
+                    原来它占着一行（mb-4 + py-2，约 50px），倒计时结束时这一行被移除，
+                    下方题干整体上移一截，学生正在读题会被打断（2026-10-25 吴老反馈）。
+                    改成浮层后它只是「飘」在右边，消失时零布局影响。 */}
                 {!showResult && readGateLeft > 0 && (
-                  <div className="mb-4 flex items-center gap-2 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  <div className="pointer-events-none absolute -top-1 right-0 z-10 flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700 shadow-sm">
                     <i className="fa-solid fa-hourglass-half"></i>
-                    <span>请先认真读题，<span className="font-semibold">{readGateLeft} 秒</span>后可作答</span>
+                    <span>读题中 <span className="font-bold tabular-nums">{readGateLeft}</span> 秒</span>
                   </div>
                 )}
                 <div className="flex items-start gap-2 mb-4">
