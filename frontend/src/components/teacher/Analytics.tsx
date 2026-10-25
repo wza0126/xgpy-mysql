@@ -31,12 +31,22 @@ interface StudentWithStats extends Profile {
  */
 
 
+/** 学情分析分页：页面原来一屏要滚很久（学生表 + 6 个分析区块），按使用场景切成 4 页 */
+const ANALYTICS_TABS = [
+  { key: 'overview', label: '总览', icon: 'fa-chart-pie' },
+  { key: 'students', label: '学生', icon: 'fa-users' },
+  { key: 'study', label: '学业', icon: 'fa-book-open' },
+  { key: 'warnings', label: '预警', icon: 'fa-triangle-exclamation' },
+] as const;
+type AnalyticsTab = (typeof ANALYTICS_TABS)[number]['key'];
+
 export const Analytics: React.FC = () => {
   const [classes, setClasses] = useState<Class[]>([]);
   const [students, setStudents] = useState<StudentWithStats[]>([]);
   const [selectedClass, setSelectedClass] = useState<string>('');
   // 「学生详细数据」表排序状态：点表头切换字段 / 再点切升降序
   const [detailSort, setDetailSort] = useState<{ key: DetailSortKey; asc: boolean }>({ key: 'label', asc: true });
+  const [activeSection, setActiveSection] = useState<AnalyticsTab>('overview');
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState({
     totalStudents: 0,
@@ -211,6 +221,27 @@ export const Analytics: React.FC = () => {
         </div>
       </div>
 
+      {/* 分页标签：切换不重新拉数据（各区块自己带 loading） */}
+      <div className="mb-5 flex flex-wrap gap-2 border-b border-gray-200">
+        {ANALYTICS_TABS.map((t) => {
+          const on = activeSection === t.key;
+          return (
+            <button
+              key={t.key}
+              onClick={() => setActiveSection(t.key)}
+              className={`-mb-px flex items-center gap-2 rounded-t-lg border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
+                on ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              <i className={`fa-solid ${t.icon} text-xs`} />
+              {t.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {activeSection === 'overview' && (
+        <>
       <div className="grid grid-cols-4 gap-4 mb-6">
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 text-center">
           <p className="text-3xl font-bold text-blue-600">{stats.totalStudents}</p>
@@ -290,7 +321,12 @@ export const Analytics: React.FC = () => {
         </div>
       </div>
 
-      <div className="mt-6 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        </>
+      )}
+
+      {activeSection === 'students' && (
+        <>
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
         <div className="flex items-baseline justify-between flex-wrap gap-2 p-6 border-b border-gray-200">
           <h3 className="text-lg font-bold text-gray-800">学生详细数据</h3>
           <p className="text-xs text-gray-400">点击表头按该字段排序，再点一次切换升降序；表格固定显示约 15 行，超出可滚动</p>
@@ -368,24 +404,37 @@ export const Analytics: React.FC = () => {
       </div>
 
       <div className="mt-6">
+        <StudentTrendSection classId={selectedClass} students={students} />
+      </div>
+        </>
+      )}
+
+      {activeSection === 'study' && (
+        <>
+      <div>
         <ChapterMasterySection classId={selectedClass} />
       </div>
 
       <div className="mt-6">
         <WrongQuestionsSection classId={selectedClass} />
       </div>
+
       <div className="mt-6">
-        <StudentTrendSection classId={selectedClass} students={students} />
+        <ExamDistributionSection classId={selectedClass} />
       </div>
-      <div className="mt-6">
+        </>
+      )}
+
+      {activeSection === 'warnings' && (
+        <>
+      <div>
         <PracticeAbuseSection classId={selectedClass} />
       </div>
       <div className="mt-6">
         <AtRiskSection classId={selectedClass} />
       </div>
-      <div className="mt-6">
-        <ExamDistributionSection classId={selectedClass} />
-      </div>
+        </>
+      )}
       </div>
     </LicenseGuard>
   );
