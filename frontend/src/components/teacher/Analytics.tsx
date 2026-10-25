@@ -1333,17 +1333,25 @@ const StudentTrendSection: React.FC<{ classId: string; students: StudentWithStat
 const AtRiskSection: React.FC<{ classId: string }> = ({ classId }) => {
   const [days, setDays] = useState<number>(3);
   const [data, setData] = useState<AtRiskStudent[]>([]);
+  // 判定线：显示出来老师才知道「练习量偏低」是按多少判的
+  const [meta, setMeta] = useState<{ median_answers30?: number; low_activity_line?: number } | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!classId) return;
     setLoading(true);
     const timer = setTimeout(() => {
-      analyticsFetch<AtRiskStudent[]>(`/api/teacher/analytics/at-risk/${classId}?days=${days}`)
-        .then(setData)
+      analyticsFetch<{ items: AtRiskStudent[]; meta: typeof meta }>(
+        `/api/teacher/analytics/at-risk/${classId}?days=${days}`
+      )
+        .then((d) => {
+          setData(Array.isArray(d?.items) ? d.items : []);
+          setMeta(d?.meta || null);
+        })
         .catch((e) => {
           console.error('获取掉队预警失败:', e);
           setData([]);
+          setMeta(null);
         })
         .finally(() => setLoading(false));
     }, 300);
@@ -1355,7 +1363,7 @@ const AtRiskSection: React.FC<{ classId: string }> = ({ classId }) => {
     if (s.flags.includes('inactive')) {
       badges.push({
         key: 'inactive',
-        text: s.inactive_days === null ? '从未登录' : `${s.inactive_days}天未登录`,
+        text: s.inactive_days === null ? '从未使用' : `${s.inactive_days}天无练习`,
       });
     }
     if (s.flags.includes('declining')) badges.push({ key: 'declining', text: '正确率下滑' });
@@ -1370,10 +1378,17 @@ const AtRiskSection: React.FC<{ classId: string }> = ({ classId }) => {
       <div className="flex items-center justify-between">
         <div>
           <h3 className={sectionTitleCls}>掉队预警名单</h3>
-          <p className={sectionSubCls}>长时间未登录、正确率下滑或练习量明显偏低的学生</p>
+          <p className={sectionSubCls}>长时间没有练习、正确率下滑或练习量明显偏低的学生（在「AI 分析 → 重点关注学生」里可让 AI 逐人分析原因）</p>
+          {meta && (
+            <p className="mb-4 text-xs text-gray-400">
+              判定线：练习量低于 <span className="font-medium text-gray-500">{meta.low_activity_line ?? '—'}</span> 次
+              （全班近 30 天练习中位数 <span className="font-medium text-gray-500">{meta.median_answers30 ?? '—'}</span> 的一半）；
+              正确率下滑指近 7 天比前 7 天低 15 个百分点以上
+            </p>
+          )}
         </div>
         <label className="flex items-center gap-2 text-sm text-gray-600">
-          未登录天数 ≥
+          无练习天数 ≥
           <input
             type="number"
             min={1}

@@ -641,11 +641,11 @@ app.get('/api/teacher/analytics/at-risk/:classId', authenticate, requireTeacher,
       [classId]
     );
     if (students.length === 0) {
-      return res.json({ data: [], error: null });
+      return res.json({ data: { items: [], meta: { inactive_days: days } }, error: null });
     }
     const studentIds = students.map(s => s.id);
 
-    // 每个学生的最后活跃时间
+    // 每个学生的最后登录时间（仅作兜底，见下方 lastSeen 的说明）
     const [sessionRows] = await pool.query(
       'SELECT user_id, MAX(last_active_at) AS last_active FROM login_sessions WHERE user_id IN (?) GROUP BY user_id',
       [studentIds]
@@ -653,32 +653,50 @@ app.get('/api/teacher/analytics/at-risk/:classId', authenticate, requireTeacher,
     const lastActiveMap = new Map(sessionRows.map(r => [r.user_id, r.last_active]));
 
     // 近7天 / 前7天（8-14天前）/ 近30天 答题统计
+    // ⛔ 多取一个 last_answer（最后一次作答时间）：判「未活跃」不能只看 login_sessions ——
+    //    session 行会被清理，实测有学生练了 1195 次却查不到任何登录记录，被判成「从未登录」。
+    //    这条与 AI 学情分析（src/ai-analysis.js）保持同一口径，2026-10-25 统一。
     const [answerRows] = await pool.query(`
       SELECT sa.student_id,
         SUM(CASE WHEN sa.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) THEN 1 ELSE 0 END) AS r7_answers,
         SUM(CASE WHEN sa.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) THEN sa.is_correct ELSE 0 END) AS r7_correct,
         SUM(CASE WHEN sa.created_at < DATE_SUB(NOW(), INTERVAL 7 DAY) AND sa.created_at >= DATE_SUB(NOW(), INTERVAL 14 DAY) THEN 1 ELSE 0 END) AS p7_answers,
         SUM(CASE WHEN sa.created_at < DATE_SUB(NOW(), INTERVAL 7 DAY) AND sa.created_at >= DATE_SUB(NOW(), INTERVAL 14 DAY) THEN sa.is_correct ELSE 0 END) AS p7_correct,
-        SUM(CASE WHEN sa.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) THEN 1 ELSE 0 END) AS a30
+        SUM(sa.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)) AS a30,
+        MAX(sa.created_at) AS last_answer
       FROM student_answers sa
       WHERE sa.student_id IN (?)
       GROUP BY sa.student_id
     `, [studentIds]);
     const answerMap = new Map(answerRows.map(r => [r.student_id, r]));
 
-    // 班级近30天人均答题数（含零答题学生）
+    // 班级近30天答题数：人均（展示用）与中位数（判「偏低」用）
     const totalAnswers30 = students.reduce((sum, s) => {
       const r = answerMap.get(s.id);
       return sum + (r ? Number(r.a30) : 0);
     }, 0);
     const classAvg30 = totalAnswers30 / students.length;
 
+    // ⛔ 「练习量偏低」不能用「人均的一半」：班级练习量分布极不均衡（有人上千次、有人 0 次），
+    //    人均会被高练习量的学生拉高，结果半个班都「低于人均一半」—— 实测高二4 用它把 55 人全判成掉队。
+    //    改用中位数的一半，对长尾稳健。
+    const a30Nums = students.map(s => Number((answerMap.get(s.id) || {}).a30 || 0)).sort((a, b) => a - b);
+    const median30 = a30Nums.length ? a30Nums[Math.floor(a30Nums.length / 2)] : 0;
+    const lowActivityLine = median30 * 0.5;
+
     const nowMs = Date.now();
     const data = [];
     for (const s of students) {
-      const lastActive = lastActiveMap.get(s.id) || null;
-      const inactiveDays = lastActive
-        ? Math.floor((nowMs - new Date(lastActive).getTime()) / 86400000)
+      const lastAnswer = (answerMap.get(s.id) || {}).last_answer;
+      const lastLogin = lastActiveMap.get(s.id) || null;
+      // 活跃时间取「最后作答」与「最后登录」两者较晚的那个；都没有 = 从未使用
+      const lastSeenTs = Math.max(
+        lastAnswer ? new Date(lastAnswer).getTime() : 0,
+        lastLogin ? new Date(lastLogin).getTime() : 0
+      ) || 0;
+      const lastSeen = lastSeenTs ? new Date(lastSeenTs) : null;
+      const inactiveDays = lastSeen
+        ? Math.floor((nowMs - lastSeen.getTime()) / 86400000)
         : null;
 
       const r = answerMap.get(s.id) || {};
@@ -689,9 +707,9 @@ app.get('/api/teacher/analytics/at-risk/:classId', authenticate, requireTeacher,
       const p7Rate = p7Answers > 0 ? (Number(r.p7_correct || 0) / p7Answers) * 100 : null;
 
       const flags = [];
-      if (lastActive === null || inactiveDays >= days) flags.push('inactive');
+      if (lastSeen === null || inactiveDays >= days) flags.push('inactive');
       if (r7Answers >= 5 && p7Answers >= 5 && r7Rate !== null && p7Rate !== null && r7Rate < p7Rate - 15) flags.push('declining');
-      if (classAvg30 > 0 && a30 < classAvg30 * 0.5) flags.push('low_activity');
+      if (lowActivityLine > 0 && a30 < lowActivityLine) flags.push('low_activity');
 
       if (flags.length === 0) continue;
       data.push({
@@ -706,7 +724,7 @@ app.get('/api/teacher/analytics/at-risk/:classId', authenticate, requireTeacher,
       });
     }
 
-    // flags 多的在前，其次 inactive_days 大的在前（从未登录视为最大）
+    // flags 多的在前，其次 inactive_days 大的在前（从未使用视为最大）
     data.sort((a, b) => {
       if (b.flags.length !== a.flags.length) return b.flags.length - a.flags.length;
       const ia = a.inactive_days === null ? Number.MAX_SAFE_INTEGER : a.inactive_days;
@@ -714,7 +732,19 @@ app.get('/api/teacher/analytics/at-risk/:classId', authenticate, requireTeacher,
       return ib - ia;
     });
 
-    res.json({ data, error: null });
+    // 把判定线一起返回：老师要能看出「练习量偏低」是按多少判的，否则数字没法解释。
+    res.json({
+      data: {
+        items: data,
+        meta: {
+          inactive_days: days,
+          median_answers30: median30,
+          low_activity_line: Math.round(lowActivityLine * 10) / 10,
+          class_avg_answers30: Math.round(classAvg30 * 10) / 10,
+        },
+      },
+      error: null,
+    });
   } catch (error) {
     console.error('Error in GET /api/teacher/analytics/at-risk/:classId:', error);
     res.status(500).json({ data: null, error: error.message });
