@@ -55,6 +55,15 @@ const TOPICS = [
 
 const TOPIC_KEYS = TOPICS.map((t) => t.key);
 
+/** 题型英文 → 中文（库里实际只有这几种，多出来的原样透出） */
+const TYPE_NAMES = {
+  choice: '单选题',
+  fill_blank: '填空题',
+  composite: '复合题',
+  wps_op: 'WPS 操作题',
+  access_op: 'Access 操作题',
+};
+
 /** 掌握阈值（同一题答对几次算掌握）—— 与练习模块、学情分析完全同口径 */
 async function getMasterThreshold(pool) {
   const [rows] = await pool.query(
@@ -448,7 +457,7 @@ async function buildWrong(pool, base) {
 }
 
 // ============ 主题 4：重点关注学生 ============
-async function buildStudents(pool, base, threshold, inactiveDays = 3) {
+async function buildStudents(pool, base, threshold, inactiveDays = 7) {
   const ids = base.studentIds;
   if (!ids.length) {
     return { metrics: { 班级: base.name, 提示: '该班没有学生' }, tables: [] };
@@ -488,6 +497,35 @@ async function buildStudents(pool, base, threshold, inactiveDays = 3) {
   const lowActivityLine = median30 * 0.5;
 
   const masteredMap = await loadMasteredMap(pool, ids, threshold);
+
+  // 题库总量：用来判断「练得少」到底是不是问题（吴老 2026-10-25 指出）
+  const [[poolQ]] = await pool.query(
+    `SELECT COUNT(*) AS n FROM questions
+      WHERE practice_enabled = 1 AND cluster_id IS NOT NULL AND cluster_id <> ''
+        AND type NOT IN ('wps_op', 'access_op')`
+  );
+  const questionPoolSize = num(poolQ?.n);
+  const masteredEnoughLine = Math.round(questionPoolSize * 0.7);
+
+  // 最近两场考试成绩（比练习量更硬的证据）
+  const [examRows] = await pool.query(
+    `SELECT er.student_id, er.test_id, er.score, t.title, t.passing_score, t.created_at
+       FROM exam_records er
+       JOIN tests t ON t.id = er.test_id
+      WHERE er.student_id IN (?) AND t.type = 'exam'
+        AND (TIMESTAMPDIFF(SECOND, er.started_at, er.completed_at) > 0
+             OR EXISTS (SELECT 1 FROM student_answers sa2
+                         WHERE sa2.test_id = er.test_id AND sa2.student_id = er.student_id AND sa2.source = 'exam'))
+      ORDER BY t.created_at DESC`,
+    [ids]
+  );
+  const examByStudent = new Map();
+  for (const r of examRows) {
+    if (!examByStudent.has(r.student_id)) examByStudent.set(r.student_id, []);
+    const arr = examByStudent.get(r.student_id);
+    if (arr.length < 2) arr.push(r);
+  }
+
   const nowMs = Date.now();
 
   const flagged = [];
@@ -517,7 +555,26 @@ async function buildStudents(pool, base, threshold, inactiveDays = 3) {
       flags.push(`已 ${inactive} 天无练习`);
     }
     if (r7 >= 5 && p7 >= 5 && r7rate !== null && p7rate !== null && r7rate < p7rate - 15) flags.push('正确率明显下滑');
-    if (lowActivityLine > 0 && num(r.a30) < lowActivityLine) flags.push('练习量偏低');
+    // ⛔ 练习量偏低必须结合掌握度：题库只有 982 题，掌握到 700+ 之后剩下的题练完了，
+    //    练习量下降是正常的，不是掉队（2026-10-25 吴老指出）。
+    const masteredEnough = questionPoolSize > 0 && mastered >= masteredEnoughLine;
+    if (lowActivityLine > 0 && num(r.a30) < lowActivityLine && !masteredEnough) flags.push('练习量偏低');
+
+    // 考试成绩（最硬的证据）
+    const myExams = examByStudent.get(s.id) || [];
+    const lastExam = myExams[0] || null;
+    const prevExam = myExams[1] || null;
+    let lastExamScore = null;
+    let examDrop = null;
+    if (lastExam) {
+      lastExamScore = num(lastExam.score);
+      const passing = lastExam.passing_score === null || lastExam.passing_score === undefined ? 60 : num(lastExam.passing_score);
+      if (lastExamScore < passing) flags.push('最近考试不及格');
+      if (prevExam) {
+        examDrop = Math.round((lastExamScore - num(prevExam.score)) * 10) / 10;
+        if (examDrop <= -15) flags.push('比上次退步');
+      }
+    }
 
     if (flags.length) {
       flagged.push({
@@ -529,6 +586,9 @@ async function buildStudents(pool, base, threshold, inactiveDays = 3) {
         前7天正确率: p7rate,
         近30天练习数: num(r.a30),
         已掌握题数: mastered,
+        掌握率: questionPoolSize > 0 ? Math.round((mastered / questionPoolSize) * 100) : null,
+        最近考试分: lastExamScore,
+        比上次: examDrop,
       });
     }
   }
@@ -553,8 +613,16 @@ async function buildStudents(pool, base, threshold, inactiveDays = 3) {
       已N天无练习: `最近一次练习答题（或登录）距今 ≥ ${inactiveDays} 天`,
       从未使用过: '既没有练习答题记录，也没有登录记录',
       正确率明显下滑: '近 7 天正确率比前 7 天低 15 个百分点以上（两段各有 ≥5 次练习）',
-      练习量偏低: `近 30 天练习提交数低于全班中位数（${median30} 次）的一半，即少于 ${round1(lowActivityLine)} 次`,
+      练习量偏低: `近 30 天练习提交数低于全班中位数（${median30} 次）的一半，即少于 ${round1(lowActivityLine)} 次；**且该生掌握数低于 ${masteredEnoughLine} 题**`,
+      最近考试不及格: '最近一次考试低于该场及格线',
+      比上次退步: '最近一次考试成绩比上一场低 15 分以上',
     },
+    题库总量: questionPoolSize,
+    掌握充足线: masteredEnoughLine,
+    重要提示:
+      '题库总共只有约 1000 题，学生掌握到 700 题以上后"可练的题"本来就快没了，练习量下降是正常的，' +
+      '不能据此判断掉队。判断学生是否真的落后，**优先看考试成绩**（同一时间、同一份卷、不能翻资料），' +
+      '其次看掌握率，最后才看练习量。',
     全班近30天: {
       人均练习提交数: round1(classAvg30),
       中位练习提交数: median30,
@@ -575,16 +643,16 @@ async function buildStudents(pool, base, threshold, inactiveDays = 3) {
   const tables = [
     {
       title: `需要关注的学生（${flagged.length} 人）`,
-      columns: ['账号', '姓名', '标记', '未活跃天数', '近7天正确率', '前7天正确率', '近30天练习', '已掌握'],
+      columns: ['账号', '姓名', '标记', '最近考试', '比上次', '掌握数(率)', '近7天正确率', '近30天练习'],
       rows: flagged.map((s) => [
         s.账号,
         s.姓名,
         s.标记.join('、'),
-        s.未活跃天数,
+        s.最近考试分 === null ? '未参加' : s.最近考试分,
+        s.比上次 === null ? '—' : (s.比上次 > 0 ? `+${s.比上次}` : s.比上次),
+        `${s.已掌握题数}${s.掌握率 === null ? '' : ` (${s.掌握率}%)`}`,
         s.近7天正确率 === null ? '—' : `${s.近7天正确率}%`,
-        s.前7天正确率 === null ? '—' : `${s.前7天正确率}%`,
         s.近30天练习数,
-        s.已掌握题数,
       ]),
     },
     {
@@ -643,6 +711,73 @@ async function buildExam(pool, base) {
   );
 
   const nameMap = new Map(base.students.map((s) => [s.id, s]));
+
+  // ---------- 考试答题明细：按「考试 × 题目」汇总 ----------
+  // 为什么值得单独捞：考试成绩是**同一时间、同一份卷、没人能翻资料**的场景，
+  // 比平时练习真实得多。练习数据只能说明「练了多少」，考试才能说明「真会多少」。
+  // 这里把每道题的作答人次/答错人数都取出来，就能反推「哪个知识点集体失分」。
+  const [detailRows] = await pool.query(
+    `SELECT sa.test_id, sa.question_id, q.cluster_id, q.type,
+            COUNT(*) AS attempts,
+            SUM(sa.is_correct = 1) AS corrects,
+            COUNT(DISTINCT CASE WHEN sa.is_correct = 0 THEN sa.student_id END) AS err_students,
+            COUNT(DISTINCT sa.student_id) AS students,
+            SUBSTRING(q.content, 1, 90) AS content
+       FROM student_answers sa
+       JOIN questions q ON q.id = sa.question_id
+       JOIN profiles p ON p.id = sa.student_id
+      WHERE sa.source = 'exam' AND sa.test_id IN (?) AND p.class_id = ? AND p.role = 'student'
+      GROUP BY sa.test_id, sa.question_id, q.cluster_id, q.type, content`,
+    [examIds, classId]
+  );
+
+  // 把明细按考试分组，算出三张榜：知识点错误率 / 单题错误率 / 题型错误率
+  const detailByExam = new Map();
+  for (const r of detailRows) {
+    const tid = r.test_id;
+    if (!detailByExam.has(tid)) {
+      detailByExam.set(tid, { clusters: new Map(), types: new Map(), questions: [] });
+    }
+    const d = detailByExam.get(tid);
+    const attempts = num(r.attempts);
+    const corrects = num(r.corrects);
+    const cid = r.cluster_id ? String(r.cluster_id) : '未分类';
+
+    const c = d.clusters.get(cid) || { 知识点: clusterLabel(r.cluster_id), 题目数: 0, 作答人次: 0, 答错人次: 0 };
+    c.题目数 += 1;
+    c.作答人次 += attempts;
+    c.答错人次 += attempts - corrects;
+    d.clusters.set(cid, c);
+
+    const typeName = TYPE_NAMES[r.type] || r.type || '未知题型';
+    const t = d.types.get(typeName) || { 题型: typeName, 题目数: 0, 作答人次: 0, 答错人次: 0 };
+    t.题目数 += 1;
+    t.作答人次 += attempts;
+    t.答错人次 += attempts - corrects;
+    d.types.set(typeName, t);
+
+    // ⛔ 单题错误率用「答错人数 ÷ 作答人数」，不能用人次：
+    //    考试里同一道题可能出现多次（重考/重复提交），人次会把分母放大到 158 而人数只有 44，
+    //    于是出现「30/158 却标 91.1%」这种自相矛盾的展示（2026-10-25 实测发现）。
+    const stuCount = num(r.students);
+    const errStudents = num(r.err_students);
+    d.questions.push({
+      知识点: clusterLabel(r.cluster_id),
+      题型: typeName,
+      题干摘要: String(r.content || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim(),
+      作答人数: stuCount,
+      答错人数: errStudents,
+      答错率: pct(errStudents, stuCount),
+    });
+  }
+
+  /** 把 Map 汇总转成按错误率降序的数组，并补上错误率字段 */
+  const rankByErrRate = (mapLike) =>
+    [...mapLike.values()]
+      .filter((x) => x.作答人次 >= 3) // 样本太小（只有一两个人做了）的错误率没有参考价值
+      .map((x) => ({ ...x, 错误率: pct(x.答错人次, x.作答人次) }))
+      .sort((a, b) => (b.错误率 ?? 0) - (a.错误率 ?? 0));
+
   const byExam = new Map();
   for (const r of records) {
     if (!Number(r.participated)) continue;
@@ -650,7 +785,7 @@ async function buildExam(pool, base) {
     byExam.get(r.test_id).push({ student_id: r.student_id, score: num(r.score) });
   }
 
-  const list = exams.map((e) => {
+  const list = exams.map((e, examIdx) => {
     const passing = e.passing_score === null || e.passing_score === undefined ? 60 : num(e.passing_score);
     const rs = byExam.get(e.id) || [];
     const scores = rs.map((r) => r.score);
@@ -670,7 +805,40 @@ async function buildExam(pool, base) {
       const st = nameMap.get(r.student_id) || {};
       return { 姓名: st.real_name || '', 账号: st.username || '', 分数: r.score };
     });
-    return {
+    // 考试明细（知识点错误率 / 题型 / 单题）：只对最近 3 场做，避免多场考试把上下文撑爆
+    const detail = examIdx < 3 ? detailByExam.get(e.id) : null;
+    const clusterRank = detail ? rankByErrRate(detail.clusters) : [];
+    const typeRank = detail ? rankByErrRate(detail.types) : [];
+    const hardest = detail
+      ? [...detail.questions].filter((q) => q.作答人数 >= 3).sort((a, b) => (b.答错率 ?? 0) - (a.答错率 ?? 0)).slice(0, 10)
+      : [];
+
+    // 分数段带名单：老师看到「0-59 有 6 人」之后，第一反应一定是「哪 6 个」
+    const bucketsWithNames = buckets.map((b, bi) => {
+      let members;
+      if (bi === 0) {
+        members = sorted.filter((r) => r.score < passing);
+      } else if (b.区间 === '60-69') {
+        members = sorted.filter((r) => r.score >= 60 && r.score < 70);
+      } else if (b.区间 === '70-79') {
+        members = sorted.filter((r) => r.score >= 70 && r.score < 80);
+      } else if (b.区间 === '80-89') {
+        members = sorted.filter((r) => r.score >= 80 && r.score < 90);
+      } else {
+        members = sorted.filter((r) => r.score >= 90);
+      }
+      const names = members
+        .map((r) => nameMap.get(r.student_id) || {})
+        .map((st) => st.real_name || st.username || '')
+        .filter(Boolean);
+      return {
+        区间: b.区间,
+        人数: b.人数,
+        名单: names.length > 12 ? [...names.slice(0, 12), `等 ${names.length} 人`] : names,
+      };
+    });
+
+    const out = {
       考试名称: e.title,
       及格线: passing,
       考试时间: e.created_at ? new Date(e.created_at).toISOString().slice(0, 10) : '',
@@ -682,15 +850,55 @@ async function buildExam(pool, base) {
       最低分: n ? Math.min(...scores) : null,
       及格率: n ? pct(pass, n) : null,
       优秀率: n ? pct(excellent, n) : null,
-      分数段: buckets,
+      分数段: bucketsWithNames,
       最低的5人: lowOnes,
     };
+
+    if (detail) {
+      // 最近一场额外给「全员分数」：只有拿到完整分布，AI 才能判断是两极分化还是整体偏低
+      if (examIdx === 0) {
+        out.全员分数 = sorted.map((r) => {
+          const st = nameMap.get(r.student_id) || {};
+          return [st.real_name || st.username || '', r.score];
+        });
+      }
+      out.知识点错误率 = clusterRank.slice(0, examIdx === 0 ? 12 : 6).map((c) => ({
+        知识点: c.知识点,
+        题目数: c.题目数,
+        作答人次: c.作答人次,
+        错误率: c.错误率,
+      }));
+      out.题型错误率 = typeRank.map((t) => ({
+        题型: t.题型,
+        题目数: t.题目数,
+        作答人次: t.作答人次,
+        错误率: t.错误率,
+      }));
+      out.最容易错的题 = hardest.map((q) => ({
+        知识点: q.知识点,
+        题干摘要: q.题干摘要.slice(0, 45) + (q.题干摘要.length > 45 ? '…' : ''),
+        答错人数: q.答错人数,
+        作答人数: q.作答人数,
+        答错率: q.答错率,
+      }));
+    }
+
+    return out;
   });
 
   const metrics = {
     班级: base.name,
     班级人数: size,
-    说明: '只统计真正参加考试的学生，未参加的 0 分占位记录已剔除',
+    说明:
+      '只统计真正参加考试的学生，未参加的 0 分占位记录已剔除。' +
+      '考试是同一时间、同一份卷、不能翻资料作答，比平时练习更能反映真实掌握程度。',
+    字段说明: {
+      知识点错误率: '该场考试里每个知识点的答错人次 ÷ 作答人次，按错误率从高到低排；这是判断「该补什么」最直接的依据',
+      题型错误率: '按题型汇总的错误率，可看出是「选择题猜不准」还是「填空题写不出」',
+      最容易错的题: '单题答错率排名，带题干摘要，可直接拿去讲评',
+      分数段: '每档都带学生姓名名单',
+      全员分数: '只有最近一场提供，格式 [姓名, 分数]',
+    },
     考试列表: list,
   };
 
@@ -714,14 +922,52 @@ async function buildExam(pool, base) {
     const latest = list[0];
     tables.push({
       title: `最新一场分数段：${latest.考试名称}`,
-      columns: ['分数段', '人数'],
-      rows: latest.分数段.map((b) => [b.区间, b.人数]),
+      columns: ['分数段', '人数', '名单'],
+      rows: latest.分数段.map((b) => [b.区间, b.人数, (b.名单 || []).join('、') || '—']),
     });
     tables.push({
       title: `最新一场最低的 5 人：${latest.考试名称}`,
       columns: ['账号', '姓名', '分数'],
       rows: latest.最低的5人.map((s) => [s.账号, s.姓名, s.分数]),
     });
+
+    // 考试的知识点错误率 —— 这是整块里最有教学价值的数据，单独成表
+    if (Array.isArray(latest.知识点错误率) && latest.知识点错误率.length) {
+      tables.push({
+        title: `最新一场知识点错误率：${latest.考试名称}`,
+        columns: ['知识点', '题目数', '作答人次', '错误率'],
+        rows: latest.知识点错误率.map((c) => [
+          c.知识点 || '未分类',
+          c.题目数,
+          c.作答人次,
+          c.错误率 === null ? '—' : `${c.错误率}%`,
+        ]),
+      });
+    }
+    if (Array.isArray(latest.题型错误率) && latest.题型错误率.length) {
+      tables.push({
+        title: `最新一场题型错误率：${latest.考试名称}`,
+        columns: ['题型', '题目数', '作答人次', '错误率'],
+        rows: latest.题型错误率.map((c) => [
+          c.题型,
+          c.题目数,
+          c.作答人次,
+          c.错误率 === null ? '—' : `${c.错误率}%`,
+        ]),
+      });
+    }
+    if (Array.isArray(latest.最容易错的题) && latest.最容易错的题.length) {
+      tables.push({
+        title: `最新一场最容易错的题：${latest.考试名称}`,
+        columns: ['知识点', '题干', '答错/作答人数', '答错率'],
+        rows: latest.最容易错的题.map((q) => [
+          q.知识点 || '未分类',
+          q.题干摘要,
+          `${q.答错人数}/${q.作答人数}`,
+          q.答错率 === null ? '—' : `${q.答错率}%`,
+        ]),
+      });
+    }
   }
 
   return { metrics, tables };

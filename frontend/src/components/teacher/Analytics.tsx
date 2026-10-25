@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
 import { Profile, Class, StudentAnswer, TestRecord, StudentPet } from '../../types';
 import { useAuth } from '../../hooks/useAuth';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, ComposedChart, Line, Legend } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, ComposedChart, Line, Legend } from 'recharts';
 import { API_CONFIG } from '../../api/config';
 import { sanitizeHtml } from '../../utils/htmlUtils';
 import { studentLabel } from '../../utils/studentLabel';
@@ -52,9 +52,11 @@ export const Analytics: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState({
     totalStudents: 0,
-    avgPoints: 0,
+    // 2026-10-25 起总览改为「掌握数 / 做题数」导向：
+    // 积分和萌宠是激励手段，对教学判断没有信息量；掌握数才是真的学会了多少。
+    avgMastered: 0,
+    avgAnswers: 0,
     avgAccuracy: 0,
-    petAdoptionRate: 0,
   });
   const { profile } = useAuth();
 
@@ -131,29 +133,30 @@ export const Analytics: React.FC = () => {
       setStudents(studentsWithStats);
 
       const totalStudents = studentsWithStats.length;
-      const avgPoints = totalStudents > 0
-        ? Math.round(studentsWithStats.reduce((sum, s) => sum + (s.current_points || 0), 0) / totalStudents)
+      const avgMastered = totalStudents > 0
+        ? Math.round(studentsWithStats.reduce((sum, s) => sum + (s.total_mastered || 0), 0) / totalStudents)
         : 0;
       const avgAccuracy = totalStudents > 0
         ? Math.round(studentsWithStats.reduce((sum, s) => sum + (s.accuracy || 0), 0) / totalStudents)
         : 0;
-      const petAdoptionRate = totalStudents > 0
-        ? Math.round((studentsWithStats.filter((s) => s.has_pet).length / totalStudents) * 100)
+      // 平均做题数 = 班级总提交数 ÷ 人数（不是「各人正确率的平均」，那是另一个概念）
+      const avgAnswers = totalStudents > 0
+        ? Math.round(studentsWithStats.reduce((sum, s) => sum + (s.total_answers || 0), 0) / totalStudents)
         : 0;
 
       setStats({
         totalStudents,
-        avgPoints,
+        avgMastered,
+        avgAnswers,
         avgAccuracy,
-        petAdoptionRate,
       });
     } else {
       setStudents([]);
       setStats({
         totalStudents: 0,
-        avgPoints: 0,
+        avgMastered: 0,
+        avgAnswers: 0,
         avgAccuracy: 0,
-        petAdoptionRate: 0,
       });
     }
     setLoading(false);
@@ -165,31 +168,50 @@ export const Analytics: React.FC = () => {
     }
   };
 
-  const pointsData = students
-    .sort((a, b) => (b.current_points || 0) - (a.current_points || 0))
+  // ---------- 两个「倒数排行榜」（2026-10-25 改为倒数） ----------
+  // 为什么改成倒数：TOP10 只告诉老师「谁最好」，那几个人本来就不用管；
+  // 真正需要干预的是最差的 10 个。
+  // ⛔ 用 [...students] 复制再排序，原代码直接 students.sort() 会原地改数组，
+  //    两个排行榜先后执行会互相污染顺序。
+  const lowestMasteredData = [...students]
+    .sort((a, b) => (a.total_mastered || 0) - (b.total_mastered || 0))
     .slice(0, 10)
     .map((s) => ({
-      name: s.real_name || s.username,
-      points: s.current_points || 0,
+      // 排行榜只显示姓名；缺姓名时退回账号，保证不出现空白行
+      name: s.real_name || s.username || '（未命名）',
+      mastered: s.total_mastered || 0,
     }));
 
-  const accuracyData = students
-    .filter((s) => s.total_answers && s.total_answers > 0)
-    .sort((a, b) => (b.accuracy || 0) - (a.accuracy || 0))
+  // 正确率倒数：必须排除「一次都没做」的学生 —— 他们正确率是 0，
+  // 会把榜单全部占满，而他们的问题属于「没练」而不是「正确率低」。
+  const lowestAccuracyData = [...students]
+    .filter((s) => (s.total_answers || 0) > 0)
+    .sort((a, b) => (a.accuracy || 0) - (b.accuracy || 0))
     .slice(0, 10)
     .map((s) => ({
-      name: s.real_name || s.username,
+      name: s.real_name || s.username || '（未命名）',
       accuracy: s.accuracy || 0,
     }));
 
-  const petLevelData = [
-    { name: '未领养', value: students.filter((s) => !s.has_pet).length },
-    { name: 'Lv.1', value: students.filter((s) => s.has_pet && s.pet_level === 1).length },
-    { name: 'Lv.2', value: students.filter((s) => s.has_pet && s.pet_level === 2).length },
-    { name: 'Lv.3+', value: students.filter((s) => s.has_pet && (s.pet_level || 0) >= 3).length },
-  ].filter((d) => d.value > 0);
+  // ---------- 掌握题数分布（200 题一档，替代原来的萌宠等级分布） ----------
+  const MASTERED_BAND = 200;
+  const masteredBandData = (() => {
+    const nums = students.map((s) => s.total_mastered || 0);
+    const max = nums.length ? Math.max(...nums) : 0;
+    // 档位动态生成：至少 3 档（哪怕全班都是 0 题也不显得空），最多刚好覆盖到最高的人。
+    // 用 (max+1) 而不是 max：max=400 时应到「400-599」这一档，而不是停在「200-399」。
+    const bands = Math.max(3, Math.ceil((max + 1) / MASTERED_BAND));
+    return Array.from({ length: bands }, (_, i) => {
+      const lo = i * MASTERED_BAND;
+      const hi = lo + MASTERED_BAND - 1;
+      return {
+        name: `${lo}-${hi}`,
+        value: nums.filter((n) => n >= lo && n <= hi).length,
+      };
+    });
+  })();
 
-  const COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A'];
+  const COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#B19CD9', '#FFB347'];
 
   if (loading) {
     return (
@@ -250,16 +272,16 @@ export const Analytics: React.FC = () => {
           <p className="text-gray-600">学生总数</p>
         </div>
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 text-center">
-          <p className="text-3xl font-bold text-yellow-600">{stats.avgPoints}</p>
-          <p className="text-gray-600">平均积分</p>
+          <p className="text-3xl font-bold text-emerald-600">{stats.avgMastered}</p>
+          <p className="text-gray-600">平均掌握数</p>
+        </div>
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 text-center">
+          <p className="text-3xl font-bold text-indigo-600">{stats.avgAnswers}</p>
+          <p className="text-gray-600">平均做题数</p>
         </div>
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 text-center">
           <p className="text-3xl font-bold text-green-600">{stats.avgAccuracy}%</p>
           <p className="text-gray-600">平均正确率</p>
-        </div>
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 text-center">
-          <p className="text-3xl font-bold text-pink-600">{stats.petAdoptionRate}%</p>
-          <p className="text-gray-600">萌宠领养率</p>
         </div>
       </div>
 
@@ -268,30 +290,33 @@ export const Analytics: React.FC = () => {
 
       <div className="grid grid-cols-2 gap-6 mb-6">
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <h3 className="text-lg font-bold text-gray-800 mb-4">积分排行榜 TOP10</h3>
+          <h3 className="text-lg font-bold text-gray-800 mb-1">掌握题数 倒数 10 名</h3>
+          <p className="mb-3 text-xs text-gray-500">掌握最少的 10 人，越靠上越需要补</p>
           <div className="h-64">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={pointsData} layout="vertical">
+              <BarChart data={lowestMasteredData} layout="vertical" margin={{ left: 4, right: 16 }}>
                 <CartesianGrid strokeDasharray="3 3" />
-                <XAxis type="number" />
-                <YAxis dataKey="name" type="category" width={80} />
-                <Tooltip />
-                <Bar dataKey="points" fill="#F59E0B" />
+                <XAxis type="number" allowDecimals={false} />
+                {/* width 足够宽，保证 3~4 个字的姓名完整显示不被裁掉 */}
+                <YAxis dataKey="name" type="category" width={112} tick={{ fontSize: 12 }} />
+                <Tooltip formatter={(v: any) => [`${v} 题`, '已掌握']} />
+                <Bar dataKey="mastered" fill="#F59E0B" radius={[0, 4, 4, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
         </div>
 
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <h3 className="text-lg font-bold text-gray-800 mb-4">正确率排行榜 TOP10</h3>
+          <h3 className="text-lg font-bold text-gray-800 mb-1">正确率 倒数 10 名</h3>
+          <p className="mb-3 text-xs text-gray-500">只统计做过题的学生（一次没做的不在这里，见「预警」）</p>
           <div className="h-64">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={accuracyData} layout="vertical">
+              <BarChart data={lowestAccuracyData} layout="vertical" margin={{ left: 4, right: 16 }}>
                 <CartesianGrid strokeDasharray="3 3" />
-                <XAxis type="number" domain={[0, 100]} />
-                <YAxis dataKey="name" type="category" width={80} />
-                <Tooltip />
-                <Bar dataKey="accuracy" fill="#10B981" />
+                <XAxis type="number" domain={[0, 100]} unit="%" />
+                <YAxis dataKey="name" type="category" width={112} tick={{ fontSize: 12 }} />
+                <Tooltip formatter={(v: any) => [`${v}%`, '正确率']} />
+                <Bar dataKey="accuracy" fill="#EF4444" radius={[0, 4, 4, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -299,26 +324,23 @@ export const Analytics: React.FC = () => {
       </div>
 
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-        <h3 className="text-lg font-bold text-gray-800 mb-4">萌宠等级分布</h3>
+        <h3 className="text-lg font-bold text-gray-800 mb-1">掌握题数分布</h3>
+        <p className="mb-4 text-xs text-gray-500">
+          每题 200 道一档，看全班掌握量集中在哪个区间；左端人数越多，说明越多人还停在低掌握区
+        </p>
         <div className="h-64">
           <ResponsiveContainer width="100%" height="100%">
-            <PieChart>
-              <Pie
-                data={petLevelData}
-                cx="50%"
-                cy="50%"
-                labelLine={false}
-                label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
-                outerRadius={80}
-                fill="#8884d8"
-                dataKey="value"
-              >
-                {petLevelData.map((entry, index) => (
-                  <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+            <BarChart data={masteredBandData} margin={{ left: 4, right: 16, top: 8 }}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} />
+              <XAxis dataKey="name" tick={{ fontSize: 12 }} />
+              <YAxis allowDecimals={false} tick={{ fontSize: 12 }} />
+              <Tooltip formatter={(v: any) => [`${v} 人`, '人数']} />
+              <Bar dataKey="value" fill="#6366F1" radius={[4, 4, 0, 0]} maxBarSize={72}>
+                {masteredBandData.map((_entry, index) => (
+                  <Cell key={`band-${index}`} fill={COLORS[index % COLORS.length]} />
                 ))}
-              </Pie>
-              <Tooltip />
-            </PieChart>
+              </Bar>
+            </BarChart>
           </ResponsiveContainer>
         </div>
       </div>
@@ -497,10 +519,22 @@ interface AtRiskStudent {
   real_name: string;
   username: string;
   flags: string[];
+  /** 综合风险分（考试证据权重最高） */
+  score?: number;
+  level?: 'high' | 'mid' | 'low';
   inactive_days: number | null;
   recent7_correct_rate: number | null;
   prev7_correct_rate: number | null;
   answers30: number;
+  /** 已掌握题数与该班题库的占比（练习量判定的前提条件） */
+  mastered?: number;
+  mastered_ratio?: number | null;
+  mastered_enough?: number;
+  /** 最近一场考试成绩与班级平均的差距 */
+  last_exam_score?: number | null;
+  last_exam_title?: string;
+  last_exam_passing?: number | null;
+  exam_drop?: number | null;
 }
 
 interface ExamBucket {
@@ -1331,10 +1365,16 @@ const StudentTrendSection: React.FC<{ classId: string; students: StudentWithStat
 
 // 3. 掉队预警名单
 const AtRiskSection: React.FC<{ classId: string }> = ({ classId }) => {
-  const [days, setDays] = useState<number>(3);
+  // 默认 7 天（2026-10-25 改）：周末两天没人练习，用 3 天会把全班判成「未活跃」
+  const [days, setDays] = useState<number>(7);
   const [data, setData] = useState<AtRiskStudent[]>([]);
   // 判定线：显示出来老师才知道「练习量偏低」是按多少判的
-  const [meta, setMeta] = useState<{ median_answers30?: number; low_activity_line?: number } | null>(null);
+  const [meta, setMeta] = useState<{
+    median_answers30?: number;
+    low_activity_line?: number;
+    question_pool_size?: number;
+    mastered_enough_line?: number;
+  } | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -1368,6 +1408,14 @@ const AtRiskSection: React.FC<{ classId: string }> = ({ classId }) => {
     }
     if (s.flags.includes('declining')) badges.push({ key: 'declining', text: '正确率下滑' });
     if (s.flags.includes('low_activity')) badges.push({ key: 'low_activity', text: '练习量偏低' });
+    // 考试成绩类（2026-10-25 新增）
+    if (s.flags.includes('exam_fail')) {
+      badges.push({ key: 'exam_fail', text: `考试不及格${s.last_exam_score !== null && s.last_exam_score !== undefined ? ` ${s.last_exam_score}分` : ''}` });
+    }
+    if (s.flags.includes('exam_below_avg')) badges.push({ key: 'exam_below_avg', text: '低于班平15分' });
+    if (s.flags.includes('exam_dropping')) {
+      badges.push({ key: 'exam_dropping', text: `比上次降${s.exam_drop !== null && s.exam_drop !== undefined ? Math.abs(s.exam_drop) : ''}分` });
+    }
     return badges;
   };
 
@@ -1378,12 +1426,17 @@ const AtRiskSection: React.FC<{ classId: string }> = ({ classId }) => {
       <div className="flex items-center justify-between">
         <div>
           <h3 className={sectionTitleCls}>掉队预警名单</h3>
-          <p className={sectionSubCls}>长时间没有练习、正确率下滑或练习量明显偏低的学生（在「AI 分析 → 重点关注学生」里可让 AI 逐人分析原因）</p>
+          <p className={sectionSubCls}>
+            综合判断：<b>考试成绩</b>（不及格 / 低于班平 15 分 / 比上次降 15 分）权重最高，
+            其次是正确率下滑与练习量偏低。<b>练习量只在「题还没练完」时才算数</b> ——
+            题库共 {meta?.question_pool_size ?? 1000} 题，掌握到 {meta?.mastered_enough_line ?? '—'} 题以上后练得少属正常。
+          </p>
           {meta && (
             <p className="mb-4 text-xs text-gray-400">
               判定线：练习量低于 <span className="font-medium text-gray-500">{meta.low_activity_line ?? '—'}</span> 次
               （全班近 30 天练习中位数 <span className="font-medium text-gray-500">{meta.median_answers30 ?? '—'}</span> 的一半）；
-              正确率下滑指近 7 天比前 7 天低 15 个百分点以上
+              掌握度 ≥ <span className="font-medium text-gray-500">{meta.mastered_enough_line ?? '—'}</span> 题
+              （题库 {meta.question_pool_size ?? '—'} 题的 70%）时不再因练习量少而入选
             </p>
           )}
         </div>
@@ -1413,6 +1466,10 @@ const AtRiskSection: React.FC<{ classId: string }> = ({ classId }) => {
               <tr>
                 <th className="px-4 py-3 text-left text-sm font-medium text-gray-600">账号 姓名</th>
                 <th className="px-4 py-3 text-left text-sm font-medium text-gray-600">预警标签</th>
+                <th className="px-4 py-3 text-center text-sm font-medium text-gray-600" title="已掌握题数 / 可练习题库总量。掌握够了以后练得少是正常的">
+                  掌握度
+                </th>
+                <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">最近考试</th>
                 <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">近7天正确率</th>
                 <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">前7天正确率</th>
                 <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">近30天答题数</th>
@@ -1430,6 +1487,37 @@ const AtRiskSection: React.FC<{ classId: string }> = ({ classId }) => {
                         </span>
                       ))}
                     </div>
+                  </td>
+                  <td className="px-4 py-3 text-center text-sm">
+                    <span className={s.mastered_enough ? 'text-green-600' : 'text-gray-700'}>
+                      {s.mastered ?? 0}
+                      <span className="ml-1 text-xs text-gray-400">({s.mastered_ratio ?? 0}%)</span>
+                    </span>
+                    {s.mastered_enough ? (
+                      <span className="ml-1 rounded bg-green-50 px-1 py-0.5 text-[10px] text-green-700">已充足</span>
+                    ) : null}
+                  </td>
+                  <td className="px-4 py-3 text-center text-sm">
+                    {s.last_exam_score === null || s.last_exam_score === undefined ? (
+                      <span className="text-gray-300">未参加</span>
+                    ) : (
+                      <span
+                        className={
+                          s.last_exam_passing !== null && s.last_exam_passing !== undefined && s.last_exam_score < s.last_exam_passing
+                            ? 'font-semibold text-red-600'
+                            : 'text-gray-700'
+                        }
+                        title={s.last_exam_title || ''}
+                      >
+                        {s.last_exam_score}
+                        {s.exam_drop !== null && s.exam_drop !== undefined && s.exam_drop !== 0 ? (
+                          <span className={`ml-1 text-xs ${s.exam_drop < 0 ? 'text-red-500' : 'text-green-600'}`}>
+                            {s.exam_drop > 0 ? '+' : ''}
+                            {s.exam_drop}
+                          </span>
+                        ) : null}
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-center text-sm text-gray-600">{fmtRate(s.recent7_correct_rate)}</td>
                   <td className="px-4 py-3 text-center text-sm text-gray-600">{fmtRate(s.prev7_correct_rate)}</td>
@@ -1724,38 +1812,62 @@ interface PracticeAbuseItem {
   correct: number;
   accuracy: number;
   max_repeat: number;
+  /** ≤3 秒提交占比：读题闸最小 3 秒，正常操作不可能出现（硬违规信号） */
   fast_ratio: number;
+  /** 踩闸率：间隔 ≤ 该题理论最短用时的占比（卡着闸门点，机械点击特征） */
+  gate_ratio: number;
+  /** 平均间隔秒数，辅助判断（正常 15~30 秒，踩闸 4~6 秒） */
+  avg_gap: number | null;
   score: number;
   level: 'high' | 'mid' | 'low';
 }
 
+/** 接口返回的统计区间与判定口径 */
+interface PracticeAbuseResp {
+  range: { start: string; end: string; days: number; single_day: boolean };
+  gate_effective_from?: string;
+  mixed_window?: boolean;
+  criterion?: { min_answers: number; fast_seconds: number; gate_ratio: string; note: string };
+  items: PracticeAbuseItem[];
+  total: number;
+}
+
 const PracticeAbuseSection: React.FC<{ classId: string }> = ({ classId }) => {
-  const [date, setDate] = useState(() => {
+  // 统计区间（2026-10-25 改）：默认「近 7 天」。
+  // 旧版默认「今天」，老师每看一天都要手点一次日期；而刷题是连续行为，
+  // 只按单日看很难判断「他是偶尔这样，还是天天这样」。
+  const [days, setDays] = useState<number>(7);
+  const [pickSingleDay, setPickSingleDay] = useState(false);
+  const [singleDate, setSingleDate] = useState(() => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   });
+
   const [items, setItems] = useState<PracticeAbuseItem[]>([]);
   const [total, setTotal] = useState(0);
+  const [meta, setMeta] = useState<PracticeAbuseResp | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   useEffect(() => {
+    if (!classId) return;
     setLoading(true);
     setError('');
-    analyticsFetch<{ date: string; items: PracticeAbuseItem[]; total: number }>(
-      `/api/teacher/practice-suspicious?date=${date}`
-    )
+    const qs = pickSingleDay ? `date=${singleDate}` : `days=${days}`;
+    analyticsFetch<PracticeAbuseResp>(`/api/teacher/practice-suspicious?${qs}`)
       .then((d) => {
         setItems(Array.isArray(d?.items) ? d.items : []);
         setTotal(Number(d?.total) || 0);
+        setMeta(d || null);
       })
       .catch((e) => {
         console.error('获取疑似刷题名单失败:', e);
         setError(e?.message || '加载失败');
         setItems([]);
+        setMeta(null);
       })
       .finally(() => setLoading(false));
-  }, [date]);
+  }, [classId, days, pickSingleDay, singleDate]);
 
   // 按班级过滤（后端返回全校，前端只显示当前班级）
   const rows = classId ? items.filter((it) => it.class_id === classId) : items;
@@ -1766,23 +1878,69 @@ const PracticeAbuseSection: React.FC<{ classId: string }> = ({ classId }) => {
     return <span className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded-full text-xs">关注</span>;
   };
 
+  const rangeText = meta?.range
+    ? meta.range.single_day
+      ? meta.range.start
+      : `${meta.range.start} ~ ${meta.range.end}（${meta.range.days} 天）`
+    : '';
+
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-      <div className="flex items-start justify-between mb-4">
-        <div>
+      <div className="flex items-start justify-between gap-4 mb-4">
+        <div className="min-w-0">
           <h3 className={sectionTitleCls}>疑似刷题名单</h3>
           <p className={sectionSubCls}>
-            当天练习中提交过密、正确率偏低、同题反复提交的学生（判定信号：正确率 &lt; 60%、相邻提交 ≤2 秒占比高、同题最多提交 5 次以上）。只做提示，不自动处罚。
+            判定信号：<b>踩闸率</b>（提交间隔卡在「读题闸下限」附近 —— 不读题、只在等闸开）、
+            <b>≤3 秒提交</b>（读题闸最小 3 秒，正常操作不可能出现）、正确率偏低、同题反复提交。
+            证据叠加才入榜，只提示不处罚。
           </p>
+          {rangeText && (
+            <p className="mb-1 text-xs text-gray-500">
+              <i className="fa-regular fa-calendar mr-1"></i>
+              统计区间：<span className="font-semibold text-gray-700">{rangeText}</span>
+              {meta?.range && !meta.range.single_day && (
+                <span className="ml-2 text-gray-400">（全班该区间有练习记录的学生 {total} 人）</span>
+              )}
+            </p>
+          )}
+          {meta?.mixed_window && (
+            <p className="mb-1 rounded-md bg-amber-50 px-2 py-1 text-xs text-amber-800">
+              <i className="fa-solid fa-triangle-exclamation mr-1"></i>
+              该区间跨过了读题闸生效日（{meta.gate_effective_from}）。闸门上线前的记录本来就可以很快，
+              ≤3 秒 / 踩闸率会偏高，请结合日期判断。看 {meta.gate_effective_from} 之后的数据最准。
+            </p>
+          )}
         </div>
-        <label className="flex items-center gap-2 text-sm text-gray-600 flex-shrink-0">
-          <input
-            type="date"
-            value={date}
-            onChange={(e) => setDate(e.target.value)}
-            className="p-1.5 border border-gray-300 rounded-lg"
-          />
-        </label>
+        <div className="flex flex-shrink-0 items-center gap-2">
+          {!pickSingleDay ? (
+            <select
+              value={days}
+              onChange={(e) => setDays(Number(e.target.value))}
+              className="rounded-lg border border-gray-300 p-1.5 text-sm"
+            >
+              <option value={3}>近 3 天</option>
+              <option value={7}>近 7 天</option>
+              <option value={14}>近 14 天</option>
+              <option value={30}>近 30 天</option>
+            </select>
+          ) : (
+            <input
+              type="date"
+              value={singleDate}
+              onChange={(e) => setSingleDate(e.target.value)}
+              className="rounded-lg border border-gray-300 p-1.5 text-sm"
+            />
+          )}
+          <label className="flex cursor-pointer items-center gap-1 text-xs text-gray-500">
+            <input
+              type="checkbox"
+              checked={pickSingleDay}
+              onChange={(e) => setPickSingleDay(e.target.checked)}
+              className="h-3.5 w-3.5 rounded border-gray-300"
+            />
+            指定某天
+          </label>
+        </div>
       </div>
 
       {loading ? (
@@ -1790,39 +1948,58 @@ const PracticeAbuseSection: React.FC<{ classId: string }> = ({ classId }) => {
       ) : error ? (
         <p className="text-sm text-red-500">{error}</p>
       ) : rows.length === 0 ? (
-        <p className="text-sm text-gray-400 py-6 text-center">
-          {total === 0 ? '当天还没有练习记录' : '当前班级没有发现异常刷题行为'}
-        </p>
+        <div className="py-8 text-center">
+          <i className="fa-solid fa-circle-check mb-2 text-3xl text-green-500"></i>
+          <p className="font-medium text-green-600">
+            {total === 0 ? '该区间没有练习记录' : '当前班级没有发现异常刷题行为'}
+          </p>
+          {rangeText && <p className="mt-1 text-xs text-gray-400">统计区间：{rangeText}</p>}
+        </div>
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full">
             <thead>
               <tr className="border-b border-gray-200 bg-gray-50">
-                <th className="h-10 px-4 text-left text-sm font-medium text-gray-600">账号 姓名</th>
-                <th className="h-10 px-4 text-center text-sm font-medium text-gray-600">提交次数</th>
-                <th className="h-10 px-4 text-center text-sm font-medium text-gray-600">不同题</th>
-                <th className="h-10 px-4 text-center text-sm font-medium text-gray-600">正确率</th>
-                <th className="h-10 px-4 text-center text-sm font-medium text-gray-600">同题最多</th>
-                <th className="h-10 px-4 text-center text-sm font-medium text-gray-600">≤2秒占比</th>
-                <th className="h-10 px-4 text-center text-sm font-medium text-gray-600">判定</th>
+                <th className="h-10 px-3 text-left text-sm font-medium text-gray-600">账号 姓名</th>
+                <th className="h-10 px-3 text-center text-sm font-medium text-gray-600">提交次数</th>
+                <th className="h-10 px-3 text-center text-sm font-medium text-gray-600">不同题</th>
+                <th className="h-10 px-3 text-center text-sm font-medium text-gray-600">正确率</th>
+                <th className="h-10 px-3 text-center text-sm font-medium text-gray-600" title="同一道题在该区间内最多被提交几次">同题最多</th>
+                <th
+                  className="h-10 px-3 text-center text-sm font-medium text-gray-600"
+                  title="提交间隔卡在「读题闸下限」附近的比例。刷题的人卡着下限点，正常做题的人忽长忽短"
+                >
+                  踩闸率
+                </th>
+                <th className="h-10 px-3 text-center text-sm font-medium text-gray-600" title="≤3 秒提交占比。读题闸最小 3 秒，正常操作不可能出现">
+                  ≤3秒
+                </th>
+                <th className="h-10 px-3 text-center text-sm font-medium text-gray-600">平均间隔</th>
+                <th className="h-10 px-3 text-center text-sm font-medium text-gray-600">判定</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
               {rows.map((it) => (
                 <tr key={it.student_id} className="hover:bg-gray-50">
-                  <td className="h-12 px-4 text-gray-800 whitespace-nowrap">
+                  <td className="h-12 whitespace-nowrap px-3 text-gray-800">
                     {it.username} {it.real_name}
                   </td>
-                  <td className="h-12 px-4 text-center text-gray-700 font-medium">{it.answers}</td>
-                  <td className="h-12 px-4 text-center text-gray-600">{it.distinct_questions}</td>
-                  <td className={`h-12 px-4 text-center font-semibold ${it.accuracy < 45 ? 'text-red-600' : 'text-gray-700'}`}>
+                  <td className="h-12 px-3 text-center font-medium text-gray-700">{it.answers}</td>
+                  <td className="h-12 px-3 text-center text-gray-600">{it.distinct_questions}</td>
+                  <td className={`h-12 px-3 text-center font-semibold ${it.accuracy < 45 ? 'text-red-600' : 'text-gray-700'}`}>
                     {it.accuracy}%
                   </td>
-                  <td className="h-12 px-4 text-center text-gray-600">{it.max_repeat} 次</td>
-                  <td className={`h-12 px-4 text-center ${it.fast_ratio >= 70 ? 'text-red-600 font-semibold' : 'text-gray-600'}`}>
+                  <td className="h-12 px-3 text-center text-gray-600">{it.max_repeat} 次</td>
+                  <td className={`h-12 px-3 text-center font-semibold ${it.gate_ratio >= 55 ? 'text-red-600' : (it.gate_ratio >= 35 ? 'text-amber-600' : 'text-gray-600')}`}>
+                    {it.gate_ratio}%
+                  </td>
+                  <td className={`h-12 px-3 text-center ${it.fast_ratio >= 12 ? 'font-semibold text-red-600' : 'text-gray-500'}`}>
                     {it.fast_ratio}%
                   </td>
-                  <td className="h-12 px-4 text-center">{levelBadge(it.level)}</td>
+                  <td className="h-12 px-3 text-center text-gray-500">
+                    {it.avg_gap === null || it.avg_gap === undefined ? '—' : `${it.avg_gap}s`}
+                  </td>
+                  <td className="h-12 px-3 text-center">{levelBadge(it.level)}</td>
                 </tr>
               ))}
             </tbody>

@@ -684,6 +684,78 @@ app.get('/api/teacher/analytics/at-risk/:classId', authenticate, requireTeacher,
     const median30 = a30Nums.length ? a30Nums[Math.floor(a30Nums.length / 2)] : 0;
     const lowActivityLine = median30 * 0.5;
 
+    // ---------- 题库总量与每生掌握数 ----------
+    // ⛔ 「练习量偏低」必须结合掌握度看（2026-10-25 吴老指出）：
+    //    题库总共就 982 道可练习题，一个学生掌握到 700+ 之后只剩两百来题，
+    //    练习量自然往下掉 —— 这时候判他「掉队」是冤枉。所以：
+    //    只有「掌握度还很低、却练得少」才算掉队信号。
+    const [[poolQ]] = await pool.query(
+      `SELECT COUNT(*) AS n FROM questions
+        WHERE practice_enabled = 1 AND cluster_id IS NOT NULL AND cluster_id <> ''
+          AND type NOT IN ('wps_op', 'access_op')`
+    );
+    const questionPoolSize = Number(poolQ?.n) || 0;
+
+    const masterThreshold = await getMasterThreshold();
+    const [masterRows] = await pool.query(
+      `SELECT m.student_id, COUNT(*) AS n FROM (
+         SELECT student_id, question_id FROM student_answers
+          WHERE student_id IN (?) AND source = 'practice' AND is_correct = 1
+          GROUP BY student_id, question_id
+         HAVING COUNT(*) >= ?
+       ) m
+       JOIN questions q ON q.id = m.question_id
+       WHERE q.practice_enabled = 1 AND q.cluster_id IS NOT NULL AND q.cluster_id <> ''
+         AND q.type NOT IN ('wps_op', 'access_op')
+       GROUP BY m.student_id`,
+      [studentIds, masterThreshold]
+    );
+    const masteredMap = new Map(masterRows.map((r) => [r.student_id, Number(r.n) || 0]));
+
+    // 掌握度达到这个比例后，练习量下降属于正常（题快练完了）
+    const MASTERED_ENOUGH_RATIO = 0.7;
+    const masteredEnoughLine = Math.round(questionPoolSize * MASTERED_ENOUGH_RATIO);
+
+    // ---------- 最近两场考试的成绩 ----------
+    // 考试成绩是「同一时间、同一份卷、不能翻资料」，是判断真实掌握最硬的指标，
+    // 尤其在练习量已经不能说明问题的时候（吴老 2026-10-25 明确要求纳入）。
+    const [examRows] = await pool.query(
+      `SELECT er.student_id, er.test_id, er.score, t.title, t.passing_score, t.created_at
+         FROM exam_records er
+         JOIN tests t ON t.id = er.test_id
+        WHERE er.student_id IN (?) AND t.type = 'exam'
+          AND (TIMESTAMPDIFF(SECOND, er.started_at, er.completed_at) > 0
+               OR EXISTS (SELECT 1 FROM student_answers sa2
+                           WHERE sa2.test_id = er.test_id AND sa2.student_id = er.student_id AND sa2.source = 'exam'))
+        ORDER BY t.created_at DESC`,
+      [studentIds]
+    );
+    // 每人保留最近两场（用于看趋势）
+    const examByStudent = new Map();
+    for (const r of examRows) {
+      if (!examByStudent.has(r.student_id)) examByStudent.set(r.student_id, []);
+      const arr = examByStudent.get(r.student_id);
+      if (arr.length < 2) arr.push(r);
+    }
+
+    // 最近一场考试的班级平均分（按考试分别算，用于判断"明显低于班级平均"）
+    const latestExamIds = [...new Set([...examByStudent.values()].map((arr) => arr[0]?.test_id).filter(Boolean))];
+    const examAvgMap = new Map();
+    if (latestExamIds.length) {
+      const [avgRows] = await pool.query(
+        `SELECT er.test_id, AVG(er.score) AS avg_score
+           FROM exam_records er
+           JOIN profiles p2 ON p2.id = er.student_id
+          WHERE er.test_id IN (?) AND p2.class_id = ? AND p2.role = 'student'
+            AND (TIMESTAMPDIFF(SECOND, er.started_at, er.completed_at) > 0
+                 OR EXISTS (SELECT 1 FROM student_answers sa3
+                             WHERE sa3.test_id = er.test_id AND sa3.student_id = er.student_id AND sa3.source = 'exam'))
+          GROUP BY er.test_id`,
+        [latestExamIds, classId]
+      );
+      for (const r of avgRows) examAvgMap.set(r.test_id, Number(r.avg_score) || 0);
+    }
+
     const nowMs = Date.now();
     const data = [];
     for (const s of students) {
@@ -706,27 +778,86 @@ app.get('/api/teacher/analytics/at-risk/:classId', authenticate, requireTeacher,
       const r7Rate = r7Answers > 0 ? (Number(r.r7_correct || 0) / r7Answers) * 100 : null;
       const p7Rate = p7Answers > 0 ? (Number(r.p7_correct || 0) / p7Answers) * 100 : null;
 
+      const mastered = masteredMap.get(s.id) || 0;
+      // 掌握度够了（≥题库 70%）就视为「题已经练完」，练习量下降不算异常
+      const masteredEnough = questionPoolSize > 0 && mastered >= masteredEnoughLine;
+
       const flags = [];
       if (lastSeen === null || inactiveDays >= days) flags.push('inactive');
       if (r7Answers >= 5 && p7Answers >= 5 && r7Rate !== null && p7Rate !== null && r7Rate < p7Rate - 15) flags.push('declining');
-      if (lowActivityLine > 0 && a30 < lowActivityLine) flags.push('low_activity');
+      // ⛔ 练习量偏低要加掌握度前提（2026-10-25）：题库才 982 题，掌握到 700+ 的学生
+      //    只剩两百来题可练，练得少是正常的。只有「掌握不够却也不练」才是掉队。
+      if (lowActivityLine > 0 && a30 < lowActivityLine && !masteredEnough) flags.push('low_activity');
+
+      // ---------- 考试成绩（2026-10-25 新增，重要指标） ----------
+      const myExams = examByStudent.get(s.id) || [];
+      const lastExam = myExams[0] || null;
+      const prevExam = myExams[1] || null;
+      let lastExamScore = null;
+      let lastExamTitle = '';
+      let lastExamPassing = null;
+      let examDrop = null;
+
+      if (lastExam) {
+        lastExamScore = Number(lastExam.score) || 0;
+        lastExamTitle = lastExam.title || '';
+        lastExamPassing = lastExam.passing_score === null || lastExam.passing_score === undefined
+          ? 60 : Number(lastExam.passing_score);
+
+        if (lastExamScore < lastExamPassing) flags.push('exam_fail');
+
+        const classAvg = examAvgMap.get(lastExam.test_id) || 0;
+        if (classAvg > 0 && lastExamScore < classAvg - 15) flags.push('exam_below_avg');
+
+        if (prevExam) {
+          const prevScore = Number(prevExam.score) || 0;
+          examDrop = Math.round((lastExamScore - prevScore) * 10) / 10;
+          if (examDrop <= -15) flags.push('exam_dropping');
+        }
+      }
 
       if (flags.length === 0) continue;
+
+      // ---------- 打分（2026-10-25 改） ----------
+      // ⛔ 「有任意一条信号就入榜」太宽：周末两天没练习，`inactive` 会让全班都入榜
+      //    （实测高二5 近 3 天 0/54 人练过，54 人全中，但考试不及格的其实只有 10 人）。
+      //    改为打分：考试成绩是硬证据权重最高，「未活跃」单独不足以定性。
+      let score = 0;
+      if (flags.includes('exam_fail')) score += 3;
+      if (flags.includes('exam_below_avg')) score += 3;
+      if (flags.includes('exam_dropping')) score += 3;
+      if (flags.includes('declining')) score += 2;
+      if (flags.includes('low_activity')) score += 2;
+      if (flags.includes('inactive')) score += 1;
+      if (score < 2) continue; // 只有「未活跃」一项不入选
+
       data.push({
         id: s.id,
         real_name: s.real_name,
         username: s.username,
         flags,
+        score,
+        level: score >= 6 ? 'high' : (score >= 4 ? 'mid' : 'low'),
         inactive_days: inactiveDays,
         recent7_correct_rate: r7Rate !== null ? Math.round(r7Rate) : null,
         prev7_correct_rate: p7Rate !== null ? Math.round(p7Rate) : null,
         answers30: a30,
+        // 新增：掌握度与最近考试成绩，供前端展示与老师判断
+        mastered,
+        mastered_ratio: questionPoolSize > 0 ? Math.round((mastered / questionPoolSize) * 100) : null,
+        mastered_enough: masteredEnough ? 1 : 0,
+        last_exam_score: lastExamScore,
+        last_exam_title: lastExamTitle,
+        last_exam_passing: lastExamPassing,
+        exam_drop: examDrop,
       });
     }
 
-    // flags 多的在前，其次 inactive_days 大的在前（从未使用视为最大）
+    // 排序（2026-10-25 调整）：考试成绩是最硬的证据，先把「考不及格」的顶到前面，
+    // 其次看信号数量，最后看未练习天数。
+    // 分数高的在前；同分时未练习天数多的在前
     data.sort((a, b) => {
-      if (b.flags.length !== a.flags.length) return b.flags.length - a.flags.length;
+      if (b.score !== a.score) return b.score - a.score;
       const ia = a.inactive_days === null ? Number.MAX_SAFE_INTEGER : a.inactive_days;
       const ib = b.inactive_days === null ? Number.MAX_SAFE_INTEGER : b.inactive_days;
       return ib - ia;
@@ -741,6 +872,10 @@ app.get('/api/teacher/analytics/at-risk/:classId', authenticate, requireTeacher,
           median_answers30: median30,
           low_activity_line: Math.round(lowActivityLine * 10) / 10,
           class_avg_answers30: Math.round(classAvg30 * 10) / 10,
+          // 题库总量与掌握线：让老师理解为什么「掌握多了练得少」不算掉队
+          question_pool_size: questionPoolSize,
+          mastered_enough_line: masteredEnoughLine,
+          mastered_enough_ratio: MASTERED_ENOUGH_RATIO,
         },
       },
       error: null,
@@ -3684,6 +3819,10 @@ app.post('/api/student/practice/low-accuracy-penalty', authenticate, async (req,
   }
 });
 
+// 读题闸（最短读题时间）生效日：v3.1.7 于 2026-10-23 晚上线。
+// 这一天之前的提交没有闸门限制，间隔自然可以很短，所以新旧数据不能直接比。
+const GATE_EFFECTIVE_FROM = '2026-10-23';
+
 // ============== 教师端：练习「疑似闭眼连点」名单 ==============
 // 判定不靠单一指标，而是四个信号叠加，避免误伤「做得快但确实会」的学生：
 //   ① 正确率明显偏低（低于 60%，越低分越高）
@@ -3697,12 +3836,31 @@ app.get('/api/teacher/practice-suspicious', authenticate, async (req, res) => {
     if (role !== 'teacher' && role !== 'admin') {
       return res.status(403).json({ data: null, error: '无权访问' });
     }
+    // 统计区间（2026-10-25 改）：默认最近 7 天，不再默认「今天」。
+    // 原因：刷题是连续行为，按单日看只能看到一天的量，且老师每换一天都要手点一次日期；
+    //      按周看才能看出「这个人每天都在闭眼点」。
+    // 仍兼容旧的 ?date=YYYY-MM-DD（只看那一天），方便需要精确核对某天时使用。
     const now = new Date();
     const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
     const dateStr = String(req.query.date || '').trim();
-    const day = /^\d{4}-\d{2}-\d{2}$/.test(dateStr) ? dateStr : todayStr;
-    const start = `${day} 00:00:00`;
-    const end = `${day} 23:59:59`;
+    const isSingleDay = /^\d{4}-\d{2}-\d{2}$/.test(dateStr);
+
+    let days = parseInt(req.query.days, 10);
+    if (!Number.isFinite(days) || days < 1) days = 7;
+    if (days > 30) days = 30;
+
+    let start;
+    let end;
+    if (isSingleDay) {
+      start = `${dateStr} 00:00:00`;
+      end = `${dateStr} 23:59:59`;
+    } else {
+      end = `${todayStr} 23:59:59`;
+      const from = new Date(now.getTime() - (days - 1) * 86400000);
+      start = `${from.getFullYear()}-${String(from.getMonth() + 1).padStart(2, '0')}-${String(from.getDate()).padStart(2, '0')} 00:00:00`;
+    }
+    const startDay = start.slice(0, 10);
+    const endDay = end.slice(0, 10);
 
     // ① 基础聚合
     const [base] = await pool.query(
@@ -3711,11 +3869,18 @@ app.get('/api/teacher/practice-suspicious', authenticate, async (req, res) => {
          FROM student_answers
         WHERE source = 'practice' AND created_at BETWEEN ? AND ?
         GROUP BY student_id
-        HAVING n >= 60`,
+        HAVING n >= 150`,
       [start, end]
     );
     if (base.length === 0) {
-      return res.json({ data: { date: day, items: [], total: 0 }, error: null });
+      return res.json({
+        data: {
+          range: { start: startDay, end: endDay, days: isSingleDay ? 1 : days, single_day: isSingleDay },
+          items: [],
+          total: 0,
+        },
+        error: null,
+      });
     }
 
     // ② 同题最多被提交几次
@@ -3730,17 +3895,35 @@ app.get('/api/teacher/practice-suspicious', authenticate, async (req, res) => {
     );
     const repMap = new Map(repRows.map((r) => [r.student_id, Number(r.max_rep) || 0]));
 
-    // ③ 提交间隔：≤2 秒的占比（窗口函数算相邻两条的时间差）
+    // ③ 提交间隔：换新口径（2026-10-25）
+    //
+    // ⛔ 旧的「≤2 秒占比」已经失效：v3.1.7 起练习有「最短读题时间」闸（3~8 秒，按题干字数算），
+    //    答错后还有 3 秒延迟，所以正常操作下**物理上不可能**出现 ≤2 秒的提交。
+    //    实测 10-24 之后 ≤4 秒占比已归零（均值从 16 秒涨到 44 秒）。继续用旧指标会永远显示 0%，
+    //    等于对刷题完全瞎掉。
+    //
+    // 换成两个新指标：
+    //   fast_ratio  —— 相邻提交间隔 ≤3 秒的占比。读题闸最小就是 3 秒，≤3 秒必然是绕过前端的手段。
+    //   gate_ratio  —— 「踩闸率」：间隔小于等于该题理论下限的占比。
+    //                  理论下限 = 读题闸(题干字数) + (上一题答错 ? 3 : 0)，与前端 PracticeModule 同一公式。
+    //                  刷题的人会卡着下限点，正常做题的人忽长忽短，所以这个比例对「机械点击」很敏感。
     const [gapRows] = await pool.query(
-      `SELECT student_id, SUM(gap IS NOT NULL) AS gn,
-              SUM(CASE WHEN gap IS NOT NULL AND gap <= 2 THEN 1 ELSE 0 END) AS fast
+      `SELECT student_id,
+              SUM(gap IS NOT NULL) AS gn,
+              SUM(CASE WHEN gap IS NOT NULL AND gap <= 3 THEN 1 ELSE 0 END) AS fast,
+              SUM(CASE WHEN gap IS NOT NULL AND gap <= gate + IF(prev_ok = 0, 3, 0) THEN 1 ELSE 0 END) AS under_gate,
+              ROUND(AVG(gap), 1) AS avg_gap
          FROM (
-           SELECT student_id,
-                  TIMESTAMPDIFF(SECOND,
-                    LAG(created_at) OVER (PARTITION BY student_id ORDER BY created_at, id),
-                    created_at) AS gap
-             FROM student_answers
-            WHERE source = 'practice' AND created_at BETWEEN ? AND ?
+           SELECT sa.student_id, sa.is_correct,
+                  g.gate,
+                  TIMESTAMPDIFF(SECOND, LAG(sa.created_at) OVER w, sa.created_at) AS gap,
+                  LAG(sa.is_correct) OVER w AS prev_ok
+             FROM student_answers sa
+             JOIN (SELECT id,
+                          LEAST(8, GREATEST(3, CEIL(CHAR_LENGTH(REGEXP_REPLACE(content, '<[^>]*>', '')) / 30) + 2)) AS gate
+                     FROM questions) g ON g.id = sa.question_id
+            WHERE sa.source = 'practice' AND sa.created_at BETWEEN ? AND ?
+            WINDOW w AS (PARTITION BY sa.student_id ORDER BY sa.created_at, sa.id)
          ) t
         GROUP BY student_id`,
       [start, end]
@@ -3748,6 +3931,8 @@ app.get('/api/teacher/practice-suspicious', authenticate, async (req, res) => {
     const gapMap = new Map(gapRows.map((r) => [r.student_id, {
       gn: Number(r.gn) || 0,
       fast: Number(r.fast) || 0,
+      gate: Number(r.under_gate) || 0,
+      avgGap: r.avg_gap === null ? null : Number(r.avg_gap),
     }]));
 
     // ④ 学生信息
@@ -3769,26 +3954,45 @@ app.get('/api/teacher/practice-suspicious', authenticate, async (req, res) => {
       const ok = Number(r.ok) || 0;
       const rate = n ? Math.round((ok / n) * 100) : 0;
       const maxRep = repMap.get(r.student_id) || 0;
-      const g = gapMap.get(r.student_id) || { gn: 0, fast: 0 };
-      const fastRatio = g.gn > 0 ? Math.round((g.fast / g.gn) * 100) : 0;
+      const g = gapMap.get(r.student_id) || { gn: 0, fast: 0, gate: 0, avgGap: null };
+      const fastRatio = g.gn > 0 ? Math.round((g.fast / g.gn) * 100) : 0;   // ≤3 秒占比（硬违规）
+      const gateRatio = g.gn > 0 ? Math.round((g.gate / g.gn) * 100) : 0;   // 踩闸率（贴着下限点）
       const p = profileMap.get(r.student_id) || {};
 
-      // 打分：以「连点」为主信号（这是无脑刷的直接证据），题量/正确率/重复为辅。
-      // 只看正确率会误伤「学得慢但确实在思考」的学生（实测：某生 42 题、正确率 38%、
-      // 相邻提交 ≤2 秒只占 5%，那是困难不是刷题），所以连点权重最高，且题量设门槛。
+      // 打分（2026-10-25 第二次调整）：
+      //
+      // ⛔ 上一版把「踩闸率」当主信号，实测命中 34 人，其中一半是正确率 80% 以上的勤奋学生
+      //    （张瑞翔 81%、周虎城 84%、蒋涵予 86%）—— 那些人只是练得多、手速快，不是不读题。
+      //    根本原因：闸门 10-23 才上线，此前的数据「快」是正常的；而且简单题 3 秒读完也正常，
+      //    踩闸率高不等于没读题。
+      //
+      // 真正的「无脑刷」特征是「量大 + 错得多」：刷量但不吸收。所以：
+      //   ① 主信号 = 低正确率 + 大题量（刷量不看题）
+      //   ② 踩闸率 / ≤3 秒 只在「闸门生效后」的区间才给满分，跨闸门窗口权重减半
+      //   ③ 同题反复、题量作为辅证
+      const gateValid = startDay >= GATE_EFFECTIVE_FROM;
+      const gateWeight = gateValid ? 1 : 0.5;
+
       let score = 0;
-      // ① 连点（核心）
-      if (fastRatio >= 70) score += 4;
-      else if (fastRatio >= 50) score += 3;
-      else if (fastRatio >= 30) score += 1;
-      // ② 正确率偏低
-      if (rate < 40) score += 2;
-      else if (rate < 55) score += 1;
-      // ③ 题量异常
-      if (n >= 300) score += 2;
-      else if (n >= 150) score += 1;
-      // ④ 同题反复（辅助）
-      if (maxRep >= 10) score += 1;
+      // ① 主信号：量大 + 错得多
+      if (rate < 45 && n >= 300) score += 5;
+      else if (rate < 55 && n >= 500) score += 4;
+      else if (rate < 60 && n >= 800) score += 3;
+      else if (rate < 65 && n >= 1200) score += 2;
+      // ② 同题反复（反复刷同一批题，且还在错）
+      if (maxRep >= 15) score += 2;
+      else if (maxRep >= 10) score += 1;
+      // ③ 踩闸率（闸门生效后才算满分）
+      let gateScore = 0;
+      if (gateRatio >= 70) gateScore = 3;
+      else if (gateRatio >= 50) gateScore = 2;
+      else if (gateRatio >= 30) gateScore = 1;
+      score += Math.round(gateScore * gateWeight);
+      // ④ ≤3 秒硬违规（同样只在闸门生效后才算满分）
+      let fastScore = 0;
+      if (fastRatio >= 20) fastScore = 3;
+      else if (fastRatio >= 8) fastScore = 1;
+      score += Math.round(fastScore * gateWeight);
 
       return {
         student_id: r.student_id,
@@ -3802,14 +4006,33 @@ app.get('/api/teacher/practice-suspicious', authenticate, async (req, res) => {
         accuracy: rate,
         max_repeat: maxRep,
         fast_ratio: fastRatio,
+        gate_ratio: gateRatio,
+        avg_gap: g.avgGap,
         score,
-        level: score >= 7 ? 'high' : (score >= 5 ? 'mid' : 'low'),
+        level: score >= 8 ? 'high' : (score >= 6 ? 'mid' : 'low'),
       };
     })
-      .filter((it) => it.score >= 5)
-      .sort((a, b) => b.score - a.score || b.answers - a.answers);
+      .filter((it) => it.score >= 6)
+      .sort((a, b) => b.score - a.score || b.gate_ratio - a.gate_ratio || b.answers - a.answers);
 
-    res.json({ data: { date: day, items, total: base.length }, error: null });
+    res.json({
+      data: {
+        // 明确回传统计区间：老师看到的每条结论都得知道「这是哪段时间的数据」
+        range: { start: startDay, end: endDay, days: isSingleDay ? 1 : days, single_day: isSingleDay },
+        // 读题闸生效日：区间跨过这一天时，≤3秒/踩闸率会混入「闸门前本来就可以很快」的记录
+        gate_effective_from: GATE_EFFECTIVE_FROM,
+        mixed_window: startDay < GATE_EFFECTIVE_FROM,
+        criterion: {
+          min_answers: 150,
+          fast_seconds: 3,
+          gate_ratio: '相邻提交间隔 ≤ 该题理论最短用时（读题闸 + 上题答错延迟）的占比',
+          note: '读题闸最小 3 秒，正常操作不可能出现 ≤3 秒的提交；出现即为异常，但闸门上线前的记录不能这样解读。',
+        },
+        items,
+        total: base.length,
+      },
+      error: null,
+    });
   } catch (error) {
     console.error('[SUSPICIOUS] 统计失败:', error);
     res.status(500).json({ data: null, error: error.message });
