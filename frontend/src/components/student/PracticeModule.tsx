@@ -1045,27 +1045,15 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
 
   return (
     <div className="p-6 max-w-4xl mx-auto">
-      <div className="grid grid-cols-5 gap-4 mb-6">
-        <div className="bg-blue-50 rounded-lg p-4 text-center">
-          <p className="text-sm text-gray-600">总做题数</p>
-          <p className="text-2xl font-bold text-blue-600">{stats.total}</p>
-        </div>
-        <div className="bg-amber-50 rounded-lg p-4 text-center">
-          <p className="text-sm text-gray-600">已掌握</p>
-          <p className="text-2xl font-bold text-amber-600">{stats.mastered}</p>
-        </div>
-        <div className="bg-green-50 rounded-lg p-4 text-center">
-          <p className="text-sm text-gray-600">做对</p>
-          <p className="text-2xl font-bold text-green-600">{stats.correct}</p>
-        </div>
-        <div className="bg-red-50 rounded-lg p-4 text-center">
-          <p className="text-sm text-gray-600">做错</p>
-          <p className="text-2xl font-bold text-red-600">{stats.wrong}</p>
-        </div>
-        <div className="bg-purple-50 rounded-lg p-4 text-center">
-          <p className="text-sm text-gray-600">正确率</p>
-          <p className="text-2xl font-bold text-purple-600">{stats.accuracy}%</p>
-        </div>
+      {/* 做题统计条（2026-10-25 改）：原来是 5 个 p-4 卡片、每个两行（标签 + 2xl 数字），
+          竖向吃掉约 100px，题干被挤到下面很多。改成一行紧凑条，高度降到约 36px，
+          信息一个不少，颜色区分保留。 */}
+      <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-gray-200 bg-white px-4 py-1.5 text-sm">
+        <span className="text-gray-500">总做题 <span className="ml-0.5 font-semibold text-blue-600">{stats.total}</span></span>
+        <span className="text-gray-500">已掌握 <span className="ml-0.5 font-semibold text-amber-600">{stats.mastered}</span></span>
+        <span className="text-gray-500">做对 <span className="ml-0.5 font-semibold text-green-600">{stats.correct}</span></span>
+        <span className="text-gray-500">做错 <span className="ml-0.5 font-semibold text-red-600">{stats.wrong}</span></span>
+        <span className="ml-auto text-gray-500">正确率 <span className="ml-0.5 font-semibold text-purple-600">{stats.accuracy}%</span></span>
       </div>
 
       <HonorBadge currentStreak={currentStreak} currentCritStreak={currentCritStreak} currentWrong={currentWrong} buffs={buffs} />
