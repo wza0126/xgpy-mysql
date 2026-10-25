@@ -4916,6 +4916,46 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
     }
     const testEarly = testRowsEarly[0];
 
+    // ===== 限时校验（v3.1.17 服务端兜底）=====
+    // 前端已经做到「倒计时归零自动交卷」，这里防的是绕过前端的做法（改代码、关窗口偷时间）。
+    // 给 120 秒宽限：网络慢、自动交卷正在上传都可能延迟几秒到几十秒，不能误伤。
+    // ⛔ 教师/管理员代提交（考试结束批量补交）**不做**这个校验 —— 那是补录，本来就超过限时。
+    if (!isTeacherSubmitExam) {
+      try {
+        const [[pgRow]] = await connection.query(
+          'SELECT started_at FROM exam_progress WHERE test_id = ? AND student_id = ? ORDER BY updated_at DESC LIMIT 1',
+          [test_id, student_id]
+        );
+        const [[erRow]] = await connection.query(
+          `SELECT started_at FROM exam_records
+            WHERE test_id = ? AND student_id = ? AND completed_at IS NULL
+            ORDER BY started_at DESC LIMIT 1`,
+          [test_id, student_id]
+        );
+        const startSrc = pgRow?.started_at || erRow?.started_at || null;
+        if (startSrc) {
+          const limitMin = Number(testEarly.time_limit) || 15;
+          const limitSec = limitMin * 60;
+          const GRACE_SEC = 120;
+          const elapsed = Math.floor((Date.now() - new Date(startSrc).getTime()) / 1000);
+          if (elapsed > limitSec + GRACE_SEC) {
+            await connection.rollback();
+            console.warn('[EXAM-TIMEOUT] 拒绝超时提交:', student_id, '用时', elapsed, '秒，限时', limitSec);
+            return res.status(400).json({
+              data: null,
+              error: `考试已超时（限时 ${limitMin} 分钟，已用 ${Math.floor(elapsed / 60)} 分 ${elapsed % 60} 秒），本次提交未被接受。请联系老师处理。`,
+              timeout: true,
+              elapsed,
+              limit_sec: limitSec,
+            });
+          }
+        }
+      } catch (e) {
+        // 校验本身出错不能挡住正常提交
+        console.warn('[EXAM-TIMEOUT] 校验失败，跳过:', e.message);
+      }
+    }
+
     // 分母防作弊：考试题目是前端从 tests.question_ids 里随机抽 question_count 道，
     // 不能采信前端传来的数组长度（否则只交 1 道题就能拿 100 分、拿走全额奖励）。
     let configuredIds = [];
@@ -5216,6 +5256,36 @@ app.get('/api/business/exam-progress/:examRecordId', authenticate, async (req, r
       } catch {
         progress.answers = {};
       }
+    }
+
+    // ===== 服务端权威剩余时间（v3.1.17）=====
+    // ⛔ 为什么不能直接用前端保存的 time_remaining：
+    //    前端的倒计时只在考试界面挂着时才走。学生把考试窗口关掉，计时就停了；
+    //    再打开时从 time_remaining 恢复 —— 相当于白得一段考试时间。
+    //    实测 python测试1 有 17 人（12%）"用时"超过 15 分钟限时，最慢 17 分 24 秒。
+    //
+    // 现在用**服务端时间戳**重算：exam_progress.started_at 由 MySQL 写入（首次 INSERT 时），
+    // 之后 ON DUPLICATE KEY UPDATE 只更新 updated_at、不会改它，所以它是可靠的「开考时刻」。
+    // 拿不到时退回 exam_records.started_at（前端写入，只在开考时写一次）。
+    try {
+      const [[rec]] = await pool.query(
+        `SELECT er.started_at AS record_started, t.time_limit
+           FROM exam_records er
+           JOIN tests t ON t.id = er.test_id
+          WHERE er.id = ? LIMIT 1`,
+        [examRecordId]
+      );
+      const limitSec = (Number(rec?.time_limit) || 15) * 60;
+      const startSource = progress.started_at || rec?.record_started || null;
+      const startMs = startSource ? new Date(startSource).getTime() : null;
+      const elapsed = startMs ? Math.max(0, Math.floor((Date.now() - startMs) / 1000)) : 0;
+      progress.authoritative_remaining = Math.max(0, limitSec - elapsed);
+      progress.authoritative_elapsed = elapsed;
+      progress.time_limit_sec = limitSec;
+      progress.time_up = progress.authoritative_remaining <= 0;
+    } catch (e) {
+      console.warn('[EXAM-PROGRESS] 计算权威剩余时间失败:', e.message);
+      // 算不出来就不给字段，前端会退回用 time_remaining
     }
 
     res.json({ data: progress, error: null });

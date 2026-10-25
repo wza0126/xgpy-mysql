@@ -1,4 +1,4 @@
-import React, { useState, useEffect, lazy, Suspense } from 'react';
+import React, { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
 import { Test, Question, TestRecord } from '../../types';
@@ -151,6 +151,10 @@ export const TestModule: React.FC = () => {
   const [showPKBattle, setShowPKBattle] = useState(false);
   const [currentExamTest, setCurrentExamTest] = useState<any>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // 限时到点强制交卷（v3.1.17）：examTimeUp 控制「时间到」遮罩提示，
+  // examTimeUpRef 保证自动提交只触发一次（effect 可能因其他 state 变化重跑）
+  const [examTimeUp, setExamTimeUp] = useState(false);
+  const examTimeUpRef = useRef(false);
   const { profile, refreshProfile } = useAuth();
   const { updatePoints } = usePoints();
   /** 测试资格明细：test_id -> { passed, correct:{...}, mastered:{...} }（服务端裁定，口径唯一） */
@@ -193,22 +197,33 @@ export const TestModule: React.FC = () => {
     }
   }, [activeTest]);
 
+  // ===== 考试倒计时（v3.1.17 重写）=====
+  // 拆成两段，各有原因：
+  // ① 只负责递减。依赖写成 activeExam?.test?.id 而不是整个对象 ——
+  //    原写法依赖整个对象，每秒 state 变化都会销毁重建定时器，既不必要也让时序抖动。
+  // ② 单独监听「归零 → 强制交卷」。
+  //    ⛔ 不能在 setState 的 updater 里调 handleSubmitExam：updater 必须是纯函数，
+  //    React 严格模式会执行两次，可能重复提交，也可能拿到过期的闭包变量。
   useEffect(() => {
-    if (activeExam && activeExam.timeRemaining > 0) {
-      const timer = setInterval(() => {
-        setActiveExam((prev) => {
-          if (!prev) return null;
-          const newTime = prev.timeRemaining - 1;
-          if (newTime <= 0) {
-            handleSubmitExam();
-            return null;
-          }
-          return { ...prev, timeRemaining: newTime };
-        });
-      }, 1000);
-      return () => clearInterval(timer);
-    }
-  }, [activeExam]);
+    if (!activeExam) return;
+    const timer = setInterval(() => {
+      setActiveExam((prev) => {
+        if (!prev || prev.timeRemaining <= 0) return prev;
+        return { ...prev, timeRemaining: prev.timeRemaining - 1 };
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [activeExam?.test?.id]);
+
+  // 到点强制交卷：用 ref 保证只触发一次（effects 可能因其他 state 变化重跑）
+  useEffect(() => {
+    if (!activeExam || activeExam.timeRemaining > 0) return;
+    if (examTimeUpRef.current) return;
+    examTimeUpRef.current = true;
+    setExamTimeUp(true);
+    handleSubmitExam();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeExam?.timeRemaining]);
 
   // 自动保存考试进度（每10秒）
   useEffect(() => {
@@ -498,13 +513,29 @@ export const TestModule: React.FC = () => {
       setExamCompositeChoiceAnswers(examChoices);
       setExamCompositeBlankAnswers(examBlanks);
 
+      // 进入考试：重置「已到点」标记，否则第二场考试会一进去就被判超时
+      examTimeUpRef.current = false;
+      setExamTimeUp(false);
+
       // 设置考试状态，如果有保存的进度则恢复
       setActiveExam({
         test: exam,
         questions: shuffledQuestions,
         answers: savedAnswers,
         currentIndex: savedProgress?.current_index || 0,
-        timeRemaining: savedProgress?.time_remaining || (exam.time_limit || 60) * 60,
+        // ⛔ 剩余时间以服务端算的为准（v3.1.17）：
+        //    前端 savedProgress.time_remaining 只在考试界面挂着时才递减，
+        //    学生关掉窗口再开就能白得一段时间。后端用 exam_progress.started_at
+        //    （MySQL 写入的时间戳）算出的 authoritative_remaining 才是真实的。
+        timeRemaining: (() => {
+          const fallback = (Number(exam.time_limit) || 60) * 60;
+          const serverRemain = (savedProgress as any)?.authoritative_remaining;
+          if (typeof serverRemain === 'number' && Number.isFinite(serverRemain)) {
+            return Math.max(0, serverRemain);
+          }
+          const saved = savedProgress?.time_remaining;
+          return typeof saved === 'number' && saved > 0 ? saved : fallback;
+        })(),
         startedAt: new Date(),
       });
 
@@ -691,6 +722,8 @@ export const TestModule: React.FC = () => {
       const isClosedResult = await backendClient.isExamClosed(activeExam.test.id);
       if (isClosedResult?.data?.isClosed) {
         alert('考试已结束，无法提交');
+        setExamTimeUp(false);
+        examTimeUpRef.current = false;
         setActiveExam(null);
         // 考试结束应回到「考试列表」，不是测试列表（顺手统一，2026-10-24）
         setShowExamList(true);
@@ -713,6 +746,10 @@ export const TestModule: React.FC = () => {
       });
 
       if (result.error) {
+        // 交卷失败（含"考试已超时被拒绝"）：必须解除「时间到」遮罩，
+        // 否则学生会卡在遮罩后面既不能交也不能退
+        setExamTimeUp(false);
+        examTimeUpRef.current = false;
         alert(result.error || '提交失败，请重试');
         setIsSubmitting(false);
         return;
@@ -1732,7 +1769,26 @@ export const TestModule: React.FC = () => {
     }).length;
 
     return (
-      <div className="p-6 select-none flex gap-4" style={{ userSelect: 'none', WebkitUserSelect: 'none' }}>
+      <div className="p-6 select-none flex gap-4 relative" style={{ userSelect: 'none', WebkitUserSelect: 'none' }}>
+        {/* 限时到点遮罩（v3.1.17）：倒计时归零后立即盖住整屏，防止继续作答。
+            自动交卷成功后 activeExam 会被清空、遮罩自然消失；
+            若后端拒绝（超时太久），handleSubmitExam 会解除遮罩并弹出原因。 */}
+        {examTimeUp && (
+          <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/55">
+            <div className="w-[min(90vw,380px)] rounded-2xl bg-white p-7 text-center shadow-2xl">
+              <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-red-50">
+                <i className="fa-solid fa-hourglass-end text-2xl text-red-500"></i>
+              </div>
+              <h3 className="text-lg font-bold text-gray-800">考试时间到</h3>
+              <p className="mt-1.5 text-sm text-gray-600">答案已锁定，正在自动交卷，请不要关闭页面…</p>
+              <div className="mt-4 flex items-center justify-center gap-2 text-sm text-gray-400">
+                <i className="fa-solid fa-circle-notch fa-spin"></i>
+                提交中
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* 左侧：考试内容区 */}
         <div className={`flex-1 ${showExamNavigator ? 'max-w-3xl' : 'max-w-4xl'} mx-auto`}>
           <div className="flex items-center justify-between mb-4">
