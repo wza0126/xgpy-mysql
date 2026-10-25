@@ -3786,6 +3786,111 @@ app.get('/api/teacher/practice-suspicious', authenticate, async (req, res) => {
   }
 });
 
+// ==================== AI 学情分析（教师端）====================
+// 设计原则与理由见 src/ai-analysis.js 顶部注释：
+//   **AI 不碰数据库，只解读已经算好的数字。** 数字全部来自固定 SQL，AI 只负责讲人话。
+const aiAnalysis = require('./ai-analysis');
+
+// 按人按天限次：防误触狂点把 token 烧掉。
+// 放内存里就够了 —— exe 重启清零无所谓，限频的目的是防连点，不是做配额审计。
+const AI_DAILY_LIMIT = 60;
+const aiUsage = new Map(); // key: `${userId}|${YYYY-MM-DD}` -> count
+function aiUsageToday(userId) {
+  const day = new Date().toISOString().slice(0, 10);
+  return aiUsage.get(`${userId}|${day}`) || 0;
+}
+function bumpAiUsage(userId) {
+  const day = new Date().toISOString().slice(0, 10);
+  const key = `${userId}|${day}`;
+  const v = (aiUsage.get(key) || 0) + 1;
+  aiUsage.set(key, v);
+  // 顺手清掉过期的 key，避免长期运行内存只增不减
+  if (aiUsage.size > 500) {
+    for (const k of aiUsage.keys()) if (!k.endsWith(day)) aiUsage.delete(k);
+  }
+  return v;
+}
+
+app.get('/api/teacher/ai-analysis/topics', authenticate, requireTeacher, requireLicense(FEATURES.ANALYTICS), (req, res) => {
+  res.json({
+    data: {
+      topics: aiAnalysis.TOPICS,
+      daily_limit: AI_DAILY_LIMIT,
+      used_today: aiUsageToday(req.user.userId),
+    },
+    error: null,
+  });
+});
+
+// 指标包：老师选完主题就先把数据和表格拿到手（AI 还没开始说话）
+app.get('/api/teacher/ai-analysis/context', authenticate, requireTeacher, requireLicense(FEATURES.ANALYTICS), async (req, res) => {
+  try {
+    const { class_id: classId, topic } = req.query;
+    if (!classId) return res.status(400).json({ data: null, error: '缺少 class_id' });
+    if (!(await assertTeacherOwnsClass(req, res, classId))) return;
+
+    const ctx = await aiAnalysis.buildContext(pool, { classId, topic });
+    if (!ctx) return res.status(404).json({ data: null, error: '班级不存在' });
+    res.json({ data: ctx, error: null });
+  } catch (error) {
+    console.error('[AI-ANALYSIS] 获取指标包失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 对话分析：服务端**重新取一遍指标包**再喂给模型。
+// ⛔ 绝不能让前端把数字传上来 —— 改个请求体就能让 AI 分析一份虚构的成绩。
+app.post('/api/teacher/ai-analysis/chat', authenticate, requireTeacher, requireLicense(FEATURES.ANALYTICS), async (req, res) => {
+  try {
+    const { class_id: classId, topic, question, history } = req.body || {};
+    const q = String(question || '').trim();
+    if (!classId) return res.status(400).json({ data: null, error: '缺少 class_id' });
+    if (!q) return res.status(400).json({ data: null, error: '请输入要分析的问题' });
+    if (q.length > 500) return res.status(400).json({ data: null, error: '问题太长了，请精简到 500 字以内' });
+    if (!(await assertTeacherOwnsClass(req, res, classId))) return;
+
+    const used = aiUsageToday(req.user.userId);
+    if (used >= AI_DAILY_LIMIT) {
+      return res.status(429).json({
+        data: null,
+        error: `今天的 AI 分析次数已用完（每天 ${AI_DAILY_LIMIT} 次），明天再试`,
+      });
+    }
+
+    const config = await getAiQaConfig(pool);
+    if (!config.ai_api_base_url || !config.ai_api_key) {
+      return res.status(400).json({ data: null, error: 'AI 未配置，请先在「系统配置 → AI设置」填写 API 地址和密钥' });
+    }
+
+    const ctx = await aiAnalysis.buildContext(pool, { classId, topic });
+    if (!ctx) return res.status(404).json({ data: null, error: '班级不存在' });
+
+    const messages = aiAnalysis.buildMessages(ctx, q, history);
+    const answer = await callAiApi(
+      { ...config, ai_temperature: 0.3 },
+      messages,
+      // ⛔ 1200 实测会被截断：模型列知识点时容易铺开，中文 1200 token 约 800 字不够。
+      //    给到 1800，同时靠提示词限制罗列条数 —— 双保险，避免老师看到半句话。
+      { max_tokens: 1800 }
+    );
+
+    bumpAiUsage(req.user.userId);
+
+    res.json({
+      data: {
+        answer: String(answer || '').trim(),
+        context: ctx,
+        used_today: aiUsageToday(req.user.userId),
+        daily_limit: AI_DAILY_LIMIT,
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('[AI-ANALYSIS] 分析失败:', error);
+    res.status(500).json({ data: null, error: error.message || 'AI 分析失败' });
+  }
+});
+
 // ============== 业务API：确保学生有且只有一只宠物（幂等）==============
 // 口径（老师 2026-10-14 明确）：
 //   ① **领养概念已废除** —— 新学生启用账号时自动随机选一只，不需要学生点「领养」；

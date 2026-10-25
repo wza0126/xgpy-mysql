@@ -12,6 +12,7 @@ import { LicenseGuard } from '../common/LicenseGuard';
 import { authHeaders } from '../../utils/authToken';
 import { pickExplainQueue } from '../../utils/explainQueue';
 import { AiExplainPlayer, ExplainQuestion } from './AiExplainPlayer';
+import { AiAnalysisPanel } from './AiAnalysisPanel';
 
 interface StudentWithStats extends Profile {
   class?: Class;
@@ -37,6 +38,7 @@ const ANALYTICS_TABS = [
   { key: 'students', label: '学生', icon: 'fa-users' },
   { key: 'study', label: '学业', icon: 'fa-book-open' },
   { key: 'warnings', label: '预警', icon: 'fa-triangle-exclamation' },
+  { key: 'ai', label: 'AI 分析', icon: 'fa-wand-magic-sparkles' },
 ] as const;
 type AnalyticsTab = (typeof ANALYTICS_TABS)[number]['key'];
 
@@ -434,6 +436,16 @@ export const Analytics: React.FC = () => {
         <AtRiskSection classId={selectedClass} />
       </div>
         </>
+      )}
+
+      {activeSection === 'ai' && (
+        selectedClass ? (
+          <AiAnalysisPanel classId={selectedClass} />
+        ) : (
+          <div className="rounded-xl border border-gray-200 bg-white p-10 text-center text-sm text-gray-500">
+            请先在顶部选择一个班级，AI 才能读取该班的统计数据。
+          </div>
+        )
       )}
       </div>
     </LicenseGuard>
