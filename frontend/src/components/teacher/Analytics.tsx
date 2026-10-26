@@ -173,24 +173,34 @@ export const Analytics: React.FC = () => {
   // 真正需要干预的是最差的 10 个。
   // ⛔ 用 [...students] 复制再排序，原代码直接 students.sort() 会原地改数组，
   //    两个排行榜先后执行会互相污染顺序。
-  const lowestMasteredData = [...students]
+  //
+  // 2026-10-26：两个榜单都剔除「一次都没做过题」的学生。
+  //   他们掌握数和正确率都是 0，会白占倒数第一的座位，而这批人真正的问题是「没来练」
+  //   （多半是休学/转走），属于学生管理，不是学情。判据用 total_answers（作答次数）
+  //   而不是 total_mastered（掌握数）：掌握数为 0 未必是休学 —— 高二4 檀晨做了 21 题、
+  //   正确率 71%，只是没有一题重复答对到阈值，掌握数照样是 0，这种人必须留在榜上。
+  const activeStudents = students.filter((s) => (s.total_answers || 0) > 0);
+  const inactiveCount = students.length - activeStudents.length;
+
+  const lowestMasteredData = [...activeStudents]
     .sort((a, b) => (a.total_mastered || 0) - (b.total_mastered || 0))
     .slice(0, 10)
     .map((s) => ({
       // 排行榜只显示姓名；缺姓名时退回账号，保证不出现空白行
       name: s.real_name || s.username || '（未命名）',
       mastered: s.total_mastered || 0,
+      // 带上做题数，tooltip 里能看出「0 掌握」是真不会还是压根没做
+      answers: s.total_answers || 0,
     }));
 
-  // 正确率倒数：必须排除「一次都没做」的学生 —— 他们正确率是 0，
-  // 会把榜单全部占满，而他们的问题属于「没练」而不是「正确率低」。
-  const lowestAccuracyData = [...students]
-    .filter((s) => (s.total_answers || 0) > 0)
+  // 正确率倒数：同样只算做过题的学生（口径与上面统一）
+  const lowestAccuracyData = [...activeStudents]
     .sort((a, b) => (a.accuracy || 0) - (b.accuracy || 0))
     .slice(0, 10)
     .map((s) => ({
       name: s.real_name || s.username || '（未命名）',
       accuracy: s.accuracy || 0,
+      answers: s.total_answers || 0,
     }));
 
   // ---------- 掌握题数分布（200 题一档，替代原来的萌宠等级分布） ----------
@@ -291,34 +301,59 @@ export const Analytics: React.FC = () => {
       <div className="grid grid-cols-2 gap-6 mb-6">
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
           <h3 className="text-lg font-bold text-gray-800 mb-1">掌握题数 倒数 10 名</h3>
-          <p className="mb-3 text-xs text-gray-500">掌握最少的 10 人，越靠上越需要补</p>
-          <div className="h-64">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={lowestMasteredData} layout="vertical" margin={{ left: 4, right: 16 }}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis type="number" allowDecimals={false} />
-                {/* width 足够宽，保证 3~4 个字的姓名完整显示不被裁掉 */}
-                <YAxis dataKey="name" type="category" width={112} tick={{ fontSize: 12 }} />
-                <Tooltip formatter={(v: any) => [`${v} 题`, '已掌握']} />
-                <Bar dataKey="mastered" fill="#F59E0B" radius={[0, 4, 4, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+          <p className="mb-3 text-xs text-gray-500">
+            掌握最少的 10 人，越靠上越需要补
+            {inactiveCount > 0 && `（已排除 ${inactiveCount} 名从未做题的学生，多半休学/未参加）`}
+          </p>
+          {/* 高度按「10 行 × 每人一行」留足，256px 塞 10 个姓名会被 recharts 自动隔行隐藏 */}
+          <div style={{ height: 340 }}>
+            {lowestMasteredData.length === 0 ? (
+              <EmptyRankHint />
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={lowestMasteredData} layout="vertical" margin={{ left: 4, right: 16 }}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis type="number" allowDecimals={false} />
+                  {/* width 足够宽，保证 3~4 个字的姓名完整显示不被裁掉 */}
+                  {/* interval={0}：强制 10 个姓名全部显示，不允许按回车密度抽样 */}
+                  <YAxis dataKey="name" type="category" width={112} tick={{ fontSize: 12 }} interval={0} />
+                  <Tooltip
+                    formatter={(v: any, _n: any, p: any) => [
+                      `${v} 题（累计作答 ${p?.payload?.answers ?? 0} 次）`,
+                      '已掌握',
+                    ]}
+                  />
+                  <Bar dataKey="mastered" fill="#F59E0B" radius={[0, 4, 4, 0]} maxBarSize={20} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
           </div>
         </div>
 
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
           <h3 className="text-lg font-bold text-gray-800 mb-1">正确率 倒数 10 名</h3>
-          <p className="mb-3 text-xs text-gray-500">只统计做过题的学生（一次没做的不在这里，见「预警」）</p>
-          <div className="h-64">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={lowestAccuracyData} layout="vertical" margin={{ left: 4, right: 16 }}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis type="number" domain={[0, 100]} unit="%" />
-                <YAxis dataKey="name" type="category" width={112} tick={{ fontSize: 12 }} />
-                <Tooltip formatter={(v: any) => [`${v}%`, '正确率']} />
-                <Bar dataKey="accuracy" fill="#EF4444" radius={[0, 4, 4, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+          <p className="mb-3 text-xs text-gray-500">
+            只统计做过题的学生，一次没做的不参与排行（与左图口径一致）
+          </p>
+          <div style={{ height: 340 }}>
+            {lowestAccuracyData.length === 0 ? (
+              <EmptyRankHint />
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={lowestAccuracyData} layout="vertical" margin={{ left: 4, right: 16 }}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis type="number" domain={[0, 100]} unit="%" />
+                  <YAxis dataKey="name" type="category" width={112} tick={{ fontSize: 12 }} interval={0} />
+                  <Tooltip
+                    formatter={(v: any, _n: any, p: any) => [
+                      `${v}%（累计作答 ${p?.payload?.answers ?? 0} 次）`,
+                      '正确率',
+                    ]}
+                  />
+                  <Bar dataKey="accuracy" fill="#EF4444" radius={[0, 4, 4, 0]} maxBarSize={20} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
           </div>
         </div>
       </div>
@@ -604,6 +639,14 @@ const analyticsPost = async <T,>(path: string, body: unknown): Promise<T> => {
 const SectionSpinner: React.FC = () => (
   <div className="flex items-center justify-center h-40">
     <i className="fa-solid fa-circle-notch fa-spin text-2xl text-blue-500"></i>
+  </div>
+);
+
+/** 排行榜空态：全班都没有有效作答数据时给一句人话，别留一片空白坐标轴 */
+const EmptyRankHint: React.FC = () => (
+  <div className="flex h-full flex-col items-center justify-center gap-2 text-gray-400">
+    <i className="fa-solid fa-chart-column text-2xl"></i>
+    <p className="text-sm">本班暂无可排行数据（全员都没有作答记录）</p>
   </div>
 );
 
