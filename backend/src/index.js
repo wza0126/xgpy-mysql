@@ -12676,6 +12676,9 @@ app.get('/api/teacher/composite/questions', authenticate, requireTeachingRole, a
 // 选题页已经有了且更强。这里只回答老师真正关心的问题：学生练得怎么样。
 app.get('/api/teacher/composite/stats', authenticate, requireTeachingRole, async (req, res) => {
   try {
+    const classId = String(req.query.class_id || '').trim();
+    if (classId && !(await assertTeacherOwnsClass(req, res, classId))) return;
+
     const [qs] = await pool.query("SELECT id, answers FROM questions WHERE type = 'composite'");
     const data = [];
     for (const q of qs) {
@@ -12683,13 +12686,22 @@ app.get('/api/teacher/composite/stats', authenticate, requireTeachingRole, async
       const full = subs.reduce((sum, sq) => sum + (Number(sq.score) || 1), 0);
 
       // 只看练习来源：考试成绩由考试模块统计，别混进来
+      // 带 class_id 时用 profiles 关联限定到该班（老师按班看反馈，2026-10-26）
+      const params = [q.id];
+      let classJoin = '';
+      let classWhere = '';
+      if (classId) {
+        classJoin = ' JOIN profiles p ON p.id = a.student_id ';
+        classWhere = ' AND p.class_id = ? ';
+        params.push(classId);
+      }
       const [rows] = await pool.query(
-        `SELECT student_id, answer, is_correct, created_at
-           FROM student_answers
-          WHERE question_id = ? AND source = 'practice'
-          ORDER BY created_at DESC
+        `SELECT a.student_id, a.answer, a.is_correct, a.created_at
+           FROM student_answers a${classJoin}
+          WHERE a.question_id = ? AND a.source = 'practice'${classWhere}
+          ORDER BY a.created_at DESC
           LIMIT 300`,
-        [q.id]
+        params
       );
 
       let earnedSum = 0;
@@ -12736,16 +12748,25 @@ app.post('/api/teacher/composite/reset', authenticate, requireTeachingRole, asyn
     if (!qRows.length) return res.status(404).json({ data: null, error: '题目不存在' });
     if (qRows[0].type !== 'composite') return res.status(400).json({ data: null, error: '不是综合题' });
 
+    // 按班级重置：选了班级就只清该班学生的记录，没选就是全部班级
+    const classId = String((req.body && req.body.class_id) || '').trim();
+    if (classId && !(await assertTeacherOwnsClass(req, res, classId))) return;
+
+    const classScopeSql = classId
+      ? ' AND student_id IN (SELECT id FROM profiles WHERE class_id = ?)'
+      : '';
+    const scopeParams = classId ? [questionId, classId] : [questionId];
+
     const [[cnt]] = await pool.query(
-      "SELECT COUNT(*) AS n FROM student_answers WHERE question_id = ? AND source = 'practice'",
-      [questionId]
+      `SELECT COUNT(*) AS n FROM student_answers WHERE question_id = ? AND source = 'practice'${classScopeSql}`,
+      scopeParams
     );
     const total = Number(cnt && cnt.n) || 0;
     if (total === 0) return res.json({ data: { deleted: 0, before: 0 }, error: null });
 
     const [del] = await pool.query(
-      "DELETE FROM student_answers WHERE question_id = ? AND source = 'practice'",
-      [questionId]
+      `DELETE FROM student_answers WHERE question_id = ? AND source = 'practice'${classScopeSql}`,
+      scopeParams
     );
     // 顺手清掉这道题在错题本里的未解决记录，否则学生还会在「错题集」里看到它
     await pool.query('DELETE FROM wrong_questions WHERE question_id = ? AND is_resolved = 0', [questionId]).catch(() => {});
@@ -17961,9 +17982,15 @@ function judgeNormalizeBlankAnswers(value) {
 }
 
 function judgeFillBlankAnswer(userAnswers, correctAnswers) {
-  const userList = Array.isArray(userAnswers)
+  let userList = Array.isArray(userAnswers)
     ? userAnswers
     : (userAnswers === undefined || userAnswers === null || userAnswers === '' ? [] : [userAnswers]);
+  // 去掉尾部的空元素再比长度：有些调用方会把数组补到固定长度（如 ['AI','流程图','','']），
+  // 严格按长度比对会把「两空都填对」判成错（2026-10-26 综合题填空小题不得分就是这个原因）。
+  // 只裁尾部空串不会放过漏填：少填一空时长度仍不足，照样判错。
+  while (userList.length > 0 && String(userList[userList.length - 1] ?? '').trim() === '') {
+    userList = userList.slice(0, -1);
+  }
   const normalized = judgeNormalizeBlankAnswers(correctAnswers);
   if (userList.length !== normalized.length) return false;
   return userList.every((userAns, idx) =>

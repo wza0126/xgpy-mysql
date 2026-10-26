@@ -47,12 +47,18 @@ export const CompositeManager: React.FC = () => {
   const [error, setError] = useState('');
   const [busyId, setBusyId] = useState('');
   const [filter, setFilter] = useState<'all' | 'practicable' | 'practiced'>('all');
+  /** 反馈按班级看（2026-10-26）：不选班级就是全年级 */
+  const [classes, setClasses] = useState<{ id: string; name: string }[]>([]);
+  const [classId, setClassId] = useState('');
 
   const load = async () => {
     try {
+      const statUrl = classId
+        ? `/api/teacher/composite/stats?class_id=${encodeURIComponent(classId)}`
+        : '/api/teacher/composite/stats';
       const [listRes, statRes]: any[] = await Promise.all([
         backendClient.get('/api/teacher/composite/questions'),
-        backendClient.get('/api/teacher/composite/stats'),
+        backendClient.get(statUrl),
       ]);
       setRows((listRes && listRes.data) || []);
       const map: Record<string, StatRow> = {};
@@ -69,8 +75,21 @@ export const CompositeManager: React.FC = () => {
   };
 
   useEffect(() => {
-    load();
+    (async () => {
+      try {
+        const res: any = await backendClient.get('/api/classes');
+        setClasses((res && res.data) || []);
+      } catch {
+        setClasses([]);
+      }
+    })();
   }, []);
+
+  // 换班级要重新拉统计（stats 是按班算的）
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [classId]);
 
   const togglePractice = async (row: CompositeRow) => {
     setBusyId(row.id);
@@ -97,8 +116,10 @@ export const CompositeManager: React.FC = () => {
       return;
     }
     // 二次确认：先把「要删多少条」摆出来，再说清哪些数据不受影响
+    const scopeLabel = classId ? classLabel : '全部班级';
     const ok = window.confirm(
       `重置「${label}」的练习记录？\n\n` +
+        `范围：${scopeLabel}\n` +
         `将删除 ${count} 条学生练习作答（涉及 ${st?.students || 0} 名学生），删除后不可恢复。\n` +
         `学生重新进入「综合题」就能再做这道题；考试成绩不受影响。`
     );
@@ -106,7 +127,10 @@ export const CompositeManager: React.FC = () => {
 
     setBusyId(row.id);
     try {
-      const res: any = await backendClient.post('/api/teacher/composite/reset', { question_id: row.id });
+      const res: any = await backendClient.post('/api/teacher/composite/reset', {
+        question_id: row.id,
+        class_id: classId || undefined,
+      });
       const deleted = Number(res?.data?.deleted) || 0;
       alert(`已重置：删除 ${deleted} 条练习记录`);
       await load();
@@ -116,6 +140,8 @@ export const CompositeManager: React.FC = () => {
       setBusyId('');
     }
   };
+
+  const classLabel = classes.find((c) => c.id === classId)?.name || '全部班级';
 
   const totals = useMemo(() => {
     const list = Object.values(stats);
@@ -170,6 +196,18 @@ export const CompositeManager: React.FC = () => {
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            value={classId}
+            onChange={(e) => setClassId(e.target.value)}
+            className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm focus:ring-2 focus:ring-purple-500"
+            title="反馈按班级统计；选班级后「重置练习」也只清这个班"
+          >
+            <option value="">全部班级</option>
+            {classes.map((c) => (
+              <option key={c.id} value={c.id}>{c.name}</option>
+            ))}
+          </select>
         <div className="flex gap-1 rounded-lg bg-gray-100 p-1 text-sm">
           {([['all', '全部'], ['practicable', '可练'], ['practiced', '练过的']] as const).map(([k, label]) => (
             <button
@@ -182,6 +220,7 @@ export const CompositeManager: React.FC = () => {
               {label}
             </button>
           ))}
+        </div>
         </div>
         <p className="text-xs text-gray-500">
           改题干 / 小题 / 答案请到「选题」页（那里是完整编辑器）

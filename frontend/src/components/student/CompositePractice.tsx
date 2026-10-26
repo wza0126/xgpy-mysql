@@ -102,7 +102,10 @@ export const CompositePracticeModule: React.FC = () => {
   const setBlank = (idx: number, blankIdx: number, value: string) => {
     if (result) return;
     setBlankAnswers((prev) => {
-      const cur = prev[idx] ? [...prev[idx]] : ['', '', '', ''];
+      // ⛔ 数组长度必须**正好等于该小题的空数**：服务端 judgeFillBlankAnswer 是按长度严格比对的，
+      //    以前这里补成固定 4 个元素，2 个空的题提交 ['AI','流程图','',''] 长度不符 → 直接判错。
+      const count = Math.max(1, active?.subs[idx]?.blank_count || 1);
+      const cur = Array.from({ length: count }, (_, i) => String(prev[idx]?.[i] ?? ''));
       cur[blankIdx] = value;
       return { ...prev, [idx]: cur };
     });
