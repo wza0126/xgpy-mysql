@@ -347,6 +347,9 @@ export const ClassManager: React.FC = () => {
               <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">测试</th>
               <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">操作题</th>
               <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">萌宠</th>
+              {/* ⚠️ 这张表的表头是写死的，数据列却由 MODULE_SWITCHES 渲染：
+                  加开关时必须同步加表头，否则新列会错位到「创建时间」下面（2026-10-26 踩过） */}
+              <th className="px-6 py-4 text-center text-sm font-medium text-gray-600">综合题</th>
               <th className="px-6 py-4 text-left text-sm font-medium text-gray-600">创建时间</th>
               <th className="px-6 py-4 text-right text-sm font-medium text-gray-600">操作</th>
             </tr>
