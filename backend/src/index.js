@@ -12671,6 +12671,92 @@ app.get('/api/teacher/composite/questions', authenticate, requireTeachingRole, a
   }
 });
 
+// 教师端：综合题练习反馈（谁做了、平均分、最高分、最近作答）
+// 设计意图（2026-10-26 吴老）：综合题入口不做「题目管理」——那是一整套编辑器，
+// 选题页已经有了且更强。这里只回答老师真正关心的问题：学生练得怎么样。
+app.get('/api/teacher/composite/stats', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const [qs] = await pool.query("SELECT id, answers FROM questions WHERE type = 'composite'");
+    const data = [];
+    for (const q of qs) {
+      const subs = taskGetAnswersArray(q.answers) || [];
+      const full = subs.reduce((sum, sq) => sum + (Number(sq.score) || 1), 0);
+
+      // 只看练习来源：考试成绩由考试模块统计，别混进来
+      const [rows] = await pool.query(
+        `SELECT student_id, answer, is_correct, created_at
+           FROM student_answers
+          WHERE question_id = ? AND source = 'practice'
+          ORDER BY created_at DESC
+          LIMIT 300`,
+        [q.id]
+      );
+
+      let earnedSum = 0;
+      let best = 0;
+      for (const r of rows) {
+        const { subResults } = getCompositeCredit(q.answers, r.answer);
+        const earned = subResults.reduce(
+          (sum, ok, i) => sum + (ok ? (Number(subs[i] && subs[i].score) || 1) : 0),
+          0
+        );
+        earnedSum += earned;
+        if (earned > best) best = earned;
+      }
+
+      data.push({
+        id: q.id,
+        subs_count: subs.length,
+        full_score: full,
+        attempts: rows.length,
+        students: new Set(rows.map((r) => String(r.student_id))).size,
+        avg_score: rows.length ? Math.round((earnedSum / rows.length) * 10) / 10 : 0,
+        best_score: best,
+        last_at: rows.length ? rows[0].created_at : null,
+      });
+    }
+    res.json({ data, error: null });
+  } catch (error) {
+    console.error('获取综合题练习反馈失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 教师端：重置某道综合题的练习记录，让学生能重做
+// ⛔ 这是删除操作，条件写死到「单题 + 练习来源」：
+//    · 只删 question_id = ? 这一道题，不碰其它题；
+//    · 只删 source='practice'，考试记录（exam）与随堂任务（task）一律不动；
+//    · 返回实际删除条数，前端必须先把条数告诉老师再确认。
+app.post('/api/teacher/composite/reset', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const questionId = String((req.body && req.body.question_id) || '').trim();
+    if (!questionId) return res.status(400).json({ data: null, error: '缺少题目ID' });
+
+    const [qRows] = await pool.query("SELECT id, type FROM questions WHERE id = ? LIMIT 1", [questionId]);
+    if (!qRows.length) return res.status(404).json({ data: null, error: '题目不存在' });
+    if (qRows[0].type !== 'composite') return res.status(400).json({ data: null, error: '不是综合题' });
+
+    const [[cnt]] = await pool.query(
+      "SELECT COUNT(*) AS n FROM student_answers WHERE question_id = ? AND source = 'practice'",
+      [questionId]
+    );
+    const total = Number(cnt && cnt.n) || 0;
+    if (total === 0) return res.json({ data: { deleted: 0, before: 0 }, error: null });
+
+    const [del] = await pool.query(
+      "DELETE FROM student_answers WHERE question_id = ? AND source = 'practice'",
+      [questionId]
+    );
+    // 顺手清掉这道题在错题本里的未解决记录，否则学生还会在「错题集」里看到它
+    await pool.query('DELETE FROM wrong_questions WHERE question_id = ? AND is_resolved = 0', [questionId]).catch(() => {});
+
+    res.json({ data: { deleted: del.affectedRows, before: total }, error: null });
+  } catch (error) {
+    console.error('重置综合题练习记录失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
 // 教师端：控制学生端能否练这道综合题（practice_enabled）
 app.post('/api/teacher/composite/practice', authenticate, requireTeachingRole, async (req, res) => {
   try {

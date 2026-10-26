@@ -55,6 +55,9 @@ export const CompositePracticeModule: React.FC = () => {
   const [result, setResult] = useState<null | {
     subCorrect: boolean[];
     correctAnswers: any[];
+    /** 按小题分值累加的得分 / 满分 */
+    earned: number;
+    full: number;
     credit: number;
     weight: number;
   }>(null);
@@ -118,15 +121,20 @@ export const CompositePracticeModule: React.FC = () => {
     setSubmitting(true);
     setSubmitError('');
     try {
-      const res: any = await backendClient.post('/api/student/submit-answer', {
+      // ⛔ 必须走 businessSubmitAnswer：练习作答的服务端判分入口是 /api/business/submit-answer，
+      //    以前写成 /api/student/submit-answer（这个路径不存在），一提交就报 Network error。
+      const result: any = await backendClient.businessSubmitAnswer({
         student_id: profile?.id,
         question_id: active.id,
-        // 服务端只认这个 payload：choice_answers / blank_answers 按小题序号索引
         answer: JSON.stringify({ choice_answers: choiceAnswers, blank_answers: blankAnswers }),
+        points_change: 0,
         source: 'practice',
       });
-      const d = (res && res.data) || {};
+      if (result && result.error) throw new Error(result.error);
+      const d = (result && result.data) || {};
       const subCorrect: boolean[] = Array.isArray(d.sub_correct) ? d.sub_correct : [];
+      // 满分 = 各小题分值之和（小题没配分值按 1 分算）
+      const full = active.subs.reduce((sum, sq) => sum + (sq.score || 1), 0);
       const correctAnswers = Array.isArray(d.correct_answers)
         ? d.correct_answers
         : (() => {
@@ -135,6 +143,9 @@ export const CompositePracticeModule: React.FC = () => {
       setResult({
         subCorrect,
         correctAnswers,
+        // 得分按小题分值累加（小题没配分值就按 1 分一个算）
+        earned: subCorrect.reduce((sum, ok, i) => sum + (ok ? (active.subs[i]?.score || 1) : 0), 0),
+        full,
         credit: subCorrect.filter(Boolean).length,
         weight: subCorrect.length || active.subs.length,
       });
@@ -205,7 +216,8 @@ export const CompositePracticeModule: React.FC = () => {
                   {active.sub_topic ? ` · ${active.sub_topic}` : ''}
                 </p>
                 <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs text-gray-600">
-                  共 {active.subs.length} 小题 · 按小题得分
+                  共 {active.subs.length} 小题 · 满分{' '}
+                  {active.subs.reduce((sum, sq) => sum + (sq.score || 1), 0)} 分
                 </span>
               </div>
               <div
@@ -297,7 +309,10 @@ export const CompositePracticeModule: React.FC = () => {
               {result ? (
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <p className="text-sm text-gray-700">
-                    得分 <span className="text-lg font-bold text-indigo-600">{result.credit}</span> / {result.weight} 小题
+                    得分 <span className="text-lg font-bold text-indigo-600">{result.earned}</span> / {result.full} 分
+                    <span className="ml-2 text-xs text-gray-500">
+                      （答对 {result.credit} / {result.weight} 小题）
+                    </span>
                     {result.credit === result.weight && (
                       <span className="ml-2 rounded-full bg-green-100 px-2 py-0.5 text-xs text-green-700">全部正确</span>
                     )}
@@ -326,6 +341,26 @@ export const CompositePracticeModule: React.FC = () => {
                   <p className="text-xs text-gray-500">
                     已作答 {answeredCount} / {active.subs.length} 小题（可以只做会的，按小题给分）
                   </p>
+                  <button
+                    onClick={() => {
+                      // 复用学生端现有的 AI 答疑浮窗：把材料 + 所有小题（含选项）拼成纯文本
+                      const toText = (html: string) =>
+                        String(html || '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+                      let text = toText(active.content);
+                      active.subs.forEach((sq, i) => {
+                        text += `\n\n(${i + 1}) ${toText(sq.content)}`;
+                        if (sq.type !== 'fill_blank') {
+                          sq.options.forEach((o, oi) => {
+                            text += `\n${LETTERS[oi]}. ${toText(stripOptionPrefix(String(o)))}`;
+                          });
+                        }
+                      });
+                      (window as any).openAiQaWindow?.({ question: text });
+                    }}
+                    className="rounded-lg bg-purple-500 px-4 py-2 text-sm text-white hover:bg-purple-600"
+                  >
+                    <i className="fa-solid fa-robot mr-1"></i>AI答疑
+                  </button>
                   <button
                     onClick={submit}
                     disabled={submitting || answeredCount === 0}
