@@ -12637,6 +12637,95 @@ app.get('/api/student/composite/questions', authenticate, async (req, res) => {
   }
 });
 
+// 学生端：综合题练习成绩（2026-10-26）
+//
+// 为什么需要这个接口：student_answers 只存整题的 is_correct（0/1），
+// 「答对几个小题、得几分」没有落库 —— 学生做完刷新就看不到自己得了多少分。
+// 这里用**与判分完全相同的** getCompositeCredit() 把历史作答重算一遍，
+// 保证「学生看到的分」和「判分时给的分」出自同一个算法（改答案/改分值后会一起变，这是对的）。
+app.get('/api/student/composite/progress', authenticate, async (req, res) => {
+  try {
+    const studentId = req.user?.userId;
+    if (!studentId) return res.status(401).json({ data: null, error: '未登录' });
+
+    const [qs] = await pool.query(
+      `SELECT id, answers FROM questions
+        WHERE practice_enabled = 1 AND type = 'composite'
+        ORDER BY cluster_id ASC, id ASC`
+    );
+
+    const data = [];
+    let totalFull = 0;
+    let totalBest = 0;
+    let practicedCount = 0;
+
+    for (const q of qs) {
+      const subs = taskGetAnswersArray(q.answers) || [];
+      const scoreOf = (i) => Number(subs[i] && subs[i].score) || 1;
+      const full = subs.reduce((sum, sq, i) => sum + scoreOf(i), 0);
+      totalFull += full;
+
+      const [ans] = await pool.query(
+        `SELECT answer, created_at FROM student_answers
+          WHERE student_id = ? AND question_id = ? AND source = 'practice'
+          ORDER BY created_at DESC`,
+        [studentId, q.id]
+      );
+
+      let bestScore = 0;
+      let bestCredit = 0;
+      for (const r of ans) {
+        const { subResults } = getCompositeCredit(q.answers, r.answer);
+        const earned = subResults.reduce((sum, ok, i) => sum + (ok ? scoreOf(i) : 0), 0);
+        if (earned > bestScore) {
+          bestScore = earned;
+          bestCredit = subResults.filter(Boolean).length;
+        }
+      }
+
+      const lastRow = ans[0] || null;
+      let lastScore = 0;
+      let lastCredit = 0;
+      if (lastRow) {
+        const { subResults } = getCompositeCredit(q.answers, lastRow.answer);
+        lastScore = subResults.reduce((sum, ok, i) => sum + (ok ? scoreOf(i) : 0), 0);
+        lastCredit = subResults.filter(Boolean).length;
+      }
+
+      if (ans.length > 0) practicedCount += 1;
+      totalBest += bestScore;
+
+      data.push({
+        id: q.id,
+        subs_count: subs.length,
+        full_score: full,
+        attempts: ans.length,
+        best_score: bestScore,
+        best_credit: bestCredit,
+        last_score: lastScore,
+        last_credit: lastCredit,
+        last_at: lastRow ? lastRow.created_at : null,
+      });
+    }
+
+    res.json({
+      data: {
+        items: data,
+        summary: {
+          total_count: qs.length,
+          practiced_count: practicedCount,
+          total_full: totalFull,
+          total_best: totalBest,
+        },
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('获取综合题练习成绩失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
 // 教师端：综合题清单（题库管理 →「综合题」入口用），带练习开关与小题数
 app.get('/api/teacher/composite/questions', authenticate, requireTeachingRole, async (req, res) => {
   try {

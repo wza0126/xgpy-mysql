@@ -33,6 +33,27 @@ interface CompositeItem {
   subs: SubQuestion[];
 }
 
+/** 每道题的练习成绩（服务端按同一个判分算法重算，不是前端估的） */
+interface ProgressItem {
+  id: string;
+  subs_count: number;
+  full_score: number;
+  attempts: number;
+  /** 历史最好得分 / 对应答对小题数 */
+  best_score: number;
+  best_credit: number;
+  last_score: number;
+  last_credit: number;
+  last_at: string | null;
+}
+
+interface ProgressSummary {
+  total_count: number;
+  practiced_count: number;
+  total_full: number;
+  total_best: number;
+}
+
 const LETTERS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
 
 /** 题干里的字母选项前缀（A. / A、 / A．）去掉，避免和按钮上的字母重复 */
@@ -62,6 +83,11 @@ export const CompositePracticeModule: React.FC = () => {
     weight: number;
   }>(null);
   const [submitError, setSubmitError] = useState('');
+  /** 练习成绩（2026-10-26）：student_answers 只存整题对错，分数由服务端按小题重算后回显 */
+  const [progress, setProgress] = useState<Record<string, ProgressItem>>({});
+  const [summary, setSummary] = useState<ProgressSummary | null>(null);
+  /** 本次提交是否刷新了历史最好成绩 */
+  const [isNewBest, setIsNewBest] = useState(false);
 
   const active = useMemo(() => items.find((it) => it.id === activeId) || null, [items, activeId]);
 
@@ -78,7 +104,21 @@ export const CompositePracticeModule: React.FC = () => {
         setLoading(false);
       }
     })();
+    loadProgress();
   }, []);
+
+  const loadProgress = async () => {
+    try {
+      const res: any = await backendClient.get('/api/student/composite/progress');
+      const d = (res && res.data) || {};
+      const map: Record<string, ProgressItem> = {};
+      (d.items || []).forEach((it: ProgressItem) => { map[it.id] = it; });
+      setProgress(map);
+      setSummary(d.summary || null);
+    } catch {
+      // 成绩是附加信息，拉不到不影响做题
+    }
+  };
 
   // 换题就把作答与结果清空
   useEffect(() => {
@@ -86,6 +126,7 @@ export const CompositePracticeModule: React.FC = () => {
     setBlankAnswers({});
     setResult(null);
     setSubmitError('');
+    setIsNewBest(false);
   }, [activeId]);
 
   const setChoice = (idx: number, letter: string, multiple: boolean) => {
@@ -152,6 +193,10 @@ export const CompositePracticeModule: React.FC = () => {
         credit: subCorrect.filter(Boolean).length,
         weight: subCorrect.length || active.subs.length,
       });
+      // 提交后回拉成绩：本题最好分/累计总分立刻更新（左侧标记与顶部总分才有意义）
+      const earnedNow = subCorrect.reduce((sum, ok, i) => sum + (ok ? (active.subs[i]?.score || 1) : 0), 0);
+      setIsNewBest(earnedNow > (progress[active.id]?.best_score || 0));
+      loadProgress();
     } catch (e: any) {
       setSubmitError(e?.message || '提交失败');
     } finally {
@@ -184,10 +229,19 @@ export const CompositePracticeModule: React.FC = () => {
     <div className="flex h-full gap-4">
       {/* 左：题目列表 */}
       <div className="w-64 flex-shrink-0 overflow-y-auto rounded-xl border border-gray-200 bg-white p-3">
-        <p className="mb-2 text-xs text-gray-500">共 {items.length} 道综合题</p>
+        <div className="mb-2 flex items-center justify-between">
+          <p className="text-xs text-gray-500">共 {items.length} 道综合题</p>
+          {summary && (
+            <p className="text-[11px] text-gray-400">
+              已练 {summary.practiced_count}/{summary.total_count}
+            </p>
+          )}
+        </div>
         <div className="space-y-1.5">
           {items.map((it, i) => {
             const on = it.id === activeId;
+            const pg = progress[it.id];
+            const done = !!pg && pg.attempts > 0;
             return (
               <button
                 key={it.id}
@@ -196,12 +250,26 @@ export const CompositePracticeModule: React.FC = () => {
                   on ? 'border-indigo-300 bg-indigo-50' : 'border-gray-200 hover:bg-gray-50'
                 }`}
               >
-                <p className="truncate text-sm font-medium text-gray-800">
-                  综合题 {i + 1} · {it.subs_count} 小题
-                </p>
-                <p className="mt-0.5 truncate text-xs text-gray-400">
-                  {(it.cluster_id || '').split('/').pop() || '未分类'}
-                </p>
+                <div className="flex items-center justify-between gap-1">
+                  <p className="truncate text-sm font-medium text-gray-800">
+                    综合题 {i + 1} · {it.subs_count} 小题
+                  </p>
+                  {done ? (
+                    <i className="fa-solid fa-circle-check flex-shrink-0 text-xs text-green-500" title="做过"></i>
+                  ) : (
+                    <span className="flex-shrink-0 rounded bg-gray-100 px-1 text-[10px] text-gray-400">未做</span>
+                  )}
+                </div>
+                <div className="mt-0.5 flex items-center justify-between gap-1">
+                  <p className="truncate text-xs text-gray-400">
+                    {(it.cluster_id || '').split('/').pop() || '未分类'}
+                  </p>
+                  <span
+                    className={`flex-shrink-0 text-xs ${done ? 'font-medium text-indigo-600' : 'text-gray-300'}`}
+                  >
+                    {done ? `${pg.best_score}/${pg.full_score} 分` : `满分 ${pg ? pg.full_score : it.subs.reduce((a, b) => a + (b.score || 1), 0)}`}
+                  </span>
+                </div>
               </button>
             );
           })}
@@ -218,10 +286,21 @@ export const CompositePracticeModule: React.FC = () => {
                   {(active.cluster_id || '').split('/').pop() || '未分类'}
                   {active.sub_topic ? ` · ${active.sub_topic}` : ''}
                 </p>
-                <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs text-gray-600">
-                  共 {active.subs.length} 小题 · 满分{' '}
-                  {active.subs.reduce((sum, sq) => sum + (sq.score || 1), 0)} 分
-                </span>
+                <div className="flex flex-wrap items-center justify-end gap-1.5">
+                  {/* 「所有题总分」（2026-10-26 吴老）：全部可练综合题的满分合计 + 我目前的最好成绩合计 */}
+                  {summary && (
+                    <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs text-indigo-700">
+                      全部 {summary.total_count} 题总分{' '}
+                      <span className="font-semibold">{summary.total_full}</span> 分
+                      <span className="mx-1 text-indigo-300">|</span>
+                      已得 <span className="font-semibold">{summary.total_best}</span> 分
+                    </span>
+                  )}
+                  <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs text-gray-600">
+                    本题 {active.subs.length} 小题 · 满分{' '}
+                    {active.subs.reduce((sum, sq) => sum + (sq.score || 1), 0)} 分
+                  </span>
+                </div>
               </div>
               <div
                 className="markdown-content mt-3 text-sm leading-7 text-gray-800"
@@ -318,6 +397,18 @@ export const CompositePracticeModule: React.FC = () => {
                     </span>
                     {result.credit === result.weight && (
                       <span className="ml-2 rounded-full bg-green-100 px-2 py-0.5 text-xs text-green-700">全部正确</span>
+                    )}
+                    {/* 历史最好成绩：学生的「分数记录」在服务端，刷新页面也还在 */}
+                    {progress[active.id] && progress[active.id].attempts > 0 && (
+                      <span className="ml-2 text-xs text-gray-500">
+                        历史最好 {progress[active.id].best_score} 分
+                        <span className="ml-1 text-gray-400">（第 {progress[active.id].attempts} 次）</span>
+                      </span>
+                    )}
+                    {isNewBest && (
+                      <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">
+                        <i className="fa-solid fa-arrow-trend-up mr-1"></i>刷新最好成绩
+                      </span>
                     )}
                   </p>
                   <div className="flex gap-2">
