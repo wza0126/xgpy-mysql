@@ -4129,18 +4129,105 @@ app.post('/api/teacher/ai-analysis/chat', authenticate, requireTeacher, requireL
 
     bumpAiUsage(req.user.userId);
 
+    // 存档（2026-10-26）：答案只活在页面状态里，刷新就没了，老师想再看只能重新烧一次 token。
+    // 存失败不影响本次返回 —— 老师要看的是分析结果，不是「保存成功没有」。
+    let reportId = null;
+    try {
+      reportId = require('crypto').randomUUID();
+      await pool.query(
+        `INSERT INTO ai_analysis_reports (id, teacher_id, class_id, class_name, topic, question, answer, model)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          reportId,
+          req.user.userId,
+          String(classId),
+          ctx.class_name || null,
+          String(topic || 'overview'),
+          q,
+          String(answer || '').trim(),
+          config.ai_model || null,
+        ]
+      );
+    } catch (e) {
+      console.error('[AI-ANALYSIS] 存档失败:', e.message);
+      reportId = null;
+    }
+
     res.json({
       data: {
         answer: String(answer || '').trim(),
         context: ctx,
         used_today: aiUsageToday(req.user.userId),
         daily_limit: AI_DAILY_LIMIT,
+        report_id: reportId,
       },
       error: null,
     });
   } catch (error) {
     console.error('[AI-ANALYSIS] 分析失败:', error);
     res.status(500).json({ data: null, error: error.message || 'AI 分析失败' });
+  }
+});
+
+// 历次分析记录：按班级列（老师找的是「上周那次的结论」，不是会话）
+app.get('/api/teacher/ai-analysis/reports', authenticate, requireTeacher, requireLicense(FEATURES.ANALYTICS), async (req, res) => {
+  try {
+    const classId = String(req.query.class_id || '').trim();
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 30));
+    if (!classId) return res.status(400).json({ data: null, error: '缺少 class_id' });
+    if (!(await assertTeacherOwnsClass(req, res, classId))) return;
+
+    const [rows] = await pool.query(
+      `SELECT id, class_id, class_name, topic, question, model, created_at,
+              CHAR_LENGTH(answer) AS answer_len
+         FROM ai_analysis_reports
+        WHERE class_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?`,
+      [classId, limit]
+    );
+    res.json({ data: formatRows(rows), error: null });
+  } catch (error) {
+    console.error('[AI-ANALYSIS] 读取历史失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 单条记录全文
+app.get('/api/teacher/ai-analysis/reports/:id', authenticate, requireTeacher, requireLicense(FEATURES.ANALYTICS), async (req, res) => {
+  try {
+    const id = String(req.params.id || '').trim();
+    const [rows] = await pool.query('SELECT * FROM ai_analysis_reports WHERE id = ? LIMIT 1', [id]);
+    if (!rows.length) return res.status(404).json({ data: null, error: '记录不存在' });
+
+    const row = rows[0];
+    const isAdmin = req.user.role === 'super_admin' || req.user.role === 'admin';
+    if (String(row.teacher_id) !== String(req.user.userId) && !isAdmin) {
+      // 只允许看自己生成的（同校多老师时避免互相看到对方班级的结论）
+      if (!(await assertTeacherOwnsClass(req, res, row.class_id))) return;
+    }
+    res.json({ data: formatRow(row), error: null });
+  } catch (error) {
+    console.error('[AI-ANALYSIS] 读取记录失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 删除一条记录（清理用的，不提供批量，避免误删一片）
+app.delete('/api/teacher/ai-analysis/reports/:id', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const id = String(req.params.id || '').trim();
+    const [rows] = await pool.query('SELECT teacher_id FROM ai_analysis_reports WHERE id = ? LIMIT 1', [id]);
+    if (!rows.length) return res.status(404).json({ data: null, error: '记录不存在' });
+    const isAdmin = req.user.role === 'super_admin' || req.user.role === 'admin';
+    if (String(rows[0].teacher_id) !== String(req.user.userId) && !isAdmin) {
+      return res.status(403).json({ data: null, error: '只能删除自己生成的分析' });
+    }
+    await pool.query('DELETE FROM ai_analysis_reports WHERE id = ?', [id]);
+    res.json({ data: { success: true }, error: null });
+  } catch (error) {
+    console.error('[AI-ANALYSIS] 删除记录失败:', error);
+    res.status(500).json({ data: null, error: error.message });
   }
 });
 
