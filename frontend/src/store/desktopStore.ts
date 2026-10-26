@@ -19,6 +19,8 @@ interface DesktopState {
 export const desktopIcons: DesktopIcon[] = [
   { id: 'learn', title: '学习', icon: 'fa-book', color: 'bg-blue-500' },
   { id: 'practice', title: '练习', icon: 'fa-pen-to-square', color: 'bg-green-500' },
+  // 综合题练习（2026-10-26）：单独入口，不混在单题练习里（见后端 SQL_PRACTICE_SCOPE）
+  { id: 'composite', title: '综合题', icon: 'fa-layer-group', color: 'bg-indigo-600' },
   { id: 'test', title: '测试', icon: 'fa-clipboard-check', color: 'bg-purple-500' },
   { id: 'wpsOp', title: '操作题', icon: 'fa-file-excel', color: 'bg-emerald-600' },
   { id: 'wrong', title: '错题集', icon: 'fa-circle-xmark', color: 'bg-red-500' },

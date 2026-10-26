@@ -20,6 +20,7 @@ type IconOpt = { id: string; label: string; icon: string };
 const ICON_SHOW_OPTIONS: IconOpt[] = [
   { id: 'learn', label: '学习中心', icon: 'fa-book' },
   { id: 'practice', label: '练习', icon: 'fa-pen-to-square' },
+  { id: 'composite', label: '综合题', icon: 'fa-layer-group' },
   { id: 'test', label: '测试', icon: 'fa-clipboard-check' },
   { id: 'wpsOp', label: '操作题', icon: 'fa-file-excel' },
   { id: 'wrong', label: '错题集', icon: 'fa-circle-xmark' },

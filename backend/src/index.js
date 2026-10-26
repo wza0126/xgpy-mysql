@@ -692,7 +692,7 @@ app.get('/api/teacher/analytics/at-risk/:classId', authenticate, requireTeacher,
     const [[poolQ]] = await pool.query(
       `SELECT COUNT(*) AS n FROM questions
         WHERE practice_enabled = 1 AND cluster_id IS NOT NULL AND cluster_id <> ''
-          AND type NOT IN ('wps_op', 'access_op')`
+          AND type NOT IN ('wps_op', 'access_op', 'composite')`
     );
     const questionPoolSize = Number(poolQ?.n) || 0;
 
@@ -706,7 +706,7 @@ app.get('/api/teacher/analytics/at-risk/:classId', authenticate, requireTeacher,
        ) m
        JOIN questions q ON q.id = m.question_id
        WHERE q.practice_enabled = 1 AND q.cluster_id IS NOT NULL AND q.cluster_id <> ''
-         AND q.type NOT IN ('wps_op', 'access_op')
+         AND q.type NOT IN ('wps_op', 'access_op', 'composite')
        GROUP BY m.student_id`,
       [studentIds, masterThreshold]
     );
@@ -1011,7 +1011,7 @@ app.get('/api/teacher/analytics/chapter-mastery/:classId', authenticate, require
     //    学生会永远看到「N 题只掌握 N-1 题」，且练到无可练还被判未完成（2026-10-19 修）。
     const [clusterRows] = await pool.query(
       `SELECT cluster_id, COUNT(*) AS cnt FROM questions
-       WHERE practice_enabled = 1 AND cluster_id IS NOT NULL AND cluster_id <> ''${SQL_NOT_WPS_OP}
+       WHERE practice_enabled = 1 AND cluster_id IS NOT NULL AND cluster_id <> ''${SQL_PRACTICE_SCOPE}
        GROUP BY cluster_id`
     );
     const chapterQCount = new Map();
@@ -1470,6 +1470,11 @@ const QUESTION_ANSWER_FIELDS = ['answers', 'explanation', 'wps_spec', 'access_sp
 //    凡取题/计数 SQL 都要带上这个片段。将来若要把操作题并入测试/考试，
 //    改这一处 + 各作答 UI 即可（操作题自己的路由见 wps-op.js / access-op.js）。
 const SQL_NOT_WPS_OP = " AND type NOT IN ('wps_op','access_op')";
+// 练习池与掌握分母在操作题之外**再排除综合题**（2026-10-26 吴老定）：
+// 综合题不是「一道题」，而是一道带 4~6 个小题的大题，混进单题练习流会打断节奏，
+// 也不能按整题算掌握（要 6 小题一次全对才算对，等于永远掌握不了）。
+// 它走「综合题练习」独立模块，考试端照旧可以组卷 —— 所以考试池仍用 SQL_NOT_WPS_OP。
+const SQL_PRACTICE_SCOPE = " AND type NOT IN ('wps_op','access_op','composite')";
 
 function stripQuestionForStudent(row) {
   if (!row || typeof row !== 'object') return row;
@@ -1804,7 +1809,7 @@ app.get('/api/tables/:tableName', authenticate, async (req, res) => {
     //    教师不受限（教师端要用这个接口做题库浏览）。
     if (tableName === 'questions' && !isTeachingRole(req.user && req.user.role)) {
       query += query.includes(' WHERE ') ? ' AND ' : ' WHERE ';
-      query += SQL_NOT_WPS_OP.trim().replace(/^AND\s+/i, '');
+      query += SQL_PRACTICE_SCOPE.trim().replace(/^AND\s+/i, '');
     }
 
     const [rows] = await pool.query(query, params);
@@ -4616,6 +4621,10 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
     }
 
     let correct = 0;
+    // 加权计分：综合题按小题数计权重，答对几个小题就得分几个小题的分
+    let credit = 0;
+    let weightSum = 0;
+    let answeredCount = 0;
 
     // 服务端判分数据源：题目类型与正确答案一律取自题库 questions 表。
     // 前端传来的 questions[].answers 只是它自己的一份副本，不能作为判分依据
@@ -4631,18 +4640,31 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
     }
 
     for (const q of questions) {
+      const serverQ = serverQuestionMap.get(q.id);
+      const isComposite = !!serverQ && serverQ.type === 'composite';
+      const qWeight = isComposite ? getCompositeCredit(serverQ.answers, '').weight : 1;
+      weightSum += qWeight;
+
       const userAnswer = answers[q.id];
       if (!userAnswer) continue;
-      const serverQ = serverQuestionMap.get(q.id);
       if (!serverQ) {
         // 题库中查不到该题（异常数据）：按未答对处理，绝不采信前端给的"答案"
         console.warn('[submit-test/exam] 题目不在题库中，按未答对处理:', q.id);
         continue;
       }
-      if (judgeQuestionAnswer(serverQ, userAnswer).isCorrect) correct++;
+      answeredCount += 1;
+      if (isComposite) {
+        credit += getCompositeCredit(serverQ.answers, userAnswer).credit;
+      } else if (judgeQuestionAnswer(serverQ, userAnswer).isCorrect) {
+        credit += 1;
+      }
     }
 
-    const score = Math.round((correct / total) * 100);
+    // 分母防作弊：漏交的题按单题权重补齐（综合题漏交按 1 分算，宁可少给不虚高）
+    const missingCount = Math.max(0, total - answeredCount);
+    const totalWeight = weightSum + missingCount;
+    correct = Math.round(credit);
+    const score = totalWeight > 0 ? Math.round((credit / totalWeight) * 100) : 0;
 
     // 测试信息已在判分前加载（testEarly）
     const test = testEarly;
@@ -5165,13 +5187,13 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
     if (examRecordId) {
       await connection.query(
         'UPDATE exam_records SET score = ?, correct_count = ?, total_count = ?, points_earned = ?, internet_codes_earned = ?, is_passed = ?, completed_at = NOW() WHERE id = ?',
-        [score, correct, total, accumulatedPoints, internetCodes.length, isPassed ? 1 : 0, examRecordId]
+        [score, correct, totalWeight, accumulatedPoints, internetCodes.length, isPassed ? 1 : 0, examRecordId]
       );
     } else {
       examRecordId = `er_${Date.now()}_${Math.random().toString(36).substr(2,9)}`;
       await connection.query(
         'INSERT INTO exam_records (id, test_id, student_id, score, correct_count, total_count, points_earned, internet_codes_earned, is_passed, started_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())',
-        [examRecordId, test_id, student_id, score, correct, total, accumulatedPoints, internetCodes.length, isPassed ? 1 : 0]
+        [examRecordId, test_id, student_id, score, correct, totalWeight, accumulatedPoints, internetCodes.length, isPassed ? 1 : 0]
       );
     }
 
@@ -5573,39 +5595,27 @@ app.post('/api/business/close-exam', authenticate, async (req, res) => {
           }
         }
 
-        // 计算得分
-        let correct = 0;
+        // 计算得分（综合题按小题结算：答对几个小题就得几分，不再全对才得分）
+        let credit = 0;
+        let totalWeight = 0;
         for (const q of questions) {
+          const isComposite = q.type === 'composite';
+          totalWeight += isComposite ? getCompositeCredit(q.answers, '').weight : 1;
           const userAnswer = answers[q.id];
           if (!userAnswer) continue;
-          if (q.type === 'composite') {
-            try {
-              const parsed = JSON.parse(userAnswer);
-              const subQs = getCompositeSubQuestions(q.answers);
-              const allCorrect = subQs.every((sq, idx) => {
-                if (sq.type === 'choice') {
-                  const ans = parsed.choice_answers?.[idx] || '';
-                  return checkChoiceAnswer(ans, sq.answers || [], sq.multiple || false);
-                } else if (sq.type === 'fill_blank') {
-                  const ans = parsed.blank_answers?.[idx] || [];
-                  return checkFillBlankAnswer(ans, sq.answers || []);
-                }
-                return false;
-              });
-              if (allCorrect) correct++;
-            } catch {
-              // 解析失败不计分
-            }
+          if (isComposite) {
+            credit += getCompositeCredit(q.answers, userAnswer).credit;
           } else {
             const correctAnswers = getAnswersArray(q.answers);
             const isCorrect = correctAnswers.some(
               (ans) => normalizeAnswer(ans) === normalizeAnswer(userAnswer)
             );
-            if (isCorrect) correct++;
+            if (isCorrect) credit += 1;
           }
         }
+        const correct = Math.round(credit);
 
-        const score = totalCount > 0 ? Math.round((correct / totalCount) * 100) : 0;
+        const score = totalWeight > 0 ? Math.round((credit / totalWeight) * 100) : 0;
         const isPassed = score >= passingScore;
         const pointsEarned = isPassed ? Math.round((score / 100) * (test.points_reward || 50)) : 0;
 
@@ -5615,7 +5625,7 @@ app.post('/api/business/close-exam', authenticate, async (req, res) => {
                points_earned = ?, internet_codes_earned = 0, is_passed = ?, 
                completed_at = NOW()
            WHERE id = ?`,
-          [score, correct, totalCount, pointsEarned, isPassed ? 1 : 0, existingRecord.id]
+          [score, correct, totalWeight, pointsEarned, isPassed ? 1 : 0, existingRecord.id]
         );
 
         // 记录学生答案
@@ -11858,13 +11868,13 @@ async function getPracticableCountInClusters(primaryNames) {
     : [];
   if (names.length === 0) {
     const [rows] = await pool.query(
-      `SELECT COUNT(*) AS n FROM questions WHERE practice_enabled = 1${SQL_NOT_WPS_OP}`
+      `SELECT COUNT(*) AS n FROM questions WHERE practice_enabled = 1${SQL_PRACTICE_SCOPE}`
     );
     return Number(rows[0]?.n) || 0;
   }
   const [rows] = await pool.query(
     `SELECT cluster_id FROM questions
-     WHERE practice_enabled = 1${SQL_NOT_WPS_OP} AND cluster_id IS NOT NULL AND cluster_id <> ''`
+     WHERE practice_enabled = 1${SQL_PRACTICE_SCOPE} AND cluster_id IS NOT NULL AND cluster_id <> ''`
   );
   const wanted = new Set(names);
   let count = 0;
@@ -12132,7 +12142,7 @@ app.get('/api/teacher/qualification/counts', authenticate, requireTeacher, async
   try {
     const [rows] = await pool.query(
       `SELECT cluster_id, COUNT(*) AS cnt FROM questions
-       WHERE practice_enabled = 1${SQL_NOT_WPS_OP} AND cluster_id IS NOT NULL AND cluster_id <> ''
+       WHERE practice_enabled = 1${SQL_PRACTICE_SCOPE} AND cluster_id IS NOT NULL AND cluster_id <> ''
        GROUP BY cluster_id`
     );
     const byPrimary = {};
@@ -12220,7 +12230,7 @@ app.get('/api/student/learn-chapters', authenticate, async (req, res) => {
     //    否则小节会永远显示「6 题只掌握 5 题」且再也练不出第 6 题（2026-10-19 修）。
     const [clusterRows] = await pool.query(
       `SELECT cluster_id, COUNT(*) AS cnt FROM questions
-       WHERE practice_enabled = 1 AND cluster_id IS NOT NULL AND cluster_id <> ''${SQL_NOT_WPS_OP}
+       WHERE practice_enabled = 1 AND cluster_id IS NOT NULL AND cluster_id <> ''${SQL_PRACTICE_SCOPE}
        GROUP BY cluster_id`
     );
     const chapterCount = new Map();
@@ -12557,7 +12567,7 @@ app.get('/api/student/practice-catalog', authenticate, async (req, res) => {
   try {
     const [rows] = await pool.query(
       `SELECT ${PRACTICE_META_COLUMNS} FROM questions
-        WHERE practice_enabled = 1${SQL_NOT_WPS_OP}`
+        WHERE practice_enabled = 1${SQL_PRACTICE_SCOPE}`
     );
     res.json({
       data: {
@@ -12573,6 +12583,100 @@ app.get('/api/student/practice-catalog', authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error('获取练习题库目录失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// ===== 综合题练习（2026-10-26 吴老定）=====
+// 综合题不进单题练习池（见 SQL_PRACTICE_SCOPE）：它是「一道材料带 4~6 个小题」的大题，
+// 混在单选/填空里会打断节奏，也没法按整题算掌握。这里给它一条独立的取题通道。
+// 判分不另写一套：作答结果仍提交到 /api/student/submit-answer，
+// 它返回的 sub_correct 就是逐小题对错，前端据此算「答对几个小题」。
+app.get('/api/student/composite/questions', authenticate, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT id, content, options, cluster_id, sub_topic, tags, answers, practice_enabled
+         FROM questions
+        WHERE practice_enabled = 1 AND type = 'composite'
+        ORDER BY cluster_id ASC, id ASC`
+    );
+    const data = rows.map((r) => {
+      const subs = taskGetAnswersArray(r.answers) || [];
+      return {
+        id: r.id,
+        content: r.content,
+        cluster_id: r.cluster_id || '',
+        sub_topic: r.sub_topic || '',
+        tags: r.tags,
+        subs_count: subs.length,
+        // ⛔ 只下发小题的题干与选项，**绝不带 answers** —— 学生端拿不到正确答案，
+        //    对错一律等提交后由服务端回执（judgeQuestionAnswer / sub_correct）。
+        subs: subs.map((sq, idx) => ({
+          index: idx,
+          type: sq.type || 'choice',
+          content: sq.content || '',
+          options: Array.isArray(sq.options) ? sq.options : [],
+          multiple: sq.multiple === true || sq.type === 'multiple_choice',
+          score: Number(sq.score) || 0,
+          // 填空小题的 answers 是「按空分组」的数组，长度就是空数（不泄露答案内容）
+          blank_count: Array.isArray(sq.answers) && sq.answers.length ? sq.answers.length : 1,
+        })),
+      };
+    });
+    res.json({ data, error: null });
+  } catch (error) {
+    console.error('获取综合题列表失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 教师端：综合题清单（题库管理 →「综合题」入口用），带练习开关与小题数
+app.get('/api/teacher/composite/questions', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT id, content, cluster_id, sub_topic, practice_enabled, exam_enabled, answers, created_at
+         FROM questions WHERE type = 'composite'
+        ORDER BY practice_enabled DESC, cluster_id ASC, id ASC`
+    );
+    const data = rows.map((r) => {
+      const subs = taskGetAnswersArray(r.answers) || [];
+      return {
+        id: r.id,
+        content: r.content,
+        cluster_id: r.cluster_id || '',
+        sub_topic: r.sub_topic || '',
+        practice_enabled: Number(r.practice_enabled) === 1,
+        exam_enabled: Number(r.exam_enabled) === 1,
+        created_at: r.created_at,
+        subs_count: subs.length,
+        subs_preview: subs.map((s) => ({
+          type: s.type,
+          score: s.score || 0,
+          multiple: s.multiple === true,
+          content: String(s.content || '').replace(/<[^>]+>/g, '').slice(0, 40),
+        })),
+      };
+    });
+    res.json({ data, error: null });
+  } catch (error) {
+    console.error('获取教师端综合题清单失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 教师端：控制学生端能否练这道综合题（practice_enabled）
+app.post('/api/teacher/composite/practice', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const questionId = String((req.body && req.body.question_id) || '').trim();
+    const enabled = !!(req.body && req.body.practice_enabled);
+    if (!questionId) return res.status(400).json({ data: null, error: '缺少题目ID' });
+    const [rows] = await pool.query("SELECT id, type FROM questions WHERE id = ? LIMIT 1", [questionId]);
+    if (!rows.length) return res.status(404).json({ data: null, error: '题目不存在' });
+    if (rows[0].type !== 'composite') return res.status(400).json({ data: null, error: '不是综合题' });
+    await pool.query('UPDATE questions SET practice_enabled = ? WHERE id = ?', [enabled ? 1 : 0, questionId]);
+    res.json({ data: { id: questionId, practice_enabled: enabled }, error: null });
+  } catch (error) {
+    console.error('切换综合题练习开关失败:', error);
     res.status(500).json({ data: null, error: error.message });
   }
 });
@@ -12607,7 +12711,7 @@ app.post('/api/student/practice/questions', authenticate, async (req, res) => {
 
     const [rows] = await pool.query(
       `SELECT ${PRACTICE_PICK_COLUMNS} FROM questions
-        WHERE practice_enabled = 1${SQL_NOT_WPS_OP}
+        WHERE practice_enabled = 1${SQL_PRACTICE_SCOPE}
         ORDER BY created_at ASC`
     );
 
@@ -12666,7 +12770,7 @@ app.get('/api/student/learn-chapter/:clusterId', authenticate, async (req, res) 
       const paths = secs.map(s => `${clusterId}/${s}`);
       const [rows] = await pool.query(
         `SELECT cluster_id, COUNT(*) AS cnt FROM questions
-         WHERE practice_enabled = 1 AND cluster_id IN (${placeholders})${SQL_NOT_WPS_OP} GROUP BY cluster_id`,
+         WHERE practice_enabled = 1 AND cluster_id IN (${placeholders})${SQL_PRACTICE_SCOPE} GROUP BY cluster_id`,
         paths
       );
       counts = rows;
@@ -17849,6 +17953,19 @@ function judgeCompositeSubResults(correctField, userAnswerRaw) {
     }
     return false;
   });
+}
+
+/**
+ * 综合题按小题结算（2026-10-26 吴老定）：一道大题里的每个小题各记各的分。
+ * 以前是 allCorrect 才算 1 分 —— 6 个小题错 1 个就整题归零，既不公平也看不出学生到底会几个。
+ * 返回 { credit: 答对小题数, weight: 小题总数, subResults: 逐小题对错 }。
+ */
+function getCompositeCredit(correctField, userAnswerRaw) {
+  const subs = taskGetAnswersArray(correctField);
+  const weight = Array.isArray(subs) && subs.length ? subs.length : 1;
+  const subResults = judgeCompositeSubResults(correctField, userAnswerRaw);
+  const credit = subResults.filter(Boolean).length;
+  return { credit, weight, subResults };
 }
 
 // 18. 提交答题

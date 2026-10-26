@@ -13,6 +13,7 @@ import { DesktopPet } from '../components/common/DesktopPet';
 import { QuickAccessPanel } from '../components/common/QuickAccessPanel';
 import { LearnModule } from '../components/student/LearnModule';
 import { PracticeModule } from '../components/student/PracticeModule';
+import { CompositePracticeModule } from '../components/student/CompositePractice';
 import { TestModule } from '../components/student/TestModule';
 import { WpsOpApp } from '../components/student/WpsOpApp';
 import { WrongQuestions } from '../components/student/WrongQuestions';
@@ -72,6 +73,7 @@ interface FocusModeConfig {
 const moduleComponents: Record<string, React.ReactNode> = {
   learn: <LearnModule />,
   practice: <PracticeModule />,
+  composite: <CompositePracticeModule />,
   test: <TestModule />,
   wpsOp: <WpsOpApp />,
   wrong: <WrongQuestions />,
@@ -97,6 +99,8 @@ type ModuleGuardKey = 'practice_enabled' | 'test_enabled' | 'op_enabled' | 'pet_
 
 const MODULE_GUARD_MAP: Record<string, ModuleGuardKey> = {
   practice: 'practice_enabled',
+  // 综合题练习跟「练习」同一个班级开关：老师关掉练习，综合题也一并关掉
+  composite: 'practice_enabled',
   test: 'test_enabled',
   wpsOp: 'op_enabled',
   pet: 'pet_enabled',
