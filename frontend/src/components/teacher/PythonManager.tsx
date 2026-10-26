@@ -3,6 +3,7 @@ import { backendClient } from '../../api/backendClient';
 import { useAuth } from '../../hooks/useAuth';
 import { LatexRenderer } from '../common/LatexRenderer';
 import { FillBlankExplainPlayer } from '../student/FillBlankExplainPlayer';
+import { PythonMatrixPanel } from './PythonMatrixPanel';
 
 interface PythonTask {
   id: string;
@@ -68,7 +69,7 @@ interface Grading {
 
 export const PythonManager: React.FC = () => {
   const { user } = useAuth();
-  const [activeTab, setActiveTab] = useState<'tasks' | 'create'>('tasks');
+  const [activeTab, setActiveTab] = useState<'tasks' | 'create' | 'matrix'>('tasks');
   const [taskFilter, setTaskFilter] = useState<'all' | 'code' | 'fill_blank'>('all');
   const [tasks, setTasks] = useState<PythonTask[]>([]);
   const [selectedTask, setSelectedTask] = useState<PythonTask | null>(null);
@@ -620,6 +621,15 @@ export const PythonManager: React.FC = () => {
               <i className="fa fa-plus mr-1"></i>
               {editingId ? '编辑任务' : '创建任务'}
             </button>
+            <button
+              className={`px-4 py-2 rounded-lg font-medium transition ${
+                activeTab === 'matrix' ? 'bg-purple-600 text-white' : 'bg-gray-100 text-gray-600'
+              }`}
+              onClick={() => setActiveTab('matrix')}
+              title="每个学生对每道题的完成情况（可按列排序、批量启用/禁用、重置提交）"
+            >
+              <i className="fa fa-table-cells mr-1"></i>完成明细
+            </button>
             <div className="flex items-center gap-2 bg-gray-100 rounded-lg px-3 py-2">
               <select
                 value={exportClassId}
@@ -642,7 +652,14 @@ export const PythonManager: React.FC = () => {
         </div>
       </div>
 
-      <div className="flex-1 flex overflow-hidden">
+      {/* 完成明细：独立整宽视图，与三栏互斥 */}
+      {activeTab === 'matrix' && (
+        <div className="flex-1 overflow-auto p-4">
+          <PythonMatrixPanel />
+        </div>
+      )}
+
+      <div className={`flex-1 flex overflow-hidden ${activeTab === 'matrix' ? 'hidden' : ''}`}>
         <div className="w-80 bg-white border-r overflow-y-auto p-4 flex-shrink-0">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="font-medium text-gray-700">作业任务</h3>

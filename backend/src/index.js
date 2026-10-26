@@ -8912,6 +8912,201 @@ app.get('/api/python/teacher/task-progress/:taskId', authenticate, requireTeachi
   }
 });
 
+/**
+ * Python 作业 · 班级明细矩阵（2026-10-27）
+ *
+ * 吴老要与「题库管理 → 综合题」同一个粒度的表：每个学生对每道题的完成情况，
+ * 并且能多选题目批量启用/禁用、重置让重做。
+ *
+ * 行 = 该班学生，列 = 全部 Python 作业（题号升序，与学生端一致），
+ * 格子 = 该生这道题的分数；没交不返回格子（前端显示「—」），
+ * 交了就按批改进度分三态：已批改（有分数）/ 已交待批改 / 迟交。
+ *
+ * ⛔ 分数口径与 task-progress、提交列表一致：adjusted_score ?? total_score。
+ *    教师手动调分用 adjusted_score，两处必须取同一个，否则同一份作业两个页面显示不同分。
+ * ⛔ 该班可见性沿用 python_task_class_status 的「例外」语义：没记录就继承全局 is_active。
+ */
+app.get('/api/python/teacher/matrix', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const classId = String(req.query.class_id || '').trim();
+    if (!classId) return res.status(400).json({ data: null, error: '请先选择班级' });
+    if (!(await assertTeacherOwnsClass(req, res, classId))) return;
+
+    const [students] = await pool.query(
+      `SELECT id, username, real_name FROM profiles
+        WHERE role = 'student' AND class_id = ?
+        ORDER BY username ASC`,
+      [classId],
+    );
+
+    const [taskRows] = await pool.query('SELECT * FROM python_tasks ' + pyTaskOrderSql('title'));
+    const [statusRows] = await pool.query(
+      'SELECT task_id, is_active FROM python_task_class_status WHERE class_id = ?',
+      [classId],
+    );
+    const overrides = new Map(statusRows.map((r) => [String(r.task_id), Number(r.is_active)]));
+
+    const questions = taskRows.map((t, i) => {
+      const id = String(t.id);
+      const override = overrides.has(id) ? overrides.get(id) : null;
+      const globalActive = Number(t.is_active) === 1;
+      return {
+        id,
+        idx: i + 1,
+        title: t.title || '',
+        task_type: t.task_type === 'fill_blank' ? 'fill_blank' : 'code',
+        full_score: Number(t.total_score) || 100,
+        deadline: t.deadline || null,
+        // 这个班到底能不能看到这道题（批量启用/禁用改的就是它）
+        enabled: override === null ? globalActive : override === 1,
+      };
+    });
+
+    const fullByTask = new Map(questions.map((q) => [q.id, q.full_score]));
+    // 只把「对这个班开放」的题算进分母（2026-10-27）：
+    // 关闭的题学生根本进不去，算进去会让「得分 220/1670」这种数字彻底失去意义。
+    // 关闭题的历史提交仍然显示在格子里（灰列），只是不参与「已交 / 得分」汇总。
+    const visibleIds = new Set(questions.filter((q) => q.enabled).map((q) => q.id));
+    const totalFull = questions
+      .filter((q) => visibleIds.has(q.id))
+      .reduce((sum, q) => sum + q.full_score, 0);
+
+    const rowsById = new Map();
+    for (const stu of students) {
+      rowsById.set(String(stu.id), {
+        id: String(stu.id),
+        username: stu.username || '',
+        real_name: stu.real_name || '',
+        cells: {},
+        done: 0,
+        graded: 0,
+        earned: 0,
+        full: totalFull,
+      });
+    }
+
+    if (students.length && questions.length) {
+      const [subs] = await pool.query(
+        `SELECT s.task_id, s.student_id, s.submitted_at, s.is_late, s.status,
+                g.total_score, g.adjusted_score
+           FROM python_submissions s
+           JOIN profiles p ON p.id = s.student_id
+           LEFT JOIN python_gradings g ON g.submission_id = s.id
+          WHERE p.class_id = ?`,
+        [classId],
+      );
+
+      for (const row of subs) {
+        const target = rowsById.get(String(row.student_id));
+        const taskId = String(row.task_id);
+        if (!target || !fullByTask.has(taskId)) continue;
+        const full = fullByTask.get(taskId);
+
+        const raw = row.adjusted_score != null
+          ? Number(row.adjusted_score)
+          : (row.total_score != null ? Number(row.total_score) : null);
+        const score = Number.isFinite(raw) ? raw : null;
+        const late = Number(row.is_late) === 1;
+
+        target.cells[taskId] = {
+          // value=null 表示交了但还没批改：排序列里与「没交」同样当 -1，两者都算没完成
+          value: score,
+          score,
+          submitted: true,
+          graded: score !== null,
+          is_late: late,
+          submitted_at: row.submitted_at || null,
+          status: row.status || 'submitted',
+          text: score !== null ? `${score}/${full}` : (late ? '迟交待批' : '待批改'),
+          kind: score === null ? 'warn' : (score >= full ? 'full' : 'normal'),
+        };
+        if (visibleIds.has(taskId)) {
+          target.done += 1;
+          if (score !== null) {
+            target.earned += score;
+            target.graded += 1;
+          }
+        }
+      }
+    }
+
+    res.json({
+      data: {
+        questions,
+        students: [...rowsById.values()],
+        total_full: totalFull,
+        // 前端「已交 x/N」的 N 用它：可见题数，不是列数
+        visible_count: visibleIds.size,
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('获取 Python 作业明细矩阵失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+/**
+ * 重置 Python 作业提交（2026-10-27）：让学生重做某几道题。
+ *
+ * ⛔ 这是删除操作，条件写死到「指定班级 + 指定题目」：
+ *    · 只删 class_id 这个班的学生、task_ids 这几道题的提交；
+ *    · 批改记录随提交一起删（否则留下孤儿批改，学生重交后会撞 unique_submission）；
+ *    · 先 COUNT 再删，把条数与人数一起返回，前端必须先把数字告诉老师。
+ */
+app.post('/api/python/teacher/reset-homework', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const classId = String(body.class_id || '').trim();
+    const taskIds = Array.from(new Set(
+      (Array.isArray(body.task_ids) ? body.task_ids : [])
+        .map((x) => String(x == null ? '' : x).trim())
+        .filter(Boolean),
+    )).slice(0, 200);
+
+    if (!classId) return res.status(400).json({ data: null, error: '请先选择班级' });
+    if (!taskIds.length) return res.status(400).json({ data: null, error: '请先勾选题目' });
+    if (!(await assertTeacherOwnsClass(req, res, classId))) return;
+
+    const [[cnt]] = await pool.query(
+      `SELECT COUNT(*) AS n, COUNT(DISTINCT student_id) AS stu
+         FROM python_submissions
+        WHERE task_id IN (?) AND student_id IN (SELECT id FROM profiles WHERE class_id = ?)`,
+      [taskIds, classId],
+    );
+    const total = Number(cnt && cnt.n) || 0;
+    const affectedStudents = Number(cnt && cnt.stu) || 0;
+    if (!total) {
+      return res.json({ data: { deleted: 0, gradings: 0, before: 0, students: 0 }, error: null });
+    }
+
+    const [delGrading] = await pool.query(
+      `DELETE g FROM python_gradings g
+         JOIN python_submissions s ON s.id = g.submission_id
+        WHERE s.task_id IN (?) AND s.student_id IN (SELECT id FROM profiles WHERE class_id = ?)`,
+      [taskIds, classId],
+    );
+    const [delSub] = await pool.query(
+      `DELETE FROM python_submissions
+        WHERE task_id IN (?) AND student_id IN (SELECT id FROM profiles WHERE class_id = ?)`,
+      [taskIds, classId],
+    );
+
+    res.json({
+      data: {
+        deleted: delSub.affectedRows,
+        gradings: delGrading.affectedRows,
+        before: total,
+        students: affectedStudents,
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('重置 Python 作业提交失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
 // 获取未提交作业的学生
 app.get('/api/python/teacher/unsubmitted/:taskId', authenticate, requireTeachingRole, async (req, res) => {
   try {
@@ -10219,6 +10414,21 @@ function coverOfPages(pages) {
   return { kind: first.kind || 'lead', title: clip(first.title, 20), kicker: clip(first.kicker, 24) };
 }
 
+/**
+ * 外链课程地址校验（2026-10-26）。
+ * 只接受 https：学校内网页面里跳 http 会被浏览器拦成混合内容；
+ * 长度上限 600 与列宽一致。非法输入返回空串，由调用方报错。
+ */
+function normalizeLectureExternalUrl(input) {
+  const raw = String(input || '').trim();
+  if (!raw) return '';
+  let u;
+  try { u = new URL(raw); } catch { return ''; }
+  if (u.protocol !== 'https:' || !u.hostname) return '';
+  const full = u.toString();
+  return full.length <= 600 ? full : '';
+}
+
 function lectureRowOut(row, opts = {}) {
   if (!row) return null;
   const withPages = opts.withPages !== false;
@@ -10234,6 +10444,9 @@ function lectureRowOut(row, opts = {}) {
     outline: row.outline || '',
     requirement: row.requirement || '',
     style_key: row.style_key,
+    // 课程来源（2026-10-26）：ai = AI 生成，link = 引用外链（学生端点开新标签打开）
+    source: row.source === 'link' ? 'link' : 'ai',
+    external_url: row.external_url || '',
     ...(withPages ? { pages } : {}),
     cover: cover || (pages && pages.length ? coverOfPages(pages) : null),
     page_count: Number(row.page_count) || (pages ? pages.length : 0),
@@ -10255,6 +10468,181 @@ function lectureRowOut(row, opts = {}) {
  * ⛔ 截断是常态：7~8 页 JSON 约 2000 字，max_tokens 给小了必然半个 JSON（实测 1200 时 3 挂 2）。
  *    这里给 3500 并自动重试一次，仍失败才抛错 —— 不重试会让老师频繁撞「生成失败」。
  */
+/**
+ * 从题库挑检测题（2026-10-26 第二步）。
+ *
+ * ⛔ 题目一律来自题库，绝不让模型自己出题：模型编的题答案不可信，
+ *    而题库里的题有老师核对过的答案和解析，答错时给的解析也是学情分析里同一份口径。
+ *
+ * 匹配思路：题库 982 道题，cluster_id 形如「算法的程序实现/分支结构」。
+ * 取尾段（知识点名）与「标题 + 章节 + 大纲」比字面，命中越多越优先；
+ * 尾段常常比大纲行更粗（大纲写「单分支 if 语句」，簇是「分支结构」），
+ * 所以还退一步看 2 字子串。
+ */
+function lectureTextForMatch(meta) {
+  return [meta && meta.title, meta && meta.chapter, meta && meta.outline]
+    .map((x) => String(x || ''))
+    .join('\n');
+}
+
+/** 题库选项是 {"options":["A. xxx",...]}，答案 {"answers":["B"]}；这里统一成纯文本数组 + 字母 */
+function parseQuizQuestionRow(row) {
+  let opts = row.options;
+  if (typeof opts === 'string') {
+    try { opts = JSON.parse(opts); } catch { opts = null; }
+  }
+  if (!Array.isArray(opts) && opts && Array.isArray(opts.options)) opts = opts.options;
+  if (!Array.isArray(opts)) return null;
+  const options = opts
+    .map((o) => String(o == null ? '' : o).replace(/^\s*[A-Ha-h]\s*[.．、:：]\s*/, '').trim())
+    .filter(Boolean)
+    .slice(0, 4);
+  if (options.length < 2) return null;
+
+  let ans = row.answers;
+  if (typeof ans === 'string') {
+    try { ans = JSON.parse(ans); } catch { ans = null; }
+  }
+  if (!Array.isArray(ans) && ans && Array.isArray(ans.answers)) ans = ans.answers;
+  const letters = (Array.isArray(ans) ? ans : [])
+    .map((x) => String(x == null ? '' : x).trim().toUpperCase())
+    .filter((x) => /^[A-H]$/.test(x));
+  // 只收单选题：多选一答就错，学生没学过全选的角度，放在课程里会打击信心
+  if (letters.length !== 1) return null;
+
+  // ⛔ 题干里带代码块（```）的题不适合放进检测页：压成一行后完全没法读，
+  //    这种题留给练习题的编辑器去展示，检测页只要纯文字题干。
+  const rawStem = String(row.content == null ? '' : row.content);
+  if (/```|<pre|<code|\bprint\s*\(|\binput\s*\(/i.test(rawStem)) return null;
+  // 多行题干基本都是「执行下列代码 / 读程序写结果」，压成一行没法读，检测页不要
+  if (/\r?\n/.test(rawStem.trim())) return null;
+  const stem = rawStem.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  if (!stem) return null;
+
+  return {
+    id: row.id,
+    stem,
+    options,
+    answer: letters[0],
+    analysis: String(row.explanation == null ? '' : row.explanation).replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim().slice(0, 200),
+  };
+}
+
+/** 按关键词匹配簇，抽 limit 道题（每个 sub_topic 最多取 1 道，尽量覆盖不同小节） */
+async function pickQuizQuestionsForLecture(meta, limit = 3) {
+  const text = lectureTextForMatch(meta);
+  if (!text.trim()) return [];
+
+  const [rows] = await pool.query(
+    `SELECT id, content, options, answers, cluster_id, sub_topic, explanation
+       FROM questions
+      WHERE practice_enabled = 1 AND type = 'choice' AND cluster_id IS NOT NULL AND cluster_id <> ''
+      LIMIT 3000`,
+  );
+  if (!rows.length) return [];
+
+  // 每个簇算一个分数：整段命中 10 分，否则按命中的 2 字子串个数计分
+  const scoreOf = (clusterId) => {
+    const tail = String(clusterId).split('/').pop() || '';
+    if (!tail) return 0;
+    if (text.includes(tail)) return 10;
+    let hit = 0;
+    for (let i = 0; i + 2 <= tail.length; i += 1) {
+      if (text.includes(tail.slice(i, i + 2))) hit += 1;
+    }
+    return hit;
+  };
+
+  const pool2 = [];
+  for (const r of rows) {
+    const score = scoreOf(r.cluster_id);
+    if (score > 0) pool2.push({ row: r, score });
+  }
+  if (!pool2.length) return [];
+
+  // 分数高的簇优先；同簇内打乱
+  const byCluster = new Map();
+  for (const item of pool2) {
+    const key = item.row.cluster_id;
+    if (!byCluster.has(key)) byCluster.set(key, { score: item.score, rows: [] });
+    byCluster.get(key).rows.push(item.row);
+  }
+  const clusters = [...byCluster.entries()].sort((a, b) => b[1].score - a[1].score);
+
+  const picked = [];
+  const usedSubTopics = new Set();
+  for (const [, group] of clusters) {
+    const shuffled = [...group.rows].sort(() => Math.random() - 0.5);
+    for (const r of shuffled) {
+      if (picked.length >= limit) break;
+      const sub = String(r.sub_topic || r.id);
+      if (usedSubTopics.has(sub)) continue;
+      const q = parseQuizQuestionRow(r);
+      if (!q || !q.stem) continue;
+      usedSubTopics.add(sub);
+      picked.push(q);
+    }
+    if (picked.length >= limit) break;
+  }
+  return picked;
+}
+
+/**
+ * 生成后试跑 lab 页（2026-10-26 第三步）。
+ *
+ * ⛔ 模型写的代码不一定跑得通（缩进错、变量没定义、死循环）。如果直接把跑不通的实验给学生，
+ *    屏幕上会是一片红色报错，学生会以为是自己的问题 —— 比不给实验更糟。
+ * 所以这里真的跑一次（沙盒约 0.9 秒），跑不通就降级成只能看的 code 页，并把预期输出写成说明。
+ * 试跑本身异常（沙盒不可用）则保留 lab 页 —— 不能因为沙盒坏了就把课改残。
+ */
+async function verifyLabPages(pages) {
+  for (const p of pages || []) {
+    if (!p || p.kind !== 'lab' || !p.lab || !p.lab.code) continue;
+    let ok = false;
+    try {
+      const r = await pythonSandbox.executeCode(p.lab.code, '');
+      ok = !!(r && r.success === true);
+      if (!ok) console.warn('[lecture-lab] 代码跑不通，降级为 code 页:', String((r && r.error) || '').slice(0, 120));
+    } catch (e) {
+      console.warn('[lecture-lab] 试跑异常，保留 lab 页交给前端:', e.message);
+      continue;
+    }
+    if (ok) continue;
+
+    p.kind = 'code';
+    p.code = { lang: 'python', text: p.lab.code };
+    p.note = p.lab.expected ? `这段代码应当输出：${p.lab.expected}` : '';
+    delete p.lab;
+    // 原来指向运行结果的句子，改成指代码
+    (p.beats || []).forEach((b) => {
+      if (b && b.focus === 'output') { b.focus = 'code'; b.run = false; }
+    });
+  }
+  return pages;
+}
+
+/** 把题目包成一页检测页 */
+function buildQuizPage(questions, index) {
+  const n = questions.length;
+  return {
+    kind: 'quiz',
+    title: n >= 3 ? '阶段检测' : '随堂检测',
+    narration: `先停一下，做个快速检测。${n} 道选择题，看看刚才讲的重点抓住了没有。答完再继续往下。`,
+    questions,
+  };
+}
+
+/** 把检测页插在 recap（小结）之前；课程太短（少于 5 页）就不插，免得一节课全是考题 */
+function insertQuizPages(pages, questions) {
+  if (!Array.isArray(pages) || pages.length < 5) return pages;
+  if (!questions || questions.length < 2) return pages;
+  const out = [...pages];
+  let at = out.findIndex((p, i) => p && p.kind === 'recap' && i > 0);
+  if (at < 0) at = Math.max(1, out.length - 1);
+  out.splice(at, 0, buildQuizPage(questions, at));
+  return out;
+}
+
 async function generateLecturePages({ title, subject, chapter, outline, requirement, style, pageTarget }) {
   const cfg = await getAiQaConfig(pool);
   const systemPrompt = buildLectureSystemPrompt(style, { pageTarget });
@@ -10299,7 +10687,21 @@ async function generateLecturePages({ title, subject, chapter, outline, requirem
         console.warn(`微课程 JSON 不合法，已按页抢救回 ${pages.length} 页：${parseErr.message}`);
         parsed = normalizeLecturePages({ title: '', pages }, { outline, pageTarget });
       }
-      return { ...parsed, model: cfg.ai_model || null };
+      // 生成完插入检测页（2026-10-26 第二步）：从题库抽题，插在小结之前。
+      // ⛔ 抽题失败绝不影响课程生成本身 —— 没有检测页最多是少了环节，生成失败才是事故。
+      let pages = parsed.pages;
+      try {
+        pages = await verifyLabPages(pages);
+      } catch (vErr) {
+        console.warn('lab 页试跑校验失败（保留原样）:', vErr.message);
+      }
+      try {
+        const quizQs = await pickQuizQuestionsForLecture({ title, chapter, outline }, 3);
+        pages = insertQuizPages(pages, quizQs);
+      } catch (qzErr) {
+        console.warn('插入检测页失败（课程照常生成）:', qzErr.message);
+      }
+      return { ...parsed, pages, model: cfg.ai_model || null };
     } catch (e) {
       lastErr = e;
       console.error(`生成微课程失败（第 ${i + 1}/${attempts.length} 次）:`, e.message);
@@ -10344,7 +10746,8 @@ app.get('/api/teacher/lectures', authenticate, requireTeacher, async (req, res) 
     // ⛔ 列表不查 pages（一篇好几 KB）：封面走 cover 冗余列
     const [rows] = await pool.query(
       `SELECT id, title, category, subject, chapter, style_key, cover, page_count, duration_sec,
-              status, class_ids, viewed_classes, sort_order, play_count, published_at, created_at, updated_at
+              status, class_ids, viewed_classes, sort_order, play_count, published_at, created_at, updated_at,
+              source, external_url
          FROM lectures
         ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
         ORDER BY sort_order ASC, updated_at DESC
@@ -10382,20 +10785,43 @@ app.post('/api/teacher/lectures', authenticate, requireTeacher, async (req, res)
     const b = req.body || {};
     const title = clip(b.title, 120);
     if (!title) return res.status(400).json({ data: null, error: '请填写课程标题' });
-    const outline = String(b.outline || '').slice(0, 4000);
-    if (!outline.trim()) return res.status(400).json({ data: null, error: '请填写知识点大纲' });
 
-    const styleKey = String(b.style_key || 'lecture').trim();
-    const style = await getStyle(pool, styleKey);
-    if (!style) return res.status(400).json({ data: null, error: '讲解风格不存在' });
+    // 两种来源（2026-10-26 吴老定）：
+    //   ai   —— 原有流程，必须有知识点大纲，之后调 AI 生成 pages
+    //   link —— 引用老师在 openMAIC 等平台做好的课程，只存地址；
+    //           对方禁止 iframe 嵌入，所以学生端点开是新标签页打开，不进播放器
+    const source = b.source === 'link' ? 'link' : 'ai';
+    let externalUrl = '';
+    if (source === 'link') {
+      externalUrl = normalizeLectureExternalUrl(b.external_url);
+      if (!externalUrl) {
+        return res.status(400).json({ data: null, error: '请填写以 https:// 开头的课程链接' });
+      }
+    }
+
+    const outline = String(b.outline || '').slice(0, 4000);
+    if (source === 'ai' && !outline.trim()) {
+      return res.status(400).json({ data: null, error: '请填写知识点大纲' });
+    }
+
+    // 外链课不生成页面，风格与页数都无意义；仍留一个默认值以免历史查询报空
+    let styleKey = String(b.style_key || 'lecture').trim() || 'lecture';
+    if (source === 'ai') {
+      const style = await getStyle(pool, styleKey);
+      if (!style) return res.status(400).json({ data: null, error: '讲解风格不存在' });
+    }
+    // 外链课可手填预计时长（分钟），列表上显示「约 N 分钟」；不填就是 0
+    const durationSec = source === 'link'
+      ? Math.max(0, Math.min(600, Math.round(Number(b.duration_min) || 0))) * 60
+      : 0;
 
     const id = lectureNewId();
     const [maxRow] = await pool.query('SELECT COALESCE(MAX(sort_order), 0) AS m FROM lectures');
     await pool.query(
       `INSERT INTO lectures
-        (id, title, category, subject, chapter, outline, requirement, style_key, pages, cover,
-         page_count, duration_sec, status, class_ids, sort_order, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', NULL, 0, 0, 'draft', ?, ?, ?)`,
+        (id, title, category, subject, chapter, outline, requirement, style_key, source, external_url,
+         pages, cover, page_count, duration_sec, status, class_ids, sort_order, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', NULL, 0, ?, 'draft', ?, ?, ?)`,
       [
         id,
         title,
@@ -10405,6 +10831,9 @@ app.post('/api/teacher/lectures', authenticate, requireTeacher, async (req, res)
         outline,
         String(b.requirement || '').slice(0, 2000),
         styleKey,
+        source,
+        externalUrl || null,
+        durationSec,
         JSON.stringify(normalizeLectureClassIds(b.class_ids)),
         Math.min(Number(b.sort_order) || 0, 9999) || (Number(maxRow[0].m) || 0) + 10,
         req.user.userId || null,
@@ -10421,6 +10850,10 @@ app.post('/api/teacher/lectures', authenticate, requireTeacher, async (req, res)
 // 生成整篇（覆盖 pages）。body: { style_key?, page_target? }
 app.post('/api/teacher/lectures/:id/generate', authenticate, requireTeacher, async (req, res) => {
   try {
+    const row0 = await loadLectureForTeacher(req.params.id, req);
+    if (row0.source === 'link') {
+      return res.status(400).json({ data: null, error: '外链课程不需要生成页面，请直接编辑链接或删除后重建' });
+    }
     const licenseResult = await licenseManager.checkFeatureLicense(FEATURES.AI);
     if (!licenseResult.allowed) {
       return res.status(403).json({ data: null, error: 'AI 功能需要授权激活后才能使用', licenseStatus: licenseResult.status });
@@ -10467,6 +10900,10 @@ app.post('/api/teacher/lectures/:id/generate', authenticate, requireTeacher, asy
 // 单页重生成：8 页里通常只有 1~2 页不满意，整篇重来既费钱又会把满意的页改坏
 app.post('/api/teacher/lectures/:id/generate-page', authenticate, requireTeacher, async (req, res) => {
   try {
+    const row0 = await loadLectureForTeacher(req.params.id, req);
+    if (row0.source === 'link') {
+      return res.status(400).json({ data: null, error: '外链课程没有页面可生成' });
+    }
     const licenseResult = await licenseManager.checkFeatureLicense(FEATURES.AI);
     if (!licenseResult.allowed) {
       return res.status(403).json({ data: null, error: 'AI 功能需要授权激活后才能使用', licenseStatus: licenseResult.status });
@@ -10564,6 +11001,18 @@ app.put('/api/teacher/lectures/:id', authenticate, requireTeacher, async (req, r
     }
     if (b.class_ids !== undefined) push('class_ids', JSON.stringify(normalizeLectureClassIds(b.class_ids)));
     if (b.sort_order !== undefined) push('sort_order', Math.min(Math.max(Number(b.sort_order) || 0, 0), 9999));
+    // 外链课可改链接与预计时长（2026-10-26）：AI 课没有 external_url 概念，一并拒绝
+    if (b.external_url !== undefined) {
+      if (row.source !== 'link') {
+        return res.status(400).json({ data: null, error: '只有引用外链的课程才能设置链接' });
+      }
+      const u = normalizeLectureExternalUrl(b.external_url);
+      if (!u) return res.status(400).json({ data: null, error: '请填写以 https:// 开头的课程链接' });
+      push('external_url', u);
+    }
+    if (b.duration_min !== undefined) {
+      push('duration_sec', Math.max(0, Math.min(600, Math.round(Number(b.duration_min) || 0))) * 60);
+    }
 
     let pagesToSave = null;
     if (b.pages !== undefined) {
@@ -10595,8 +11044,13 @@ app.put('/api/teacher/lectures/:id', authenticate, requireTeacher, async (req, r
 app.post('/api/teacher/lectures/:id/publish', authenticate, requireTeacher, async (req, res) => {
   try {
     const row = await loadLectureForTeacher(req.params.id, req);
-    const pages = parseJsonArrayField(row.pages);
-    if (!pages.length) return res.status(400).json({ data: null, error: '这门课还没有生成页面，不能发布' });
+    // 外链课本来就没有 pages，只要有链接就能发布（2026-10-26）
+    if (row.source !== 'link') {
+      const pages = parseJsonArrayField(row.pages);
+      if (!pages.length) return res.status(400).json({ data: null, error: '这门课还没有生成页面，不能发布' });
+    } else if (!row.external_url) {
+      return res.status(400).json({ data: null, error: '这门外链课程还没有填写链接' });
+    }
     await pool.query(
       "UPDATE lectures SET status = 'published', published_at = COALESCE(published_at, NOW(3)), updated_at = NOW(3) WHERE id = ?",
       [row.id],
@@ -10627,9 +11081,9 @@ app.post('/api/teacher/lectures/:id/duplicate', authenticate, requireTeacher, as
     const id = lectureNewId();
     await pool.query(
       `INSERT INTO lectures
-        (id, title, subject, chapter, outline, requirement, style_key, pages, cover,
+        (id, title, subject, chapter, outline, requirement, style_key, source, external_url, pages, cover,
          page_count, duration_sec, status, class_ids, sort_order, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)`,
       [
         id,
         clip(`${row.title} 副本`, 120),
@@ -10638,6 +11092,9 @@ app.post('/api/teacher/lectures/:id/duplicate', authenticate, requireTeacher, as
         row.outline,
         row.requirement,
         row.style_key,
+        // 复制外链课时要连来源与链接一起复制，否则副本会变成「没有页面也没有链接」的空课
+        row.source === 'link' ? 'link' : 'ai',
+        row.external_url || null,
         typeof row.pages === 'string' ? row.pages : JSON.stringify(parseJsonArrayField(row.pages)),
         row.cover ? (typeof row.cover === 'string' ? row.cover : JSON.stringify(row.cover)) : null,
         Number(row.page_count) || 0,
@@ -10683,8 +11140,12 @@ app.post('/api/teacher/lectures/batch', authenticate, requireTeacher, async (req
     const inSql = ids.map(() => '?').join(',');
 
     if (op === 'publish') {
+      // 外链课没有 pages 但可以直接发布，跳过名单里要把它排除（2026-10-26）
       const [noPage] = await pool.query(
-        `SELECT id FROM lectures WHERE id IN (${inSql}) AND (page_count <= 0 OR pages IS NULL OR pages IN ('', '[]'))`,
+        `SELECT id FROM lectures
+          WHERE id IN (${inSql})
+            AND IFNULL(source, 'ai') <> 'link'
+            AND (page_count <= 0 OR pages IS NULL OR pages IN ('', '[]'))`,
         ids,
       );
       const blocked = noPage.map((r) => r.id);
@@ -10751,7 +11212,8 @@ app.get('/api/student/lectures', authenticate, requireStudent, async (req, res) 
     const classId = prof.length ? String(prof[0].class_id || '') : '';
 
     const [rows] = await pool.query(
-      `SELECT id, title, category, subject, chapter, cover, page_count, duration_sec, class_ids, sort_order, play_count
+      `SELECT id, title, category, subject, chapter, cover, page_count, duration_sec, class_ids, sort_order, play_count,
+              source, external_url
          FROM lectures
         WHERE status = 'published'
         ORDER BY sort_order ASC, published_at DESC
@@ -10786,9 +11248,41 @@ app.get('/api/student/lectures/:id', authenticate, requireStudent, async (req, r
     }
 
     await pool.query('UPDATE lectures SET play_count = play_count + 1 WHERE id = ?', [rows[0].id]);
+    // 外链课的 pages 恒为空，前端拿到 source=link + external_url 后会直接新标签打开，
+    // 不进播放器（对方站点禁止 iframe 嵌入，只能跳出去）
     res.json({ data: { lecture: lectureRowOut(rows[0]) }, error: null });
   } catch (error) {
     console.error('读取学生微课程失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 外链课打开上报（2026-10-26）
+// 外链课的学生端点击是前端直接 window.open 出去的，不走详情接口，
+// 这里补一个只做计数的轻量接口，免得为了 play_count +1 再下一遍全文。
+app.post('/api/student/lectures/:id/visit', authenticate, requireStudent, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    if (!(await isAiExplainEnabledFor(userId))) {
+      return res.status(403).json({ data: null, error: '老师还没有为你开通 AI 讲解' });
+    }
+    const [rows] = await pool.query(
+      "SELECT id, class_ids FROM lectures WHERE id = ? AND status = 'published' LIMIT 1",
+      [req.params.id],
+    );
+    if (!rows.length) return res.status(404).json({ data: null, error: '这门课不存在或还没有发布' });
+
+    const [prof] = await pool.query('SELECT class_id FROM profiles WHERE id = ? LIMIT 1', [userId]);
+    const classId = prof.length ? String(prof[0].class_id || '') : '';
+    const ids = parseJsonArrayField(rows[0].class_ids);
+    if (ids.length && !(classId && ids.includes(classId))) {
+      return res.status(403).json({ data: null, error: '这门课不是给你们班开的' });
+    }
+
+    await pool.query('UPDATE lectures SET play_count = play_count + 1 WHERE id = ?', [rows[0].id]);
+    res.json({ data: { ok: true }, error: null });
+  } catch (error) {
+    console.error('外链课打开上报失败:', error);
     res.status(500).json({ data: null, error: error.message });
   }
 });
@@ -12843,6 +13337,117 @@ app.get('/api/teacher/composite/stats', authenticate, requireTeachingRole, async
   }
 });
 
+// 教师端：班级明细矩阵（2026-10-27 吴老要「每个班每个人每个题目的完成情况」）
+// 一张表看清全班每个学生对每道综合题做了没有、最好多少分。
+// 口径与 /stats 完全一致：只算 source='practice'，按小题分值重算（同一个 getCompositeCredit），
+// 所以这张表上的数字和「练习反馈」里的平均分、学生端看到的历史最好分是同一套算法。
+app.get('/api/teacher/composite/matrix', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const classId = String(req.query.class_id || '').trim();
+    if (!classId) return res.status(400).json({ data: null, error: '请先选择班级' });
+    if (!(await assertTeacherOwnsClass(req, res, classId))) return;
+
+    const [students] = await pool.query(
+      `SELECT id, username, real_name FROM profiles
+        WHERE role = 'student' AND class_id = ?
+        ORDER BY username ASC`,
+      [classId],
+    );
+
+    const [qs] = await pool.query(
+      `SELECT id, answers, practice_enabled, cluster_id, sub_topic
+         FROM questions WHERE type = 'composite'
+        ORDER BY cluster_id ASC, id ASC`,
+    );
+
+    const questions = [];
+    const metaMap = new Map();
+    for (const q of qs) {
+      const subs = taskGetAnswersArray(q.answers) || [];
+      const scoreOf = (i) => Number(subs[i] && subs[i].score) || 1;
+      const full = subs.reduce((sum, _s, i) => sum + scoreOf(i), 0);
+      const item = {
+        id: q.id,
+        idx: questions.length + 1,
+        subs_count: subs.length,
+        full_score: full,
+        practice_enabled: Number(q.practice_enabled) === 1,
+        cluster: String(q.cluster_id || '').split('/').pop() || '',
+        sub_topic: q.sub_topic || '',
+      };
+      questions.push(item);
+      metaMap.set(q.id, { scoreOf, rawAnswers: q.answers });
+    }
+
+    if (!questions.length) return res.json({ data: { questions: [], students: [] }, error: null });
+
+    // 同上：分母只算「对该班开放」的题，关闭的题学生练不到
+    const visibleQuestions = questions.filter((q) => q.practice_enabled);
+    const totalFull = visibleQuestions.reduce((sum, q) => sum + q.full_score, 0);
+    const rowsById = new Map();
+    for (const s of students) {
+      rowsById.set(s.id, {
+        id: s.id,
+        username: s.username,
+        real_name: s.real_name || '',
+        cells: {},
+        practiced: 0,
+        earned: 0,
+        full: totalFull,
+      });
+    }
+
+    if (students.length) {
+      const qids = questions.map((q) => q.id);
+      const [ans] = await pool.query(
+        `SELECT a.student_id, a.question_id, a.answer
+           FROM student_answers a
+           JOIN profiles p ON p.id = a.student_id
+          WHERE a.source = 'practice' AND p.class_id = ? AND a.question_id IN (?)`,
+        [classId, qids],
+      );
+
+      for (const a of ans) {
+        const row = rowsById.get(a.student_id);
+        const meta = metaMap.get(a.question_id);
+        if (!row || !meta) continue;
+        let earned = 0;
+        try {
+          const { subResults } = getCompositeCredit(meta.rawAnswers, a.answer);
+          earned = subResults.reduce((sum, ok, i) => sum + (ok ? meta.scoreOf(i) : 0), 0);
+        } catch { earned = 0; }
+        const cell = row.cells[a.question_id] || { best: 0, attempts: 0 };
+        cell.attempts += 1;
+        if (earned > cell.best) cell.best = earned;
+        row.cells[a.question_id] = cell;
+      }
+    }
+
+    const out = [...rowsById.values()].map((r) => {
+      let practiced = 0;
+      let earned = 0;
+      for (const q of visibleQuestions) {
+        const c = r.cells[q.id];
+        if (c && c.attempts > 0) { practiced += 1; earned += c.best; }
+      }
+      return { ...r, practiced, earned };
+    });
+
+    res.json({
+      data: {
+        questions,
+        students: out,
+        total_full: totalFull,
+        visible_count: visibleQuestions.length,
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('获取综合题班级明细失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
 // 教师端：重置某道综合题的练习记录，让学生能重做
 // ⛔ 这是删除操作，条件写死到「单题 + 练习来源」：
 //    · 只删 question_id = ? 这一道题，不碰其它题；
@@ -12850,12 +13455,18 @@ app.get('/api/teacher/composite/stats', authenticate, requireTeachingRole, async
 //    · 返回实际删除条数，前端必须先把条数告诉老师再确认。
 app.post('/api/teacher/composite/reset', authenticate, requireTeachingRole, async (req, res) => {
   try {
-    const questionId = String((req.body && req.body.question_id) || '').trim();
-    if (!questionId) return res.status(400).json({ data: null, error: '缺少题目ID' });
+    // 支持单个与批量（2026-10-27）
+    const body = req.body || {};
+    const ids = Array.from(new Set(
+      (Array.isArray(body.question_ids) ? body.question_ids : [body.question_id])
+        .map((x) => String(x == null ? '' : x).trim())
+        .filter(Boolean),
+    )).slice(0, 200);
+    if (!ids.length) return res.status(400).json({ data: null, error: '缺少题目ID' });
 
-    const [qRows] = await pool.query("SELECT id, type FROM questions WHERE id = ? LIMIT 1", [questionId]);
-    if (!qRows.length) return res.status(404).json({ data: null, error: '题目不存在' });
-    if (qRows[0].type !== 'composite') return res.status(400).json({ data: null, error: '不是综合题' });
+    const [qRows] = await pool.query('SELECT id, type FROM questions WHERE id IN (?)', [ids]);
+    if (qRows.length !== ids.length) return res.status(404).json({ data: null, error: '有题目不存在，请刷新后重试' });
+    if (qRows.some((r) => r.type !== 'composite')) return res.status(400).json({ data: null, error: '只能重置综合题的练习记录' });
 
     // 按班级重置：选了班级就只清该班学生的记录，没选就是全部班级
     const classId = String((req.body && req.body.class_id) || '').trim();
@@ -12864,23 +13475,25 @@ app.post('/api/teacher/composite/reset', authenticate, requireTeachingRole, asyn
     const classScopeSql = classId
       ? ' AND student_id IN (SELECT id FROM profiles WHERE class_id = ?)'
       : '';
-    const scopeParams = classId ? [questionId, classId] : [questionId];
+    const scopeParams = classId ? [ids, classId] : [ids];
 
     const [[cnt]] = await pool.query(
-      `SELECT COUNT(*) AS n FROM student_answers WHERE question_id = ? AND source = 'practice'${classScopeSql}`,
+      `SELECT COUNT(*) AS n FROM student_answers WHERE question_id IN (?) AND source = 'practice'${classScopeSql}`,
       scopeParams
     );
     const total = Number(cnt && cnt.n) || 0;
-    if (total === 0) return res.json({ data: { deleted: 0, before: 0 }, error: null });
+    if (total === 0) {
+      return res.json({ data: { deleted: 0, before: 0, ids, per_question: [] }, error: null });
+    }
 
     const [del] = await pool.query(
-      `DELETE FROM student_answers WHERE question_id = ? AND source = 'practice'${classScopeSql}`,
+      `DELETE FROM student_answers WHERE question_id IN (?) AND source = 'practice'${classScopeSql}`,
       scopeParams
     );
-    // 顺手清掉这道题在错题本里的未解决记录，否则学生还会在「错题集」里看到它
-    await pool.query('DELETE FROM wrong_questions WHERE question_id = ? AND is_resolved = 0', [questionId]).catch(() => {});
+    // 顺手清掉这些题在错题本里的未解决记录，否则学生还会在「错题集」里看到它们
+    await pool.query('DELETE FROM wrong_questions WHERE question_id IN (?) AND is_resolved = 0', [ids]).catch(() => {});
 
-    res.json({ data: { deleted: del.affectedRows, before: total }, error: null });
+    res.json({ data: { deleted: del.affectedRows, before: total, ids }, error: null });
   } catch (error) {
     console.error('重置综合题练习记录失败:', error);
     res.status(500).json({ data: null, error: error.message });
@@ -12890,14 +13503,22 @@ app.post('/api/teacher/composite/reset', authenticate, requireTeachingRole, asyn
 // 教师端：控制学生端能否练这道综合题（practice_enabled）
 app.post('/api/teacher/composite/practice', authenticate, requireTeachingRole, async (req, res) => {
   try {
-    const questionId = String((req.body && req.body.question_id) || '').trim();
-    const enabled = !!(req.body && req.body.practice_enabled);
-    if (!questionId) return res.status(400).json({ data: null, error: '缺少题目ID' });
-    const [rows] = await pool.query("SELECT id, type FROM questions WHERE id = ? LIMIT 1", [questionId]);
-    if (!rows.length) return res.status(404).json({ data: null, error: '题目不存在' });
-    if (rows[0].type !== 'composite') return res.status(400).json({ data: null, error: '不是综合题' });
-    await pool.query('UPDATE questions SET practice_enabled = ? WHERE id = ?', [enabled ? 1 : 0, questionId]);
-    res.json({ data: { id: questionId, practice_enabled: enabled }, error: null });
+    // 支持单个（question_id）与批量（question_ids）两种入参（2026-10-27 吴老要批量启用）
+    const body = req.body || {};
+    const ids = Array.from(new Set(
+      (Array.isArray(body.question_ids) ? body.question_ids : [body.question_id])
+        .map((x) => String(x == null ? '' : x).trim())
+        .filter(Boolean),
+    )).slice(0, 200);
+    const enabled = !!body.practice_enabled;
+    if (!ids.length) return res.status(400).json({ data: null, error: '缺少题目ID' });
+
+    const [rows] = await pool.query('SELECT id, type FROM questions WHERE id IN (?)', [ids]);
+    if (rows.length !== ids.length) return res.status(404).json({ data: null, error: '有题目不存在，请刷新后重试' });
+    if (rows.some((r) => r.type !== 'composite')) return res.status(400).json({ data: null, error: '只能对综合题操作' });
+
+    await pool.query('UPDATE questions SET practice_enabled = ? WHERE id IN (?)', [enabled ? 1 : 0, ids]);
+    res.json({ data: { ids, practice_enabled: enabled, affected: ids.length }, error: null });
   } catch (error) {
     console.error('切换综合题练习开关失败:', error);
     res.status(500).json({ data: null, error: error.message });

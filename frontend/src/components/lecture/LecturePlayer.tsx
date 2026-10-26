@@ -18,7 +18,32 @@ import {
 } from '../../utils/ttsEngine';
 import { CourseFlowDiagram } from './CourseFlowDiagram';
 
-export type LecturePageKind = 'lead' | 'point' | 'steps' | 'flow' | 'table' | 'chart' | 'code' | 'example' | 'recap';
+export type LecturePageKind = 'lead' | 'point' | 'steps' | 'flow' | 'table' | 'chart' | 'code' | 'example' | 'recap' | 'quiz' | 'lab';
+
+/**
+ * 讲解节拍（2026-10-26）：一句一动作。
+ * 以前一页只有一整段 narration，学生听完第一句就把后面全看完了；
+ * 现在把旁白拆成 beat，每句带一个 focus 指向本页要强调的元素，
+ * 播到哪句就把哪个元素点亮、其余淡下去（聚光灯效果）。
+ * ⛔ 不叫 steps —— 那个名字已经被「横向步骤图」页型占了。
+ */
+export interface LectureBeat {
+  /** 这一句要念的话 */
+  say: string;
+  /** 强调哪个元素，取值见后端 normalizeLecturePage 的白名单；不填 = 不高亮 */
+  focus?: string;
+  /** 讲到这一句时自动运行代码（只有 lab 页用） */
+  run?: boolean;
+}
+
+/** 检测页的一道题（2026-10-26，题干与选项来自题库，answer/analysis 也来自题库） */
+export interface LectureQuizQuestion {
+  id: string;
+  stem: string;
+  options: string[];
+  answer: string;
+  analysis?: string;
+}
 
 export interface LecturePage {
   kind: LecturePageKind;
@@ -35,6 +60,12 @@ export interface LecturePage {
   scenario?: string;
   question?: string;
   answer?: string;
+  /** 讲解节拍；老课程没有这个字段，仍按整段 narration 逐句念 */
+  beats?: LectureBeat[];
+  /** kind='quiz' 时的题目 */
+  questions?: LectureQuizQuestion[];
+  /** kind='lab' 时的代码实验（2026-10-26 第三步） */
+  lab?: { lang?: string; code: string; hints?: string[]; expected?: string };
 }
 
 export interface Lecture {
@@ -99,6 +130,8 @@ const PAGE_KIND_LABEL: Record<string, string> = {
   code: '代码',
   example: '例子',
   recap: '小结',
+  quiz: '检测',
+  lab: '实验',
 };
 
 const readNum = (key: string, fallback: number) => {
@@ -155,7 +188,21 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
   }
 
   const page = pages[pageIdx];
-  const sentences = useMemo(() => splitSentences(page?.narration || ''), [page?.narration]);
+  // 有 beats 就按节拍念（一句一动作），没有就用老办法把整段 narration 切句
+  const sentences = useMemo(() => {
+    const beats = page?.beats;
+    if (Array.isArray(beats) && beats.length) {
+      return beats.map((b) => String(b?.say || '').trim());
+    }
+    return splitSentences(page?.narration || '');
+  }, [page]);
+
+  /** 当前这句要强调的元素；没有 beats 就返回空串（不做高亮，与旧版表现一致） */
+  const focusKey = useMemo(() => {
+    const beats = page?.beats;
+    if (!Array.isArray(beats) || !beats.length) return '';
+    return String(beats[sentenceIdx]?.focus || '');
+  }, [page, sentenceIdx]);
   const isLastPage = pageIdx >= pages.length - 1;
 
   const tokenRef = useRef(0);
@@ -343,6 +390,8 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
       }
       // 本页讲完：example 页自动揭晓答案，再按设置翻下一页
       setRevealed(true);
+      // 检测页：讲完就停下等作答，绝不自动翻页（否则学生还没答就跳走了）
+      if (page?.kind === 'quiz') { setPlaying(false); return; }
       if (isLastPage) { markDone(); setPlaying(false); return; }
       if (!autoNext) { setPlaying(false); return; }
       nextTimerRef.current = window.setTimeout(() => {
@@ -587,7 +636,16 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
         <div className="mx-auto flex h-full max-w-6xl flex-col">
           <PageHead page={page} index={pageIdx} total={pages.length} />
           <div className="mt-6 flex-1 overflow-auto">
-            <PageBody page={page} revealed={revealed} onReveal={() => setRevealed(true)} />
+            {/* key 用页序号：换页时重挂载，检测页的作答状态必须清空 */}
+            <PageBody
+              key={pageIdx}
+              page={page}
+              revealed={revealed}
+              onReveal={() => setRevealed(true)}
+              focus={focusKey}
+              runToken={page?.beats?.[sentenceIdx]?.run ? `${pageIdx}-${sentenceIdx}` : ''}
+              onNext={() => goPage(pageIdx + 1)}
+            />
           </div>
         </div>
       </div>
@@ -721,12 +779,219 @@ const PageHead: React.FC<{ page: LecturePage; index: number; total: number }> = 
   </div>
 );
 
+const OPT_LETTERS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
+
+/**
+ * 检测页（2026-10-26）：讲完一节就停下来考一下，答完才继续。
+ * 题目来自题库（题干/选项/答案/解析都由服务端取），学生点选项立即判对错 —— 不留到课后。
+ * ⛔ 全部答完才出现「继续学习」，中途不让人溜过去。
+ */
+const QuizPanel: React.FC<{ page: LecturePage; onNext?: () => void }> = ({ page, onNext }) => {
+  const qs = page.questions || [];
+  const [picked, setPicked] = useState<Record<number, string>>({});
+  const answeredCount = Object.keys(picked).length;
+  const allAnswered = qs.length > 0 && answeredCount === qs.length;
+  const rightCount = qs.reduce(
+    (n, q, i) => n + (picked[i] && String(picked[i]).toUpperCase() === String(q.answer || '').toUpperCase() ? 1 : 0),
+    0,
+  );
+
+  if (!qs.length) {
+    return <p className="pt-8 text-center text-[1.1em] text-gray-400">这一页没有题目</p>;
+  }
+
+  return (
+    <div className="space-y-4 pt-2">
+      {qs.map((q, qi) => {
+        const mine = picked[qi];
+        const rightLetter = String(q.answer || '').toUpperCase();
+        const isRight = !!mine && String(mine).toUpperCase() === rightLetter;
+        return (
+          <div key={q.id || qi} className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+            <div className="flex items-start gap-3">
+              <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-amber-500 text-sm font-semibold text-white">{qi + 1}</span>
+              <p className="text-[1.2em] leading-relaxed text-gray-900">{q.stem}</p>
+            </div>
+            <div className="mt-3 space-y-2 pl-10">
+              {(q.options || []).map((opt, oi) => {
+                const letter = OPT_LETTERS[oi];
+                const on = mine === letter;
+                const showRight = !!mine && letter === rightLetter;
+                return (
+                  <button
+                    key={oi}
+                    onClick={() => { if (!mine) setPicked((prev) => ({ ...prev, [qi]: letter })); }}
+                    disabled={!!mine}
+                    className={`flex w-full items-start gap-2 rounded-lg border px-3 py-2 text-left text-[1.05em] transition-colors ${
+                      showRight
+                        ? 'border-emerald-400 bg-emerald-50 text-emerald-900'
+                        : on
+                          ? 'border-rose-400 bg-rose-50 text-rose-900'
+                          : 'border-gray-200 hover:border-amber-300 hover:bg-amber-50'
+                    }`}
+                  >
+                    <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded text-xs ${showRight ? 'bg-emerald-500 text-white' : on ? 'bg-rose-500 text-white' : 'bg-gray-100 text-gray-600'}`}>
+                      {letter}
+                    </span>
+                    <span className="min-w-0">{opt}</span>
+                  </button>
+                );
+              })}
+            </div>
+            {mine && (
+              <div className={`mt-3 rounded-lg px-3 py-2 text-[1.05em] ${isRight ? 'bg-emerald-50 text-emerald-800' : 'bg-rose-50 text-rose-800'}`}>
+                <i className={`fa-solid ${isRight ? 'fa-circle-check' : 'fa-circle-xmark'} mr-1.5`}></i>
+                {isRight ? '答对了' : `答错了，正确答案是 ${q.answer}`}
+                {q.analysis && <p className="mt-1 leading-relaxed text-gray-700">{q.analysis}</p>}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {allAnswered && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+          <p className="text-[1.1em] text-amber-900">
+            本节检测完成：答对 <span className="text-xl font-bold">{rightCount}</span> / {qs.length} 题
+          </p>
+          {onNext && (
+            <button onClick={onNext} className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700">
+              继续学习<i className="fa-solid fa-arrow-right ml-1.5"></i>
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+/**
+ * 聚光灯：当前这句讲到的元素亮起，其余淡下去（2026-10-26）。
+ * focus 为空（老课程没有 beats）时一律正常显示，与改动前完全一致。
+ */
+const spot = (focus: string | undefined, fid: string) => {
+  if (!focus || focus === '*') return 'transition-all duration-500';
+  return focus === fid
+    ? 'rounded-xl ring-4 ring-violet-400/70 ring-offset-2 transition-all duration-500'
+    : 'opacity-25 transition-all duration-500';
+};
+
 /** 8 种页型渲染 */
+
+/**
+ * 代码实验页（2026-10-26 第三步）。
+ *
+ * 左边代码可以直接改，右边看运行结果；讲到「跑起来」那句会自动执行一次（beat.run）。
+ * ⛔ 执行复用 /api/python/run（和 Python 作业同一个沙盒），不另写一套执行逻辑。
+ * ⛔ 运行失败要原样显示报错：这是实验，学生改错了就该看到错误信息，不要吞掉。
+ */
+const LabPanel: React.FC<{ page: LecturePage; focus?: string; runToken?: string }> = ({ page, focus, runToken }) => {
+  const lab = page.lab;
+  const [code, setCode] = useState(lab ? lab.code : '');
+  const [out, setOut] = useState<{ ok: boolean; text: string } | null>(null);
+  const [running, setRunning] = useState(false);
+  const [err, setErr] = useState('');
+
+  const run = useCallback(async () => {
+    const src = code;
+    if (!src.trim()) return;
+    setRunning(true);
+    setErr('');
+    try {
+      const res = await fetch('/api/python/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ code: src }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok) throw new Error((json && json.error) || `运行失败（${res.status}）`);
+      const d = (json && json.data) || {};
+      setOut({ ok: !!d.success, text: d.success ? (d.output || '（这段代码没有输出）') : (d.error || '运行出错') });
+    } catch (e) {
+      setErr((e as Error).message || '运行失败');
+    } finally {
+      setRunning(false);
+    }
+  }, [code]);
+
+  // 讲稿推到「跑起来」那句时自动跑一次；用 ref 避免把 run 放进依赖导致反复触发
+  const runRef = useRef(run);
+  runRef.current = run;
+  useEffect(() => {
+    if (runToken) void runRef.current();
+  }, [runToken]);
+
+  if (!lab) {
+    return <p className="pt-8 text-center text-[1.1em] text-gray-400">这一页没有可运行的代码</p>;
+  }
+
+  return (
+    <div className="flex h-[21rem] gap-3 pt-2">
+      <div className={`flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-700 bg-slate-900 ${spot(focus, 'code')}`}>
+        <div className="flex items-center justify-between border-b border-slate-700 px-3 py-1.5">
+          <span className="text-xs uppercase tracking-wide text-slate-400">{lab.lang || 'python'}</span>
+          <button
+            onClick={() => void run()}
+            disabled={running}
+            className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+          >
+            {running ? <><i className="fa-solid fa-spinner fa-spin mr-1"></i>运行中</> : <><i className="fa-solid fa-play mr-1"></i>运行</>}
+          </button>
+        </div>
+        <textarea
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+          spellCheck={false}
+          className="min-h-0 flex-1 resize-none bg-slate-900 px-4 py-3 font-mono text-[1.05em] leading-relaxed text-slate-100 outline-none"
+        />
+      </div>
+
+      <div className={`flex w-[17rem] shrink-0 flex-col overflow-hidden rounded-xl border bg-white ${out && !out.ok ? 'border-rose-300' : 'border-gray-200'} ${spot(focus, 'output')}`}>
+        <div className="flex items-center justify-between border-b border-gray-200 px-3 py-1.5">
+          <span className="text-xs font-medium text-gray-500">运行结果</span>
+          {out && (
+            <span className={`text-[11px] ${out.ok ? 'text-emerald-600' : 'text-rose-600'}`}>
+              {out.ok ? '成功' : '有错误'}
+            </span>
+          )}
+        </div>
+        <pre className={`min-h-0 flex-1 overflow-auto whitespace-pre-wrap px-3 py-2 font-mono text-[0.95em] leading-relaxed ${out && !out.ok ? 'text-rose-700' : 'text-gray-800'}`}>
+          {out ? out.text : (lab.expected ? `这段代码应当输出：${lab.expected}` : '点「运行」看看结果')}
+        </pre>
+        {err && <p className="border-t border-rose-200 px-3 py-1.5 text-xs text-rose-700">{err}</p>}
+        {(lab.hints || []).length > 0 && (
+          <div className="border-t border-gray-200 bg-amber-50/70 px-3 py-2">
+            {(lab.hints || []).map((h, i) => (
+              <p key={i} className="text-[0.95em] leading-relaxed text-amber-900">
+                <i className="fa-solid fa-lightbulb mr-1.5 text-amber-500"></i>{h}
+              </p>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 const PageBody: React.FC<{
   page: LecturePage;
   revealed: boolean;
   onReveal: () => void;
-}> = ({ page, revealed, onReveal }) => {
+  /** 当前节拍要强调的元素（'bullet:0' / 'flow' / 'table:row:1' …） */
+  focus?: string;
+  /** 检测页答完后「继续学习」 */
+  onNext?: () => void;
+  /** 讲解到「跑起来」那句时传一个变化的值，lab 页据此自动执行 */
+  runToken?: string;
+}> = ({ page, revealed, onReveal, focus, onNext, runToken }) => {
+  if (page.kind === 'quiz') {
+    return <QuizPanel page={page} onNext={onNext} />;
+  }
+
+  if (page.kind === 'lab') {
+    return <LabPanel page={page} focus={focus} runToken={runToken} />;
+  }
+
   if (page.kind === 'lead') {
     return (
       <div className="flex h-full flex-col items-center justify-center text-center">
@@ -750,7 +1015,7 @@ const PageBody: React.FC<{
         )}
         {bullets.length === 0 && <p className="text-[1.2em] leading-relaxed text-gray-700">{page.narration}</p>}
         {bullets.map((b, i) => (
-          <div key={i} className="flex items-start gap-4 rounded-xl border border-gray-200 bg-white px-5 py-4 shadow-sm">
+          <div key={i} className={`flex items-start gap-4 rounded-xl border border-gray-200 bg-white px-5 py-4 shadow-sm ${spot(focus, `bullet:${i}`)}`}>
             <span className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-base font-semibold text-white ${page.kind === 'recap' ? 'bg-emerald-500' : 'bg-violet-600'}`}>
               {page.kind === 'recap' ? <i className="fa-solid fa-check"></i> : i + 1}
             </span>
@@ -764,7 +1029,7 @@ const PageBody: React.FC<{
   if (page.kind === 'flow' && page.flow) {
     return (
       <div className="pt-2">
-        <div className="rounded-xl border border-gray-200 bg-white px-3 py-2 shadow-sm">
+        <div className={`rounded-xl border border-gray-200 bg-white px-3 py-2 shadow-sm ${spot(focus, 'flow')}`}>
           <CourseFlowDiagram flow={page.flow} />
         </div>
       </div>
@@ -778,7 +1043,7 @@ const PageBody: React.FC<{
         <div className="flex items-stretch gap-2">
           {steps.map((st, i) => (
             <React.Fragment key={i}>
-              <div className="flex-1 rounded-xl border border-violet-200 bg-white px-4 py-5 shadow-sm">
+              <div className={`flex-1 rounded-xl border border-violet-200 bg-white px-4 py-5 shadow-sm ${spot(focus, `step:${i}`)}`}>
                 <div className="mb-2 flex items-center gap-2">
                   <span className="flex h-7 w-7 items-center justify-center rounded-full bg-violet-600 text-sm font-semibold text-white">{i + 1}</span>
                   <span className="text-[1.3em] font-semibold text-gray-900">{st.label}</span>
@@ -811,7 +1076,7 @@ const PageBody: React.FC<{
           </thead>
           <tbody>
             {table.rows.map((r, ri) => (
-              <tr key={ri} className={ri % 2 ? 'bg-gray-50' : 'bg-white'}>
+              <tr key={ri} className={`${ri % 2 ? 'bg-gray-50' : 'bg-white'} ${spot(focus && focus !== 'table' ? focus : '', `table:row:${ri}`)}`}>
                 {r.map((cell, ci) => (
                   <td key={ci} className={`px-5 py-3 text-[1.15em] ${ci === 0 ? 'font-medium text-gray-900' : 'text-gray-700'}`}>{cell}</td>
                 ))}
@@ -828,7 +1093,7 @@ const PageBody: React.FC<{
     const max = Math.max(1, ...items.map((i) => Number(i.value) || 0));
     return (
       <div className="pt-4">
-        <div className="flex h-[22rem] items-end justify-around gap-6 rounded-xl border border-gray-200 bg-white px-8 py-6 shadow-sm">
+        <div className={`flex h-[22rem] items-end justify-around gap-6 rounded-xl border border-gray-200 bg-white px-8 py-6 shadow-sm ${spot(focus, 'chart')}`}>
           {items.map((it, i) => (
             <div key={i} className="flex h-full flex-1 flex-col items-center justify-end">
               <span className="mb-2 text-[1.1em] font-semibold text-violet-700">
@@ -850,7 +1115,7 @@ const PageBody: React.FC<{
     const lines = String(page.code?.text || '').split('\n');
     return (
       <div className="pt-2">
-        <div className="overflow-hidden rounded-xl border border-slate-700 bg-slate-900 shadow-sm">
+        <div className={`overflow-hidden rounded-xl border border-slate-700 bg-slate-900 shadow-sm ${spot(focus, 'code')}`}>
           <div className="flex items-center justify-between border-b border-slate-700 px-4 py-2">
             <span className="text-xs uppercase tracking-wide text-slate-400">{page.code?.lang || 'text'}</span>
             <span className="flex gap-1.5">
@@ -881,20 +1146,20 @@ const PageBody: React.FC<{
   return (
     <div className="space-y-4 pt-2">
       {page.scenario && (
-        <div className="rounded-xl border border-gray-200 bg-white px-5 py-4 shadow-sm">
+        <div className={`rounded-xl border border-gray-200 bg-white px-5 py-4 shadow-sm ${spot(focus, 'scenario')}`}>
           <p className="text-xs font-medium uppercase tracking-wide text-gray-400">情景</p>
           <p className="mt-1 text-[1.3em] leading-relaxed text-gray-800">{page.scenario}</p>
         </div>
       )}
       {page.question && (
-        <div className="rounded-xl border border-violet-200 bg-violet-50 px-5 py-4">
+        <div className={`rounded-xl border border-violet-200 bg-violet-50 px-5 py-4 ${spot(focus, 'question')}`}>
           <p className="text-xs font-medium uppercase tracking-wide text-violet-500">想一想</p>
           <p className="mt-1 text-[1.3em] font-semibold leading-relaxed text-violet-900">{page.question}</p>
         </div>
       )}
       {page.answer && (
         revealed ? (
-          <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-5 py-4">
+          <div className={`rounded-xl border border-emerald-200 bg-emerald-50 px-5 py-4 ${spot(focus, 'answer')}`}>
             <p className="text-xs font-medium uppercase tracking-wide text-emerald-600">答案</p>
             <p className="mt-1 text-[1.3em] leading-relaxed text-emerald-900">{page.answer}</p>
           </div>

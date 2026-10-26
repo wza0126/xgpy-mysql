@@ -23,6 +23,9 @@ interface LectureCard {
   page_count: number;
   duration_sec: number;
   play_count: number;
+  /** ai = 讲堂内嵌播放；link = 外链课，点了新标签页打开（对方禁止 iframe 嵌入） */
+  source?: 'ai' | 'link';
+  external_url?: string;
 }
 
 const CATEGORIES = ['python精讲', '真题讲评', '易错点', '程序填空题策略', '其他'];
@@ -35,6 +38,8 @@ const KIND_ICON: Record<string, string> = {
   chart: 'fa-chart-simple',
   code: 'fa-code',
   example: 'fa-circle-question',
+  quiz: 'fa-clipboard-question',
+  lab: 'fa-flask',
   recap: 'fa-check-double',
 };
 
@@ -73,6 +78,19 @@ export const AiLectureApp: React.FC = () => {
   useEffect(() => { load(); }, [load]);
 
   const play = async (id: string) => {
+    // 外链课（2026-10-26）：openMAIC 等站点禁止 iframe 嵌入，只能新标签页打开。
+    // ⛔ 必须在这个点击事件里同步调 window.open —— 先 await 详情再打开会被当弹窗拦掉。
+    const target = list.find((x) => x.id === id);
+    if (target?.source === 'link') {
+      if (!target.external_url) { alert('这门课还没有填写链接'); return; }
+      window.open(target.external_url, '_blank', 'noopener,noreferrer');
+      // 上报一次打开，让老师能看到「这门课有没有人看」（失败不影响跳转）
+      try {
+        fetch(`/api/student/lectures/${id}/visit`, { method: 'POST', headers: authHeaders(), keepalive: true });
+      } catch { /* ignore */ }
+      return;
+    }
+
     setOpening(id);
     try {
       const res = await fetch(`/api/student/lectures/${id}`, { headers: authHeaders() });
@@ -200,11 +218,22 @@ export const AiLectureApp: React.FC = () => {
                   <span className="shrink-0 rounded-full bg-violet-50 px-1.5 py-0.5 text-[11px] text-violet-700">{item.category || '其他'}</span>
                   <span className="truncate text-gray-500">{item.chapter || ''}</span>
                 </p>
-                <p className="mt-1 text-xs text-gray-400">
-                  {item.page_count} 页 · 约 {fmtDuration(item.duration_sec)}
+                <p className="mt-1 flex items-center gap-1.5 text-xs text-gray-400">
+                  {item.source === 'link' ? (
+                    <>
+                      <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] text-amber-700">外部课程</span>
+                      {item.duration_sec > 0 && <span>约 {fmtDuration(item.duration_sec)}</span>}
+                    </>
+                  ) : (
+                    <span>{item.page_count} 页 · 约 {fmtDuration(item.duration_sec)}</span>
+                  )}
                 </p>
               </div>
-              <i className="fa-solid fa-play mt-3 shrink-0 text-xs text-violet-500"></i>
+              {item.source === 'link' ? (
+                <i className="fa-solid fa-arrow-up-right-from-square mt-3 shrink-0 text-xs text-amber-600"></i>
+              ) : (
+                <i className="fa-solid fa-play mt-3 shrink-0 text-xs text-violet-500"></i>
+              )}
             </button>
           ))}
         </div>

@@ -11,7 +11,8 @@
 //     模型极爱自己编「1000 个数比较 10 次」这种数据，画出来与知识点对不上，比不画更糟。
 //  ③ narration 一律 clip 到 400 字：TTS 单句上限 300，超了会 400 报错导致整页没声音。
 
-const PAGE_KINDS = ['lead', 'point', 'steps', 'flow', 'table', 'chart', 'code', 'example', 'recap'];
+// quiz（检测页）只能由服务端从题库插进来，模型不要主动产出 —— 它编的题答案不可信
+const PAGE_KINDS = ['lead', 'point', 'steps', 'flow', 'table', 'chart', 'code', 'example', 'recap', 'quiz', 'lab'];
 
 /** 每种页型在提示词里的说明（也是前端渲染的字段约定） */
 const PAGE_KIND_DOC = `- lead（引入，每课第一页）：kicker 一句钩子（≤20 字，写「为什么学这个」），narration 把学生带进来。
@@ -24,7 +25,12 @@ const PAGE_KIND_DOC = `- lead（引入，每课第一页）：kicker 一句钩�
   **凡是讲语句、运算符、循环、分支、输入输出的课，必须有一页 code，且 text 是可运行的真实代码，
   符号（冒号、缩进、括号、引号、= == < > // %）必须原样写出来，绝不能用中文复述代码。**
 - example（例子）：scenario 情景 ≤60 字，question 设问 ≤40 字，answer 答案 ≤60 字（会被"揭晓式"呈现）。
-- recap（小结，每课最后一页）：bullets 2 到 3 条，每条 ≤24 字，收束全课。`;
+- recap（小结，每课最后一页）：bullets 2 到 3 条，每条 ≤24 字，收束全课。
+- lab（代码实验，编程课必备）：lab.code 是**能直接运行**的 Python 代码（≤12 行，必须包含 print，不能有 input 也没有死循环），
+  lab.hints 1 到 2 条（每条 ≤30 字，写「把哪个值改成多少」这类可操作的动作），lab.expected 一句预期输出（≤40 字）。
+  这一页学生可以自己改代码再运行，所以要选那种「改一个值就能看到不同结果」的代码（例如 if-elif-else 判成绩、循环累加）。
+  **讲语句、分支、循环、输入输出时优先用 lab，而不是 code** —— code 只能看，lab 能动手。
+- quiz（检测，由系统从题库插入，**你不要产出这一页**）。`;
 
 const LECTURE_BASE = `你是江苏省高中信息技术老师，正在为「AI 讲堂」录制一节微课程。你的讲解词会被机器逐句念出来投屏给学生看。
 
@@ -38,11 +44,16 @@ const LECTURE_BASE = `你是江苏省高中信息技术老师，正在为「AI �
 const LECTURE_RULES = `【公共规则，任何风格都不许违反】
 1. 每页先有一句结论式标题（≤16 字），再展开讲；不要用「第一页」「接下来」当标题。
 2. 每个专业名词第一次出现时，紧跟一句大白话解释，例如「RAM 就是临时桌面，一断电就清空」。
-3. 讲解词每句不超过 35 个字，短句为主，适合直接朗读；一页讲清一件事。
+3. 讲解按「一句一动作」组织：每页给 beats 数组，每一项是 {say, focus}。
+   say 是要念的一句话，不超过 35 个字；focus 是这句话要强调的屏幕元素，播到这句时它会被点亮。
+   focus 只能取该页型允许的值：point/recap → "bullet:0" "bullet:1"…；steps → "step:0"…；
+   flow → "flow"；table → "table" 或 "table:row:0"…；chart → "chart"；code → "code"；
+   example → "scenario" / "question" / "answer"；lead → "*"。不确定就写 "*"（表示整页）。
+   每页 3 到 6 句，一句只说一件事，不要一句话塞两层意思。
 4. 禁止否定式评价（这都不会、这么简单、太粗心），禁止网络烂梗，禁止「同学们」这类称呼。
 5. 禁止在讲解词里念出页型名称（不要说「这一页是流程图」）。
-6. 【视觉要求，必须满足】每节课至少 **2 页**是 flow / code / table / chart 之一，不能整节课都是纯文字页（lead / point / recap）：
-   讲流程图、循环、条件走向 → 用 flow 画出来；讲代码、运算符、语句 → 用 code 写真实代码；
+6. 【视觉要求，必须满足】每节课至少 **2 页**是 flow / lab / code / table / chart 之一，不能整节课都是纯文字页（lead / point / recap）：
+   讲流程图、循环、条件走向 → 用 flow 画出来；讲代码、运算符、语句 → 优先用 lab（可运行），确实不适合跑再用 code；
    有对比 → 用 table；有数量对比 → 用 chart。
 7. 讲解词不要逐字念代码或符号（不念「a 等于 a 加 1」「大于号小于号」），改成指屏幕：「看屏幕上这一行」，
    再用大白话说这行在干什么。代码和符号交给画面显示。`;
@@ -51,15 +62,16 @@ const LECTURE_STRUCTURE = `【输出结构】只输出一个 JSON 对象，不�
 {
   "title": "课程标题（≤20 字）",
   "pages": [
-    { "kind": "lead", "title": "页标题", "kicker": "为什么学这个", "narration": "要念的话" },
-    { "kind": "point", "title": "页标题", "narration": "要念的话", "bullets": ["要点1", "要点2"] },
-    { "kind": "steps", "title": "页标题", "narration": "要念的话", "steps": [{ "label": "步骤名", "text": "一句说明" }] },
-    { "kind": "flow", "title": "页标题", "narration": "要念的话", "flow": { "nodes": [{ "id": "n1", "type": "start", "text": "开始" }, { "id": "n2", "type": "decision", "text": "条件成立吗" }], "edges": [{ "from": "n1", "to": "n2" }, { "from": "n2", "to": "n3", "label": "是" }] } },
-    { "kind": "table", "title": "页标题", "narration": "要念的话", "table": { "columns": ["列1", "列2"], "rows": [["格1", "格2"]] } },
-    { "kind": "chart", "title": "页标题", "narration": "要念的话", "chart": { "unit": "单位", "items": [{ "label": "标签", "value": 3 }] } },
-    { "kind": "code", "title": "页标题", "narration": "要念的话", "code": { "lang": "python", "text": "代码" }, "note": "一句说明" },
-    { "kind": "example", "title": "页标题", "narration": "要念的话", "scenario": "情景", "question": "设问", "answer": "答案" },
-    { "kind": "recap", "title": "页标题", "narration": "要念的话", "bullets": ["回顾1", "回顾2"] }
+    { "kind": "lead", "title": "页标题", "kicker": "为什么学这个", "beats": [{ "say": "要念的话", "focus": "*" }] },
+    { "kind": "point", "title": "页标题", "bullets": ["要点1", "要点2"], "beats": [{ "say": "先讲第一个要点", "focus": "bullet:0" }, { "say": "再讲第二个要点", "focus": "bullet:1" }] },
+    { "kind": "steps", "title": "页标题", "steps": [{ "label": "步骤名", "text": "一句说明" }], "beats": [{ "say": "要念的话", "focus": "step:0" }] },
+    { "kind": "flow", "title": "页标题", "flow": { "nodes": [{ "id": "n1", "type": "start", "text": "开始" }, { "id": "n2", "type": "decision", "text": "条件成立吗" }], "edges": [{ "from": "n1", "to": "n2" }, { "from": "n2", "to": "n3", "label": "是" }] }, "beats": [{ "say": "看这张图", "focus": "flow" }] },
+    { "kind": "table", "title": "页标题", "table": { "columns": ["列1", "列2"], "rows": [["格1", "格2"]] }, "beats": [{ "say": "先看第一行", "focus": "table:row:0" }] },
+    { "kind": "chart", "title": "页标题", "chart": { "unit": "单位", "items": [{ "label": "标签", "value": 3 }] }, "beats": [{ "say": "看这组数据", "focus": "chart" }] },
+    { "kind": "code", "title": "页标题", "code": { "lang": "python", "text": "代码" }, "note": "一句说明", "beats": [{ "say": "看屏幕上这一行", "focus": "code" }] },
+    { "kind": "lab", "title": "页标题", "lab": { "lang": "python", "code": "score = 90\nif score >= 90:\n    print('优秀！')\nelse://n    print('再接再厉')", "hints": ["把 90 改成 75 再运行"], "expected": "优秀！" }, "beats": [{ "say": "先看这段代码", "focus": "code" }, { "say": "我们把它跑起来", "focus": "output", "run": true }, { "say": "把 90 改成 75 再试一次", "focus": "code" }] },
+    { "kind": "example", "title": "页标题", "scenario": "情景", "question": "设问", "answer": "答案", "beats": [{ "say": "先看情景", "focus": "scenario" }, { "say": "想一想", "focus": "question" }, { "say": "答案是这样", "focus": "answer" }] },
+    { "kind": "recap", "title": "页标题", "bullets": ["回顾1", "回顾2"], "beats": [{ "say": "回到今天讲的内容", "focus": "bullet:0" }] }
   ]
 }
 
@@ -92,7 +104,7 @@ function buildLectureSystemPrompt(style, opts = {}) {
     `【讲解风格：${styleName}】\n${snippet}\n注意：风格只改「怎么说」，上面关于内容与结构的要求一句都不能改。`,
     LECTURE_STRUCTURE,
     `【本课规模】共 ${pageTarget} 页（允许 ${pageTarget - 1} 到 ${pageTarget + 1} 页）：第一页必须是 lead，最后一页必须是 recap，中间从 point / steps / table / chart / code / example 里按内容需要挑，不要为了凑数硬塞。
-每页 narration 80 到 200 字，两句到四句。整个 JSON 必须在 ${pageTarget * 260} 字以内写完，不要截断。`,
+每页 beats 3 到 6 句、合计 80 到 200 字。整个 JSON 必须在 ${pageTarget * 260} 字以内写完，不要截断。`,
   ].join('\n\n');
 }
 
@@ -138,6 +150,52 @@ function chartToPoint(page) {
 }
 
 /**
+ * 某一页允许的 focus 取值（2026-10-26）。
+ * 模型写错 focus 时不能硬套 —— 高亮错元素比不高亮更误导，所以非法值一律丢掉（等于不高亮）。
+ */
+function allowedFocusOf(page) {
+  const set = new Set(['*']);
+  const kind = page.kind;
+  if (kind === 'point' || kind === 'recap') {
+    (page.bullets || []).forEach((_, i) => set.add(`bullet:${i}`));
+  } else if (kind === 'steps') {
+    (page.steps || []).forEach((_, i) => set.add(`step:${i}`));
+  } else if (kind === 'flow') {
+    set.add('flow');
+  } else if (kind === 'table') {
+    set.add('table');
+    ((page.table && page.table.rows) || []).forEach((_, i) => set.add(`table:row:${i}`));
+  } else if (kind === 'chart') {
+    set.add('chart');
+  } else if (kind === 'code') {
+    set.add('code');
+  } else if (kind === 'example') {
+    ['scenario', 'question', 'answer'].forEach((k) => set.add(k));
+  } else if (kind === 'lab') {
+    // 代码区与运行结果区：两句讲完「看代码 → 跑起来看输出」
+    set.add('code');
+    set.add('output');
+  }
+  return set;
+}
+
+/** 校验节拍数组：每句 say ≤120 字（TTS 安全），focus 必须在白名单内 */
+function normalizeLectureBeats(rawBeats, page) {
+  if (!Array.isArray(rawBeats) || !rawBeats.length) return null;
+  const ok = allowedFocusOf(page);
+  const beats = rawBeats
+    .slice(0, 10)
+    .map((b) => {
+      const say = clip(b && b.say, 120);
+      const f = String((b && b.focus) || '').trim();
+      // run=true：讲到这句时自动把代码跑一次（lab 页用），其余页忽略
+      return { say, focus: ok.has(f) ? f : '', run: !!(b && b.run === true) };
+    })
+    .filter((b) => b.say);
+  return beats.length >= 2 ? beats : null;
+}
+
+/**
  * 校验并规范化模型输出。
  * @param {object} obj 模型返回的 JSON
  * @param {object} opts { outline: 老师给的大纲原文, pageTarget }
@@ -153,7 +211,9 @@ function normalizeLecturePages(obj, opts = {}) {
     if (!p || typeof p !== 'object') continue;
     const kind = PAGE_KINDS.includes(p.kind) ? p.kind : 'point';
     const narration = clip(p.narration, NARRATION_MAX);
-    if (!narration) continue; // 没有讲解词的页等于空白页，直接丢
+    const hasBeats = Array.isArray(p.beats) && p.beats.length > 0;
+    // 没有讲解词的页等于空白页；但如果给了 beats（新版格式），讲解词由 beats 拼接而来
+    if (!narration && !hasBeats) continue;
 
     const page = { kind, title: clip(p.title, 20) || '讲解', narration };
 
@@ -230,6 +290,27 @@ function normalizeLecturePages(obj, opts = {}) {
         page.code = { lang, text: codeText };
         page.note = clip(p.note, 60);
       }
+    } else if (kind === 'lab') {
+      // 代码实验页（2026-10-26 第三步）：代码要能直接跑，hints 是给学生的动手提示。
+      // ⛔ 这里只做格式校验；「跑不跑得通」由生成后服务端真的跑一次再定（index.js verifyLabPages）。
+      const rawLab = p.lab && typeof p.lab === 'object' ? p.lab : {};
+      const labCode = clipMultiline(rawLab.code, 1200);
+      const labLines = labCode ? labCode.split('\n').length : 0;
+      if (!labCode || labLines > 16 || !/print\s*\(/.test(labCode)) {
+        // 没代码 / 太长 / 没有输出 → 降级成不能跑的 code 页
+        page.kind = 'code';
+        if (labCode) page.code = { lang: 'python', text: labCode };
+      } else {
+        page.lab = {
+          lang: 'python',
+          code: labCode,
+          hints: (Array.isArray(rawLab.hints) ? rawLab.hints : [])
+            .slice(0, 2)
+            .map((h) => clip(h, 40))
+            .filter(Boolean),
+          expected: clip(rawLab.expected, 60),
+        };
+      }
     } else if (kind === 'example') {
       page.scenario = clip(p.scenario, 80);
       page.question = clip(p.question, 60);
@@ -240,6 +321,14 @@ function normalizeLecturePages(obj, opts = {}) {
         .slice(0, 4)
         .map((b) => clip(b, 26))
         .filter(Boolean);
+    }
+
+    // 讲解节拍（2026-10-26）：校验 focus，并用节拍拼出 narration，
+    // 保证「字幕显示的」与「实际念出来的」一字不差（模型两者常写得不一样）。
+    const beats = normalizeLectureBeats(p.beats, page);
+    if (beats) {
+      page.beats = beats;
+      page.narration = clip(beats.map((b) => b.say).join(''), NARRATION_MAX) || page.narration;
     }
 
     pages.push(page);
@@ -274,6 +363,7 @@ module.exports = {
   lecturePromptVersion,
   normalizeLecturePages,
   normalizeLecturePage,
+  normalizeLectureBeats,
   estimateDuration,
   numberAppearsIn,
 };

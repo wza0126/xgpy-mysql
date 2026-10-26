@@ -19,6 +19,9 @@ interface LectureCard {
   sort_order: number;
   play_count: number;
   updated_at?: string;
+  /** 课程来源（2026-10-26）：ai = AI 生成；link = 引用外链，点开新标签页打开 */
+  source?: 'ai' | 'link';
+  external_url?: string;
 }
 
 /** 课程分类（与后端 LECTURE_CATEGORIES 一致；后端是唯一真源，这里只做展示与筛选） */
@@ -64,6 +67,8 @@ const KIND_ICON: Record<string, string> = {
   code: 'fa-code',
   example: 'fa-circle-question',
   recap: 'fa-check-double',
+  quiz: 'fa-clipboard-question',
+  lab: 'fa-flask',
 };
 
 const fmtDuration = (sec: number) => {
@@ -105,6 +110,8 @@ export const LectureManager: React.FC = () => {
 
   const [wizardOpen, setWizardOpen] = useState(false);
   const [editing, setEditing] = useState<Lecture | null>(null);
+  /** 外链课的轻量编辑（2026-10-26）：不开那套逐页编辑器，只改链接/标题/班级 */
+  const [editingLink, setEditingLink] = useState<LectureCard | null>(null);
   const [playing, setPlaying] = useState<Lecture | null>(null);
   const [editPageIdx, setEditPageIdx] = useState(0);
 
@@ -165,7 +172,9 @@ export const LectureManager: React.FC = () => {
       if (!window.confirm(`取消发布后学生端就看不到「${item.title}」了，确定吗？`)) return;
       await backendClient.post(`/api/teacher/lectures/${item.id}/unpublish`, {});
     } else {
-      if (!item.page_count) { alert('这门课还没有生成页面，不能发布'); return; }
+      // 外链课没有 pages，但有链接就能发布
+      if (item.source !== 'link' && !item.page_count) { alert('这门课还没有生成页面，不能发布'); return; }
+      if (item.source === 'link' && !item.external_url) { alert('这门外链课还没有填写链接'); return; }
       await backendClient.post(`/api/teacher/lectures/${item.id}/publish`, {});
     }
     await loadList();
@@ -407,6 +416,11 @@ export const LectureManager: React.FC = () => {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
                       <h3 className="truncate font-semibold text-gray-800" title={item.title}>{item.title}</h3>
+                      {item.source === 'link' && (
+                        <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[11px] text-amber-700" title="引用外部平台课程，学生端点开新标签页打开">
+                          <i className="fa-solid fa-arrow-up-right-from-square mr-0.5"></i>外链
+                        </span>
+                      )}
                       {item.status === 'published' ? (
                         <span className="shrink-0 rounded bg-emerald-100 px-1.5 py-0.5 text-[11px] text-emerald-700">已发布</span>
                       ) : (
@@ -418,7 +432,9 @@ export const LectureManager: React.FC = () => {
                       <span className="truncate text-gray-500">{item.chapter || '未填章节'}</span>
                     </p>
                     <p className="mt-1 text-xs text-gray-400">
-                      {item.page_count} 页 · 约 {fmtDuration(item.duration_sec)}
+                      {item.source === 'link'
+                        ? `外部课程${item.duration_sec > 0 ? ` · 约 ${fmtDuration(item.duration_sec)}` : ''}`
+                        : `${item.page_count} 页 · 约 ${fmtDuration(item.duration_sec)}`}
                       {item.play_count > 0 && <span className="ml-2">播放 {item.play_count} 次</span>}
                       {viewed.length > 0 && (
                         <span className="ml-2 rounded bg-sky-50 px-1.5 py-0.5 text-[11px] text-sky-700">
@@ -430,15 +446,32 @@ export const LectureManager: React.FC = () => {
                 </div>
 
                 <div className="mt-auto flex items-center gap-1.5 border-t border-gray-100 px-3 py-2">
+                  {item.source === 'link' ? (
+                    <button
+                      onClick={() => {
+                        // ⛔ 必须在点击事件里同步 open，不能先 await 详情再打开，否则被当弹窗拦掉
+                        if (!item.external_url) { alert('这门外链课还没有填写链接'); return; }
+                        window.open(item.external_url, '_blank', 'noopener,noreferrer');
+                      }}
+                      className="rounded-lg bg-amber-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-amber-700"
+                      title="在浏览器新标签页打开这门课程"
+                    >
+                      <i className="fa-solid fa-arrow-up-right-from-square mr-1"></i>打开
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => playItem(item.id)}
+                      disabled={!item.page_count}
+                      className="rounded-lg bg-violet-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-violet-700 disabled:opacity-40"
+                      title="全屏投屏播放"
+                    >
+                      <i className="fa-solid fa-play mr-1"></i>播放
+                    </button>
+                  )}
                   <button
-                    onClick={() => playItem(item.id)}
-                    disabled={!item.page_count}
-                    className="rounded-lg bg-violet-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-violet-700 disabled:opacity-40"
-                    title="全屏投屏播放"
+                    onClick={() => (item.source === 'link' ? setEditingLink(item) : openEditor(item.id))}
+                    className="rounded-lg border border-gray-300 px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
                   >
-                    <i className="fa-solid fa-play mr-1"></i>播放
-                  </button>
-                  <button onClick={() => openEditor(item.id)} className="rounded-lg border border-gray-300 px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-50">
                     <i className="fa-solid fa-pen mr-1"></i>编辑
                   </button>
                   <button
@@ -510,9 +543,20 @@ export const LectureManager: React.FC = () => {
           onCreated={async (lecture) => {
             setWizardOpen(false);
             await loadList();
+            // 外链课没有 pages，进逐页编辑器只会看到空白，直接回列表
+            if ((lecture as any)?.source === 'link') return;
             setEditing(lecture);
             setEditPageIdx(0);
           }}
+        />
+      )}
+
+      {editingLink && (
+        <LinkLectureDialog
+          item={editingLink}
+          classes={classes}
+          onClose={() => setEditingLink(null)}
+          onSaved={async () => { setEditingLink(null); await loadList(); }}
         />
       )}
 
@@ -561,6 +605,144 @@ export const LectureManager: React.FC = () => {
   );
 };
 
+// ============ 外链课编辑（2026-10-26）============
+/**
+ * 外链课不提供逐页编辑器：它没有 pages，那套 UI 全是空的。
+ * 这里只改标题、链接、时长、说明、开放班级 —— 够用且不会误伤 AI 课的页面结构。
+ */
+const LinkLectureDialog: React.FC<{
+  item: LectureCard;
+  classes: ClassInfo[];
+  onClose: () => void;
+  onSaved: () => void;
+}> = ({ item, classes, onClose, onSaved }) => {
+  const [title, setTitle] = useState(item.title);
+  const [url, setUrl] = useState(item.external_url || '');
+  const [chapter, setChapter] = useState(item.chapter || '');
+  const [minutes, setMinutes] = useState(Math.round((item.duration_sec || 0) / 60));
+  const [classIds, setClassIds] = useState<string[]>(item.class_ids || []);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const save = async () => {
+    if (!title.trim()) { setErr('请填写课程标题'); return; }
+    const u = url.trim();
+    if (!u.toLowerCase().startsWith('https:') || u.length > 600) {
+      setErr('链接必须是 https:// 开头');
+      return;
+    }
+    setErr('');
+    setSaving(true);
+    try {
+      await backendClient.put(`/api/teacher/lectures/${item.id}`, {
+        title: title.trim(),
+        external_url: u,
+        chapter: chapter.trim(),
+        duration_min: minutes,
+        class_ids: classIds,
+      });
+      onSaved();
+    } catch (e) {
+      setErr((e as Error).message || '保存失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[9990] flex items-center justify-center bg-black/40 p-4">
+      <div className="flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl">
+        <div className="flex items-center justify-between border-b border-gray-200 px-6 py-3">
+          <h3 className="text-lg font-semibold text-gray-800">
+            <i className="fa-solid fa-arrow-up-right-from-square mr-2 text-amber-600"></i>编辑外链课程
+          </h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-700">
+            <i className="fa-solid fa-xmark"></i>
+          </button>
+        </div>
+
+        <div className="flex-1 space-y-4 overflow-auto px-6 py-4">
+          {err && (
+            <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{err}</div>
+          )}
+          <div>
+            <label className="mb-1 block text-sm font-medium text-gray-700">课程标题</label>
+            <input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-violet-400 focus:outline-none"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium text-gray-700">课程链接</label>
+            <input
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-violet-400 focus:outline-none"
+            />
+            <button
+              type="button"
+              onClick={() => window.open(url.trim(), '_blank', 'noopener,noreferrer')}
+              className="mt-1 text-xs text-violet-600 hover:underline"
+            >
+              <i className="fa-solid fa-arrow-up-right-from-square mr-1"></i>先打开看看
+            </button>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">章节（可留空）</label>
+              <input
+                value={chapter}
+                onChange={(e) => setChapter(e.target.value)}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">预计时长（分钟）</label>
+              <input
+                type="number"
+                min={0}
+                max={600}
+                value={minutes || ''}
+                onChange={(e) => setMinutes(Math.max(0, Math.min(600, Number(e.target.value) || 0)))}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+              />
+            </div>
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium text-gray-700">开放班级（不选 = 全部班级可见）</label>
+            <div className="flex flex-wrap gap-2">
+              {classes.length === 0 && <span className="text-xs text-gray-400">没有可选班级</span>}
+              {classes.map((c) => {
+                const on = classIds.includes(c.id);
+                return (
+                  <button
+                    key={c.id}
+                    type="button"
+                    onClick={() => setClassIds((prev) => (on ? prev.filter((x) => x !== c.id) : [...prev, c.id]))}
+                    className={`rounded-lg border px-3 py-1.5 text-xs ${on ? 'border-violet-400 bg-violet-50 text-violet-700' : 'border-gray-300 text-gray-600 hover:bg-gray-50'}`}
+                  >
+                    {on && <i className="fa-solid fa-check mr-1"></i>}{c.name}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-gray-200 px-6 py-3">
+          <button onClick={onClose} disabled={saving} className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-40">
+            取消
+          </button>
+          <button onClick={save} disabled={saving} className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50">
+            {saving ? '保存中…' : '保存'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ============ 新建向导 ============
 const NewLectureWizard: React.FC<{
   classes: ClassInfo[];
@@ -578,9 +760,41 @@ const NewLectureWizard: React.FC<{
   const [classIds, setClassIds] = useState<string[]>([]);
   const [phase, setPhase] = useState<'form' | 'creating' | 'generating'>('form');
   const [err, setErr] = useState('');
+  /** 来源：ai = 现有 AI 生成；link = 引用现成课程（openMAIC 等），只存地址 */
+  const [mode, setMode] = useState<'ai' | 'link'>('ai');
+  const [url, setUrl] = useState('');
+  const [minutes, setMinutes] = useState(0);
 
   const submit = async (generate: boolean) => {
     if (!title.trim()) { setErr('请填写课程标题'); return; }
+
+    // 外链课：不生成、不消耗 AI，创建出来就能发布
+    if (mode === 'link') {
+      const u = url.trim();
+      if (!u) { setErr('请粘贴课程链接'); return; }
+      // ⛔ 只接受 https：http 在 https 页面里会被浏览器当混合内容拦掉
+      if (!u.toLowerCase().startsWith('https:') || u.length > 600) {
+        setErr('链接必须是 https:// 开头（http 会被浏览器拦）');
+        return;
+      }
+      setErr('');
+      setPhase('creating');
+      try {
+        const created = await backendClient.post('/api/teacher/lectures', {
+          title: title.trim(), category, chapter: chapter.trim(),
+          outline, source: 'link', external_url: u, duration_min: minutes,
+          class_ids: classIds,
+        });
+        const lec = created?.data?.lecture;
+        if (!lec) throw new Error('创建失败');
+        onCreated(lec);
+      } catch (e) {
+        setErr((e as Error).message || '创建失败');
+        setPhase('form');
+      }
+      return;
+    }
+
     if (!outline.trim()) { setErr('请填写知识点大纲'); return; }
     setErr('');
     setPhase('creating');
@@ -630,6 +844,27 @@ const NewLectureWizard: React.FC<{
               {err && (
                 <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{err}</div>
               )}
+              {/* 来源二选一：AI 生成 / 引用现成课程（2026-10-26） */}
+              <div className="flex gap-1 rounded-lg bg-gray-100 p-1">
+                {([['ai', 'AI 生成', 'fa-wand-magic-sparkles'], ['link', '引用现成课程', 'fa-link']] as const).map(([k, label, icon]) => (
+                  <button
+                    key={k}
+                    type="button"
+                    onClick={() => setMode(k)}
+                    className={`flex-1 rounded-md px-3 py-1.5 text-sm transition-colors ${
+                      mode === k ? 'bg-white font-medium text-violet-700 shadow-sm' : 'text-gray-600 hover:text-gray-800'
+                    }`}
+                  >
+                    <i className={`fa-solid ${icon} mr-1.5`}></i>{label}
+                  </button>
+                ))}
+              </div>
+              {mode === 'link' && (
+                <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800">
+                  引用别的平台做好的课程（如 openMAIC）。这类课程<strong>不能嵌在讲堂里播放</strong>，
+                  学生会点开新标签页去看，讲堂只能统计「打开过几次」，拿不到观看进度。
+                </p>
+              )}
               <div className="grid grid-cols-3 gap-3">
                 <div className="col-span-2">
                   <label className="mb-1 block text-sm font-medium text-gray-700">课程标题</label>
@@ -660,7 +895,48 @@ const NewLectureWizard: React.FC<{
                   className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-violet-400 focus:outline-none"
                 />
               </div>
-              <div>
+              {mode === 'link' && (
+                <>
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-gray-700">
+                      课程链接 <span className="text-rose-500">*</span>
+                    </label>
+                    <input
+                      value={url}
+                      onChange={(e) => setUrl(e.target.value)}
+                      placeholder="https://open.maic.chat/classroom/..."
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-violet-400 focus:outline-none"
+                    />
+                    <p className="mt-1 text-xs text-gray-400">
+                      只支持 https。请先在无痕窗口打开确认：学生不用登录也能看。
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="mb-1 block text-sm font-medium text-gray-700">预计时长（分钟，可留空）</label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={600}
+                        value={minutes || ''}
+                        onChange={(e) => setMinutes(Math.max(0, Math.min(600, Number(e.target.value) || 0)))}
+                        placeholder="例如 15"
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-sm font-medium text-gray-700">简要说明（可留空）</label>
+                      <input
+                        value={outline}
+                        onChange={(e) => setOutline(e.target.value)}
+                        placeholder="一句话说明这节课讲什么"
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                      />
+                    </div>
+                  </div>
+                </>
+              )}
+              <div className={mode === 'link' ? 'hidden' : ''}>
                 <label className="mb-1 block text-sm font-medium text-gray-700">
                   知识点大纲 <span className="text-rose-500">*</span>
                 </label>
@@ -741,12 +1017,20 @@ const NewLectureWizard: React.FC<{
           <button onClick={onClose} disabled={phase !== 'form'} className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-40">
             取消
           </button>
-          <button onClick={() => submit(false)} disabled={phase !== 'form'} className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-40">
-            只存大纲
-          </button>
-          <button onClick={() => submit(true)} disabled={phase !== 'form'} className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50">
-            <i className="fa-solid fa-wand-magic-sparkles mr-1.5"></i>生成微课程
-          </button>
+          {mode === 'ai' && (
+            <button onClick={() => submit(false)} disabled={phase !== 'form'} className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-40">
+              只存大纲
+            </button>
+          )}
+          {mode === 'link' ? (
+            <button onClick={() => submit(false)} disabled={phase !== 'form'} className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50">
+              <i className="fa-solid fa-link mr-1.5"></i>创建外链课程
+            </button>
+          ) : (
+            <button onClick={() => submit(true)} disabled={phase !== 'form'} className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50">
+              <i className="fa-solid fa-wand-magic-sparkles mr-1.5"></i>生成微课程
+            </button>
+          )}
         </div>
       </div>
     </div>
