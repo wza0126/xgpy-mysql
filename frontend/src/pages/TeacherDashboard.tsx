@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuth } from '../hooks/useAuth';
 import { useSiteConfig } from '../hooks/useSiteConfig';
@@ -45,29 +45,104 @@ interface LicenseStatus {
 
 const PAID_MENU_ITEMS = ['apps', 'prizes', 'pets', 'taskManager', 'proxyNet', 'game', 'rollCall', 'analytics', 'creativeWorkshop'];
 
-const menuItems = [
-  { id: 'notifications', title: '通知管理', icon: 'fa-bell' },
-  { id: 'messageManager', title: '消息设置', icon: 'fa-comments' },
-  { id: 'taskManager', title: '备课工作台', icon: 'fa-chalkboard-user' },
-  { id: 'rollCall', title: '课堂点名', icon: 'fa-hand-pointer' },
-  { id: 'proxyNet', title: '上网管理', icon: 'fa-earth-asia' },
-  { id: 'creativeWorkshop', title: 'AI创意工坊', icon: 'fa-wand-magic-sparkles' },
-  { id: 'mentalHealth', title: '心理健康', icon: 'fa-heart-pulse' },
-  { id: 'classes', title: '班级管理', icon: 'fa-users' },
-  { id: 'students', title: '学生管理', icon: 'fa-user-graduate' },
-  { id: 'questions', title: '题库管理', icon: 'fa-book' },
-  { id: 'wpsOp', title: 'WPS/ACCESS', icon: 'fa-file-excel' },
-  { id: 'knowledgeBase', title: '答疑库管理', icon: 'fa-graduation-cap' },
-  { id: 'tests', title: '考试管理', icon: 'fa-clipboard-check' },
-  { id: 'python', title: 'Python编程', icon: 'fa-code' },
-  { id: 'apps', title: '应用管理', icon: 'fa-th-large' },
-  { id: 'prizes', title: '积分兑换管理', icon: 'fa-gift' },
-  { id: 'pets', title: '萌宠配置', icon: 'fa-paw' },
-  { id: 'game', title: '刷题打怪系统', icon: 'fa-gamepad' },
-  { id: 'layers', title: '图层背景', icon: 'fa-layer-group' },
-  { id: 'analytics', title: '学情分析', icon: 'fa-chart-line' },
-  { id: 'settings', title: '系统配置', icon: 'fa-cog' },
+// 菜单按「一节课的使用顺序」分组：备课 → 上课 → 复盘 → 管人 → 资源 → 配置。
+// 2026-10-26 之前是一个 21 项的平铺列表，顺序等于开发追加顺序（通知/消息这类低频配置
+// 占了最前面，班级/学生/题库/考试被拆成四段）。分组只是重排，功能一个没增没减。
+// ⚠️ id 一律不许改：activeTab、旧收藏链接、PAID_MENU_ITEMS、components 映射全靠它。
+const MENU_GROUPS: { title: string; items: { id: string; title: string; icon: string }[] }[] = [
+  {
+    title: '日常教学',
+    items: [
+      { id: 'taskManager', title: '备课工作台', icon: 'fa-chalkboard-user' },
+      { id: 'rollCall', title: '课堂点名', icon: 'fa-hand-pointer' },
+      { id: 'analytics', title: '学情分析', icon: 'fa-chart-line' },
+      { id: 'tests', title: '考试管理', icon: 'fa-clipboard-check' },
+    ],
+  },
+  {
+    title: '班级与学生',
+    items: [
+      { id: 'classes', title: '班级管理', icon: 'fa-users' },
+      { id: 'students', title: '学生管理', icon: 'fa-user-graduate' },
+      { id: 'mentalHealth', title: '心理健康', icon: 'fa-heart-pulse' },
+      { id: 'proxyNet', title: '上网管理', icon: 'fa-earth-asia' },
+    ],
+  },
+  {
+    title: '教学资源',
+    items: [
+      { id: 'questions', title: '题库管理', icon: 'fa-book' },
+      { id: 'wpsOp', title: 'WPS/ACCESS', icon: 'fa-file-excel' },
+      { id: 'python', title: 'Python编程', icon: 'fa-code' },
+      { id: 'knowledgeBase', title: '答疑库管理', icon: 'fa-graduation-cap' },
+    ],
+  },
+  {
+    title: '激励体系',
+    items: [
+      { id: 'prizes', title: '积分兑换管理', icon: 'fa-gift' },
+      { id: 'pets', title: '萌宠配置', icon: 'fa-paw' },
+      { id: 'game', title: '刷题打怪系统', icon: 'fa-gamepad' },
+    ],
+  },
+  {
+    title: '学生桌面',
+    items: [
+      { id: 'apps', title: '应用管理', icon: 'fa-th-large' },
+      { id: 'layers', title: '图层背景', icon: 'fa-layer-group' },
+      { id: 'creativeWorkshop', title: 'AI创意工坊', icon: 'fa-wand-magic-sparkles' },
+    ],
+  },
+  {
+    title: '通知与系统',
+    items: [
+      { id: 'notifications', title: '通知管理', icon: 'fa-bell' },
+      { id: 'messageManager', title: '消息设置', icon: 'fa-comments' },
+      { id: 'settings', title: '系统配置', icon: 'fa-cog' },
+    ],
+  },
 ];
+
+// 扁平列表：标题栏文字、授权判断、组件映射都按 id 查，顺序无所谓
+const menuItems = MENU_GROUPS.flatMap((g) => g.items);
+
+/** 侧边栏单个菜单项（桌面栏与移动端抽屉共用，避免两处各写一遍） */
+const MenuButton: React.FC<{
+  item: { id: string; title: string; icon: string };
+  active: boolean;
+  locked: boolean;
+  collapsed?: boolean;
+  dense?: boolean;
+  onClick: (id: string) => void;
+}> = ({ item, active, locked, collapsed, dense, onClick }) => (
+  <button
+    onClick={() => onClick(item.id)}
+    className={`w-full flex items-center gap-3 px-4 ${dense ? 'py-2.5' : 'py-3'} rounded-lg transition-all ${
+      active
+        ? 'bg-blue-600 text-white shadow-lg'
+        : locked
+        ? 'text-gray-500 hover:bg-gray-800 hover:text-gray-400'
+        : 'text-gray-300 hover:bg-gray-800 hover:text-white'
+    } ${collapsed ? 'justify-center' : ''}`}
+    title={collapsed ? item.title : locked ? `${item.title}（需授权）` : ''}
+  >
+    <div className="relative">
+      <i className={`fa-solid ${item.icon} ${collapsed ? 'text-lg' : ''}`}></i>
+      {locked && !collapsed && (
+        <i className="fa-solid fa-lock text-[10px] absolute -bottom-1 -right-2 text-amber-400"></i>
+      )}
+    </div>
+    {!collapsed && <span className="font-medium flex-1 text-left">{item.title}</span>}
+    {locked && !collapsed && (
+      <span className="text-[10px] px-1.5 py-0.5 bg-amber-500/20 text-amber-400 rounded">授权</span>
+    )}
+  </button>
+);
+
+/** 分组标题：折叠态不显示文字，只靠组间的分割线分隔 */
+const MenuGroupTitle: React.FC<{ title: string }> = ({ title }) => (
+  <p className="px-4 pb-1 pt-1 text-[11px] font-medium tracking-wider text-gray-500">{title}</p>
+);
 
 const components: Record<string, React.ReactNode> = {
   notifications: <NotificationManager />,
@@ -97,7 +172,10 @@ const components: Record<string, React.ReactNode> = {
 };
 
 export const TeacherDashboard: React.FC = () => {
-  const [activeTab, setActiveTab] = useState('notifications');
+  // 默认落地页从「通知管理」改成「学情分析」：打开后台先看班里谁掉队，而不是一份通知列表
+  const [activeTab, setActiveTab] = useState('analytics');
+  // 学情分析是付费菜单，授权不可用时不该落在它上面 —— 见 fetchLicenseStatus 里的「一次性纠正」
+  const landingResolvedRef = useRef(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
@@ -119,6 +197,15 @@ export const TeacherDashboard: React.FC = () => {
     trackPageview('/teacher');
   }, []);
 
+  // 落地页兜底：默认页是付费的「学情分析」，授权不可用（过期/未激活/接口拿不到）时退回免费的
+  // 「通知管理」，否则一打开后台就是一屏授权提示。只纠正一次 —— 用 ref 记账，
+  // 免得把这个页面之后手动切走的标签再拉回来。
+  const fallbackLanding = () => {
+    if (landingResolvedRef.current) return;
+    landingResolvedRef.current = true;
+    setActiveTab('notifications');
+  };
+
   const fetchLicenseStatus = async () => {
     try {
       const res = await fetch(`${API_BASE}/api/license/status`);
@@ -128,9 +215,19 @@ export const TeacherDashboard: React.FC = () => {
         if (result.data.isExpiringSoon || !result.data.isValid) {
           setShowLicenseAlert(true);
         }
+        if (!landingResolvedRef.current) {
+          landingResolvedRef.current = true;
+          if (!result.data.isValid && !result.data.isFreeOpenDay) {
+            setActiveTab('notifications');
+          }
+        }
+      } else {
+        fallbackLanding();
       }
     } catch (error) {
+      // 拿不到授权状态时按「不可用」处理，别让付费页当落地页
       console.error('获取授权状态失败:', error);
+      fallbackLanding();
     }
   };
 
@@ -236,45 +333,30 @@ export const TeacherDashboard: React.FC = () => {
               <i className={`fa-solid fa-chevron-left text-xs transition-transform duration-300 ${isCollapsed ? 'rotate-180' : ''}`}></i>
             </button>
 
-            {/* 导航菜单 */}
+            {/* 导航菜单：按组渲染，组间用分割线隔开；折叠态不显示组名，只留分割线 */}
             <nav className="flex-1 overflow-y-auto py-4">
-              <div className={`space-y-1 ${isCollapsed ? 'px-2' : 'px-4'}`}>
-                {visibleMenuItems.map((item) => (
-                  <button
-                    key={item.id}
-                    onClick={() => handleMenuClick(item.id)}
-                    className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
-                      activeTab === item.id
-                        ? 'bg-blue-600 text-white shadow-lg'
-                        : isPaidMenu(item.id) && !canAccessMenu(item.id)
-                        ? 'text-gray-500 hover:bg-gray-800 hover:text-gray-400'
-                        : 'text-gray-300 hover:bg-gray-800 hover:text-white'
-                    } ${isCollapsed ? 'justify-center' : ''}`}
-                    title={isCollapsed ? item.title : (isPaidMenu(item.id) && !canAccessMenu(item.id) ? `${item.title}（需授权）` : '')}
-                  >
-                    <div className="relative">
-                      <i className={`fa-solid ${item.icon} ${isCollapsed ? 'text-lg' : ''}`}></i>
-                      {isPaidMenu(item.id) && !canAccessMenu(item.id) && !isCollapsed && (
-                        <i className="fa-solid fa-lock text-[10px] absolute -bottom-1 -right-2 text-amber-400"></i>
-                      )}
+              <div className={isCollapsed ? 'px-2' : 'px-4'}>
+                {MENU_GROUPS.map((group, gi) => {
+                  const items = group.items.filter((it) => visibleMenuItems.some((v) => v.id === it.id));
+                  if (items.length === 0) return null;
+                  return (
+                    <div key={group.title} className={gi === 0 ? '' : 'mt-2 border-t border-gray-800 pt-2'}>
+                      {!isCollapsed && <MenuGroupTitle title={group.title} />}
+                      <div className="space-y-1">
+                        {items.map((item) => (
+                          <MenuButton
+                            key={item.id}
+                            item={item}
+                            active={activeTab === item.id}
+                            locked={isPaidMenu(item.id) && !canAccessMenu(item.id)}
+                            collapsed={isCollapsed}
+                            onClick={handleMenuClick}
+                          />
+                        ))}
+                      </div>
                     </div>
-                    {!isCollapsed && (
-                      <motion.span
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        exit={{ opacity: 0 }}
-                        className="font-medium flex-1 text-left"
-                      >
-                        {item.title}
-                      </motion.span>
-                    )}
-                    {isPaidMenu(item.id) && !canAccessMenu(item.id) && !isCollapsed && (
-                      <span className="text-[10px] px-1.5 py-0.5 bg-amber-500/20 text-amber-400 rounded">
-                        授权
-                      </span>
-                    )}
-                  </button>
-                ))}
+                  );
+                })}
               </div>
             </nav>
 
@@ -340,34 +422,23 @@ export const TeacherDashboard: React.FC = () => {
                 </div>
 
                 <nav className="flex-1 overflow-y-auto p-4">
-                  <div className="space-y-1">
-                    {visibleMenuItems.map((item) => (
-                      <button
-                        key={item.id}
-                        onClick={() => handleMenuClick(item.id)}
-                        className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
-                          activeTab === item.id
-                            ? 'bg-blue-600 text-white'
-                            : isPaidMenu(item.id) && !canAccessMenu(item.id)
-                            ? 'text-gray-500 hover:bg-gray-800 hover:text-gray-400'
-                            : 'text-gray-300 hover:bg-gray-800 hover:text-white'
-                        }`}
-                      >
-                        <div className="relative">
-                          <i className={`fa-solid ${item.icon}`}></i>
-                          {isPaidMenu(item.id) && !canAccessMenu(item.id) && (
-                            <i className="fa-solid fa-lock text-[10px] absolute -bottom-1 -right-2 text-amber-400"></i>
-                          )}
-                        </div>
-                        <span className="font-medium flex-1 text-left">{item.title}</span>
-                        {isPaidMenu(item.id) && !canAccessMenu(item.id) && (
-                          <span className="text-[10px] px-1.5 py-0.5 bg-amber-500/20 text-amber-400 rounded">
-                            授权
-                          </span>
-                        )}
-                      </button>
-                    ))}
-                  </div>
+                  {MENU_GROUPS.map((group, gi) => (
+                    <div key={group.title} className={gi === 0 ? '' : 'mt-3 border-t border-gray-800 pt-3'}>
+                      <p className="px-4 pb-1 text-[11px] font-medium tracking-wider text-gray-500">{group.title}</p>
+                      <div className="space-y-1">
+                        {group.items.map((item) => (
+                          <MenuButton
+                            key={item.id}
+                            item={item}
+                            active={activeTab === item.id}
+                            locked={isPaidMenu(item.id) && !canAccessMenu(item.id)}
+                            dense
+                            onClick={handleMenuClick}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  ))}
                 </nav>
               </motion.div>
             </>
