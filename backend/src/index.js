@@ -1616,6 +1616,9 @@ app.put('/api/classes/:id/toggles', authenticate, async (req, res) => {
       { key: 'test_enabled',       profileField: 'test_enabled',              label: '测试' },
       { key: 'op_enabled',         profileField: 'op_enabled',                label: '操作题' },
       { key: 'pet_enabled',        profileField: 'pet_enabled',               label: '萌宠' },
+      // 2026-10-26：综合题独立成模块（自己的桌面窗口），开关也要独立，
+      // 不能复用 practice_enabled —— 关掉练习不代表必须关掉综合题。
+      { key: 'composite_enabled',  profileField: 'composite_enabled',         label: '综合题' },
     ];
 
     const classSets = [];
@@ -1978,6 +1981,7 @@ app.put('/api/tables/:tableName/:id', authenticate, async (req, res) => {
         // 模块开关与「强制专注」：只能由老师通过班级管理 / 学生管理改。
         // 不加这里的话，学生可以用通用表接口把自己的练习开关重新打开、或关掉自己的强制专注。
         'python_enabled', 'practice_enabled', 'test_enabled', 'op_enabled', 'pet_enabled',
+        'composite_enabled',
         'focus_force_enabled',
       ];
       const PROTECTED_FIELDS = [...POINT_FIELDS, ...IDENTITY_FIELDS];
@@ -12067,6 +12071,7 @@ app.get('/api/student/desktop-permissions', authenticate, requireStudent, async 
     const [rows] = await pool.query(
       `SELECT p.can_use_app, p.can_exchange_internet_code, p.can_open_exchange_module,
               p.python_enabled, p.practice_enabled, p.test_enabled, p.op_enabled, p.pet_enabled,
+              p.composite_enabled,
               p.focus_force_enabled,
               p.class_id, c.ai_enabled
          FROM profiles p
@@ -12085,7 +12090,7 @@ app.get('/api/student/desktop-permissions', authenticate, requireStudent, async 
                 focus_mode_show_python, focus_mode_show_apps, focus_mode_show_pet,
                 focus_mode_show_exchange, focus_mode_show_leaderboard, focus_mode_show_profile,
                 focus_mode_show_security, focus_mode_show_proxyBrowser, focus_mode_show_creative,
-                focus_mode_show_wpsOp, focus_mode_show_aiExplain,
+                focus_mode_show_wpsOp, focus_mode_show_aiExplain, focus_mode_show_composite,
                 focus_mode_quick_access, focus_mode_classes
            FROM pet_config LIMIT 1`
       );
@@ -12103,6 +12108,8 @@ app.get('/api/student/desktop-permissions', authenticate, requireStudent, async 
         test_enabled: r.test_enabled,
         op_enabled: r.op_enabled,
         pet_enabled: r.pet_enabled,
+        // 综合题模块开关（独立窗口，与练习分开控制）
+        composite_enabled: r.composite_enabled,
         // 个人强制专注：与班级开关取并集，老师可用它单独「罚」某个学生进专注模式
         focus_force_enabled: r.focus_force_enabled,
         ai_enabled: r.ai_enabled,

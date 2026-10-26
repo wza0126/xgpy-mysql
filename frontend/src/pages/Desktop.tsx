@@ -95,12 +95,12 @@ const moduleComponents: Record<string, React.ReactNode> = {
 };
 
 /** 受班级开关控制的模块：桌面图标 id → profiles 上的开关字段（2026-10-24 新增） */
-type ModuleGuardKey = 'practice_enabled' | 'test_enabled' | 'op_enabled' | 'pet_enabled';
+type ModuleGuardKey = 'practice_enabled' | 'test_enabled' | 'op_enabled' | 'pet_enabled' | 'composite_enabled';
 
 const MODULE_GUARD_MAP: Record<string, ModuleGuardKey> = {
   practice: 'practice_enabled',
-  // 综合题练习跟「练习」同一个班级开关：老师关掉练习，综合题也一并关掉
-  composite: 'practice_enabled',
+  // 综合题有独立开关（见 116_composite_module_switch.sql）
+  composite: 'composite_enabled',
   test: 'test_enabled',
   wpsOp: 'op_enabled',
   pet: 'pet_enabled',
@@ -136,6 +136,7 @@ export const Desktop: React.FC = () => {
     test_enabled: true,
     op_enabled: true,
     pet_enabled: true,
+    composite_enabled: true,
   });
 
   // 考试期间自动关闭学习模块：学生可能先开着学习再进考试，
@@ -458,6 +459,7 @@ export const Desktop: React.FC = () => {
         test_enabled: isOn(perm.test_enabled),
         op_enabled: isOn(perm.op_enabled),
         pet_enabled: isOn(perm.pet_enabled),
+        composite_enabled: isOn(perm.composite_enabled),
       };
       setModuleSwitches(moduleSwitchState);
       const guardLabels: Record<ModuleGuardKey, string> = {
@@ -465,6 +467,7 @@ export const Desktop: React.FC = () => {
         test_enabled: '测试',
         op_enabled: '操作题',
         pet_enabled: '萌宠',
+        composite_enabled: '综合题',
       };
       const closedLabels: string[] = [];
       Object.keys(MODULE_GUARD_MAP).forEach((winId) => {

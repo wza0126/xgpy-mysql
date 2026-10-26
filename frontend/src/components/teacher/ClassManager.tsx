@@ -7,7 +7,7 @@ import { useAuth } from '../../hooks/useAuth';
 /** 班级快捷开关的键：每个都对应 classes 表一列，切换后会同步到该班所有学生的 profiles */
 type ClassSwitchKey =
   | 'app_center_enabled' | 'exchange_enabled' | 'internet_enabled' | 'pk_battle_enabled' | 'python_enabled'
-  | 'practice_enabled' | 'test_enabled' | 'op_enabled' | 'pet_enabled';
+  | 'practice_enabled' | 'test_enabled' | 'op_enabled' | 'pet_enabled' | 'composite_enabled';
 
 /** 2026-10-24 新增的四个模块开关（控制学生端能否打开对应窗口），默认启用 */
 const MODULE_SWITCHES: { key: ClassSwitchKey; label: string }[] = [
@@ -15,6 +15,8 @@ const MODULE_SWITCHES: { key: ClassSwitchKey; label: string }[] = [
   { key: 'test_enabled', label: '测试' },
   { key: 'op_enabled', label: '操作题' },
   { key: 'pet_enabled', label: '萌宠' },
+  // 2026-10-26：综合题是独立窗口，单独一个开关（关掉练习不影响综合题）
+  { key: 'composite_enabled', label: '综合题' },
 ];
 
 export const ClassManager: React.FC = () => {
@@ -107,6 +109,7 @@ export const ClassManager: React.FC = () => {
       'test_enabled',
       'op_enabled',
       'pet_enabled',
+      'composite_enabled',
     ];
     const quickToggles: Record<string, boolean> = {};
     for (const k of quickKeys) {

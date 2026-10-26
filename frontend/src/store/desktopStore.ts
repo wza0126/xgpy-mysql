@@ -19,15 +19,16 @@ interface DesktopState {
 export const desktopIcons: DesktopIcon[] = [
   { id: 'learn', title: '学习', icon: 'fa-book', color: 'bg-blue-500' },
   { id: 'practice', title: '练习', icon: 'fa-pen-to-square', color: 'bg-green-500' },
-  // 综合题练习（2026-10-26）：单独入口，不混在单题练习里（见后端 SQL_PRACTICE_SCOPE）
-  { id: 'composite', title: '综合题', icon: 'fa-layer-group', color: 'bg-indigo-600' },
   { id: 'test', title: '测试', icon: 'fa-clipboard-check', color: 'bg-purple-500' },
+  // 2026-10-26：三类「大题」连在一起排（综合题 → 操作题 → 编程题），
+  // 它们都是整题作答、按小题或步骤给分，和单题练习/测试不是一类。
+  { id: 'composite', title: '综合题', icon: 'fa-layer-group', color: 'bg-indigo-600' },
   { id: 'wpsOp', title: '操作题', icon: 'fa-file-excel', color: 'bg-emerald-600' },
+  { id: 'python', title: '编程题', icon: 'fa-code', color: 'bg-blue-600' },
   { id: 'wrong', title: '错题集', icon: 'fa-circle-xmark', color: 'bg-red-500' },
   // AI 讲解（学生端）：默认隐藏，老师在「学生管理 → 讲解」里按账号放开
   { id: 'aiExplain', title: 'AI讲解', icon: 'fa-headphones-simple', color: 'bg-violet-600' },
   { id: 'notebook', title: '记事本', icon: 'fa-note-sticky', color: 'bg-yellow-500' },
-  { id: 'python', title: 'Python编程', icon: 'fa-code', color: 'bg-blue-600' },
   { id: 'apps', title: '应用中心', icon: 'fa-rocket', color: 'bg-indigo-500' },
   { id: 'pet', title: '萌宠', icon: 'fa-paw', color: 'bg-pink-500' },
   { id: 'exchange', title: '兑换', icon: 'fa-gift', color: 'bg-orange-500' },
