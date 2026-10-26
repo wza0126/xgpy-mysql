@@ -56,9 +56,13 @@ interface Props {
   title: string;
   description?: string;
   template: string;
-  /** 学生当前填的答案（按空顺序）；没填就是空串 */
+  /** 学生当前填的答案（按空顺序）；没填就是空串。教师端传标准答案（见 audience） */
   studentAnswers: string[];
   onClose: () => void;
+  /** 谁在听：学生走 /api/student，教师走 /api/teacher（2026-10-26 教师端也能课前核对/课堂播放） */
+  audience?: 'student' | 'teacher';
+  /** 教师端隐藏「你填的」对比（老师没有自己的作答） */
+  hideMyAnswer?: boolean;
 }
 
 interface TtsConfig {
@@ -104,7 +108,9 @@ function speechify(text: string): string {
 
 export const FillBlankExplainPlayer: React.FC<Props> = ({
   taskId, title, description, template, studentAnswers, onClose,
+  audience = 'student', hideMyAnswer = false,
 }) => {
+  const apiBase = audience === 'teacher' ? '/api/teacher' : '/api/student';
   const [script, setScript] = useState<Script | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadErr, setLoadErr] = useState('');
@@ -138,7 +144,7 @@ export const FillBlankExplainPlayer: React.FC<Props> = ({
       setLoading(true);
       setLoadErr('');
       try {
-        const res = await fetch('/api/student/explain/fill-blank', {
+        const res = await fetch(`${apiBase}/explain/fill-blank`, {
           method: 'POST',
           headers: authHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({ task_id: taskId }),
@@ -155,13 +161,13 @@ export const FillBlankExplainPlayer: React.FC<Props> = ({
       }
     })();
     return () => { alive = false; };
-  }, [taskId]);
+  }, [taskId, apiBase]);
 
   // ---------- 语音配置 ----------
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch('/api/student/explain/tts/config', { headers: authHeaders() });
+        const res = await fetch(`${apiBase}/explain/tts/config`, { headers: authHeaders() });
         const json = await res.json().catch(() => null);
         if (json?.data) {
           setTtsConfig(json.data as TtsConfig);
@@ -171,7 +177,7 @@ export const FillBlankExplainPlayer: React.FC<Props> = ({
         setTtsConfig({ configured: false, voices: [], voice: '', speed: 50 });
       }
     })();
-  }, []);
+  }, [apiBase]);
 
   useEffect(() => {
     const load = () => {
@@ -261,7 +267,7 @@ export const FillBlankExplainPlayer: React.FC<Props> = ({
     const key = `${xfyunVcn}|${text}`;
     const hit = blobCacheRef.current.get(key);
     if (hit) return hit;
-    const res = await fetch('/api/student/explain/tts', {
+    const res = await fetch(`${apiBase}/explain/tts`, {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ text, voice: xfyunVcn || undefined, speed: Math.round(50 * rate) }),
@@ -532,7 +538,7 @@ export const FillBlankExplainPlayer: React.FC<Props> = ({
                       也可以写成：<span className="font-mono text-slate-300">{activeBlank.answers.slice(1, 4).join('  或  ')}</span>
                     </p>
                   )}
-                  {(() => {
+                  {!hideMyAnswer && (() => {
                     const mine = String(studentAnswers[step.idx] || '').trim();
                     if (!mine) return <p className="mt-2 text-xs text-slate-500">你这一空还没填</p>;
                     const ok = activeBlank.answers.some((a) => a.replace(/\s+/g, '') === mine.replace(/\s+/g, ''));

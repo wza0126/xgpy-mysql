@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { backendClient } from '../../api/backendClient';
 import { useAuth } from '../../hooks/useAuth';
 import { LatexRenderer } from '../common/LatexRenderer';
+import { FillBlankExplainPlayer } from '../student/FillBlankExplainPlayer';
 
 interface PythonTask {
   id: string;
@@ -22,6 +23,24 @@ interface PythonTask {
   blank_weights?: number[];
   is_active: boolean;
   created_at: string;
+  /** 按班查询时后端附带：该班的有效状态（2026-10-26 按班级启停） */
+  class_active?: boolean;
+  /** null = 该班没单独设置过，继承全局 is_active */
+  class_override?: number | null;
+}
+
+/** 作业完成情况里的一行：全班每个学生，含没交的 */
+interface ProgressStudent {
+  student_id: string;
+  username: string;
+  real_name: string;
+  class_id: string;
+  class_name: string;
+  submitted: boolean;
+  submitted_at: string | null;
+  is_late: boolean;
+  submission_id: string | null;
+  score: number | null;
 }
 
 interface Submission {
@@ -78,22 +97,39 @@ export const PythonManager: React.FC = () => {
   const [classFilter, setClassFilter] = useState<string>('');
   const [submissionsPage, setSubmissionsPage] = useState(1);
   const SUBMISSIONS_PER_PAGE = 100;
-  const [sortBy, setSortBy] = useState<'username' | 'score'>('username');
+  const [sortBy, setSortBy] = useState<'status' | 'username' | 'score' | 'class'>('status');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
   const [selectedSubmissions, setSelectedSubmissions] = useState<string[]>([]);
   const [keywordInput, setKeywordInput] = useState<string>('');
-  const [showUnsubmitted, setShowUnsubmitted] = useState(false);
-  const [unsubmittedStudents, setUnsubmittedStudents] = useState<{ id: string; username: string; real_name?: string }[]>([]);
   const [exportClassId, setExportClassId] = useState<string>('');
+  /** 任务列表的班级视图：既是筛选条件，也是批量启用/禁用的作用班级 */
+  const [taskClassId, setTaskClassId] = useState<string>('');
+  /** 作业完成情况：全班学生（含未提交） */
+  const [progress, setProgress] = useState<ProgressStudent[]>([]);
+  const [progressFilter, setProgressFilter] = useState<'all' | 'submitted' | 'unsubmitted'>('all');
+  /** 删除二次确认弹窗（题目删除不可恢复，必须让人再确认一次） */
+  const [deleteDialog, setDeleteDialog] = useState<{ open: boolean; taskIds: string[]; titles: string[] }>({
+    open: false,
+    taskIds: [],
+    titles: [],
+  });
+  const [deleteAck, setDeleteAck] = useState(false);
+  const [batchBusy, setBatchBusy] = useState(false);
+  /** 教师端编程填空 AI 语音讲解 */
+  const [explainTask, setExplainTask] = useState<PythonTask | null>(null);
 
   useEffect(() => {
     loadData();
     loadClasses();
   }, []);
 
-  const loadData = async () => {
+  const loadData = async (classId: string = taskClassId) => {
     try {
-      const res = await backendClient.get('/api/python/teacher/tasks');
+      const res = await backendClient.get(
+        classId
+          ? `/api/python/teacher/tasks?class_id=${encodeURIComponent(classId)}`
+          : '/api/python/teacher/tasks'
+      );
       const tasks = res.data || [];
       setTasks(tasks);
     } catch (error) {
@@ -163,6 +199,12 @@ export const PythonManager: React.FC = () => {
       const data = (res.data || []).map(normalizeSubmission);
       setSubmissions(data);
       setSubmissionsPage(1);
+      setProgressFilter('all');
+      // 完成情况：一次取回全班（含未提交），前端才能按「完成情况」排序
+      const progRes = await backendClient.get(
+        `/api/python/teacher/task-progress/${task.id}${classFilter ? `?class_id=${encodeURIComponent(classFilter)}` : ''}`
+      );
+      setProgress((progRes.data && progRes.data.students) || []);
     } catch (error) {
       console.error('Failed to load submissions:', error);
       alert('加载提交记录失败，请刷新页面重试');
@@ -197,14 +239,38 @@ export const PythonManager: React.FC = () => {
     setActiveTab('create');
   };
 
-  const deleteTask = async (taskId: string) => {
-    if (!confirm('确定要删除这个任务吗？\n关联的所有作业提交和批改记录也将被删除。')) return;
+  // 删除一律走弹窗二次确认：题目删掉会连带提交与批改记录，库里没有回收站，误删无法恢复
+  const askDeleteTasks = (taskIds: string[]) => {
+    if (!taskIds.length) return;
+    setDeleteAck(false);
+    setDeleteDialog({
+      open: true,
+      taskIds,
+      titles: taskIds.map((id) => tasks.find((t) => t.id === id)?.title || id),
+    });
+  };
+
+  const doDeleteTasks = async () => {
+    const ids = deleteDialog.taskIds;
+    if (!ids.length) return;
+    setDeleteDialog({ open: false, taskIds: [], titles: [] });
+    setBatchBusy(true);
     try {
-      await backendClient.delete(`/api/python/teacher/tasks/${taskId}`);
+      for (const taskId of ids) {
+        await backendClient.delete(`/api/python/teacher/tasks/${taskId}`);
+      }
+      setSelectedTasks([]);
+      if (selectedTask && ids.includes(selectedTask.id)) setSelectedTask(null);
       await loadData();
     } catch (error: any) {
       alert(`删除失败: ${error.message}`);
+    } finally {
+      setBatchBusy(false);
     }
+  };
+
+  const deleteTask = async (taskId: string) => {
+    askDeleteTasks([taskId]);
   };
 
   const toggleTaskSelection = (taskId: string) => {
@@ -224,28 +290,68 @@ export const PythonManager: React.FC = () => {
   };
 
   const deleteSelectedTasks = async () => {
-    if (!confirm(`确定要删除选中的 ${selectedTasks.length} 个任务吗？\n关联的所有作业提交和批改记录也将被删除。`)) return;
-    try {
-      for (const taskId of selectedTasks) {
-        await backendClient.delete(`/api/python/teacher/tasks/${taskId}`);
-      }
-      setSelectedTasks([]);
-      await loadData();
-      setSelectedTask(null);
-    } catch (error: any) {
-      alert(`删除失败: ${error.message}`);
-    }
+    askDeleteTasks(selectedTasks);
   };
+
+  const classLabel = (id: string) => classes.find((c) => c.id === id)?.name || '该班';
 
   const toggleActive = async (taskId: string, e: React.MouseEvent) => {
     e.stopPropagation();
     try {
       const task = tasks.find(t => t.id === taskId);
       if (!task) return;
-      await backendClient.put(`/api/python/teacher/tasks/${taskId}`, { is_active: !task.is_active });
+      // 选了班级就只改这个班（不动全局 is_active），没选班级就是原来的全局开关
+      const current = taskClassId ? (task.class_active ?? task.is_active) : task.is_active;
+      if (taskClassId) {
+        await backendClient.post('/api/python/teacher/tasks/class-status', {
+          task_ids: [taskId],
+          class_id: taskClassId,
+          is_active: !current,
+        });
+      } else {
+        await backendClient.put(`/api/python/teacher/tasks/${taskId}`, { is_active: !current });
+      }
       await loadData();
+      if (selectedTask && selectedTask.id === taskId) {
+        setSelectedTask({ ...selectedTask, is_active: !current });
+        if (selectedTask.task_type === 'fill_blank' || selectedTask.task_type === 'code') {
+          // 右侧列表跟着刷一下，避免状态与列表不一致
+          viewTask({ ...selectedTask, is_active: !current });
+        }
+      }
     } catch (error: any) {
       alert(`操作失败: ${error.message}`);
+    }
+  };
+
+  /**
+   * 批量启用/禁用：作用域 = 选中的题目 × 当前班级筛选。
+   * 启用时后端会把这些题补进该班的 class_ids（否则「启用了却看不见」）；
+   * 禁用只写班级状态，不解除布置关系。
+   */
+  const batchSetActive = async (isActive: boolean) => {
+    if (!selectedTasks.length) return;
+    if (!taskClassId) {
+      alert('请先在左侧「按班级查看」里选一个班。\n批量启用/禁用是按班级生效的，不选班级就不知道该改哪个班。');
+      return;
+    }
+    setBatchBusy(true);
+    try {
+      const res: any = await backendClient.post('/api/python/teacher/tasks/class-status', {
+        task_ids: selectedTasks,
+        class_id: taskClassId,
+        is_active: isActive,
+      });
+      await loadData();
+      const attached = Number(res?.data?.attached) || 0;
+      alert(
+        `已对【${classLabel(taskClassId)}】${isActive ? '启用' : '禁用'} ${selectedTasks.length} 道题。` +
+        (attached ? `\n其中 ${attached} 道原本没布置给这个班，已一并加入。` : '')
+      );
+    } catch (error: any) {
+      alert(`操作失败: ${error.message}`);
+    } finally {
+      setBatchBusy(false);
     }
   };
 
@@ -333,7 +439,7 @@ export const PythonManager: React.FC = () => {
     return new Date(dateStr).toLocaleString('zh-CN');
   };
 
-  const toggleSort = (field: 'username' | 'score') => {
+  const toggleSort = (field: 'status' | 'username' | 'score' | 'class') => {
     if (sortBy === field) {
       setSortOrder(o => o === 'asc' ? 'desc' : 'asc');
     } else {
@@ -342,20 +448,53 @@ export const PythonManager: React.FC = () => {
     }
   };
 
-  const sortedSubmissions = [...submissions].sort((a, b) => {
+  // 提交记录按学生索引，用于把「已提交卡片」贴回全班名册
+  const submissionByStudent = new Map(submissions.map((s) => [String(s.student_id), s]));
+
+  // 名单以「全班学生」为准（progress 含未提交）；接口异常时退回「仅提交记录」，不至于整块空掉
+  const allRows = (progress.length
+    ? progress.map((p) => ({ ...p, sub: submissionByStudent.get(String(p.student_id)) || null }))
+    : submissions.map((s) => ({
+        student_id: String(s.student_id),
+        username: s.username || '',
+        real_name: s.real_name || '',
+        class_id: s.student_class_id || '',
+        class_name: '',
+        submitted: true,
+        submitted_at: s.submitted_at,
+        is_late: false,
+        submission_id: s.id,
+        score: s.grading?.total_score ?? null,
+        sub: s as Submission | null,
+      }))
+  );
+
+  const filteredRows = allRows.filter((r) =>
+    progressFilter === 'all' ? true : progressFilter === 'submitted' ? r.submitted : !r.submitted
+  );
+
+  const sortedRows = [...filteredRows].sort((a, b) => {
     let cmp = 0;
     if (sortBy === 'username') {
       cmp = (a.username || '').localeCompare(b.username || '');
+    } else if (sortBy === 'class') {
+      // 同班内再按学号，翻页时不会跳来跳去
+      cmp = (a.class_name || '').localeCompare(b.class_name || '')
+        || (a.username || '').localeCompare(b.username || '');
+    } else if (sortBy === 'score') {
+      cmp = (a.score ?? -1) - (b.score ?? -1);
     } else {
-      const scoreA = a.grading?.total_score ?? -1;
-      const scoreB = b.grading?.total_score ?? -1;
-      cmp = scoreA - scoreB;
+      // 完成情况：升序 = 未提交在前（最该催的人排最上面）
+      cmp = Number(a.submitted) - Number(b.submitted);
     }
     return sortOrder === 'asc' ? cmp : -cmp;
   });
 
-  const totalPages = Math.max(1, Math.ceil(sortedSubmissions.length / SUBMISSIONS_PER_PAGE));
-  const paginatedSubmissions = sortedSubmissions.slice(
+  const submittedCount = allRows.filter((r) => r.submitted).length;
+  const selectableIds = sortedRows.filter((r) => r.sub).map((r) => String((r.sub as Submission).id));
+
+  const totalPages = Math.max(1, Math.ceil(sortedRows.length / SUBMISSIONS_PER_PAGE));
+  const paginatedRows = sortedRows.slice(
     (submissionsPage - 1) * SUBMISSIONS_PER_PAGE,
     submissionsPage * SUBMISSIONS_PER_PAGE
   );
@@ -367,10 +506,10 @@ export const PythonManager: React.FC = () => {
   };
 
   const toggleSelectAllSubmissions = () => {
-    if (selectedSubmissions.length === sortedSubmissions.length) {
+    if (selectedSubmissions.length === selectableIds.length) {
       setSelectedSubmissions([]);
     } else {
-      setSelectedSubmissions(sortedSubmissions.map(s => s.id));
+      setSelectedSubmissions(selectableIds);
     }
   };
 
@@ -519,6 +658,29 @@ export const PythonManager: React.FC = () => {
                   </label>
                 )}
               </div>
+              {/* 按班级查看：既是筛选条件，也是下面批量启用/禁用的作用班级 */}
+              <div className="mb-3">
+                <label className="mb-1 flex items-center justify-between text-xs text-gray-500">
+                  <span>按班级查看</span>
+                  {taskClassId && <span className="text-purple-600">批量操作作用于该班</span>}
+                </label>
+                <select
+                  value={taskClassId}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setTaskClassId(next);
+                    setSelectedTasks([]);
+                    loadData(next);
+                  }}
+                  className="w-full rounded-lg border border-gray-300 px-2 py-1.5 text-sm focus:ring-2 focus:ring-purple-500"
+                >
+                  <option value="">全部班级（启用/禁用为全局）</option>
+                  {classes.map((cls) => (
+                    <option key={cls.id} value={cls.id}>{cls.name}</option>
+                  ))}
+                </select>
+              </div>
+
               <div className="flex gap-1 mb-3 bg-gray-100 p-1 rounded-lg">
                 <button
                   className={`flex-1 px-2 py-1.5 rounded text-xs font-medium transition ${
@@ -546,11 +708,34 @@ export const PythonManager: React.FC = () => {
                 </button>
               </div>
               {selectedTasks.length > 0 && (
-                <div className="mb-3 p-2 bg-red-50 rounded-lg">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm text-red-600">已选择 {selectedTasks.length} 个任务</span>
+                <div className="mb-3 rounded-lg border border-purple-200 bg-purple-50 p-2">
+                  <div className="mb-2 flex items-center justify-between">
+                    <span className="text-sm text-purple-700">
+                      已选 {selectedTasks.length} 道题
+                      {taskClassId ? <span className="text-purple-500">（{classLabel(taskClassId)}）</span> : null}
+                    </span>
+                    <button className="text-xs text-gray-500 hover:text-gray-700" onClick={() => setSelectedTasks([])}>
+                      取消选择
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
                     <button
-                      className="px-2 py-1 bg-red-600 text-white rounded text-sm hover:bg-red-700"
+                      disabled={batchBusy}
+                      className="rounded bg-green-600 px-2 py-1 text-xs text-white hover:bg-green-700 disabled:opacity-50"
+                      onClick={() => batchSetActive(true)}
+                    >
+                      <i className="fa fa-toggle-on mr-1"></i>批量启用
+                    </button>
+                    <button
+                      disabled={batchBusy}
+                      className="rounded bg-gray-500 px-2 py-1 text-xs text-white hover:bg-gray-600 disabled:opacity-50"
+                      onClick={() => batchSetActive(false)}
+                    >
+                      <i className="fa fa-toggle-off mr-1"></i>批量禁用
+                    </button>
+                    <button
+                      disabled={batchBusy}
+                      className="rounded bg-red-600 px-2 py-1 text-xs text-white hover:bg-red-700 disabled:opacity-50"
                       onClick={deleteSelectedTasks}
                     >
                       <i className="fa fa-trash mr-1"></i>批量删除
@@ -587,7 +772,8 @@ export const PythonManager: React.FC = () => {
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
                             <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${
-                              task.is_active ? 'bg-green-500' : 'bg-gray-300'
+                              (taskClassId ? (task.class_active ?? task.is_active) : task.is_active)
+                                ? 'bg-green-500' : 'bg-gray-300'
                             }`}></span>
                             <span className="font-medium text-gray-800 text-sm truncate">{task.title}</span>
                             {task.task_type === 'fill_blank' && (
@@ -598,13 +784,17 @@ export const PythonManager: React.FC = () => {
                             <button
                               onClick={(e) => toggleActive(task.id, e)}
                               className={`ml-auto text-xs px-2 py-0.5 rounded transition-colors flex-shrink-0 ${
-                                task.is_active
+                                (taskClassId ? (task.class_active ?? task.is_active) : task.is_active)
                                   ? 'bg-green-100 text-green-700 hover:bg-green-200'
                                   : 'bg-gray-200 text-gray-500 hover:bg-gray-300'
                               }`}
-                              title={task.is_active ? '点击禁用' : '点击启用'}
+                              title={
+                                taskClassId
+                                  ? `${(task.class_active ?? task.is_active) ? '点击为本班禁用' : '点击为本班启用'}（只影响 ${classLabel(taskClassId)}）`
+                                  : ((task.class_active ?? task.is_active) ? '点击禁用（全局）' : '点击启用（全局）')
+                              }
                             >
-                              {task.is_active ? '启用' : '禁用'}
+                              {(taskClassId ? (task.class_active ?? task.is_active) : task.is_active) ? '启用' : '禁用'}
                             </button>
                           </div>
                           <div className="text-xs text-gray-500 mt-1">
@@ -633,6 +823,15 @@ export const PythonManager: React.FC = () => {
                         )}
                       </div>
                       <div className="flex gap-2">
+                        {selectedTask.task_type === 'fill_blank' && (
+                          <button
+                            className="px-3 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700 text-sm"
+                            onClick={() => setExplainTask(selectedTask)}
+                            title="听一遍 AI 语音讲解（与学生端同一份脚本，可课前核对）"
+                          >
+                            <i className="fa fa-volume-high mr-1"></i>AI 语音讲解
+                          </button>
+                        )}
                         <button
                           className="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm"
                           onClick={() => editTask(selectedTask)}
@@ -658,69 +857,56 @@ export const PythonManager: React.FC = () => {
                   <div className="flex-1 overflow-y-auto p-4">
                     <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
                       <h3 className="font-medium text-gray-700">
-                        {showUnsubmitted ? '未提交学生' : `作业提交情况 (${sortedSubmissions.length})`}
+                        作业完成情况
+                        <span className="ml-2 text-xs font-normal text-gray-500">
+                          已交 {submittedCount} / {allRows.length} 人
+                        </span>
                       </h3>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <div className="flex items-center gap-1 text-xs">
-                          <span className="text-gray-500">排序：</span>
-                          <button
-                            onClick={() => toggleSort('username')}
-                            className={`px-2 py-1 rounded transition-colors ${
-                              sortBy === 'username' ? 'bg-purple-100 text-purple-700 font-medium' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                            }`}
-                          >
-                            用户名 {sortBy === 'username' && (sortOrder === 'asc' ? '↑' : '↓')}
-                          </button>
-                          <button
-                            onClick={() => toggleSort('score')}
-                            className={`px-2 py-1 rounded transition-colors ${
-                              sortBy === 'score' ? 'bg-purple-100 text-purple-700 font-medium' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                            }`}
-                          >
-                            评分 {sortBy === 'score' && (sortOrder === 'asc' ? '↑' : '↓')}
-                          </button>
+                          <span className="text-gray-500">筛选</span>
+                          {([['all', '全部'], ['unsubmitted', '未提交'], ['submitted', '已提交']] as const).map(([key, label]) => (
+                            <button
+                              key={key}
+                              onClick={() => { setProgressFilter(key); setSubmissionsPage(1); }}
+                              className={`rounded px-2 py-1 transition-colors ${
+                                progressFilter === key ? 'bg-purple-100 font-medium text-purple-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                              }`}
+                            >
+                              {label}
+                            </button>
+                          ))}
                         </div>
-                        {classFilter && (
-                          <button
-                            onClick={async () => {
-                              if (!selectedTask || !classFilter) return;
-                              setShowUnsubmitted(!showUnsubmitted);
-                              if (!showUnsubmitted) {
-                                try {
-                                  const res = await backendClient.get(
-                                    `/api/python/teacher/unsubmitted/${selectedTask.id}?class_id=${classFilter}`
-                                  );
-                                  setUnsubmittedStudents(res.data || []);
-                                } catch (e) {
-                                  console.error(e);
-                                }
-                              }
-                            }}
-                            className={`px-2 py-1.5 rounded text-xs transition-colors ${
-                              showUnsubmitted
-                                ? 'bg-blue-600 text-white'
-                                : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
-                            }`}
-                          >
-                            <i className="fa fa-user-times mr-1"></i>未提交
-                          </button>
-                        )}
+                        <div className="flex items-center gap-1 text-xs">
+                          <span className="text-gray-500">排序</span>
+                          {([['status', '完成情况'], ['class', '班级'], ['username', '学号'], ['score', '评分']] as const).map(([key, label]) => (
+                            <button
+                              key={key}
+                              onClick={() => toggleSort(key)}
+                              className={`rounded px-2 py-1 transition-colors ${
+                                sortBy === key ? 'bg-purple-100 font-medium text-purple-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                              }`}
+                            >
+                              {label}{sortBy === key && (sortOrder === 'asc' ? ' ↑' : ' ↓')}
+                            </button>
+                          ))}
+                        </div>
                         <label className="text-sm text-gray-600">班级：</label>
                         <select
                           value={classFilter}
                           onChange={(e) => {
-                            setClassFilter(e.target.value);
-                            setShowUnsubmitted(false);
+                            const next = e.target.value;
+                            setClassFilter(next);
                             setSelectedSubmissions([]);
-                            if (selectedTask) {
-                              const url = e.target.value
-                                ? `/api/python/teacher/submissions/${selectedTask.id}?class_id=${e.target.value}`
-                                : `/api/python/teacher/submissions/${selectedTask.id}`;
-                              backendClient.get(url).then((res) => {
-                                const data = (res.data || []).map(normalizeSubmission);
-                                setSubmissions(data);
-                              }).catch(console.error);
-                            }
+                            setSubmissionsPage(1);
+                            if (!selectedTask) return;
+                            const qs = next ? `?class_id=${encodeURIComponent(next)}` : '';
+                            backendClient.get(`/api/python/teacher/submissions/${selectedTask.id}${qs}`)
+                              .then((res) => setSubmissions((res.data || []).map(normalizeSubmission)))
+                              .catch(console.error);
+                            backendClient.get(`/api/python/teacher/task-progress/${selectedTask.id}${qs}`)
+                              .then((res) => setProgress((res.data && res.data.students) || []))
+                              .catch(console.error);
                           }}
                           className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500"
                         >
@@ -744,38 +930,44 @@ export const PythonManager: React.FC = () => {
                       </div>
                     )}
 
-                    {showUnsubmitted ? (
-                      unsubmittedStudents.length === 0 ? (
-                        <div className="text-center text-gray-400 py-8">全班都已提交</div>
-                      ) : (
-                        <div className="space-y-2">
-                          {unsubmittedStudents.map(student => (
-                            <div key={student.id} className="bg-white rounded-lg border p-3">
-                              <div className="text-sm">
-                                <span className="font-medium text-gray-700">{student.username}</span>
-                                {student.real_name ? <span className="text-gray-400"> ({student.real_name})</span> : ''}
-                                <span className="ml-3 px-2 py-0.5 bg-red-100 text-red-600 rounded text-xs">未提交</span>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )
-                    ) : submissions.length === 0 ? (
-                      <div className="text-center text-gray-400 py-8">暂无学生提交</div>
+                    {sortedRows.length === 0 ? (
+                      <div className="text-center text-gray-400 py-8">
+                        {progress.length === 0 ? '这个班还没有学生' : '当前筛选下没有学生'}
+                      </div>
                     ) : (
                       <div className="space-y-3">
                         <div className="flex items-center gap-2 text-sm text-gray-500 px-1">
                           <label className="flex items-center gap-1 cursor-pointer hover:text-gray-700">
                             <input
                               type="checkbox"
-                              checked={selectedSubmissions.length === sortedSubmissions.length && sortedSubmissions.length > 0}
+                              checked={selectableIds.length > 0 && selectedSubmissions.length === selectableIds.length}
                               onChange={toggleSelectAllSubmissions}
                               className="rounded"
                             />
                             <span>全选</span>
                           </label>
                         </div>
-                        {paginatedSubmissions.map(sub => (
+                        {paginatedRows.map((row) => {
+                          const sub = row.sub;
+                          if (!sub) {
+                            return (
+                              <div
+                                key={`unsub-${row.student_id}`}
+                                className="rounded-lg border border-dashed border-gray-200 bg-gray-50/70 p-3"
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <div className="text-xs text-gray-500">
+                                    <span className="font-medium text-gray-600">{row.username}</span>
+                                    {row.real_name ? <span className="text-gray-400"> ({row.real_name})</span> : ''}
+                                    {row.class_name ? <span className="mx-2 text-gray-300">|</span> : null}
+                                    {row.class_name ? <span className="text-gray-400">{row.class_name}</span> : null}
+                                  </div>
+                                  <span className="rounded-full bg-rose-50 px-2 py-0.5 text-xs text-rose-600">未提交</span>
+                                </div>
+                              </div>
+                            );
+                          }
+                          return (
                           <div key={sub.id} className="bg-white rounded-lg border p-4">
                               <div className="flex justify-between items-start">
                                 <div className="flex items-start gap-2">
@@ -789,8 +981,10 @@ export const PythonManager: React.FC = () => {
                                     <div className="text-xs text-gray-500">
                                       <span className="font-medium text-gray-700">{sub.username}</span>
                                       {sub.real_name ? <span className="text-gray-400"> ({sub.real_name})</span> : ''}
+                                      {row.class_name ? <><span className="mx-2">|</span>{row.class_name}</> : null}
                                       <span className="mx-2">|</span>
                                       提交时间: {formatDate(sub.submitted_at)}
+                                      {row.is_late ? <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-amber-700">迟交</span> : null}
                                     </div>
                                   </div>
                                 </div>
@@ -866,7 +1060,8 @@ export const PythonManager: React.FC = () => {
                               )}
                             </details>
                           </div>
-                        ))}
+                          );
+                        })}
                         {totalPages > 1 && (
                           <div className="flex items-center justify-center gap-2 pt-2">
                             <button
@@ -877,7 +1072,7 @@ export const PythonManager: React.FC = () => {
                               <i className="fa fa-chevron-left"></i>
                             </button>
                             <span className="px-3 py-1 text-sm text-gray-600">
-                              第 {submissionsPage} / {totalPages} 页 (共 {sortedSubmissions.length} 条)
+                              第 {submissionsPage} / {totalPages} 页 (共 {sortedRows.length} 人)
                             </span>
                             <button
                               onClick={() => setSubmissionsPage(p => Math.min(totalPages, p + 1))}
@@ -1234,6 +1429,79 @@ export const PythonManager: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* 删除二次确认：题目删除不可恢复，必须勾选确认才能点 */}
+      {deleteDialog.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-md rounded-xl bg-white p-5 shadow-xl">
+            <div className="mb-3 flex items-start gap-3">
+              <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-red-100">
+                <i className="fa fa-triangle-exclamation text-red-600"></i>
+              </div>
+              <div>
+                <h3 className="font-bold text-gray-800">
+                  {deleteDialog.taskIds.length > 1
+                    ? `删除 ${deleteDialog.taskIds.length} 道题目？`
+                    : '删除这道题目？'}
+                </h3>
+                <p className="mt-1 text-sm text-red-600">
+                  删除后<strong>无法恢复</strong>：题目本身、学生对它的全部提交记录、AI 批改结果会一并删除。
+                </p>
+              </div>
+            </div>
+            <div className="mb-4 max-h-40 overflow-y-auto rounded-lg bg-gray-50 p-3 text-sm text-gray-600">
+              {deleteDialog.titles.slice(0, 20).map((title, idx) => (
+                <div key={idx} className="truncate">· {title}</div>
+              ))}
+              {deleteDialog.titles.length > 20 && (
+                <div className="text-gray-400">… 还有 {deleteDialog.titles.length - 20} 道</div>
+              )}
+            </div>
+            <label className="mb-4 flex cursor-pointer items-start gap-2 rounded-lg border border-red-200 bg-red-50/60 p-2 text-sm text-red-700">
+              <input
+                type="checkbox"
+                checked={deleteAck}
+                onChange={(e) => setDeleteAck(e.target.checked)}
+                className="mt-0.5 rounded"
+              />
+              <span>我知道删除后不能恢复，确认删除</span>
+            </label>
+            <div className="flex justify-end gap-2">
+              <button
+                className="rounded-lg bg-gray-200 px-4 py-2 text-gray-700 hover:bg-gray-300"
+                onClick={() => setDeleteDialog({ open: false, taskIds: [], titles: [] })}
+              >
+                取消
+              </button>
+              <button
+                disabled={!deleteAck || batchBusy}
+                className="rounded-lg bg-red-600 px-4 py-2 text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-40"
+                onClick={doDeleteTasks}
+              >
+                确认删除
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 编程填空 AI 语音讲解：与学生端同一套脚本，教师走 /api/teacher 接口 */}
+      {explainTask && (
+        <div className="fixed inset-0 z-50 bg-black/60">
+          <FillBlankExplainPlayer
+            taskId={explainTask.id}
+            title={explainTask.title}
+            description={explainTask.description}
+            template={explainTask.blank_template || ''}
+            studentAnswers={(parseJsonField(explainTask.blank_answers) as string[][]).map((group) =>
+              Array.isArray(group) ? String(group[0] || '') : String(group || '')
+            )}
+            audience="teacher"
+            hideMyAnswer
+            onClose={() => setExplainTask(null)}
+          />
+        </div>
+      )}
     </div>
   </div>
   );

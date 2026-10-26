@@ -7992,6 +7992,30 @@ const pyTaskOrderSql = (col = 'title') =>
 
 // === 学生端 API ===
 
+/**
+ * 某道 Python 作业对某个班是否可用。
+ * 取值规则（与 114_python_task_class_status.sql 保持一致）：
+ *   表里有 (task, class) 记录 → 以记录为准；没记录 → 继承 python_tasks.is_active。
+ * 没有班级的账号（或老师）只回落到全局开关。
+ * ⛔ 列表、详情、提交三处都要用它，否则学生绕过列表直接调接口就能提交被关掉的题。
+ */
+async function isPythonTaskEnabledForClass(taskId, classId) {
+  const [rows] = await pool.query(
+    `SELECT t.is_active AS global_active, cs.is_active AS class_active
+       FROM python_tasks t
+       LEFT JOIN python_task_class_status cs
+              ON cs.task_id = t.id AND cs.class_id = ?
+      WHERE t.id = ? LIMIT 1`,
+    [String(classId || ''), taskId]
+  );
+  if (!rows.length) return false;
+  const row = rows[0];
+  const effective = row.class_active === null || row.class_active === undefined
+    ? row.global_active
+    : row.class_active;
+  return Number(effective) === 1;
+}
+
 // 获取编程任务列表
 app.get('/api/python/tasks', authenticate, async (req, res) => {
   try {
@@ -8018,6 +8042,13 @@ app.get('/api/python/tasks', authenticate, async (req, res) => {
         JSON_CONTAINS(t.class_ids, ?) OR t.class_ids IS NULL OR JSON_LENGTH(t.class_ids) = 0
       )`;
       params.push(JSON.stringify(profile.class_id));
+      // 老师按班单独关掉的题不出现（表里没记录 = 继承全局 is_active）。
+      // 见 114_python_task_class_status.sql：一个班关掉不影响其他班。
+      query += ` AND NOT EXISTS (
+        SELECT 1 FROM python_task_class_status cs
+         WHERE cs.task_id = t.id AND cs.class_id = ? AND cs.is_active = 0
+      )`;
+      params.push(profile.class_id);
     }
 
     // 按标题里的题号升序（见 pyTaskOrderSql 说明），不再按创建时间倒序
@@ -8038,6 +8069,15 @@ app.get('/api/python/tasks/:taskId', authenticate, async (req, res) => {
     const [rows] = await pool.query('SELECT * FROM python_tasks WHERE id = ?', [taskId]);
     if (rows.length === 0) {
       return res.status(404).json({ data: null, error: 'Task not found' });
+    }
+    // 学生按 ID 直达时也要过一遍班级启停，避免绕过列表拿走被老师关掉的题
+    const viewer = req.user || {};
+    if (viewer.role === 'student') {
+      const [pf] = await pool.query('SELECT class_id FROM profiles WHERE id = ?', [viewer.userId || viewer.user_id]);
+      const viewerClass = pf[0] && pf[0].class_id;
+      if (viewerClass && !(await isPythonTaskEnabledForClass(taskId, viewerClass))) {
+        return res.status(404).json({ data: null, error: '这道题暂未对你所在班级开放' });
+      }
     }
     res.json({ data: stripPythonTaskAnswersForRequester(formatRow(rows[0]), req), error: null });
   } catch (error) {
@@ -8208,6 +8248,16 @@ app.post('/api/python/submit', authenticate, pythonRunLimiter, async (req, res) 
       return res.status(404).json({ data: null, error: 'Task not found' });
     }
     const task = tasks[0];
+
+    // 学生提交前再确认一次班级启停：UI 藏起来不等于接口安全
+    const submitter = req.user || {};
+    if (submitter.role === 'student') {
+      const [pf] = await pool.query('SELECT class_id FROM profiles WHERE id = ?', [submitter.userId || submitter.user_id]);
+      const submitterClass = pf[0] && pf[0].class_id;
+      if (submitterClass && !(await isPythonTaskEnabledForClass(task_id, submitterClass))) {
+        return res.status(403).json({ data: null, error: '这道题暂未对你所在班级开放，不能提交' });
+      }
+    }
 
     // 检查是否已过截止时间
     if (task.deadline) {
@@ -8439,14 +8489,104 @@ app.post('/api/python/teacher/tasks', authenticate, requireTeachingRole, async (
 // 教师获取任务列表
 app.get('/api/python/teacher/tasks', authenticate, requireTeachingRole, async (req, res) => {
   try {
+    const classId = String(req.query.class_id || '').trim();
     // 按标题里的题号升序（见 pyTaskOrderSql 说明），与学生端保持一致
     const [rows] = await pool.query(
       'SELECT * FROM python_tasks ' + pyTaskOrderSql('title')
     );
-    res.json({ data: formatRows(rows), error: null });
+    let data = formatRows(rows);
+
+    // 带 class_id 查询时，顺便告诉前端「这道题对这个班到底开没开」：
+    //   class_override = null 表示该班没单独设置（继承全局 is_active）
+    //   class_override = 0/1  表示该班被单独关/开过
+    if (classId) {
+      const [statusRows] = await pool.query(
+        'SELECT task_id, is_active FROM python_task_class_status WHERE class_id = ?',
+        [classId]
+      );
+      const overrides = new Map(statusRows.map((r) => [String(r.task_id), Number(r.is_active)]));
+      data = data.map((t) => {
+        const key = String(t.id);
+        const override = overrides.has(key) ? overrides.get(key) : null;
+        const globalActive = Number(t.is_active) === 1;
+        return {
+          ...t,
+          class_id: classId,
+          class_override: override,
+          class_active: override === null ? globalActive : override === 1,
+        };
+      });
+    }
+
+    res.json({ data, error: null });
   } catch (error) {
     console.error('Error in GET /api/python/teacher/tasks:', error);
     res.status(500).json({ data: [], error: error.message });
+  }
+});
+
+/**
+ * 批量设置「题目 × 班级」的启停（2026-10-26）
+ *
+ * 语义与环境变量式开关不同，务必按这条理解：本接口只影响**指定班级**，其他班不受影响。
+ *   · 启用：写 is_active=1，并把该班补进题目的 class_ids —— 否则题根本没布置给它，
+ *           「启用了却看不见」是最容易让人以为功能坏了的情况。
+ *   · 禁用：只写 is_active=0，不动 class_ids（保持布置关系，以后放开还在原位）。
+ * 不提供「恢复制」时直接 DELETE 本表记录即可回到继承全局的状态。
+ */
+app.post('/api/python/teacher/tasks/class-status', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const classId = String((req.body && req.body.class_id) || '').trim();
+    const isActive = !!(req.body && req.body.is_active);
+    const taskIds = Array.isArray(req.body && req.body.task_ids)
+      ? req.body.task_ids.map((v) => String(v)).filter(Boolean)
+      : [];
+
+    if (!classId) return res.status(400).json({ data: null, error: '请先选择班级' });
+    if (!taskIds.length) return res.status(400).json({ data: null, error: '请先勾选题目' });
+
+    const teacherId = (req.user && (req.user.userId || req.user.id)) || null;
+    const flag = isActive ? 1 : 0;
+    let attached = 0;
+
+    for (const taskId of taskIds) {
+      await pool.query(
+        `INSERT INTO python_task_class_status (task_id, class_id, is_active, updated_by)
+         VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE is_active = VALUES(is_active),
+                                 updated_by = VALUES(updated_by),
+                                 updated_at = NOW()`,
+        [taskId, classId, flag, teacherId]
+      );
+
+      if (isActive) {
+        // 启用时把班级补进 class_ids（只处理数组里还没有该班的题）
+        const [taskRows] = await pool.query('SELECT class_ids FROM python_tasks WHERE id = ?', [taskId]);
+        if (taskRows.length) {
+          let ids = [];
+          const raw = taskRows[0].class_ids;
+          if (Array.isArray(raw)) ids = raw.map(String);
+          else if (typeof raw === 'string' && raw) {
+            try { const parsed = JSON.parse(raw); if (Array.isArray(parsed)) ids = parsed.map(String); } catch { ids = []; }
+          }
+          if (!ids.includes(classId)) {
+            await pool.query('UPDATE python_tasks SET class_ids = ?, updated_at = NOW() WHERE id = ?', [
+              JSON.stringify([...ids, classId]),
+              taskId,
+            ]);
+            attached += 1;
+          }
+        }
+      }
+    }
+
+    res.json({
+      data: { updated: taskIds.length, attached, class_id: classId, is_active: flag },
+      error: null,
+    });
+  } catch (error) {
+    console.error('Error in POST /api/python/teacher/tasks/class-status:', error);
+    res.status(500).json({ data: null, error: error.message });
   }
 });
 
@@ -8571,6 +8711,83 @@ app.get('/api/python/teacher/submissions/:taskId', authenticate, requireTeaching
   } catch (error) {
     console.error('Error in GET /api/python/teacher/submissions/:taskId:', error);
     res.status(500).json({ data: [], error: error.message });
+  }
+});
+
+// 作业完成情况：全班学生 + 提交与否 + 分数（2026-10-26）
+// 为什么单开一个接口：原来只查得到「已提交」的行，想看谁没交还得另调 unsubmitted 且必须先选班级，
+// 老师得在两个视图之间来回切。这里一次给全班，前端才能按完成情况排序。
+app.get('/api/python/teacher/task-progress/:taskId', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const classId = String(req.query.class_id || '').trim();
+
+    const [taskRows] = await pool.query('SELECT id, title, class_ids FROM python_tasks WHERE id = ? LIMIT 1', [taskId]);
+    if (!taskRows.length) return res.status(404).json({ data: null, error: '任务不存在' });
+    const task = taskRows[0];
+
+    // 班级范围：显式指定的优先；否则用题目布置的班级；都没有就取全部学生
+    let scopeIds = [];
+    if (classId) {
+      scopeIds = [classId];
+    } else {
+      const raw = task.class_ids;
+      if (Array.isArray(raw)) scopeIds = raw.map((v) => String(v)).filter(Boolean);
+      else if (typeof raw === 'string' && raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) scopeIds = parsed.map((v) => String(v)).filter(Boolean);
+        } catch { scopeIds = []; }
+      }
+    }
+
+    const where = ["p.role = 'student'"];
+    const params = [];
+    if (scopeIds.length) {
+      where.push('p.class_id IN (?)');
+      params.push(scopeIds);
+    }
+
+    const [rows] = await pool.query(
+      `SELECT p.id AS student_id, p.username, p.real_name, p.class_id,
+              c.name AS class_name,
+              s.id AS submission_id, s.submitted_at, s.is_late,
+              g.total_score AS score
+         FROM profiles p
+         LEFT JOIN classes c ON c.id = p.class_id
+         LEFT JOIN python_submissions s ON s.task_id = ? AND s.student_id = p.id
+         LEFT JOIN python_gradings g ON g.submission_id = s.id
+        WHERE ${where.join(' AND ')}
+        ORDER BY p.class_id ASC, p.username ASC`,
+      [taskId, ...params]
+    );
+
+    const students = formatRows(rows).map((r) => ({
+      student_id: String(r.student_id),
+      username: r.username || '',
+      real_name: r.real_name || '',
+      class_id: r.class_id ? String(r.class_id) : '',
+      class_name: r.class_name || '',
+      submitted: !!r.submission_id,
+      submitted_at: r.submitted_at || null,
+      is_late: Number(r.is_late) === 1,
+      submission_id: r.submission_id || null,
+      score: r.score === null || r.score === undefined ? null : Number(r.score),
+    }));
+
+    res.json({
+      data: {
+        task: { id: String(task.id), title: task.title },
+        class_scope: scopeIds,
+        total: students.length,
+        submitted: students.filter((s) => s.submitted).length,
+        students,
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('Error in GET /api/python/teacher/task-progress/:taskId:', error);
+    res.status(500).json({ data: null, error: error.message });
   }
 });
 
@@ -9342,6 +9559,94 @@ app.get('/api/student/explain/enabled', authenticate, requireStudent, async (req
  * ⛔ 模型失败不能让功能不可用：走 buildFallbackScript 兜底（不缓存），学生照样能听到
  *    「这一空要填 X、填上之后整行变成什么」这种最小可用讲解。
  */
+/**
+ * 编程填空 AI 讲解核心：查题 → 命中缓存直接返回 → 否则生成并回写缓存。
+ * 学生端与教师端共用（老师要先听一遍核对，两边讲解口径必须一致，所以只留一份生成逻辑）。
+ * 鉴权、AI 授权、限频都由调用方按自己的场景传进来 —— 命中缓存不该被限频拦。
+ */
+async function buildFillBlankExplain(taskId, opts = {}) {
+  const { force = false, rateKey = null, rateMax = 20, rateWindow = 10 * 60 * 1000 } = opts;
+
+  const [rows] = await pool.query(
+    `SELECT id, title, description, hint, blank_template, blank_answers
+       FROM python_tasks WHERE id = ? AND task_type = 'fill_blank' AND is_active = TRUE LIMIT 1`,
+    [taskId],
+  );
+  if (!rows.length) { const e = new Error('这道填空题不存在或已下线'); e.status = 404; throw e; }
+  const t = rows[0];
+  const blanks = analyzeFillBlankTemplate(t.blank_template, t.blank_answers);
+  if (!blanks.length) { const e = new Error('这道题没有可讲解的空'); e.status = 400; throw e; }
+
+  const task = { id: t.id, title: t.title, description: t.description, hint: t.hint, template: t.blank_template };
+  const contentHash = require('crypto').createHash('sha1')
+    .update([t.title || '', t.description || '', t.blank_template || '', JSON.stringify(t.blank_answers || '')].join('\u0001'))
+    .digest('hex');
+
+  if (!force) {
+    const [cached] = await pool.query(
+      'SELECT content_hash, script, model FROM python_explain_scripts WHERE task_id = ? LIMIT 1',
+      [taskId],
+    );
+    if (cached.length && cached[0].content_hash === contentHash) {
+      try {
+        const script = JSON.parse(cached[0].script);
+        // 答案实时从题库取，缓存里只有 why/tip —— 万一老师改了答案，这里也不会给学生旧答案
+        const withAnswers = {
+          ...script,
+          blanks: (script.blanks || []).map((b, i) => ({ ...b, ...(blanks[i] ? { answers: blanks[i].answers, char: blanks[i].char, line: blanks[i].line } : {}) })),
+        };
+        return { task_id: taskId, title: t.title, template: t.blank_template, script: withAnswers, cached: true, model: cached[0].model };
+      } catch { /* 缓存坏了，重新生成 */ }
+    }
+  }
+
+  // 只有真要调用模型时才计次
+  if (rateKey && !allowExplainRate(rateKey, rateMax, rateWindow)) {
+    const e = new Error(`讲解生成太频繁，歇一会儿再点（${Math.round(rateWindow / 60000)} 分钟内最多 ${rateMax} 次）`);
+    e.status = 429;
+    throw e;
+  }
+
+  const { systemPrompt, userPrompt, promptVersion } = buildFillBlankPrompt(task, blanks);
+  let script;
+  let model = null;
+  let degraded = false;
+  try {
+    const config = await getAiQaConfig(pool);
+    const raw = await callAiApi(config, [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ]);
+    script = normalizeFillBlankScript(extractJsonObject(raw), task, blanks);
+    model = config.ai_model || null;
+  } catch (e) {
+    console.error('生成编程填空讲解失败，改用兜底脚本:', e.message);
+    script = buildFillBlankFallback(task, blanks);
+    degraded = true;
+  }
+
+  if (!degraded) {
+    await pool.query(
+      `INSERT INTO python_explain_scripts (task_id, content_hash, script, model)
+       VALUES (?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE content_hash = VALUES(content_hash), script = VALUES(script),
+                               model = VALUES(model), updated_at = NOW(3)`,
+      [taskId, contentHash, JSON.stringify({ intro: script.intro, summary: script.summary, blanks: script.blanks.map((b) => ({ index: b.index, why: b.why, tip: b.tip })) }), model],
+    );
+  }
+
+  return { task_id: taskId, title: t.title, template: t.blank_template, script, cached: false, degraded, model, prompt_version: promptVersion };
+}
+
+function sendFillBlankExplainError(res, error, tag) {
+  if (error.status === 400 || error.status === 404 || error.status === 429) {
+    return res.status(error.status).json({ data: null, error: error.message });
+  }
+  console.error(tag, error);
+  res.status(500).json({ data: null, error: error.message || '生成讲解失败' });
+}
+
+// 学生端：需要老师为该生单独开通 AI 讲解
 app.post('/api/student/explain/fill-blank', authenticate, requireStudent, async (req, res) => {
   try {
     const userId = req.user.userId;
@@ -9352,81 +9657,30 @@ app.post('/api/student/explain/fill-blank', authenticate, requireStudent, async 
     const force = !!(req.body && req.body.force);
     if (!taskId) return res.status(400).json({ data: null, error: '缺少题目ID' });
 
-    const [rows] = await pool.query(
-      `SELECT id, title, description, hint, blank_template, blank_answers
-         FROM python_tasks WHERE id = ? AND task_type = 'fill_blank' AND is_active = TRUE LIMIT 1`,
-      [taskId],
-    );
-    if (!rows.length) return res.status(404).json({ data: null, error: '这道填空题不存在或已下线' });
-    const t = rows[0];
-    const blanks = analyzeFillBlankTemplate(t.blank_template, t.blank_answers);
-    if (!blanks.length) return res.status(400).json({ data: null, error: '这道题没有可讲解的空' });
-
-    const task = { id: t.id, title: t.title, description: t.description, hint: t.hint, template: t.blank_template };
-    const contentHash = require('crypto').createHash('sha1')
-      .update([t.title || '', t.description || '', t.blank_template || '', JSON.stringify(t.blank_answers || '')].join('\u0001'))
-      .digest('hex');
-
-    if (!force) {
-      const [cached] = await pool.query(
-        'SELECT content_hash, script, model FROM python_explain_scripts WHERE task_id = ? LIMIT 1',
-        [taskId],
-      );
-      if (cached.length && cached[0].content_hash === contentHash) {
-        try {
-          const script = JSON.parse(cached[0].script);
-          // 答案实时从题库取，缓存里只有 why/tip —— 万一老师改了答案，这里也不会给学生旧答案
-          const withAnswers = {
-            ...script,
-            blanks: (script.blanks || []).map((b, i) => ({ ...b, ...(blanks[i] ? { answers: blanks[i].answers, char: blanks[i].char, line: blanks[i].line } : {}) })),
-          };
-          return res.json({
-            data: { task_id: taskId, title: t.title, template: t.blank_template, script: withAnswers, cached: true, model: cached[0].model },
-            error: null,
-          });
-        } catch { /* 缓存坏了，重新生成 */ }
-      }
-    }
-
-    if (!allowExplainRate(`fbexplain:${userId}`, 20, 10 * 60 * 1000)) {
-      return res.status(429).json({ data: null, error: '讲解生成太频繁，歇一会儿再点（10 分钟内最多 20 次）' });
-    }
-
-    const { systemPrompt, userPrompt, promptVersion } = buildFillBlankPrompt(task, blanks);
-    let script;
-    let model = null;
-    let degraded = false;
-    try {
-      const config = await getAiQaConfig(pool);
-      const raw = await callAiApi(config, [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ]);
-      script = normalizeFillBlankScript(extractJsonObject(raw), task, blanks);
-      model = config.ai_model || null;
-    } catch (e) {
-      console.error('生成编程填空讲解失败，改用兜底脚本:', e.message);
-      script = buildFillBlankFallback(task, blanks);
-      degraded = true;
-    }
-
-    if (!degraded) {
-      await pool.query(
-        `INSERT INTO python_explain_scripts (task_id, content_hash, script, model)
-         VALUES (?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE content_hash = VALUES(content_hash), script = VALUES(script),
-                                 model = VALUES(model), updated_at = NOW(3)`,
-        [taskId, contentHash, JSON.stringify({ intro: script.intro, summary: script.summary, blanks: script.blanks.map((b) => ({ index: b.index, why: b.why, tip: b.tip })) }), model],
-      );
-    }
-
-    res.json({
-      data: { task_id: taskId, title: t.title, template: t.blank_template, script, cached: false, degraded, model, prompt_version: promptVersion },
-      error: null,
-    });
+    const data = await buildFillBlankExplain(taskId, { force, rateKey: `fbexplain:${userId}`, rateMax: 20 });
+    res.json({ data, error: null });
   } catch (error) {
-    console.error('编程填空讲解失败:', error);
-    res.status(500).json({ data: null, error: error.message || '生成讲解失败' });
+    sendFillBlankExplainError(res, error, '编程填空讲解失败:');
+  }
+});
+
+// 教师端（2026-10-26）：同一道填空题老师也能听，脚本与学生端共用同一份缓存。
+// 场景：课前核对 AI 讲得对不对、上课直接放给学生听。
+app.post('/api/teacher/explain/fill-blank', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const licenseResult = await licenseManager.checkFeatureLicense(FEATURES.AI);
+    if (!licenseResult.allowed) {
+      return res.status(403).json({ data: null, error: 'AI 功能需要授权激活后才能使用', licenseStatus: licenseResult.status });
+    }
+    const taskId = String((req.body && req.body.task_id) || '').trim();
+    const force = !!(req.body && req.body.force);
+    if (!taskId) return res.status(400).json({ data: null, error: '缺少题目ID' });
+
+    const teacherId = (req.user && (req.user.userId || req.user.id)) || 'teacher';
+    const data = await buildFillBlankExplain(taskId, { force, rateKey: `fbexplain-t:${teacherId}`, rateMax: 30 });
+    res.json({ data, error: null });
+  } catch (error) {
+    sendFillBlankExplainError(res, error, '教师端编程填空讲解失败:');
   }
 });
 
