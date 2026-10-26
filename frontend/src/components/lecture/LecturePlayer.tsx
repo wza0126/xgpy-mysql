@@ -165,6 +165,14 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
   /** 本课内一旦某级引擎失败就锁定降级，避免每句都先去试一遍再失败（每句白等 200~500ms） */
   const engineLockRef = useRef<TtsEngine | null>(null);
   const nextTimerRef = useRef<number | null>(null);
+  /**
+   * 上一次 speechSynthesis.cancel() 的时间戳。
+   * ⛔ Chromium 有个老 bug：cancel() 之后**在同一轮事件循环里**立刻 speak()，
+   *    新 utterance 会被静默丢掉 —— 既不触发 onend 也不触发 onerror，
+   *    表现就是「讲完一句就再也不出声」（2026-10-26 吴老报的「第一页只讲一句就终止」）。
+   *    所以凡是 cancel 过，下一次 speak 都要让出事件循环再发。
+   */
+  const lastCancelRef = useRef(0);
   const markedRef = useRef<Set<string>>(new Set());
 
   // ---------- 语音配置 ----------
@@ -272,6 +280,7 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
 
   const stopAll = useCallback(() => {
     tokenRef.current += 1;
+    lastCancelRef.current = Date.now();
     window.speechSynthesis?.cancel();
     try { audioRef.current?.pause(); } catch { /* ignore */ }
     if (nextTimerRef.current) { clearTimeout(nextTimerRef.current); nextTimerRef.current = null; }
@@ -318,9 +327,16 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
 
     const token = ++tokenRef.current;
     let cancelled = false;
+    /** 这一句是否已经播完（自然结束）。cleanup 靠它决定要不要 cancel */
+    let ended = false;
+    /** 被静默丢弃后是否已补读过一次，避免无限重试 */
+    let retried = false;
+    let watchdogTimer: number | null = null;
 
     const advance = () => {
+      ended = true;
       if (cancelled || token !== tokenRef.current) return;
+      if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
       if (sentenceIdx < sentences.length - 1) {
         setSentenceIdx(sentenceIdx + 1);
         return;
@@ -335,24 +351,61 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
       }, 900);
     };
 
+    /** cancel 之后要等一会儿再 speak，否则新 utterance 会被浏览器吞掉 */
+    const settleCancel = async () => {
+      const since = Date.now() - lastCancelRef.current;
+      const wait = 140 - since;
+      if (wait > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, wait));
+    };
+
     const speakLocal = () => {
-      if (!window.speechSynthesis) { advance(); return; }
+      const syn = window.speechSynthesis;
+      if (!syn) { advance(); return; }
       const u = new SpeechSynthesisUtterance(text);
       if (voiceRef.current) u.voice = voiceRef.current;
       u.lang = 'zh-CN';
       u.rate = rate;
       u.onend = () => { if (!cancelled && token === tokenRef.current) advance(); };
       u.onerror = () => { if (!cancelled && token === tokenRef.current) window.setTimeout(advance, 1500); };
-      window.speechSynthesis.speak(u);
+      settleCancel().then(() => {
+        if (cancelled || token !== tokenRef.current) return;
+        syn.speak(u);
+        armWatchdog();
+      });
     };
 
-    (async () => {
+    /**
+     * 看门狗：Chromium 偶尔既不 onend 也不 onerror（utterance 被吞），
+     * 界面就永远停在这一句上。这里 1 秒后确认引擎真没在发声 → 补读一次；还不行就跳下一句，
+     * 宁可漏一句也不能让整节课卡在第一页。
+     */
+    const armWatchdog = () => {
+      if (watchdogTimer) clearTimeout(watchdogTimer);
+      watchdogTimer = window.setTimeout(() => {
+        watchdogTimer = null;
+        if (cancelled || token !== tokenRef.current || ended) return;
+        const syn = window.speechSynthesis;
+        if (syn && (syn.speaking || syn.pending)) return;
+        if (!retried) {
+          retried = true;
+          void speakCurrent();
+          return;
+        }
+        advance();
+      }, 1000);
+    };
+
+    const speakCurrent = async () => {
+      if (cancelled || token !== tokenRef.current) return;
       let engine: TtsEngine = engineLockRef.current || picked.engine;
+      await settleCancel();
+      if (cancelled || token !== tokenRef.current) return;
 
       // ① Edge 在线自然音色（Azure 神经网络，免费、无额度）
       if (engine === 'edge') {
         const v = findVoiceByName(sysVoices.edge, picked.id) || pickEdgeVoice(sysVoices.edge);
         if (v) {
+          armWatchdog();
           try {
             await speakUtterance(text, v, rate);
             if (!cancelled && token === tokenRef.current) advance();
@@ -371,6 +424,7 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
 
       // ② 讯飞云端（按量计费，后端有内存缓存）
       if (engine === 'xfyun' && cloudReady) {
+        armWatchdog();
         try {
           const blob = await getBlob(text);
           if (cancelled || token !== tokenRef.current) return;
@@ -385,12 +439,20 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
 
       // ③ 本机 SAPI
       if (!cancelled && token === tokenRef.current) speakLocal();
-    })();
+    };
+
+    void speakCurrent();
 
     return () => {
       cancelled = true;
-      window.speechSynthesis?.cancel();
-      try { audioRef.current?.pause(); } catch { /* ignore */ }
+      if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+      // ⛔ 只有「还没讲完就被打断」才需要 cancel。自然播完还 cancel，
+      //    会把紧接着的下一句一起掐掉（这正是「只讲一句就终止」的第二个成因）。
+      if (!ended) {
+        lastCancelRef.current = Date.now();
+        window.speechSynthesis?.cancel();
+        try { audioRef.current?.pause(); } catch { /* ignore */ }
+      }
     };
   }, [playing, page, sentences, sentenceIdx, pageIdx, isLastPage, autoNext, cloudReady, picked, sysVoices, rate, getBlob, playBlob, goPage, markDone]);
 
