@@ -4876,7 +4876,7 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
         success: true, 
         score,
         correct,
-        total,
+        total: totalWeight,
         is_passed: isPassed,
         points_earned: pointsEarned,
         internet_code: internetCode,
@@ -5101,6 +5101,13 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
     }
 
     let correct = 0;
+    // 加权计分（2026-10-26）：综合题按小题数占分，答对几个小题得几分；
+    // 单题题型权重恒为 1，所以「纯选择题卷」的算法与改动前完全一致。
+    // ⛔ 下面 UPDATE/INSERT exam_records 用的是 totalWeight —— 少定义它就是
+    //    ReferenceError，整场考试所有学生交卷都返回 500（2026-10-26 高二5 就是这样挂的）。
+    let credit = 0;
+    let weightSum = 0;
+    let answeredCount = 0;
 
     // 服务端判分数据源：题目类型与正确答案一律取自题库 questions 表。
     // 前端传来的 questions[].answers 只是它自己的一份副本，不能作为判分依据
@@ -5116,18 +5123,31 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
     }
 
     for (const q of questions) {
+      const serverQ = serverQuestionMap.get(q.id);
+      const isComposite = !!serverQ && serverQ.type === 'composite';
+      // 权重按题型给：综合题 = 小题数，其它 = 1
+      weightSum += isComposite ? getCompositeCredit(serverQ.answers, '').weight : 1;
+
       const userAnswer = answers[q.id];
       if (!userAnswer) continue;
-      const serverQ = serverQuestionMap.get(q.id);
       if (!serverQ) {
         // 题库中查不到该题（异常数据）：按未答对处理，绝不采信前端给的"答案"
         console.warn('[submit-test/exam] 题目不在题库中，按未答对处理:', q.id);
         continue;
       }
-      if (judgeQuestionAnswer(serverQ, userAnswer).isCorrect) correct++;
+      answeredCount += 1;
+      if (isComposite) {
+        credit += getCompositeCredit(serverQ.answers, userAnswer).credit;
+      } else if (judgeQuestionAnswer(serverQ, userAnswer).isCorrect) {
+        credit += 1;
+      }
     }
 
-    const score = Math.round((correct / total) * 100);
+    // 漏交的题按单题权重补进分母：只交前几题拿不到高分
+    const missingCount = Math.max(0, total - answeredCount);
+    const totalWeight = weightSum + missingCount;
+    correct = Math.round(credit);
+    const score = totalWeight > 0 ? Math.round((credit / totalWeight) * 100) : 0;
 
     // 考试信息已在判分前加载（testEarly）
     const test = testEarly;
