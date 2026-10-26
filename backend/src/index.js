@@ -8939,7 +8939,14 @@ app.get('/api/python/teacher/matrix', authenticate, requireTeachingRole, async (
       [classId],
     );
 
-    const [taskRows] = await pool.query('SELECT * FROM python_tasks ' + pyTaskOrderSql('title'));
+    // 题目范围（2026-10-27 吴老）：完成明细只看**编程填空**，编程作业(code)不在这张表里。
+    // 用可选参数而不是写死，以后想看全部或只看编程作业只改前端传参即可。
+    const taskType = String(req.query.task_type || '').trim();
+    const typeFilter = ['code', 'fill_blank'].includes(taskType);
+    const [taskRows] = await pool.query(
+      'SELECT * FROM python_tasks ' + (typeFilter ? 'WHERE task_type = ? ' : '') + pyTaskOrderSql('title'),
+      typeFilter ? [taskType] : [],
+    );
     const [statusRows] = await pool.query(
       'SELECT task_id, is_active FROM python_task_class_status WHERE class_id = ?',
       [classId],

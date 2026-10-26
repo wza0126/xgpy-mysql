@@ -90,8 +90,9 @@ export const PythonMatrixPanel: React.FC = () => {
     setLoading(true);
     setErr('');
     try {
+      // 只要编程填空（2026-10-27）：编程作业(code)不进这张表
       const res: any = await backendClient.get(
-        `/api/python/teacher/matrix?class_id=${encodeURIComponent(classId)}`,
+        `/api/python/teacher/matrix?class_id=${encodeURIComponent(classId)}&task_type=fill_blank`,
       );
       setData((res && res.data) || null);
     } catch (e) {
@@ -114,13 +115,18 @@ export const PythonMatrixPanel: React.FC = () => {
 
   const columns: MatrixColumn[] = useMemo(
     () =>
-      questions.map((q) => ({
-        id: q.id,
-        label: `第${q.idx}题`,
-        full: q.full_score,
-        enabled: q.enabled,
-        title: `${q.title}（${q.task_type === 'fill_blank' ? '编程填空' : '编程作业'} · 满分 ${q.full_score}）`,
-      })),
+      questions.map((q) => {
+        // 列名优先用标题里的题号（「第01题.求圆的面积」→ 第01题）：
+        // 过滤掉编程作业后，列表序号会整体前移，用 idx 会与老师看到的题号对不上
+        const m = /第\s*\d+\s*题/.exec(q.title || '');
+        return {
+          id: q.id,
+          label: m ? m[0].replace(/\s+/g, '') : `第${q.idx}题`,
+          full: q.full_score,
+          enabled: q.enabled,
+          title: `${q.title}（满分 ${q.full_score}）`,
+        };
+      }),
     [questions],
   );
 
@@ -244,8 +250,8 @@ export const PythonMatrixPanel: React.FC = () => {
           <i className="fa-solid fa-rotate mr-1"></i>刷新
         </button>
         <p className="text-xs text-gray-400">
-          格子里是每道题的<strong>分数</strong>，「待批改」表示交了还没批，<strong>「—」表示没交</strong>。
-          点表头可按该列排序。
+          只显示<strong>编程填空</strong>；格子里是每道题的<strong>分数</strong>，
+          「待批改」表示交了还没批，<strong>「—」表示没交</strong>。点表头可按该列排序。
         </p>
       </div>
 
@@ -308,10 +314,10 @@ export const PythonMatrixPanel: React.FC = () => {
                   }`}
                 >
                   {on && <i className="fa-solid fa-check mr-1"></i>}
-                  第{q.idx}题
-                  <span className="ml-1 text-[10px] opacity-70">
-                    {q.task_type === 'fill_blank' ? '填' : '码'}
-                  </span>
+                  {(() => {
+                    const m = /第\s*\d+\s*题/.exec(q.title || '');
+                    return m ? m[0].replace(/\s+/g, '') : `第${q.idx}题`;
+                  })()}
                   {!q.enabled && <span className="ml-1 text-[10px]">·关</span>}
                 </button>
               );
@@ -325,7 +331,7 @@ export const PythonMatrixPanel: React.FC = () => {
         columns={columns}
         rows={matrixRows}
         loading={loading}
-        emptyText="这个班还没有学生"
+        emptyText={questions.length ? '这个班还没有学生' : '还没有编程填空题'}
         doneLabel="已交"
         earnedLabel="得分"
         footerLabel={`全班 ${students.length} 人`}

@@ -475,5 +475,9 @@ module.exports = [
   {
     "version": "116_composite_module_switch.sql",
     "sql": "-- 综合题模块开关（2026-10-26）\n--\n-- 与 111_class_module_switches.sql 同一套机制：\n--   ① classes.composite_enabled  —— 老师在「班级管理」点一下；\n--   ② profiles.composite_enabled —— 同一接口批量同步到该班学生，学生端只认 profiles；\n--   ③ 学生端桌面轮询 /api/student/desktop-permissions，关闭时拦在入口并强制关掉已开窗口。\n--\n-- 与「练习」开关的区别：练习关的是单题练习（选择/填空），\n-- 综合题是一个独立的桌面窗口，所以要自己一个开关，不能复用 practice_enabled。\n--\n-- 另外补 pet_config 的专注模式图标字段：专注模式按 focus_mode_show_<图标id> 逐项控制显隐，\n-- 少了这一列，专注模式面板保存会报 Unknown column，且「综合题」图标无法隐藏。\n\nALTER TABLE `classes`\n  ADD COLUMN IF NOT EXISTS `composite_enabled` TINYINT(1) NOT NULL DEFAULT 1\n    COMMENT '综合题模块开关（1=允许学生打开综合题窗口）';\n\nALTER TABLE `profiles`\n  ADD COLUMN IF NOT EXISTS `composite_enabled` TINYINT(1) NOT NULL DEFAULT 1\n    COMMENT '综合题模块开关（与班级同步）';\n\nALTER TABLE `pet_config`\n  ADD COLUMN IF NOT EXISTS `focus_mode_show_composite` TINYINT(1) NOT NULL DEFAULT 1\n    COMMENT '专注模式下是否显示「综合题」桌面图标';\n"
+  },
+  {
+    "version": "117_lecture_external_source.sql",
+    "sql": "-- 微课程「引用现成课程链接」（2026-10-26 吴老定）\n--\n-- 背景：AI 讲堂原来只有一种微课程 —— 由 AI 生成 pages 后逐页播放。\n-- 但老师在 openMAIC 等平台已经做好的课程，希望能直接挂进讲堂给学生看，不必重做一遍。\n--\n-- ⛔ 这类课**不能内嵌播放**：open.maic.chat 返回\n--      X-Frame-Options: SAMEORIGIN\n--      Content-Security-Policy: frame-ancestors 'self'\n--    浏览器会拒绝把对方页面装在 xgpy 里，所以外链课只能在学生端「点开后新标签页打开」。\n--    因此这里只存地址，不存内容，也不参与 pages 相关的校验。\n--\n-- source：\n--   'ai'   —— 现有类型，pages 由 AI 生成，走讲堂播放器，可内嵌、可统计进度\n--   'link' —— 外链课，pages 恒为空、page_count = 0，学生端点开跳转新标签\n--\n-- 默认 'ai' 保证历史 20 门课行为完全不变，无需回填。\n\nALTER TABLE `lectures`\n  ADD COLUMN IF NOT EXISTS `source` VARCHAR(16) NOT NULL DEFAULT 'ai'\n    COMMENT '课程来源：ai=AI 生成，link=引用外链';\n\nALTER TABLE `lectures`\n  ADD COLUMN IF NOT EXISTS `external_url` VARCHAR(600) NULL\n    COMMENT '外链课程地址（仅 https，source=link 时有值）';\n"
   }
 ];
