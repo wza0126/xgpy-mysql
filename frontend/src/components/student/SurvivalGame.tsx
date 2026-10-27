@@ -357,12 +357,17 @@ export const SurvivalGame: React.FC = () => {
         }
       } catch (e) {
         // ⛔ 不用 alert：答题/超时提交都在这一条路径上，alert 会连环弹
-        setNotice((e as Error).message || '提交失败');
+        const msg = (e as Error).message || '提交失败';
+        setNotice(msg);
+        // 本地题目跟服务端对不上（例如此前从排行榜返回后点了旧题）：自动重新同步，别让学生卡死
+        if (msg.includes('题目已过期') || msg.includes('要先订正')) {
+          window.setTimeout(() => { void loadState(); }, 900);
+        }
       } finally {
         setBusy(false);
       }
     },
-    [question, busy, applyQuestion, state, feedback, needFix]
+    [question, busy, applyQuestion, state, feedback, needFix, loadState]
   );
 
   useEffect(() => {
@@ -547,6 +552,17 @@ export const SurvivalGame: React.FC = () => {
     if (phase === 'rank') loadRank();
   }, [phase]);
 
+  /**
+   * 从哪个界面进的排行榜，返回时原路回去。
+   * ⛔ 之前一律回 playing：在「本层已通过」页看榜再返回，就会看到上一题的题干，
+   *    又没有「进入下一层」按钮，点选项还会被后端拒（题目已过期）。
+   */
+  const [rankFrom, setRankFrom] = useState<Phase>('intro');
+  const openRank = () => {
+    setRankFrom(phase === 'rank' ? 'intro' : phase);
+    setPhase('rank');
+  };
+
   const hpInit = state?.hp_init || 100;
   const ratio = Math.min(1, Math.max(0, hp / hpInit));
   const cells = Math.max(hp > 0 ? 1 : 0, Math.round(ratio * 10));
@@ -612,7 +628,7 @@ export const SurvivalGame: React.FC = () => {
             <span className="font-mono text-xs tracking-widest" style={{ color: C.cyan }}>signal dive</span>
             <span className="text-xs" style={{ color: C.mute }}>全校排行</span>
           </div>
-          <button onClick={() => setPhase(state?.alive ? 'playing' : 'intro')} className="text-xs px-3 py-1 rounded" style={{ border: `1px solid ${C.line}`, color: C.dim }}>
+          <button onClick={() => setPhase(rankFrom)} className="text-xs px-3 py-1 rounded" style={{ border: `1px solid ${C.line}`, color: C.dim }}>
             返回
           </button>
         </div>
@@ -754,7 +770,7 @@ export const SurvivalGame: React.FC = () => {
             </p>
             <div className="flex gap-2">
               <button
-                onClick={() => setPhase('rank')}
+                onClick={openRank}
                 className="flex-1 rounded-lg py-2 text-xs"
                 style={{ border: `1px solid ${C.line}`, color: C.dim }}
               >
@@ -848,7 +864,7 @@ export const SurvivalGame: React.FC = () => {
               {info.rebirth ? `从 ${info.rebirth.code} 重新接入` : '重新接入'}
             </button>
             <button
-              onClick={() => setPhase('rank')}
+              onClick={openRank}
               className="flex-1 rounded-lg py-2.5 text-sm"
               style={{ border: `1px solid ${C.line}`, color: C.dim }}
             >
@@ -900,7 +916,7 @@ export const SurvivalGame: React.FC = () => {
             {busy ? '正在接入…' : (state && state.total_levels > 0 ? '继续下潜' : '开始下潜')}
           </button>
           <button
-            onClick={() => setPhase('rank')}
+            onClick={openRank}
             className="mt-2 w-full rounded-lg py-2 text-xs"
             style={{ color: C.dim }}
           >
@@ -947,7 +963,7 @@ export const SurvivalGame: React.FC = () => {
             <span className="font-mono text-[11px]" style={{ color: C.mute }}>
               第 {level?.seq ?? state?.seq ?? 1} 关 / 共 70 · 第 {state?.round_no ?? 1} 轮
             </span>
-            <button onClick={() => setPhase('rank')} className="text-[11px] px-2 py-0.5 rounded" style={{ border: `1px solid ${C.line}`, color: C.dim }}>
+            <button onClick={openRank} className="text-[11px] px-2 py-0.5 rounded" style={{ border: `1px solid ${C.line}`, color: C.dim }}>
               排行
             </button>
           </div>
