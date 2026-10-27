@@ -47,6 +47,9 @@ interface LevelRow {
   question_count: number;
   extra_question_ids: string[];
   is_active: boolean;
+  /** 重生点：血尽后回到这里（到达即解锁） */
+  is_checkpoint: boolean;
+  checkpoint_story: string;
   attempts: number;
 }
 
@@ -178,7 +181,7 @@ export const SurvivalManager: React.FC = () => {
             <i className="fa-solid fa-heart-pulse mr-2 text-cyan-600"></i>生存游戏 · 信号深潜
           </h3>
           <p className="mt-1 text-xs text-gray-500">
-            一关一题，答对加分下潜，答错扣血并要求订正；血量耗尽断线，回到第 1 关重来，累计深度不清零。
+            一关一题，答对加分下潜，答错扣血并要求订正；血量耗尽断线，从最近的中继站（重生点）重新接入，累计深度不清零。
             当前启用 <span className="font-medium text-gray-700">{levelsEnabled}</span> 关。
           </p>
         </div>
@@ -333,6 +336,7 @@ export const SurvivalManager: React.FC = () => {
                     <th className="px-3 py-2 text-center font-medium">题量</th>
                     <th className="px-3 py-2 text-center font-medium">作答次数</th>
                     <th className="px-3 py-2 text-center font-medium">补充题</th>
+                    <th className="px-3 py-2 text-center font-medium">中继站</th>
                     <th className="px-3 py-2 text-center font-medium">启用</th>
                     <th className="px-3 py-2 text-center font-medium">操作</th>
                   </tr>
@@ -350,6 +354,17 @@ export const SurvivalManager: React.FC = () => {
                       </td>
                       <td className="px-3 py-2 text-center text-gray-500">{l.attempts}</td>
                       <td className="px-3 py-2 text-center text-gray-500">{l.extra_question_ids.length || '—'}</td>
+                      <td className="px-3 py-2 text-center">
+                        <button
+                          onClick={() => saveLevel(l, { is_checkpoint: !l.is_checkpoint })}
+                          title={l.is_checkpoint ? (l.checkpoint_story || '血尽后回到这里') : '设为重生点'}
+                          className={`rounded-full px-2 py-0.5 text-xs ${
+                            l.is_checkpoint ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-400 hover:bg-gray-200'
+                          }`}
+                        >
+                          {l.is_checkpoint ? '★ 重生点' : '设为'}
+                        </button>
+                      </td>
                       <td className="px-3 py-2 text-center">
                         <button
                           onClick={() => saveLevel(l, { is_active: !l.is_active })}
@@ -396,6 +411,20 @@ export const SurvivalManager: React.FC = () => {
             />
 
             <label className="mb-1 block text-sm font-medium text-gray-700">
+              重生点剧情（这一关是重生点时才会显示，可留空）
+            </label>
+            <textarea
+              defaultValue={editing.checkpoint_story}
+              id="sv-level-story"
+              rows={2}
+              placeholder="例：深度 200m · 中继站 ALPHA 已激活。断线后会回到这里重新接入。"
+              className="mb-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-xs"
+            />
+            <p className="mb-3 text-xs text-gray-400">
+              学生第一次走到这一关时会看到这段话，之后不再重复。
+            </p>
+
+            <label className="mb-1 block text-sm font-medium text-gray-700">
               补充题目 ID（英文逗号分隔，可留空）
             </label>
             <textarea
@@ -419,10 +448,12 @@ export const SurvivalManager: React.FC = () => {
               <button
                 onClick={async () => {
                   const titleEl = document.getElementById('sv-level-title') as HTMLInputElement | null;
+                  const storyEl = document.getElementById('sv-level-story') as HTMLTextAreaElement | null;
                   const ids = extraInput.split(',').map((x) => x.trim()).filter(Boolean);
                   await saveLevel(editing, {
                     title: titleEl?.value?.trim() || editing.title,
                     extra_question_ids: ids,
+                    checkpoint_story: storyEl?.value?.trim() || '',
                   });
                   setEditing(null);
                 }}

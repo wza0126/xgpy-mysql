@@ -37,6 +37,14 @@ interface SLevel {
   question_count: number;
 }
 
+/** 重生点：血尽后回到这里，首次抵达会展示剧情 */
+interface SCheckpoint {
+  seq: number;
+  code: string;
+  title: string;
+  story: string;
+}
+
 interface SQuestion {
   id: string;
   type: 'choice' | 'fill_blank';
@@ -60,6 +68,8 @@ interface SState {
   deaths: number;
   alive: boolean;
   pending_correction: boolean;
+  /** 本关已结算、还没开下一关（答对后关掉页面的状态） */
+  waiting_next?: boolean;
   level: SLevel | null;
   question: SQuestion | null;
   deadline: string | null;
@@ -99,7 +109,7 @@ interface RankData {
 }
 
 const LETTERS = ['A', 'B', 'C', 'D', 'E', 'F'];
-type Phase = 'loading' | 'intro' | 'playing' | 'dead' | 'rank';
+type Phase = 'loading' | 'intro' | 'playing' | 'cleared' | 'dead' | 'rank';
 
 export const SurvivalGame: React.FC = () => {
   const { profile } = useAuth();
@@ -153,7 +163,22 @@ export const SurvivalGame: React.FC = () => {
     correct: number;
     wrong: number;
     deaths: number;
+    rebirth: SCheckpoint | null;
   }>(null);
+
+  /** 本层通过的结算信息（答对后停在这里，等学生点「下一层」） */
+  const [clearedInfo, setClearedInfo] = useState<null | {
+    code: string;
+    title: string;
+    hpDelta: number;
+    repeat: boolean;
+    corrected: boolean;
+  }>(null);
+  /** 刚解锁的重生点剧情，展示一次可关闭 */
+  const [checkpointStory, setCheckpointStory] = useState<SCheckpoint | null>(null);
+  const [nextBusy, setNextBusy] = useState(false);
+  /** 「下潜」过场：点进下一层时短暂盖住屏幕，0.55s 后自动消失 */
+  const [diving, setDiving] = useState<null | { code: string; title: string }>(null);
 
   const advanceTimer = useRef<number | null>(null);
   /** 超时自动交只允许触发一次，否则倒计时归零后每 500ms 都会再交一次 */
@@ -204,6 +229,17 @@ export const SurvivalGame: React.FC = () => {
           });
         }
         setPhase('playing');
+      } else if (d.alive && d.waiting_next) {
+        // 上次答对后直接关页面：回到「本层已通过」的结算态，不会倒退回重生点
+        setLevel(d.level);
+        setClearedInfo({
+          code: d.level?.code || '',
+          title: d.level?.title || '',
+          hpDelta: 0,
+          repeat: false,
+          corrected: false,
+        });
+        setPhase('cleared');
       } else {
         setPhase('intro');
       }
@@ -262,29 +298,24 @@ export const SurvivalGame: React.FC = () => {
         window.setTimeout(() => setHpFloat(null), 1100);
 
         if (d.correct) {
-          // 本题已结算，等 700ms 切下一题；这段时间不能再让倒计时交卷
+          // 只结算，不跳题：停在结算页等学生点「下一层」，下一题的计时由 /next 才开始
           setDeadline(null);
           timeoutFiredRef.current = true;
           setCombo((n) => n + 1);
           setFlash('good');
-          window.setTimeout(() => setFlash(''), 420);
-          // 答对：停留 700ms 让学生看到血条涨，再切下一题
-          advanceTimer.current = window.setTimeout(() => {
-            advanceTimer.current = null;
-            applyQuestion(d.level, d.question, d.deadline);
-            setState((prev) =>
-              prev
-                ? {
-                    ...prev,
-                    total_levels: d.total_levels,
-                    round_levels: d.round_levels,
-                    hp: d.hp_after,
-                    level: d.level,
-                    question: d.question,
-                  }
-                : prev
-            );
-          }, 700);
+          // 绿光走满 0.55s 再撤掉，太快会看不到
+          window.setTimeout(() => setFlash(''), 650);
+          setClearedInfo({
+            code: level?.code || '',
+            title: level?.title || '',
+            hpDelta: d.hp_delta,
+            repeat: !!d.repeat,
+            corrected: false,
+          });
+          setState((prev) =>
+            prev ? { ...prev, total_levels: d.total_levels, round_levels: d.round_levels, hp: d.hp_after } : prev
+          );
+          window.setTimeout(() => setPhase('cleared'), 520);
           return;
         }
 
@@ -315,6 +346,7 @@ export const SurvivalGame: React.FC = () => {
             correct: Number(d.total_correct) || 0,
             wrong: Number(d.total_wrong) || 0,
             deaths: Number(d.deaths) || 0,
+            rebirth: d.rebirth || null,
           });
           window.setTimeout(() => setPhase('dead'), 1500);
         }
@@ -355,21 +387,18 @@ export const SurvivalGame: React.FC = () => {
       timeoutFiredRef.current = true;
       setCombo((n) => n + 1);
       setFlash('good');
-      window.setTimeout(() => setFlash(''), 420);
-      advanceTimer.current = window.setTimeout(() => {
-        advanceTimer.current = null;
-        applyQuestion(d.level, d.question, d.deadline);
-        setState((prev) =>
-          prev
-            ? {
-                ...prev,
-                total_levels: d.total_levels,
-                round_levels: d.round_levels,
-                pending_correction: false,
-              }
-            : prev
-        );
-      }, 500);
+      window.setTimeout(() => setFlash(''), 650);
+      setClearedInfo({
+        code: level?.code || '',
+        title: level?.title || '',
+        hpDelta: 0,
+        repeat: false,
+        corrected: true,
+      });
+      setState((prev) =>
+        prev ? { ...prev, total_levels: d.total_levels, round_levels: d.round_levels, pending_correction: false } : prev
+      );
+      window.setTimeout(() => setPhase('cleared'), 520);
     } catch (e) {
       setNotice((e as Error).message || '提交失败');
     } finally {
@@ -397,13 +426,19 @@ export const SurvivalGame: React.FC = () => {
       setDeadline(null);
       timeoutFiredRef.current = true;
       setCombo((n) => n + 1);
-      advanceTimer.current = window.setTimeout(() => {
-        advanceTimer.current = null;
-        applyQuestion(d.level, d.question, d.deadline);
-        setState((prev) =>
-          prev ? { ...prev, total_levels: d.total_levels, round_levels: d.round_levels, pending_correction: false } : prev
-        );
-      }, 500);
+      setFlash('good');
+      window.setTimeout(() => setFlash(''), 650);
+      setClearedInfo({
+        code: level?.code || '',
+        title: level?.title || '',
+        hpDelta: 0,
+        repeat: false,
+        corrected: true,
+      });
+      setState((prev) =>
+        prev ? { ...prev, total_levels: d.total_levels, round_levels: d.round_levels, pending_correction: false } : prev
+      );
+      window.setTimeout(() => setPhase('cleared'), 520);
     } catch (e) {
       setNotice((e as Error).message || '提交失败');
     } finally {
@@ -411,8 +446,68 @@ export const SurvivalGame: React.FC = () => {
     }
   };
 
-  const startGame = async () => {
-    setBusy(true);
+  /**
+   * 进入下一层。
+   * ⛔ 抽题与开始计时都在这一步（服务端 /next），所以结算页停多久都不会超时。
+   */
+  const goNext = async () => {
+    if (nextBusy) return;
+    setNextBusy(true);
+    setNotice('');
+    try {
+      const res: any = await backendClient.post('/api/student/survival/next', {});
+      const d = res?.data;
+      if (!d) throw new Error('没有返回结果');
+      setHp(Number(d.hp) || 0);
+      applyQuestion(d.level, d.question, d.deadline);
+      setCheckpointStory(d.checkpoint || null);
+      setState((prev) =>
+        prev
+          ? {
+              ...prev,
+              level: d.level,
+              question: d.question,
+              round_levels: d.round_levels,
+              waiting_next: false,
+              pending_correction: false,
+            }
+          : prev
+      );
+      // 短暂过场：让「进入下一层」有个下落的感觉，而不是硬切屏
+      setDiving({ code: d.level?.code || '', title: d.level?.title || '' });
+      window.setTimeout(() => {
+        setDiving(null);
+        setPhase('playing');
+      }, 560);
+    } catch (e) {
+      setNotice((e as Error).message || '进入下一层失败');
+    } finally {
+      setNextBusy(false);
+    }
+  };
+
+  /**
+   * 结算页快速模式：回车 / 空格直接进下一层。
+   * 与学生端练习模块（PracticeModule / WrongQuestions）保持同一套手感。
+   */
+  const goNextRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    goNextRef.current = goNext;
+  }, [goNext]);
+
+  useEffect(() => {
+    if (phase !== 'cleared' || nextBusy || diving) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+        e.preventDefault();
+        goNextRef.current?.();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [phase, nextBusy, diving]);
+
+  const startGame = async () => {    setBusy(true);
     try {
       const res: any = await backendClient.post('/api/student/survival/start', {});
       const d = res?.data;
@@ -420,6 +515,7 @@ export const SurvivalGame: React.FC = () => {
       setHp(d.hp);
       applyQuestion(d.level, d.question, d.pending_correction ? null : d.deadline);
       setNeedFix(!!d.pending_correction);
+      if (d.checkpoint) setCheckpointStory(d.checkpoint);
       setState((prev) =>
         prev
           ? { ...prev, hp: d.hp, alive: true, pending_correction: !!d.pending_correction, round_no: d.round_no }
@@ -427,7 +523,7 @@ export const SurvivalGame: React.FC = () => {
       );
       setPhase('playing');
     } catch (e) {
-      alert((e as Error).message || '开始失败');
+      setNotice((e as Error).message || '开始失败');
     } finally {
       setBusy(false);
     }
@@ -465,16 +561,28 @@ export const SurvivalGame: React.FC = () => {
         @keyframes sv-shake { 0%,100%{transform:translateX(0)} 20%{transform:translateX(-7px)} 40%{transform:translateX(6px)} 60%{transform:translateX(-4px)} 80%{transform:translateX(3px)} }
         @keyframes sv-pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
         @keyframes sv-rise { 0%{opacity:0; transform:translateY(6px)} 25%{opacity:1} 100%{opacity:0; transform:translateY(-16px)} }
+        @keyframes sv-good { 0%{box-shadow:inset 0 0 0 0 rgba(52,211,153,0)} 28%{box-shadow:inset 0 0 70px 6px rgba(52,211,153,.26)} 100%{box-shadow:inset 0 0 0 0 rgba(52,211,153,0)} }
+        @keyframes sv-fadein { from{opacity:0; transform:translateY(8px)} to{opacity:1; transform:translateY(0)} }
+        @keyframes sv-dive-code { 0%{opacity:0; transform:translateY(-14px)} 100%{opacity:1; transform:translateY(0)} }
+        @keyframes sv-dive-bar { 0%{width:0; opacity:.25} 100%{width:9rem; opacity:1} }
+        @keyframes sv-pop { 0%{transform:scale(.72); opacity:0} 60%{transform:scale(1.1)} 100%{transform:scale(1); opacity:1} }
         .sv-shake{animation:sv-shake .42s ease-in-out}
         .sv-pulse{animation:sv-pulse 1.1s ease-in-out infinite}
         .sv-rise{animation:sv-rise 1.1s ease-out forwards}
+        .sv-good{animation:sv-good .55s ease-out}
+        .sv-fadein{animation:sv-fadein .28s ease-out both}
+        .sv-dive-code{animation:sv-dive-code .45s ease-out both}
+        .sv-dive-bar{animation:sv-dive-bar .55s ease-out both}
+        .sv-pop{animation:sv-pop .3s ease-out both}
         .sv-rte p{margin:.35em 0;line-height:1.7}
         .sv-rte p:first-child{margin-top:0}
         .sv-rte p:last-child{margin-bottom:0}
         .sv-rte img{max-width:100%;height:auto;border-radius:6px;display:block;margin:.4rem 0}
         .sv-rte ul,.sv-rte ol{padding-left:1.3em;margin:.35em 0}
       `}</style>
-      <div className={flash === 'bad' ? 'sv-shake flex h-full flex-col overflow-hidden' : 'flex h-full flex-col overflow-hidden'}>
+      <div
+        className={`relative flex h-full flex-col overflow-hidden ${flash === 'bad' ? 'sv-shake' : ''} ${flash === 'good' ? 'sv-good' : ''}`}
+      >
         {inner}
       </div>
     </div>
@@ -588,9 +696,96 @@ export const SurvivalGame: React.FC = () => {
     );
   }
 
+  // ---------- 本层通过（等学生点「下一层」） ----------
+  if (phase === 'cleared') {
+    const info = clearedInfo || { code: '', title: '', hpDelta: 0, repeat: false, corrected: false };
+    return shell(
+      <div className="relative flex flex-1 items-center justify-center px-6">
+        <div className="sv-fadein w-full max-w-md">
+          <div className="text-center">
+            <div className="font-mono text-[11px] tracking-[0.18em]" style={{ color: C.green }}>layer stable</div>
+            <div className="mt-2 flex items-baseline justify-center gap-2">
+              <span className="font-mono text-3xl" style={{ color: C.text }}>{info.code}</span>
+              <span className="text-sm" style={{ color: C.dim }}>{info.title}</span>
+            </div>
+            <div
+              className="mt-3 inline-flex items-center gap-2 rounded-full px-3 py-1"
+              style={{ background: 'rgba(52,211,153,0.12)', border: '1px solid #134E4A' }}
+            >
+              <span className="font-mono text-sm" style={{ color: C.green }}>
+                {info.corrected ? '订正通过 · 信号未损' : `信号 ${info.hpDelta > 0 ? '+' : ''}${info.hpDelta}`}
+              </span>
+              {info.repeat && <span className="text-[11px]" style={{ color: C.mute }}>今天做过这题</span>}
+            </div>
+          </div>
+
+          {notice && (
+            <div
+              className="mt-4 rounded-md px-3 py-1.5 text-[11px]"
+              style={{ background: 'rgba(239,68,68,0.14)', border: '1px solid #5A2020', color: '#FCA5A5' }}
+            >
+              {notice}
+            </div>
+          )}
+
+          <div className="mt-6 rounded-lg px-4 py-3" style={{ background: C.panel2, border: `1px solid ${C.line}` }}>
+            <p className="text-[11px] leading-relaxed" style={{ color: C.dim }}>
+              这一层已经稳住。可以歇一会儿，准备好了再下潜 ——
+              下一层的计时从你点按钮那一刻才开始。
+            </p>
+          </div>
+
+          <div className="mt-4 flex flex-col gap-2">
+            <button
+              onClick={goNext}
+              disabled={nextBusy}
+              className="w-full rounded-lg py-3 text-sm font-medium disabled:opacity-50"
+              style={{ background: C.cyan, color: '#062A33' }}
+            >
+              {nextBusy ? '正在下潜…' : '进入下一层 →'}
+            </button>
+            <p className="text-center text-[11px]" style={{ color: C.mute }}>
+              按回车或空格也能继续
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setPhase('rank')}
+                className="flex-1 rounded-lg py-2 text-xs"
+                style={{ border: `1px solid ${C.line}`, color: C.dim }}
+              >
+                看排行榜
+              </button>
+              <button
+                onClick={() => setPhase('intro')}
+                className="flex-1 rounded-lg py-2 text-xs"
+                style={{ border: `1px solid ${C.line}`, color: C.dim }}
+              >
+                先退出
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* 下潜过场：只在点「进入下一层」后出现 0.55 秒 */}
+        {diving && (
+          <div
+            className="absolute inset-0 z-40 flex flex-col items-center justify-center"
+            style={{ background: 'rgba(8,13,24,0.94)' }}
+          >
+            <div className="font-mono text-[10px] tracking-[0.22em]" style={{ color: C.mute }}>descending</div>
+            <div className="sv-dive-code mt-2 font-mono text-3xl" style={{ color: C.cyan }}>{diving.code}</div>
+            <div className="mt-1 text-xs" style={{ color: C.dim }}>{diving.title}</div>
+            <div className="sv-dive-bar mt-4 h-[2px] rounded" style={{ background: C.cyan }} />
+            <div className="mt-2 text-[11px]" style={{ color: C.mute }}>下潜中…</div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   // ---------- 死亡结算 ----------
   if (phase === 'dead') {
-    const info = deathInfo || { reached: 0, best: 0, total: 0, correct: 0, wrong: 0, deaths: 0 };
+    const info = deathInfo || { reached: 0, best: 0, total: 0, correct: 0, wrong: 0, deaths: 0, rebirth: null };
     return shell(
       <div className="flex flex-1 items-center justify-center px-6">
         <div className="w-full max-w-md">
@@ -600,6 +795,16 @@ export const SurvivalGame: React.FC = () => {
             <div className="mt-2 text-sm" style={{ color: C.dim }}>
               你在第 <span className="font-mono" style={{ color: C.text }}>{info.reached}</span> 层失去了信号
             </div>
+            {info.rebirth && (
+              <div
+                className="mx-auto mt-3 inline-flex flex-wrap items-center justify-center gap-x-2 rounded-md px-3 py-2"
+                style={{ background: 'rgba(251,191,36,0.08)', border: '1px solid #78350F' }}
+              >
+                <span className="text-[11px]" style={{ color: C.amber }}>中继站已锚定</span>
+                <span className="font-mono text-xs" style={{ color: '#FDE68A' }}>{info.rebirth.code}</span>
+                <span className="text-[11px]" style={{ color: C.dim }}>{info.rebirth.title}</span>
+              </div>
+            )}
           </div>
 
           <div className="mt-6 rounded-lg p-4" style={{ background: C.panel2, border: `1px solid ${C.line}` }}>
@@ -624,7 +829,7 @@ export const SurvivalGame: React.FC = () => {
 
           <div className="mt-3 rounded-md px-3 py-2" style={{ background: 'rgba(34,211,238,0.07)', border: '1px solid #164E63' }}>
             <p className="text-[11px] leading-relaxed" style={{ color: '#67E8F9' }}>
-              深度记录不会清零。重新接入后从第 1 层开始，但累计层数继续往上加。
+              深度记录不会清零。重新接入后会回到最近的中继站，不用从头再走。
             </p>
           </div>
 
@@ -635,7 +840,7 @@ export const SurvivalGame: React.FC = () => {
               className="flex-1 rounded-lg py-2.5 text-sm font-medium disabled:opacity-50"
               style={{ background: C.cyan, color: '#062A33' }}
             >
-              重新接入
+              {info.rebirth ? `从 ${info.rebirth.code} 重新接入` : '重新接入'}
             </button>
             <button
               onClick={() => setPhase('rank')}
@@ -659,7 +864,7 @@ export const SurvivalGame: React.FC = () => {
           <h3 className="mt-2 text-xl" style={{ color: C.text }}>信号深潜</h3>
           <p className="mx-auto mt-3 max-w-sm text-sm leading-relaxed" style={{ color: C.dim }}>
             一关一题。答对稳住信号并下潜一层，答错会让信号崩解。
-            信号耗尽就断线，回到第 1 层重来 —— 但深度记录永远保留。
+            信号耗尽就断线，但会从最近的中继站重新接入 —— 走过的路不必再走。
           </p>
 
           <div className="mt-5 grid grid-cols-3 gap-2 text-center">
@@ -708,6 +913,12 @@ export const SurvivalGame: React.FC = () => {
    * 就靠服务端的 pending_correction 恢复订正入口。
    */
   const fixing = needFix || (!!feedback && !feedback.dead);
+  /** 答错后用来把正确选项标绿：只认单个字母（B 这种），富文本答案不动 */
+  const correctLetter = (() => {
+    if (isFill || !feedback?.correctAnswer) return '';
+    const s = String(feedback.correctAnswer).trim().toUpperCase();
+    return /^[A-F]$/.test(s) ? s : '';
+  })();
   const timeDanger = remaining !== null && remaining <= 10;
 
   return shell(
@@ -718,7 +929,11 @@ export const SurvivalGame: React.FC = () => {
           <div className="flex items-center gap-2">
             <span className="font-mono text-[11px] tracking-[0.16em]" style={{ color: danger ? C.red : C.cyan }}>signal dive</span>
             {combo >= 2 && (
-              <span className="rounded px-1.5 py-0.5 font-mono text-[11px]" style={{ background: 'rgba(52,211,153,0.12)', color: C.green }}>
+              <span
+                key={combo}
+                className="sv-pop rounded px-1.5 py-0.5 font-mono text-[11px]"
+                style={{ background: 'rgba(52,211,153,0.12)', color: C.green }}
+              >
                 × {combo} 连对
               </span>
             )}
@@ -736,6 +951,30 @@ export const SurvivalGame: React.FC = () => {
         {danger && (
           <div className="mt-2 rounded px-2 py-1 sv-pulse" style={{ background: 'rgba(239,68,68,0.14)' }}>
             <span className="text-[11px]" style={{ color: '#FCA5A5' }}>信号崩解临界 · 再错一次即断线</span>
+          </div>
+        )}
+
+        {/* 刚解锁一个重生点：剧情只展示一次，学生可以关掉 */}
+        {checkpointStory && (
+          <div className="mt-2 rounded-md px-3 py-2" style={{ background: 'rgba(251,191,36,0.08)', border: '1px solid #78350F' }}>
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="font-mono text-[10px] tracking-widest" style={{ color: C.amber }}>
+                  checkpoint anchored · {checkpointStory.code}
+                </div>
+                <div className="mt-1 text-xs leading-relaxed" style={{ color: '#FDE68A' }}>
+                  {checkpointStory.story || '中继站已锚定，断线后会回到这里。'}
+                </div>
+              </div>
+              <button
+                onClick={() => setCheckpointStory(null)}
+                className="shrink-0 text-sm leading-none"
+                style={{ color: C.mute }}
+                title="知道了"
+              >
+                ×
+              </button>
+            </div>
           </div>
         )}
 
@@ -762,7 +1001,7 @@ export const SurvivalGame: React.FC = () => {
           {Array.from({ length: 10 }, (_, i) => (
             <span
               key={i}
-              className="h-[7px] flex-1 rounded-sm"
+              className="h-[7px] flex-1 rounded-sm transition-colors duration-300"
               style={{ background: i < cells ? barColor : '#1B2536' }}
             />
           ))}
@@ -815,6 +1054,8 @@ export const SurvivalGame: React.FC = () => {
                 const letter = LETTERS[i];
                 const on = picked === letter;
                 const disabled = fixing || busy;
+                const isRight = !!correctLetter && correctLetter === letter;
+                const isWrong = fixing && !!correctLetter && picked === letter && !isRight;
                 return (
                   <button
                     key={i}
@@ -826,14 +1067,23 @@ export const SurvivalGame: React.FC = () => {
                     }}
                     className="flex w-full items-start gap-2 rounded-lg px-3 py-2 text-left transition-colors"
                     style={{
-                      border: `1px solid ${on ? C.cyan : C.line}`,
-                      background: on ? 'rgba(34,211,238,0.08)' : 'transparent',
-                      opacity: disabled && !on ? 0.65 : 1,
+                      border: `1px solid ${isRight ? C.green : isWrong ? C.red : on ? C.cyan : C.line}`,
+                      background: isRight
+                        ? 'rgba(52,211,153,0.10)'
+                        : isWrong
+                          ? 'rgba(239,68,68,0.10)'
+                          : on
+                            ? 'rgba(34,211,238,0.08)'
+                            : 'transparent',
+                      opacity: disabled && !on && !isRight && !isWrong ? 0.65 : 1,
                     }}
                   >
                     <span
                       className="flex h-5 w-5 shrink-0 items-center justify-center rounded font-mono text-[11px]"
-                      style={{ background: on ? C.cyan : '#1B2536', color: on ? '#062A33' : C.dim }}
+                      style={{
+                        background: isRight ? C.green : isWrong ? C.red : on ? C.cyan : '#1B2536',
+                        color: isRight || isWrong || on ? '#062A33' : C.dim,
+                      }}
                     >
                       {letter}
                     </span>

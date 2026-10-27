@@ -11578,6 +11578,63 @@ async function survivalAdvance(studentId, fromSeq, fromRound, cfg, roundLevels) 
   };
 }
 
+/**
+ * 找出「从 seq 这一关回退时该落在哪个重生点」。
+ * 取 <= seq 的最大重生点；一个都没有就退回第一关（保证永远有落点）。
+ * ⛔ 不能用「单元第一关」硬编码：教师端点过单元内随机化后，单元第一关会变。
+ */
+async function survivalCheckpointFor(seq) {
+  const [rows] = await pool.query(
+    'SELECT * FROM survival_levels WHERE is_checkpoint = 1 AND seq <= ? ORDER BY seq DESC LIMIT 1',
+    [Number(seq) || 1]
+  );
+  if (rows.length) return rows[0];
+  const [first] = await pool.query('SELECT * FROM survival_levels ORDER BY seq ASC LIMIT 1');
+  return first.length ? first[0] : null;
+}
+
+/** 重生点信息（给前端展示剧情用） */
+function survivalCheckpointOut(lv) {
+  if (!lv) return null;
+  return {
+    seq: Number(lv.seq),
+    code: lv.code,
+    title: lv.title,
+    story: lv.checkpoint_story || '',
+  };
+}
+
+/**
+ * 从当前关卡推进到下一关并抽题（同时开始计时）。
+ * /next 和 /start（待命态续玩）都走这里，避免两处逻辑走岔。
+ */
+async function openNextLevel(studentId, profile, cfg) {
+  const fromSeq = Number(profile.seq);
+  const next = await survivalAdvance(
+    studentId, fromSeq, Number(profile.round_no), cfg, Number(profile.round_levels)
+  );
+  if (!next) return null;
+
+  let roundLevels = Number(profile.round_levels);
+  if (next.finishedRound) {
+    await pool.query(
+      `UPDATE survival_profiles
+          SET best_round_levels = GREATEST(best_round_levels, ?), round_levels = 0
+        WHERE student_id = ?`,
+      [roundLevels, studentId]
+    );
+    roundLevels = 0;
+  }
+
+  // 刚跨进一个重生点：剧情只在这一刻下发一次
+  const crossed = Number(next.level.seq) > fromSeq;
+  const checkpoint = crossed && Number(next.level.is_checkpoint) === 1
+    ? survivalCheckpointOut(next.level)
+    : null;
+
+  return { ...next, roundLevels, checkpoint };
+}
+
 function survivalLevelOut(lv) {
   if (!lv) return null;
   return {
@@ -11615,6 +11672,18 @@ app.get('/api/student/survival/state', authenticate, async (req, res) => {
 
     let question = null;
     let level = null;
+    // 「本关已结算、还没开下一关」的待命态：答对后前端会停在这里等学生点「下一层」
+    const waitingNext =
+      Number(profile.alive) === 1 &&
+      !profile.current_question_id &&
+      Number(profile.pending_correction) !== 1 &&
+      Number(profile.total_levels) > 0;
+
+    if (profile.current_question_id || waitingNext) {
+      const [lv] = await pool.query('SELECT * FROM survival_levels WHERE seq = ? LIMIT 1', [profile.seq]);
+      level = lv.length ? survivalLevelOut(lv[0]) : null;
+    }
+
     if (profile.current_question_id) {
       const [qs] = await pool.query(
         'SELECT id, type, content, options, answers, explanation FROM questions WHERE id = ? LIMIT 1',
@@ -11630,8 +11699,6 @@ app.get('/api/student/survival/state', authenticate, async (req, res) => {
           question.explanation = qs[0].explanation || '';
         }
       }
-      const [lv] = await pool.query('SELECT * FROM survival_levels WHERE seq = ? LIMIT 1', [profile.seq]);
-      level = lv.length ? survivalLevelOut(lv[0]) : null;
     }
 
     res.json({
@@ -11648,6 +11715,7 @@ app.get('/api/student/survival/state', authenticate, async (req, res) => {
         deaths: Number(profile.deaths),
         alive: Number(profile.alive) === 1,
         pending_correction: Number(profile.pending_correction) === 1,
+        waiting_next: waitingNext,
         level,
         question,
         deadline: profile.current_deadline || null,
@@ -11701,13 +11769,41 @@ app.post('/api/student/survival/start', authenticate, async (req, res) => {
       }
     }
 
-    // 重生：断线后重新接入，回到第 1 关
-    const [firstRows] = await pool.query('SELECT * FROM survival_levels WHERE is_active = 1 ORDER BY seq ASC LIMIT 1');
-    const first = firstRows[0];
-    if (!first) return res.status(400).json({ data: null, error: '还没有启用的关卡' });
+    // 本关已通过、还没开下一关（答对后直接关页面）：接着开下一关
+    // ⛔ 不能落到下面的重生分支，否则会倒退回上一个重生点
+    if (
+      Number(profile.alive) === 1 &&
+      !profile.current_question_id &&
+      Number(profile.pending_correction) !== 1 &&
+      Number(profile.total_levels) > 0
+    ) {
+      const next = await openNextLevel(studentId, profile, cfg);
+      if (!next) return res.status(400).json({ data: null, error: '没有可用的关卡，请联系老师' });
+      return res.json({
+        data: {
+          resumed: false,
+          waiting_next: true,
+          level: survivalLevelOut(next.level),
+          question: survivalQuestionOut(next.question),
+          deadline: next.deadline || null,
+          checkpoint: next.checkpoint,
+          finished_round: !!next.finishedRound,
+          hp: Number(profile.hp),
+          round_no: next.roundNo,
+          pending_correction: false,
+        },
+        error: null,
+      });
+    }
 
-    const question = await pickSurvivalQuestion(studentId, first);
-    if (!question) return res.status(400).json({ data: null, error: '第一关没有可用题目，请联系老师' });
+    // 重生：断线后重新接入，落到「最近的已解锁重生点」，不再一律回第 1 关
+    const cp = await survivalCheckpointFor(Number(profile.seq));
+    if (!cp) return res.status(400).json({ data: null, error: '还没有启用的关卡' });
+
+    const question = await pickSurvivalQuestion(studentId, cp);
+    if (!question) {
+      return res.status(400).json({ data: null, error: `重生点 ${cp.code} 没有可用题目，请联系老师` });
+    }
 
     const seconds = question.type === 'fill_blank' ? cfg.time_blank : cfg.time_choice;
     await pool.query(
@@ -11718,19 +11814,21 @@ app.post('/api/student/survival/start', authenticate, async (req, res) => {
               last_played_at = NOW()
         WHERE student_id = ?`,
       seconds > 0
-        ? [cfg.hp_init, first.seq, Number(profile.round_no) || 1, question.id, seconds, studentId]
-        : [cfg.hp_init, first.seq, Number(profile.round_no) || 1, question.id, studentId]
+        ? [cfg.hp_init, cp.seq, Number(profile.round_no) || 1, question.id, seconds, studentId]
+        : [cfg.hp_init, cp.seq, Number(profile.round_no) || 1, question.id, studentId]
     );
 
     res.json({
       data: {
         resumed: false,
         reborn: Number(profile.deaths) > 0,
-        level: survivalLevelOut(first),
+        rebirth: survivalCheckpointOut(cp),
+        level: survivalLevelOut(cp),
         question: survivalQuestionOut(question),
         deadline: seconds > 0 ? new Date(Date.now() + seconds * 1000).toISOString() : null,
         hp: cfg.hp_init,
         round_no: Number(profile.round_no) || 1,
+        pending_correction: false,
       },
       error: null,
     });
@@ -11818,17 +11916,8 @@ app.post('/api/student/survival/answer', authenticate, async (req, res) => {
           WHERE student_id = ?`,
         [hpAfter, roundLevels, totalLevels, studentId]
       );
-      const next = await survivalAdvance(
-        studentId, Number(profile.seq), Number(profile.round_no), cfg, roundLevels
-      );
-      if (next && next.finishedRound) {
-        await pool.query(
-          `UPDATE survival_profiles
-              SET best_round_levels = GREATEST(best_round_levels, ?), round_levels = 0
-            WHERE student_id = ?`,
-          [roundLevels, studentId]
-        );
-      }
+      // ⛔ 这里只结算，不抽下一题：抽题与开始计时都交给 /next。
+      //    否则学生点「下一层」前休息一会儿，计时早就在跑，一进去就超时扣血（2026-10-27）
       return res.json({
         data: {
           correct: true,
@@ -11840,10 +11929,10 @@ app.post('/api/student/survival/answer', authenticate, async (req, res) => {
           dead: false,
           total_levels: totalLevels,
           round_levels: roundLevels,
-          finished_round: !!(next && next.finishedRound),
-          level: next ? survivalLevelOut(next.level) : null,
-          question: next ? survivalQuestionOut(next.question) : null,
-          deadline: next ? next.deadline || null : null,
+          need_next: true,
+          level: null,
+          question: null,
+          deadline: null,
           explanation: question.explanation || '',
         },
         error: null,
@@ -11853,10 +11942,12 @@ app.post('/api/student/survival/answer', authenticate, async (req, res) => {
     // 答错：扣血；血尽则断线
     const dead = hpAfter <= 0;
     if (dead) {
+      // ⛔ round_no 不再因为死亡 +1：有了重生点之后，死亡不是「重开一轮」，
+      //    只有真正打穿最后一关才 +1（2026-10-27）
       await pool.query(
         `UPDATE survival_profiles
             SET hp = ?, deaths = deaths + 1, alive = 0, pending_correction = 0,
-                total_wrong = total_wrong + 1, round_levels = 0, round_no = round_no + 1,
+                total_wrong = total_wrong + 1, round_levels = 0,
                 best_round_levels = GREATEST(best_round_levels, ?),
                 current_question_id = NULL, current_deadline = NULL, last_played_at = NOW()
           WHERE student_id = ?`,
@@ -11873,6 +11964,11 @@ app.post('/api/student/survival/answer', authenticate, async (req, res) => {
         [hpAfter, cfg.require_correction ? 1 : 0, studentId]
       );
     }
+
+    // 断线时顺手算好重生点，前端结算页直接显示「会回到 3.1.1 信息系统分类」
+    const rebirth = dead
+      ? survivalCheckpointOut(await survivalCheckpointFor(Number(profile.seq)))
+      : null;
 
     res.json({
       data: {
@@ -11891,6 +11987,7 @@ app.post('/api/student/survival/answer', authenticate, async (req, res) => {
         // 断线结算要用：服务端这时候已经把档案重置了，所以统计值必须在这里一起返回，
         // 否则前端只能拿「重置后」的数字，显示成「在第 0 层断线」（2026-10-27）
         ...(dead ? {
+          rebirth,
           round_levels: Number(profile.round_levels),
           best_round_levels: Math.max(Number(profile.best_round_levels), Number(profile.round_levels)),
           total_levels: Number(profile.total_levels),
@@ -11903,6 +12000,74 @@ app.post('/api/student/survival/answer', authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error('[survival] 作答失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+/**
+ * 进入下一关（2026-10-27 新增）
+ *
+ * 答对只结算，不抽题；由学生点「下一层」时调这里，才推进关卡并开始计时。
+ * 这样两题之间可以喘息、可以中途离开，而不会因为计时早就在跑而白扣血。
+ */
+app.post('/api/student/survival/next', authenticate, async (req, res) => {
+  try {
+    if (!(await survivalGate(req, res))) return;
+    const cfg = await getSurvivalConfig();
+    const studentId = req.user.userId;
+    const profile = await loadSurvivalProfile(studentId);
+    if (!profile) return res.status(500).json({ data: null, error: '档案读取失败' });
+    if (Number(profile.alive) !== 1) {
+      return res.status(400).json({ data: null, error: '已断线，请先重新接入' });
+    }
+    if (Number(profile.pending_correction) === 1) {
+      return res.status(400).json({ data: null, error: '这道题要先订正才能继续' });
+    }
+
+    // 幂等：网络重试或连点两次时，直接把已经开着的这题还回去，不重复推进
+    if (profile.current_question_id) {
+      const [qs] = await pool.query(
+        'SELECT id, type, content, options FROM questions WHERE id = ? LIMIT 1',
+        [profile.current_question_id]
+      );
+      const [lv] = await pool.query('SELECT * FROM survival_levels WHERE seq = ? LIMIT 1', [profile.seq]);
+      if (qs.length) {
+        return res.json({
+          data: {
+            level: lv.length ? survivalLevelOut(lv[0]) : null,
+            question: survivalQuestionOut(qs[0]),
+            deadline: profile.current_deadline || null,
+            checkpoint: null,
+            finished_round: false,
+            round_levels: Number(profile.round_levels),
+            total_levels: Number(profile.total_levels),
+            round_no: Number(profile.round_no),
+            hp: Number(profile.hp),
+          },
+          error: null,
+        });
+      }
+    }
+
+    const next = await openNextLevel(studentId, profile, cfg);
+    if (!next) return res.status(400).json({ data: null, error: '没有可用的关卡，请联系老师' });
+
+    res.json({
+      data: {
+        level: survivalLevelOut(next.level),
+        question: survivalQuestionOut(next.question),
+        deadline: next.deadline || null,
+        checkpoint: next.checkpoint,
+        finished_round: !!next.finishedRound,
+        round_levels: next.roundLevels,
+        total_levels: Number(profile.total_levels),
+        round_no: next.roundNo,
+        hp: Number(profile.hp),
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('[survival] 进入下一关失败:', error);
     res.status(500).json({ data: null, error: error.message });
   }
 });
@@ -11953,7 +12118,7 @@ app.post('/api/student/survival/correct', authenticate, async (req, res) => {
       });
     }
 
-    // 订正通过：不扣血也不加血，直接进入下一关
+    // 订正通过：不扣血也不加血，本关记为通过；下一题同样等学生点「下一层」
     const roundLevels = Number(profile.round_levels) + 1;
     const totalLevels = Number(profile.total_levels) + 1;
     await pool.query(
@@ -11963,9 +12128,6 @@ app.post('/api/student/survival/correct', authenticate, async (req, res) => {
         WHERE student_id = ?`,
       [roundLevels, totalLevels, studentId]
     );
-    const next = await survivalAdvance(
-      studentId, Number(profile.seq), Number(profile.round_no), cfg, roundLevels
-    );
 
     res.json({
       data: {
@@ -11973,10 +12135,11 @@ app.post('/api/student/survival/correct', authenticate, async (req, res) => {
         hp: Number(profile.hp),
         total_levels: totalLevels,
         round_levels: roundLevels,
-        finished_round: !!(next && next.finishedRound),
-        level: next ? survivalLevelOut(next.level) : null,
-        question: next ? survivalQuestionOut(next.question) : null,
-        deadline: next ? next.deadline || null : null,
+        need_next: true,
+        finished_round: false,
+        level: null,
+        question: null,
+        deadline: null,
       },
       error: null,
     });
@@ -12206,6 +12369,8 @@ app.get('/api/teacher/survival/levels', authenticate, requireTeachingRole, async
         question_count: Number(r.question_count),
         extra_question_ids: parseJsonArrayField(r.extra_question_ids),
         is_active: Number(r.is_active) === 1,
+        is_checkpoint: Number(r.is_checkpoint) === 1,
+        checkpoint_story: r.checkpoint_story || '',
         attempts: Number(r.attempts) || 0,
       })),
       sync,
@@ -12226,6 +12391,11 @@ app.put('/api/teacher/survival/levels/:seq', authenticate, requireTeachingRole, 
     const params = [];
     if (typeof b.title === 'string') { sets.push('title = ?'); params.push(clip(b.title, 120)); }
     if (b.is_active !== undefined) { sets.push('is_active = ?'); params.push(b.is_active ? 1 : 0); }
+    if (b.is_checkpoint !== undefined) { sets.push('is_checkpoint = ?'); params.push(b.is_checkpoint ? 1 : 0); }
+    if (typeof b.checkpoint_story === 'string') {
+      sets.push('checkpoint_story = ?');
+      params.push(b.checkpoint_story.trim() ? clip(b.checkpoint_story.trim(), 300) : null);
+    }
     if (b.extra_question_ids !== undefined) {
       const ids = (Array.isArray(b.extra_question_ids) ? b.extra_question_ids : [])
         .map((x) => String(x || '').trim()).filter(Boolean).slice(0, 50);
