@@ -11379,14 +11379,24 @@ async function syncSurvivalLevels(force = false) {
   const [[cnt]] = await pool.query('SELECT COUNT(*) AS n FROM survival_levels');
   if (Number(cnt.n) > 0 && !force) return { synced: false, count: Number(cnt.n) };
 
-  let chapters = [];
+  /**
+   * ⛔ 编号必须直接取 chapter-taxonomy.js 的 SECTION_CODES（1.1.1 ~ 4.3.3）。
+   *    学习模块的章/节顺序、题库聚类、练习模块筛选用的都是这一套词表，
+   *    生存游戏再自己算一遍一定会对不上。
+   *    旧实现按 cluster_id 拼音序重排后编号，结果 1.1.1 变成「大数据」，
+   *    而学习模块 1.1.1 是「数据、信息与知识的概念」（2026-10-27 吴老发现）。
+   */
+  const { CHAPTER_TAXONOMY, SECTION_CODES } = require('./chapter-taxonomy');
+
+  // 讲义只用来补单元名（"必修一 · 数据"）这类展示字段，顺序一律以词表为准
+  const lectureParts = new Map(); // 章名 -> part 字符串
   try {
     const meta = getLectureMeta();
-    chapters = Array.isArray(meta && meta.chapters) ? meta.chapters : [];
+    const list = Array.isArray(meta && meta.chapters) ? meta.chapters : [];
+    for (const ch of list) lectureParts.set(String(ch.cluster_id), String(ch.part || ''));
   } catch (e) {
     console.warn('[survival] 读取讲义元数据失败:', e.message);
   }
-  if (!chapters.length) return { synced: false, count: 0, reason: '没有讲义章节数据' };
 
   const [rows] = await pool.query(
     `SELECT cluster_id, COUNT(*) AS n FROM questions
@@ -11395,52 +11405,56 @@ async function syncSurvivalLevels(force = false) {
       GROUP BY cluster_id`
   );
   const countByCluster = new Map(rows.map((r) => [String(r.cluster_id), Number(r.n)]));
-  const sectionsByChapter = new Map();
-  for (const cid of countByCluster.keys()) {
-    const ch = cid.includes('/') ? cid.split('/')[0] : cid;
-    if (!sectionsByChapter.has(ch)) sectionsByChapter.set(ch, []);
-    sectionsByChapter.get(ch).push(cid);
-  }
 
-  const unitSeen = new Map();  // part_index → 单元序号
-  const chapterNoInUnit = new Map(); // part_index → 已用章号
   const values = [];
   let seq = 0;
+  const seenUnit = new Set();
+  // 每个单元的第一关自动成为重生点（老师可在教师端改）
+  const CHECKPOINT_STORIES = [
+    '深度 0m · 起点已锚定。信号从这里接入，断线后还能回到这里。',
+    '深度 200m · 中继站 ALPHA 已激活。从今往后，断线会回到这里重新接入。',
+    '深度 400m · 中继站 BETA 已激活。走过的路线被记住了，不必从头再走。',
+    '深度 600m · 中继站 GAMMA 已激活。最后一程，信号依然稳定。',
+  ];
 
-  for (const ch of chapters) {
-    const partIndex = Number(ch.part_index) || 1;
-    if (!unitSeen.has(partIndex)) unitSeen.set(partIndex, unitSeen.size + 1);
-    const unitNo = unitSeen.get(partIndex);
-    const cNo = (chapterNoInUnit.get(partIndex) || 0) + 1;
-    chapterNoInUnit.set(partIndex, cNo);
-
-    const clusterId = String(ch.cluster_id || '');
-    const sections = (sectionsByChapter.get(clusterId) || []).sort((a, b) => a.localeCompare(b, 'zh'));
-    sections.forEach((cid, si) => {
-      seq += 1;
-      const section = cid.includes('/') ? cid.split('/').slice(1).join('/') : cid;
-      values.push([
-        seq,                              // seq
-        `${unitNo}.${cNo}.${si + 1}`,     // code 三段编号
-        section,                          // title 关卡名（知识点）
-        unitNo,                           // unit_index
-        String(ch.part || ''),            // unit_name
-        clusterId,                        // chapter_name（章）
-        cid,                              // cluster_id（知识点，抽题用）
-        countByCluster.get(cid) || 0,     // question_count
-      ]);
+  CHAPTER_TAXONOMY.forEach((part, pi) => {
+    part.chapters.forEach((chapter) => {
+      chapter.sections.forEach((section) => {
+        seq += 1;
+        const path = `${chapter.name}/${section}`;
+        const fallbackUnit = [part.part, String(part.group || '').replace(/^第[一二三四五]部分\s*/, '')]
+          .filter(Boolean)
+          .join(' · ');
+        const unitNo = pi + 1;
+        const isFirstOfUnit = !seenUnit.has(unitNo);
+        if (isFirstOfUnit) seenUnit.add(unitNo);
+        values.push([
+          seq,
+          SECTION_CODES[path] || '',        // code：1.1.1（与学习模块完全一致）
+          section,                          // title：关卡名 = 小节名
+          unitNo,                           // unit_index：1~4
+          lectureParts.get(chapter.name) || fallbackUnit, // unit_name
+          chapter.name,                     // chapter_name（章）
+          path,                             // cluster_id（抽题用）
+          countByCluster.get(path) || 0,    // question_count：该节可练题数
+          isFirstOfUnit ? 1 : 0,            // is_checkpoint
+          isFirstOfUnit ? (CHECKPOINT_STORIES[pi] || '') : null, // checkpoint_story
+        ]);
+      });
     });
-  }
+  });
 
-  if (!values.length) return { synced: false, count: 0, reason: '题库里没有可用知识点' };
+  if (!values.length) return { synced: false, count: 0, reason: '词表里没有可用小节' };
 
   await pool.query('DELETE FROM survival_levels');
   const CHUNK = 50;
   for (let i = 0; i < values.length; i += CHUNK) {
     const part = values.slice(i, i + CHUNK);
     await pool.query(
-      `INSERT INTO survival_levels (seq, code, title, unit_index, unit_name, chapter_name, cluster_id, question_count)
-       VALUES ${part.map(() => '(?,?,?,?,?,?,?,?)').join(',')}`,
+      `INSERT INTO survival_levels
+         (seq, code, title, unit_index, unit_name, chapter_name, cluster_id, question_count,
+          is_checkpoint, checkpoint_story)
+       VALUES ${part.map(() => '(?,?,?,?,?,?,?,?,?,?)').join(',')}`,
       part.flat()
     );
   }
@@ -11823,6 +11837,11 @@ app.post('/api/student/survival/start', authenticate, async (req, res) => {
         resumed: false,
         reborn: Number(profile.deaths) > 0,
         rebirth: survivalCheckpointOut(cp),
+        // 起点（1.1.1）不存在「跨入」，剧情只能在这里给：
+        // 只在真正第一次进入（没打过关、没死过）时讲一次，重生不重复
+        checkpoint: Number(profile.deaths) === 0 && Number(profile.total_levels) === 0
+          ? survivalCheckpointOut(cp)
+          : null,
         level: survivalLevelOut(cp),
         question: survivalQuestionOut(question),
         deadline: seconds > 0 ? new Date(Date.now() + seconds * 1000).toISOString() : null,
