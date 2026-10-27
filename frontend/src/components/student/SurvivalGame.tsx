@@ -683,8 +683,12 @@ export const SurvivalGame: React.FC = () => {
                       </span>
                       {r.class_name ? <span className="ml-2 text-[11px]" style={{ color: C.mute }}>{r.class_name}</span> : null}
                     </div>
-                    <span className="shrink-0 font-mono text-sm" style={{ color: rankTab === 'depth' ? C.cyan : C.amber }}>
-                      {rankTab === 'depth' ? (r.code || `第 ${r.seq} 关`) : `${r.hp} 信号`}
+                    <span
+                      className="shrink-0 font-mono text-sm"
+                      style={{ color: rankTab === 'depth' ? C.cyan : C.amber }}
+                      title={rankTab === 'depth' ? `${r.code} ${r.title}`.trim() : ''}
+                    >
+                      {rankTab === 'depth' ? `${r.seq} 层` : `${r.hp} 信号`}
                     </span>
                   </div>
                 );
@@ -708,7 +712,7 @@ export const SurvivalGame: React.FC = () => {
                 </span>
               </span>
               <span className="font-mono" style={{ color: C.mute }}>
-                当前第 {rank.me.seq || 1} 关 · {rank.me.hp} 信号
+                当前第 {rank.me.seq || 1} 层 · {rank.me.hp} 信号
               </span>
             </div>
           </div>
@@ -961,7 +965,7 @@ export const SurvivalGame: React.FC = () => {
           </div>
           <div className="flex items-center gap-3">
             <span className="font-mono text-[11px]" style={{ color: C.mute }}>
-              第 {level?.seq ?? state?.seq ?? 1} 关 / 共 70 · 第 {state?.round_no ?? 1} 轮
+              第 {level?.seq ?? state?.seq ?? 1} 层 / 共 70 · 第 {state?.round_no ?? 1} 轮
             </span>
             <button onClick={openRank} className="text-[11px] px-2 py-0.5 rounded" style={{ border: `1px solid ${C.line}`, color: C.dim }}>
               排行
