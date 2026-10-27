@@ -12015,6 +12015,13 @@ app.post('/api/student/survival/answer', authenticate, async (req, res) => {
     const rebirth = dead
       ? survivalCheckpointOut(await survivalCheckpointFor(Number(profile.seq)))
       : null;
+    // 累计深度：seq 只在 1..N 内循环，死了回锚点、打穿一轮又归 1，光看 seq 会失真
+    let deathDepth = 0;
+    if (dead) {
+      const [[lvCnt]] = await pool.query('SELECT COUNT(*) AS n FROM survival_levels');
+      const perRound = Number(lvCnt.n) || 70;
+      deathDepth = (Number(profile.round_no) - 1) * perRound + Number(profile.seq);
+    }
 
     res.json({
       data: {
@@ -12034,6 +12041,7 @@ app.post('/api/student/survival/answer', authenticate, async (req, res) => {
         // 否则前端只能拿「重置后」的数字，显示成「在第 0 层断线」（2026-10-27）
         ...(dead ? {
           rebirth,
+          depth: deathDepth,
           round_levels: Number(profile.round_levels),
           best_round_levels: Math.max(Number(profile.best_round_levels), Number(profile.round_levels)),
           total_levels: Number(profile.total_levels),
@@ -12203,13 +12211,22 @@ async function buildSurvivalRank(limit) {
   /**
    * 深度榜看「当前所处关卡」，不是累计通关数（2026-10-27 吴老定）。
    * 原因：原来按 total_levels 排，而重打旧关也会 +1，等于死了回锚点重打还能刷分，
-   *      死亡没有任何代价。改成看 seq 之后：
+   *      死亡没有任何代价。改成看关卡位置之后：
    *        · 死了回锚点 → 名次立刻掉
    *        · 重打旧关不涨位置，只有真突破才往上走
    *        · 断线（alive=0）不上榜，重生后才重新出现
+   *
+   * ⛔ 深度不是 seq：seq 只在 1..N 之间循环，打穿一轮会回到第 1 关。
+   *    按 (round_no - 1) * 每轮关卡数 + seq 算，第二轮第 5 关 = 75 层，
+   *    否则打完一轮反而掉到「1 层」，看着比新手还浅。
    */
+  const [[lvRow]] = await pool.query('SELECT COUNT(*) AS n FROM survival_levels');
+  const perRound = Number(lvRow.n) || 70;
+  const depthExpr = '(sp.round_no - 1) * ? + sp.seq';
+
   const [depth] = await pool.query(
-    `SELECT sp.student_id, sp.seq, sp.hp, sp.total_levels,
+    `SELECT sp.student_id, sp.seq, sp.round_no, sp.hp, sp.total_levels,
+            ${depthExpr} AS depth,
             l.code, l.title,
             p.username, p.real_name, c.name AS class_name
        FROM survival_profiles sp
@@ -12217,12 +12234,12 @@ async function buildSurvivalRank(limit) {
        LEFT JOIN classes c ON c.id = p.class_id
        LEFT JOIN survival_levels l ON l.seq = sp.seq
       WHERE sp.alive = 1 AND sp.total_levels > 0
-      ORDER BY sp.seq DESC, sp.updated_at ASC
+      ORDER BY depth DESC, sp.updated_at ASC
       LIMIT ?`,
-    [limit]
+    [perRound, limit]
   );
   const [hpList] = await pool.query(
-    `SELECT sp.student_id, sp.seq, sp.total_levels, sp.hp,
+    `SELECT sp.student_id, sp.seq, sp.round_no, sp.total_levels, sp.hp,
             p.username, p.real_name, c.name AS class_name
        FROM survival_profiles sp
        JOIN profiles p ON p.id = sp.student_id
@@ -12236,9 +12253,12 @@ async function buildSurvivalRank(limit) {
     'SELECT COUNT(*) AS n FROM survival_profiles WHERE alive = 1 AND total_levels > 0'
   );
   return {
+    perRound,
     depth: depth.map((r, i) => ({
       rank: i + 1,
       seq: Number(r.seq) || 0,
+      depth: Number(r.depth) || 0,
+      round_no: Number(r.round_no) || 1,
       code: r.code || '',
       title: r.title || '',
       username: r.username || '',
@@ -12250,6 +12270,8 @@ async function buildSurvivalRank(limit) {
     hp: hpList.map((r, i) => ({
       rank: i + 1,
       seq: Number(r.seq) || 0,
+      depth: (Number(r.round_no) - 1) * perRound + (Number(r.seq) || 0),
+      round_no: Number(r.round_no) || 1,
       code: '',
       title: '',
       username: r.username || '',
@@ -12277,15 +12299,18 @@ app.get('/api/student/survival/rank', authenticate, async (req, res) => {
 
     const studentId = req.user.userId;
     const [mine] = await pool.query(
-      'SELECT hp, seq, total_levels, alive FROM survival_profiles WHERE student_id = ? LIMIT 1',
+      'SELECT hp, seq, round_no, total_levels, alive FROM survival_profiles WHERE student_id = ? LIMIT 1',
       [studentId]
     );
-    const me = mine.length ? mine[0] : { hp: cfg.hp_init, seq: 0, total_levels: 0, alive: 0 };
+    const me = mine.length ? mine[0] : { hp: cfg.hp_init, seq: 0, round_no: 1, total_levels: 0, alive: 0 };
     const meAlive = Number(me.alive) === 1;
-    // 深度位次按当前关卡比较（与榜单同一口径）
+    const perRound = Number(survivalRankCache.perRound) || 70;
+    const myDepth = (Number(me.round_no) - 1) * perRound + (Number(me.seq) || 0);
+    // 深度位次按累计层数比较（与榜单同一口径）
     const [[dRank]] = await pool.query(
-      'SELECT COUNT(*) AS n FROM survival_profiles WHERE alive = 1 AND total_levels > 0 AND seq > ?',
-      [Number(me.seq) || 0]
+      `SELECT COUNT(*) AS n FROM survival_profiles
+        WHERE alive = 1 AND total_levels > 0 AND ((round_no - 1) * ? + seq) > ?`,
+      [perRound, myDepth]
     );
     const [[hRank]] = await pool.query(
       'SELECT COUNT(*) AS n FROM survival_profiles WHERE alive = 1 AND hp > ?',
@@ -12301,6 +12326,8 @@ app.get('/api/student/survival/rank', authenticate, async (req, res) => {
           username: req.user.username || '',
           hp: Number(me.hp),
           seq: Number(me.seq) || 0,
+          depth: myDepth,
+          round_no: Number(me.round_no) || 1,
           total_levels: Number(me.total_levels),
           alive: meAlive,
           depth_rank: meAlive && Number(me.total_levels) > 0 ? Number(dRank.n) + 1 : null,

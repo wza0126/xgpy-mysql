@@ -85,8 +85,11 @@ interface SState {
 
 interface RankRow {
   rank: number;
-  /** 当前所处关卡（深度榜按它排） */
+  /** 本轮内的关卡序号 1..70 */
   seq: number;
+  /** 累计深度 = (轮次-1)*70 + seq，打穿一轮会继续往上加 */
+  depth: number;
+  round_no: number;
   code: string;
   title: string;
   username: string;
@@ -104,6 +107,8 @@ interface RankData {
     username: string;
     hp: number;
     seq: number;
+    depth: number;
+    round_no: number;
     total_levels: number;
     alive: boolean;
     depth_rank: number | null;
@@ -163,6 +168,8 @@ export const SurvivalGame: React.FC = () => {
   /** 本次断线的结算数据（服务端已经重置，所以要在死亡那一刻记下来） */
   const [deathInfo, setDeathInfo] = useState<null | {
     reached: number;
+    /** 累计深度 (轮次-1)*70 + 关卡，死亡时那一刻的位置 */
+    depth: number;
     best: number;
     total: number;
     correct: number;
@@ -346,6 +353,7 @@ export const SurvivalGame: React.FC = () => {
           //    若读本地 state 会显示「你在第 0 层断线」
           setDeathInfo({
             reached: Number(d.round_levels) || 0,
+            depth: Number(d.depth) || 0,
             best: Number(d.best_round_levels) || 0,
             total: Number(d.total_levels) || 0,
             correct: Number(d.total_correct) || 0,
@@ -686,9 +694,13 @@ export const SurvivalGame: React.FC = () => {
                     <span
                       className="shrink-0 font-mono text-sm"
                       style={{ color: rankTab === 'depth' ? C.cyan : C.amber }}
-                      title={rankTab === 'depth' ? `${r.code} ${r.title}`.trim() : ''}
+                      title={
+                        rankTab === 'depth'
+                          ? `第 ${r.round_no} 轮 · 本轮第 ${r.seq} 层 · ${r.code} ${r.title}`.trim()
+                          : ''
+                      }
                     >
-                      {rankTab === 'depth' ? `${r.seq} 层` : `${r.hp} 信号`}
+                      {rankTab === 'depth' ? `${r.depth} 层` : `${r.hp} 信号`}
                     </span>
                   </div>
                 );
@@ -712,7 +724,7 @@ export const SurvivalGame: React.FC = () => {
                 </span>
               </span>
               <span className="font-mono" style={{ color: C.mute }}>
-                当前第 {rank.me.seq || 1} 层 · {rank.me.hp} 信号
+                第 {rank.me.depth || 1} 层 · {rank.me.hp} 信号
               </span>
             </div>
           </div>
@@ -810,7 +822,7 @@ export const SurvivalGame: React.FC = () => {
 
   // ---------- 死亡结算 ----------
   if (phase === 'dead') {
-    const info = deathInfo || { reached: 0, best: 0, total: 0, correct: 0, wrong: 0, deaths: 0, rebirth: null };
+    const info = deathInfo || { reached: 0, depth: 0, best: 0, total: 0, correct: 0, wrong: 0, deaths: 0, rebirth: null };
     return shell(
       <div className="flex flex-1 items-center justify-center px-6">
         <div className="w-full max-w-md">
@@ -818,7 +830,7 @@ export const SurvivalGame: React.FC = () => {
             <div className="font-mono text-[11px] tracking-[0.18em]" style={{ color: C.mute }}>transmission terminated</div>
             <div className="mt-2 text-2xl" style={{ color: C.text }}>连接中断</div>
             <div className="mt-2 text-sm" style={{ color: C.dim }}>
-              你在第 <span className="font-mono" style={{ color: C.text }}>{info.reached}</span> 层失去了信号
+              你在第 <span className="font-mono" style={{ color: C.text }}>{info.depth || info.reached}</span> 层失去了信号
             </div>
             {info.rebirth && (
               <div
@@ -835,7 +847,7 @@ export const SurvivalGame: React.FC = () => {
           <div className="mt-6 rounded-lg p-4" style={{ background: C.panel2, border: `1px solid ${C.line}` }}>
             <div className="mb-2 text-[11px] tracking-wider" style={{ color: C.mute }}>本次记录已封存</div>
             {[
-              ['抵达深度', `${info.reached} 层`, C.cyan],
+              ['当前深度', `${info.depth || info.reached} 层`, C.cyan],
               ['历史最深', `${info.best} 层`, C.text],
               ['累计通关', `${info.total} 层`, C.text],
               ['累计答对', `${info.correct} 题`, C.text],
@@ -933,6 +945,10 @@ export const SurvivalGame: React.FC = () => {
 
   // ---------- 游戏中 ----------
   const isFill = question?.type === 'fill_blank';
+  /** 累计深度：打穿一轮后 round_no+1、seq 归 1，光看 seq 会显得越打越浅 */
+  const curSeq = level?.seq ?? state?.seq ?? 1;
+  const curRound = state?.round_no ?? 1;
+  const cumDepth = (curRound - 1) * 70 + curSeq;
   /**
    * 处于「必须订正」状态：刚答错时看本地反馈；刷新/返回后本地反馈已丢，
    * 就靠服务端的 pending_correction 恢复订正入口。
@@ -965,7 +981,7 @@ export const SurvivalGame: React.FC = () => {
           </div>
           <div className="flex items-center gap-3">
             <span className="font-mono text-[11px]" style={{ color: C.mute }}>
-              第 {level?.seq ?? state?.seq ?? 1} 层 / 共 70 · 第 {state?.round_no ?? 1} 轮
+              第 {cumDepth} 层 · 第 {curRound} 轮
             </span>
             <button onClick={openRank} className="text-[11px] px-2 py-0.5 rounded" style={{ border: `1px solid ${C.line}`, color: C.dim }}>
               排行
