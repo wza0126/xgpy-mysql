@@ -11462,6 +11462,33 @@ async function syncSurvivalLevels(force = false) {
   return { synced: true, count: values.length };
 }
 
+/**
+ * 刷新关卡题量。
+ * ⛔ question_count 只是建关时的快照，老师后来加题/停题不会自动反映，
+ *    教师端会一直显示旧数字（2026-10-27：网络拓扑结构补了 2 题，仍显示 0）。
+ *    学生端抽题是按 cluster_id 实时查的，不受这个字段影响，所以只在教师端刷新即可。
+ */
+async function refreshSurvivalLevelCounts() {
+  const [rows] = await pool.query(
+    `SELECT cluster_id, COUNT(*) AS n FROM questions
+      WHERE practice_enabled = 1 AND cluster_id IS NOT NULL AND cluster_id <> ''
+        AND type IN ('choice','fill_blank')
+      GROUP BY cluster_id`
+  );
+  const countByCluster = new Map(rows.map((r) => [String(r.cluster_id), Number(r.n)]));
+  const [levels] = await pool.query('SELECT seq, cluster_id, question_count FROM survival_levels');
+  const changed = levels.filter(
+    (l) => (countByCluster.get(String(l.cluster_id)) || 0) !== Number(l.question_count)
+  );
+  for (const l of changed) {
+    await pool.query('UPDATE survival_levels SET question_count = ? WHERE seq = ?', [
+      countByCluster.get(String(l.cluster_id)) || 0,
+      l.seq,
+    ]);
+  }
+  return changed.length;
+}
+
 /** 学生是否被开放了生存游戏（按 profiles 判断，班级开关会同步到这里） */
 async function survivalGate(req, res) {
   const [rows] = await pool.query(
@@ -12372,6 +12399,8 @@ app.get('/api/teacher/survival/overview', authenticate, requireTeachingRole, asy
 app.get('/api/teacher/survival/levels', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const sync = await syncSurvivalLevels();
+    // 每次打开关卡管理都对齐一次题量，避免老师补题后还看到旧数字
+    await refreshSurvivalLevelCounts();
     const [rows] = await pool.query(
       `SELECT l.*, (SELECT COUNT(*) FROM survival_answers a WHERE a.seq = l.seq) AS attempts
          FROM survival_levels l ORDER BY l.seq ASC`
