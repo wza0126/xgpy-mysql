@@ -72,6 +72,8 @@ export const SurvivalManager: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState('');
   const [levelsEnabled, setLevelsEnabled] = useState(0);
+  /** 关卡顺序：textbook = 教材顺序，shuffled = 单元内随机过 */
+  const [orderMode, setOrderMode] = useState<'textbook' | 'shuffled'>('textbook');
   const [editing, setEditing] = useState<LevelRow | null>(null);
   const [extraInput, setExtraInput] = useState('');
 
@@ -96,8 +98,9 @@ export const SurvivalManager: React.FC = () => {
 
   const loadLevels = useCallback(async () => {
     try {
-      const res = await backendClient.get('/api/teacher/survival/levels');
+      const res: any = await backendClient.get('/api/teacher/survival/levels');
       setLevels((res?.data as LevelRow[]) || []);
+      setOrderMode(res?.order_mode === 'shuffled' ? 'shuffled' : 'textbook');
     } catch (e) {
       alert(`关卡加载失败：${(e as Error).message}`);
     }
@@ -151,15 +154,27 @@ export const SurvivalManager: React.FC = () => {
     }
   };
 
-  const shuffle = async () => {
-    if (!window.confirm('把每个单元内的关卡顺序打乱一次？\n学生正在进行的关卡不会被打断，但之后的推进顺序会变。')) return;
-    setBusy('shuffle');
+  /** 顺序 / 随机 切换：教材顺序 ↔ 单元内随机 */
+  const toggleOrder = async () => {
+    const next: 'textbook' | 'shuffled' = orderMode === 'textbook' ? 'shuffled' : 'textbook';
+    const tip =
+      next === 'shuffled'
+        ? '把每个单元内的关卡顺序打乱？\n重生点会固定在每个单元的第一关，学生正在打的关卡不会被打断。'
+        : '恢复教材顺序（1.1.1 → 4.3.3）？\n重生点会回到每个单元的第一节，学生正在打的关卡不会被打断。';
+    if (!window.confirm(tip)) return;
+    setBusy('order');
     try {
-      const res: any = await backendClient.post('/api/teacher/survival/shuffle', {});
+      const res: any = await backendClient.post('/api/teacher/survival/order', {
+        mode: next === 'shuffled' ? 'shuffle' : 'textbook',
+      });
       await loadLevels();
-      alert(`已重排 ${res?.data?.count || 0} 关`);
+      alert(
+        next === 'shuffled'
+          ? `已随机化 ${res?.data?.count || 0} 关`
+          : `已恢复教材顺序，共 ${res?.data?.count || 0} 关`
+      );
     } catch (e) {
-      alert(`重排失败：${(e as Error).message}`);
+      alert(`切换失败：${(e as Error).message}`);
     } finally {
       setBusy('');
     }
@@ -306,16 +321,21 @@ export const SurvivalManager: React.FC = () => {
           <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-gray-200 bg-white p-3">
             <p className="text-xs text-gray-500">
               共 {levels.length} 关，启用 {levels.filter((l) => l.is_active).length} 关。
-              停用的关卡会被跳过；题量只有 1 道的关卡可以用「补题」从别处再挂几道。
+              当前顺序：
+              <span className={`font-medium ${orderMode === 'textbook' ? 'text-cyan-700' : 'text-amber-600'}`}>
+                {orderMode === 'textbook' ? '教材顺序' : '单元内随机'}
+              </span>
+              。停用的关卡会被跳过；题量只有 1 道的关卡可以用「补题」从别处再挂几道。
             </p>
             <div className="flex gap-2">
               <button
-                onClick={shuffle}
-                disabled={busy === 'shuffle'}
+                onClick={toggleOrder}
+                disabled={busy === 'order'}
                 className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                title="解决「学生总在同一个单元卡死」的问题"
+                title={orderMode === 'textbook' ? '打乱每个单元内的关卡顺序' : '恢复教材顺序（1.1.1 → 4.3.3）'}
               >
-                <i className="fa-solid fa-shuffle mr-1"></i>单元内顺序随机化
+                <i className={`fa-solid ${orderMode === 'textbook' ? 'fa-shuffle' : 'fa-list-ol'} mr-1`}></i>
+                {orderMode === 'textbook' ? '单元内随机化' : '恢复教材顺序'}
               </button>
               <button
                 onClick={loadLevels}

@@ -12200,34 +12200,47 @@ let survivalRankCache = { at: 0, limit: 0, depth: [], hp: [], players: 0 };
 const SURVIVAL_RANK_TTL = 10 * 60 * 1000;
 
 async function buildSurvivalRank(limit) {
+  /**
+   * 深度榜看「当前所处关卡」，不是累计通关数（2026-10-27 吴老定）。
+   * 原因：原来按 total_levels 排，而重打旧关也会 +1，等于死了回锚点重打还能刷分，
+   *      死亡没有任何代价。改成看 seq 之后：
+   *        · 死了回锚点 → 名次立刻掉
+   *        · 重打旧关不涨位置，只有真突破才往上走
+   *        · 断线（alive=0）不上榜，重生后才重新出现
+   */
   const [depth] = await pool.query(
-    `SELECT sp.student_id, sp.total_levels, sp.hp, sp.best_round_levels,
+    `SELECT sp.student_id, sp.seq, sp.hp, sp.total_levels,
+            l.code, l.title,
             p.username, p.real_name, c.name AS class_name
        FROM survival_profiles sp
        JOIN profiles p ON p.id = sp.student_id
        LEFT JOIN classes c ON c.id = p.class_id
-      WHERE sp.total_levels > 0
-      ORDER BY sp.total_levels DESC, sp.best_round_levels DESC, sp.updated_at ASC
+       LEFT JOIN survival_levels l ON l.seq = sp.seq
+      WHERE sp.alive = 1 AND sp.total_levels > 0
+      ORDER BY sp.seq DESC, sp.updated_at ASC
       LIMIT ?`,
     [limit]
   );
   const [hpList] = await pool.query(
-    `SELECT sp.student_id, sp.total_levels, sp.hp,
+    `SELECT sp.student_id, sp.seq, sp.total_levels, sp.hp,
             p.username, p.real_name, c.name AS class_name
        FROM survival_profiles sp
        JOIN profiles p ON p.id = sp.student_id
        LEFT JOIN classes c ON c.id = p.class_id
       WHERE sp.alive = 1 AND sp.hp > 0
-      ORDER BY sp.hp DESC, sp.total_levels DESC, sp.updated_at ASC
+      ORDER BY sp.hp DESC, sp.seq DESC, sp.updated_at ASC
       LIMIT ?`,
     [limit]
   );
   const [[players]] = await pool.query(
-    'SELECT COUNT(*) AS n FROM survival_profiles WHERE total_levels > 0'
+    'SELECT COUNT(*) AS n FROM survival_profiles WHERE alive = 1 AND total_levels > 0'
   );
   return {
     depth: depth.map((r, i) => ({
       rank: i + 1,
+      seq: Number(r.seq) || 0,
+      code: r.code || '',
+      title: r.title || '',
       username: r.username || '',
       real_name: r.real_name || '',
       class_name: r.class_name || '',
@@ -12236,6 +12249,9 @@ async function buildSurvivalRank(limit) {
     })),
     hp: hpList.map((r, i) => ({
       rank: i + 1,
+      seq: Number(r.seq) || 0,
+      code: '',
+      title: '',
       username: r.username || '',
       real_name: r.real_name || '',
       class_name: r.class_name || '',
@@ -12261,13 +12277,15 @@ app.get('/api/student/survival/rank', authenticate, async (req, res) => {
 
     const studentId = req.user.userId;
     const [mine] = await pool.query(
-      'SELECT hp, total_levels, alive FROM survival_profiles WHERE student_id = ? LIMIT 1',
+      'SELECT hp, seq, total_levels, alive FROM survival_profiles WHERE student_id = ? LIMIT 1',
       [studentId]
     );
-    const me = mine.length ? mine[0] : { hp: cfg.hp_init, total_levels: 0, alive: 0 };
+    const me = mine.length ? mine[0] : { hp: cfg.hp_init, seq: 0, total_levels: 0, alive: 0 };
+    const meAlive = Number(me.alive) === 1;
+    // 深度位次按当前关卡比较（与榜单同一口径）
     const [[dRank]] = await pool.query(
-      'SELECT COUNT(*) AS n FROM survival_profiles WHERE total_levels > ?',
-      [Number(me.total_levels)]
+      'SELECT COUNT(*) AS n FROM survival_profiles WHERE alive = 1 AND total_levels > 0 AND seq > ?',
+      [Number(me.seq) || 0]
     );
     const [[hRank]] = await pool.query(
       'SELECT COUNT(*) AS n FROM survival_profiles WHERE alive = 1 AND hp > ?',
@@ -12282,10 +12300,11 @@ app.get('/api/student/survival/rank', authenticate, async (req, res) => {
         me: {
           username: req.user.username || '',
           hp: Number(me.hp),
+          seq: Number(me.seq) || 0,
           total_levels: Number(me.total_levels),
-          alive: Number(me.alive) === 1,
-          depth_rank: Number(me.total_levels) > 0 ? Number(dRank.n) + 1 : null,
-          hp_rank: Number(me.alive) === 1 ? Number(hRank.n) + 1 : null,
+          alive: meAlive,
+          depth_rank: meAlive && Number(me.total_levels) > 0 ? Number(dRank.n) + 1 : null,
+          hp_rank: meAlive ? Number(hRank.n) + 1 : null,
         },
         refreshed_at: new Date(survivalRankCache.at || now).toISOString(),
         next_refresh_at: new Date((survivalRankCache.at || now) + SURVIVAL_RANK_TTL).toISOString(),
@@ -12422,6 +12441,7 @@ app.get('/api/teacher/survival/levels', authenticate, requireTeachingRole, async
         attempts: Number(r.attempts) || 0,
       })),
       sync,
+      order_mode: await survivalOrderMode(),
       error: null,
     });
   } catch (error) {
@@ -12460,37 +12480,121 @@ app.put('/api/teacher/survival/levels/:seq', authenticate, requireTeachingRole, 
   }
 });
 
-// 单元内顺序随机化：把每单元内的关卡重排一次（解决「总在第 2 单元卡死」）
+/**
+ * 判断当前关卡顺序处于哪种模式：
+ *   textbook = 严格按教材顺序（chapter-taxonomy 的 SECTION_PATHS）
+ *   shuffled = 被单元内随机化过
+ */
+async function survivalOrderMode() {
+  const { SECTION_PATHS } = require('./chapter-taxonomy');
+  const [rows] = await pool.query('SELECT cluster_id FROM survival_levels ORDER BY seq');
+  if (!rows.length) return 'empty';
+  if (rows.length !== SECTION_PATHS.length) return 'custom';
+  const same = rows.every((r, i) => String(r.cluster_id) === SECTION_PATHS[i]);
+  return same ? 'textbook' : 'shuffled';
+}
+
+/**
+ * 重排关卡顺序（教师端「顺序 / 随机」切换）。
+ *   mode = 'textbook' 恢复教材顺序
+ *   mode = 'shuffle'  每个单元内随机，重生点固定在单元首位（保证单元第一关就是锚点）
+ *
+ * ⛔ seq 是主键，重排会改它；学生的 seq 必须按「知识点」跟着走，
+ *    否则顺序一变，学生就莫名跳到别的关卡去了。
+ */
+async function reorderSurvivalLevels(mode) {
+  const { SECTION_PATHS } = require('./chapter-taxonomy');
+  const [rows] = await pool.query(
+    'SELECT seq, cluster_id, unit_index, is_checkpoint FROM survival_levels ORDER BY seq'
+  );
+  if (!rows.length) return 0;
+
+  const byUnit = new Map();
+  for (const r of rows) {
+    const u = Number(r.unit_index) || 1;
+    if (!byUnit.has(u)) byUnit.set(u, []);
+    byUnit.get(u).push(r);
+  }
+  const unitKeys = [...byUnit.keys()].sort((a, b) => a - b);
+  const order = []; // 新的顺序（cluster_id 数组）
+
+  if (mode === 'textbook') {
+    const indexOf = new Map(SECTION_PATHS.map((p, i) => [p, i]));
+    rows
+      .slice()
+      .sort((a, b) => {
+        const ia = indexOf.has(String(a.cluster_id)) ? indexOf.get(String(a.cluster_id)) : 9999;
+        const ib = indexOf.has(String(b.cluster_id)) ? indexOf.get(String(b.cluster_id)) : 9999;
+        return ia - ib;
+      })
+      .forEach((r) => order.push(String(r.cluster_id)));
+  } else {
+    for (const u of unitKeys) {
+      const list = byUnit.get(u).slice();
+      const anchors = list.filter((r) => Number(r.is_checkpoint) === 1);
+      const rest = list.filter((r) => Number(r.is_checkpoint) !== 1);
+      for (let i = rest.length - 1; i > 0; i -= 1) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [rest[i], rest[j]] = [rest[j], rest[i]];
+      }
+      [...anchors, ...rest].forEach((r) => order.push(String(r.cluster_id)));
+    }
+  }
+
+  const oldSeqOf = new Map(rows.map((r) => [String(r.cluster_id), Number(r.seq)]));
+
+  // 先挪到负数区避开主键冲突，再写回 1..N
+  for (let i = 0; i < order.length; i += 1) {
+    const old = oldSeqOf.get(order[i]);
+    if (old === undefined) continue;
+    await pool.query('UPDATE survival_levels SET seq = ? WHERE seq = ?', [-(i + 1), old]);
+  }
+  for (let i = 0; i < order.length; i += 1) {
+    await pool.query('UPDATE survival_levels SET seq = ? WHERE seq = ?', [i + 1, -(i + 1)]);
+  }
+
+  // 学生正在打的关卡跟着知识点走
+  const oldToNew = new Map();
+  order.forEach((cid, i) => {
+    const old = oldSeqOf.get(cid);
+    if (old !== undefined) oldToNew.set(old, i + 1);
+  });
+  const [studs] = await pool.query('SELECT student_id, seq FROM survival_profiles');
+  for (const s of studs) {
+    const ns = oldToNew.get(Number(s.seq));
+    if (ns && ns !== Number(s.seq)) {
+      await pool.query('UPDATE survival_profiles SET seq = ? WHERE student_id = ?', [ns, s.student_id]);
+    }
+  }
+
+  // 顺序一变，排行榜的 10 分钟缓存立刻作废，否则学生看到的是旧名次
+  survivalRankCache = { at: 0, limit: 0, depth: [], hp: [], players: 0 };
+
+  return order.length;
+}
+
+// 单元内顺序随机化（保留旧路由，内部走同一套重排）
 app.post('/api/teacher/survival/shuffle', authenticate, requireTeachingRole, async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT seq, unit_index FROM survival_levels ORDER BY seq');
-    if (!rows.length) return res.status(400).json({ data: null, error: '还没有关卡' });
-    const byUnit = new Map();
-    for (const r of rows) {
-      const u = Number(r.unit_index) || 1;
-      if (!byUnit.has(u)) byUnit.set(u, []);
-      byUnit.get(u).push(Number(r.seq));
-    }
-    const unitKeys = [...byUnit.keys()].sort((a, b) => a - b);
-    const order = [];
-    for (const u of unitKeys) {
-      const list = byUnit.get(u);
-      for (let i = list.length - 1; i > 0; i -= 1) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [list[i], list[j]] = [list[j], list[i]];
-      }
-      order.push(...list);
-    }
-    // seq 是主键，直接改会撞键：先挪到负数区再写回
-    for (let i = 0; i < order.length; i += 1) {
-      await pool.query('UPDATE survival_levels SET seq = ? WHERE seq = ?', [-(i + 1), order[i]]);
-    }
-    for (let i = 0; i < order.length; i += 1) {
-      await pool.query('UPDATE survival_levels SET seq = ? WHERE seq = ?', [i + 1, -(i + 1)]);
-    }
-    res.json({ data: { count: order.length }, error: null });
+    const count = await reorderSurvivalLevels('shuffle');
+    res.json({ data: { count }, error: null });
   } catch (error) {
     console.error('[survival] 随机化失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 顺序 / 随机 切换
+app.post('/api/teacher/survival/order', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const mode = String(req.body?.mode || '');
+    if (!['shuffle', 'textbook'].includes(mode)) {
+      return res.status(400).json({ data: null, error: '模式只能是 shuffle 或 textbook' });
+    }
+    const count = await reorderSurvivalLevels(mode);
+    res.json({ data: { count, mode }, error: null });
+  } catch (error) {
+    console.error('[survival] 切换关卡顺序失败:', error);
     res.status(500).json({ data: null, error: error.message });
   }
 });

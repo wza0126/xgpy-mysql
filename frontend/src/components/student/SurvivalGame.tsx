@@ -85,6 +85,10 @@ interface SState {
 
 interface RankRow {
   rank: number;
+  /** 当前所处关卡（深度榜按它排） */
+  seq: number;
+  code: string;
+  title: string;
   username: string;
   real_name: string;
   class_name: string;
@@ -99,6 +103,7 @@ interface RankData {
   me: {
     username: string;
     hp: number;
+    seq: number;
     total_levels: number;
     alive: boolean;
     depth_rank: number | null;
@@ -631,7 +636,7 @@ export const SurvivalGame: React.FC = () => {
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-3">
           <div className="mb-2 flex items-center justify-between text-[11px]" style={{ color: C.mute }}>
-            <span>全校 {rank?.players ?? 0} 人参与 · 显示前 {rows.length} 名</span>
+            <span>全校 {rank?.players ?? 0} 人正在下潜 · 显示前 {rows.length} 名</span>
             <span className="font-mono">
               {rank ? `下次刷新 ${new Date(rank.next_refresh_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` : ''}
             </span>
@@ -663,7 +668,7 @@ export const SurvivalGame: React.FC = () => {
                       {r.class_name ? <span className="ml-2 text-[11px]" style={{ color: C.mute }}>{r.class_name}</span> : null}
                     </div>
                     <span className="shrink-0 font-mono text-sm" style={{ color: rankTab === 'depth' ? C.cyan : C.amber }}>
-                      {rankTab === 'depth' ? `${r.total_levels} 层` : `${r.hp} 信号`}
+                      {rankTab === 'depth' ? (r.code || `第 ${r.seq} 关`) : `${r.hp} 信号`}
                     </span>
                   </div>
                 );
@@ -678,7 +683,7 @@ export const SurvivalGame: React.FC = () => {
               <span style={{ color: C.dim }}>
                 我的位次 · 深度{' '}
                 <span className="font-mono" style={{ color: C.cyan }}>
-                  {rank.me.depth_rank ? `第 ${rank.me.depth_rank} 名` : '未上榜'}
+                  {rank.me.depth_rank ? `第 ${rank.me.depth_rank} 名` : (rank.me.alive ? '未上榜' : '已断线')}
                 </span>
                 <span className="mx-2" style={{ color: C.line }}>|</span>
                 信号{' '}
@@ -687,7 +692,7 @@ export const SurvivalGame: React.FC = () => {
                 </span>
               </span>
               <span className="font-mono" style={{ color: C.mute }}>
-                {rank.me.total_levels} 层 · {rank.me.hp} 信号
+                当前第 {rank.me.seq || 1} 关 · {rank.me.hp} 信号
               </span>
             </div>
           </div>
