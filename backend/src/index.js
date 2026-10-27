@@ -11299,6 +11299,962 @@ app.post('/api/student/lectures/:id/visit', authenticate, requireStudent, async 
   }
 });
 
+// ============================================================
+// 生存游戏 · 信号深潜（2026-10-27 吴老定）
+// ------------------------------------------------------------
+// 一关一题：答对 +10 信号并下一层，答错 -30 且必须订正才能继续；
+// HP 归零断线，回到第 1 关重来，但累计深度不清零。
+//
+// 关卡 = 知识点，三段编号（单元.章.节），4 单元 16 章 70 节，正好 70 关。
+// 关卡表首次由 lecture.json（单元划分）+ 题库 cluster 自动生成，之后老师可改。
+//
+// ⛔ HP、关卡、待订正状态全部落库，前端只做展示：否则学生改一下就是无限血、跳关。
+// ⛔ 「深度榜」用 total_levels（累计），「信号榜」用 hp（当前）——
+//    两个榜必须来自不同字段，否则会完全重复。
+// ⛔ 同一道题当天只计一次 +10，再答对只 +2，否则刷同一题就能无限涨血。
+// ============================================================
+
+const SURVIVAL_DEFAULTS = {
+  hp_init: 100,        // 初始信号强度（10 格 × 10）
+  hp_gain: 10,         // 答对一次（当天首次做对这道题）
+  hp_repeat_gain: 2,   // 同一题当天再答对
+  hp_penalty: 30,      // 答错
+  time_choice: 45,     // 选择题限时（秒），0 = 不限
+  time_blank: 60,      // 填空题限时（秒）
+  require_correction: 1, // 答错必须重新答对才能继续
+  rank_limit: 100,     // 排行榜显示条数
+};
+
+/** 读配置：system_config 里 survival_* 覆盖默认值，缺失的用默认 */
+async function getSurvivalConfig() {
+  const cfg = { ...SURVIVAL_DEFAULTS };
+  try {
+    const [rows] = await pool.query(
+      "SELECT config_key, value FROM system_config WHERE config_key LIKE 'survival\\_%'"
+    );
+    for (const r of rows) {
+      const key = String(r.config_key || '').slice('survival_'.length);
+      if (!(key in cfg)) continue;
+      let v = r.value;
+      try { v = JSON.parse(v); } catch { /* 原样 */ }
+      if (v && typeof v === 'object' && 'value' in v) v = v.value;
+      const num = Number(v);
+      if (Number.isFinite(num)) cfg[key] = num;
+    }
+  } catch (e) {
+    console.warn('[survival] 读配置失败，用默认值:', e.message);
+  }
+  return cfg;
+}
+
+/** 写配置：只接受白名单里的键，值做范围约束，避免被写成负数把游戏搞坏 */
+async function saveSurvivalConfig(patch) {
+  const bounds = {
+    hp_init: [10, 10000], hp_gain: [0, 1000], hp_repeat_gain: [0, 1000],
+    hp_penalty: [0, 1000], time_choice: [0, 600], time_blank: [0, 600],
+    require_correction: [0, 1], rank_limit: [10, 500],
+  };
+  const saved = [];
+  for (const [key, range] of Object.entries(bounds)) {
+    if (patch[key] === undefined || patch[key] === null || patch[key] === '') continue;
+    let num = Math.round(Number(patch[key]));
+    if (!Number.isFinite(num)) continue;
+    num = Math.min(range[1], Math.max(range[0], num));
+    await pool.query(
+      `INSERT INTO system_config (id, config_key, value, updated_at)
+       VALUES (?, ?, ?, NOW())
+       ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = NOW()`,
+      [`config_survival_${key}`, `survival_${key}`, JSON.stringify({ value: num })]
+    );
+    saved.push(key);
+  }
+  return saved;
+}
+
+/**
+ * 生成关卡表（只在表为空或强制重建时执行）。
+ * 编号来自讲义数据的单元划分：part_index → 单元，章内顺序 → 章号，cluster 排序 → 节号。
+ */
+async function syncSurvivalLevels(force = false) {
+  const [[cnt]] = await pool.query('SELECT COUNT(*) AS n FROM survival_levels');
+  if (Number(cnt.n) > 0 && !force) return { synced: false, count: Number(cnt.n) };
+
+  let chapters = [];
+  try {
+    const meta = getLectureMeta();
+    chapters = Array.isArray(meta && meta.chapters) ? meta.chapters : [];
+  } catch (e) {
+    console.warn('[survival] 读取讲义元数据失败:', e.message);
+  }
+  if (!chapters.length) return { synced: false, count: 0, reason: '没有讲义章节数据' };
+
+  const [rows] = await pool.query(
+    `SELECT cluster_id, COUNT(*) AS n FROM questions
+      WHERE practice_enabled = 1 AND cluster_id IS NOT NULL AND cluster_id <> ''
+        AND type IN ('choice','fill_blank')
+      GROUP BY cluster_id`
+  );
+  const countByCluster = new Map(rows.map((r) => [String(r.cluster_id), Number(r.n)]));
+  const sectionsByChapter = new Map();
+  for (const cid of countByCluster.keys()) {
+    const ch = cid.includes('/') ? cid.split('/')[0] : cid;
+    if (!sectionsByChapter.has(ch)) sectionsByChapter.set(ch, []);
+    sectionsByChapter.get(ch).push(cid);
+  }
+
+  const unitSeen = new Map();  // part_index → 单元序号
+  const chapterNoInUnit = new Map(); // part_index → 已用章号
+  const values = [];
+  let seq = 0;
+
+  for (const ch of chapters) {
+    const partIndex = Number(ch.part_index) || 1;
+    if (!unitSeen.has(partIndex)) unitSeen.set(partIndex, unitSeen.size + 1);
+    const unitNo = unitSeen.get(partIndex);
+    const cNo = (chapterNoInUnit.get(partIndex) || 0) + 1;
+    chapterNoInUnit.set(partIndex, cNo);
+
+    const clusterId = String(ch.cluster_id || '');
+    const sections = (sectionsByChapter.get(clusterId) || []).sort((a, b) => a.localeCompare(b, 'zh'));
+    sections.forEach((cid, si) => {
+      seq += 1;
+      const section = cid.includes('/') ? cid.split('/').slice(1).join('/') : cid;
+      values.push([
+        seq,                              // seq
+        `${unitNo}.${cNo}.${si + 1}`,     // code 三段编号
+        section,                          // title 关卡名（知识点）
+        unitNo,                           // unit_index
+        String(ch.part || ''),            // unit_name
+        clusterId,                        // chapter_name（章）
+        cid,                              // cluster_id（知识点，抽题用）
+        countByCluster.get(cid) || 0,     // question_count
+      ]);
+    });
+  }
+
+  if (!values.length) return { synced: false, count: 0, reason: '题库里没有可用知识点' };
+
+  await pool.query('DELETE FROM survival_levels');
+  const CHUNK = 50;
+  for (let i = 0; i < values.length; i += CHUNK) {
+    const part = values.slice(i, i + CHUNK);
+    await pool.query(
+      `INSERT INTO survival_levels (seq, code, title, unit_index, unit_name, chapter_name, cluster_id, question_count)
+       VALUES ${part.map(() => '(?,?,?,?,?,?,?,?)').join(',')}`,
+      part.flat()
+    );
+  }
+  console.log(`[survival] 关卡表已生成：${values.length} 关`);
+  return { synced: true, count: values.length };
+}
+
+/** 学生是否被开放了生存游戏（按 profiles 判断，班级开关会同步到这里） */
+async function survivalGate(req, res) {
+  const [rows] = await pool.query(
+    'SELECT id, role, class_id, survival_enabled FROM profiles WHERE id = ? LIMIT 1',
+    [req.user.userId]
+  );
+  if (!rows.length) { res.status(404).json({ data: null, error: '账号不存在' }); return null; }
+  if (rows[0].role !== 'student') { res.status(403).json({ data: null, error: '只有学生可以进入生存游戏' }); return null; }
+  if (Number(rows[0].survival_enabled) !== 1) {
+    res.status(403).json({ data: null, error: '老师还没有为你们班开放生存游戏' });
+    return null;
+  }
+  return rows[0];
+}
+
+function survivalQuestionOut(q) {
+  return {
+    id: String(q.id),
+    type: q.type === 'fill_blank' ? 'fill_blank' : 'choice',
+    content: q.content || '',
+    options: taskGetOptionsArray(q.options).map((o) => String(o)),
+  };
+}
+
+/** 从该关的知识点抽一题：优先没做过的，题少时允许重复 */
+async function pickSurvivalQuestion(studentId, level) {
+  const ids = [];
+  const [rows] = await pool.query(
+    `SELECT id FROM questions
+      WHERE practice_enabled = 1 AND cluster_id = ? AND type IN ('choice','fill_blank')`,
+    [level.cluster_id]
+  );
+  for (const r of rows) ids.push(String(r.id));
+  for (const e of parseJsonArrayField(level.extra_question_ids)) {
+    const id = String(e || '').trim();
+    if (id && !ids.includes(id)) ids.push(id);
+  }
+  if (!ids.length) return null;
+
+  const [recent] = await pool.query(
+    'SELECT question_id FROM survival_answers WHERE student_id = ? ORDER BY created_at DESC LIMIT 150',
+    [studentId]
+  );
+  const recentSet = new Set(recent.map((r) => String(r.question_id)));
+  const fresh = ids.filter((id) => !recentSet.has(id));
+  const bucket = fresh.length ? fresh : ids;
+  const picked = bucket[Math.floor(Math.random() * bucket.length)];
+
+  const [qs] = await pool.query(
+    'SELECT id, type, content, options, answers, explanation, cluster_id FROM questions WHERE id = ? LIMIT 1',
+    [picked]
+  );
+  return qs.length ? qs[0] : null;
+}
+
+/**
+ * 推进到下一关并抽题写库。
+ * 关卡按 seq 递增，越过最后一关就回到第一关并 round_no + 1。
+ */
+async function survivalAdvance(studentId, fromSeq, fromRound, cfg, roundLevels) {
+  const [nextRows] = await pool.query(
+    'SELECT * FROM survival_levels WHERE seq > ? AND is_active = 1 ORDER BY seq ASC LIMIT 1',
+    [fromSeq]
+  );
+  let level = nextRows[0];
+  let roundNo = Number(fromRound) || 1;
+  let finishedRound = false;
+
+  if (!level) {
+    const [firstRows] = await pool.query(
+      'SELECT * FROM survival_levels WHERE is_active = 1 ORDER BY seq ASC LIMIT 1'
+    );
+    level = firstRows[0];
+    if (!level) return null;
+    roundNo += 1;
+    finishedRound = true;
+  }
+
+  const question = await pickSurvivalQuestion(studentId, level);
+  if (!question) {
+    // 这一关的题全被停用了：跳过它，继续找下一关（最多找 5 关，防死循环）
+    for (let i = 0; i < 5; i += 1) {
+      const [skipRows] = await pool.query(
+        'SELECT * FROM survival_levels WHERE seq > ? AND is_active = 1 ORDER BY seq ASC LIMIT 1',
+        [level.seq]
+      );
+      if (!skipRows.length) break;
+      level = skipRows[0];
+      const q2 = await pickSurvivalQuestion(studentId, level);
+      if (q2) {
+        const seconds = q2.type === 'fill_blank' ? cfg.time_blank : cfg.time_choice;
+        await pool.query(
+          `UPDATE survival_profiles
+              SET seq = ?, round_no = ?, current_question_id = ?, current_started_at = NOW(),
+                  current_deadline = ${seconds > 0 ? 'DATE_ADD(NOW(), INTERVAL ? SECOND)' : 'NULL'},
+                  pending_correction = 0, alive = 1, round_levels = ?, last_played_at = NOW()
+            WHERE student_id = ?`,
+          seconds > 0
+            ? [level.seq, roundNo, q2.id, seconds, roundLevels, studentId]
+            : [level.seq, roundNo, q2.id, roundLevels, studentId]
+        );
+        return { level, question: q2, roundNo, finishedRound };
+      }
+    }
+    return null;
+  }
+
+  const seconds = question.type === 'fill_blank' ? cfg.time_blank : cfg.time_choice;
+  await pool.query(
+    `UPDATE survival_profiles
+        SET seq = ?, round_no = ?, current_question_id = ?, current_started_at = NOW(),
+            current_deadline = ${seconds > 0 ? 'DATE_ADD(NOW(), INTERVAL ? SECOND)' : 'NULL'},
+            pending_correction = 0, alive = 1, round_levels = ?, last_played_at = NOW()
+      WHERE student_id = ?`,
+    seconds > 0
+      ? [level.seq, roundNo, question.id, seconds, roundLevels, studentId]
+      : [level.seq, roundNo, question.id, roundLevels, studentId]
+  );
+
+  return { level, question, roundNo, finishedRound };
+}
+
+function survivalLevelOut(lv) {
+  if (!lv) return null;
+  return {
+    seq: Number(lv.seq),
+    code: lv.code,
+    title: lv.title,
+    unit_name: lv.unit_name || '',
+    chapter_name: lv.chapter_name || '',
+    question_count: Number(lv.question_count) || 0,
+  };
+}
+
+async function loadSurvivalProfile(studentId) {
+  const [rows] = await pool.query('SELECT * FROM survival_profiles WHERE student_id = ? LIMIT 1', [studentId]);
+  if (rows.length) return rows[0];
+  const cfg = await getSurvivalConfig();
+  await pool.query(
+    `INSERT INTO survival_profiles (student_id, hp, seq, round_no) VALUES (?, ?, 1, 1)
+     ON DUPLICATE KEY UPDATE student_id = student_id`,
+    [studentId, cfg.hp_init]
+  );
+  const [again] = await pool.query('SELECT * FROM survival_profiles WHERE student_id = ? LIMIT 1', [studentId]);
+  return again.length ? again[0] : null;
+}
+
+// ---------- 学生端 ----------
+
+app.get('/api/student/survival/state', authenticate, async (req, res) => {
+  try {
+    if (!(await survivalGate(req, res))) return;
+    await syncSurvivalLevels();
+    const cfg = await getSurvivalConfig();
+    const studentId = req.user.userId;
+    const profile = await loadSurvivalProfile(studentId);
+
+    let question = null;
+    let level = null;
+    if (profile.current_question_id) {
+      const [qs] = await pool.query(
+        'SELECT id, type, content, options FROM questions WHERE id = ? LIMIT 1',
+        [profile.current_question_id]
+      );
+      if (qs.length) question = survivalQuestionOut(qs[0]);
+      const [lv] = await pool.query('SELECT * FROM survival_levels WHERE seq = ? LIMIT 1', [profile.seq]);
+      level = lv.length ? survivalLevelOut(lv[0]) : null;
+    }
+
+    res.json({
+      data: {
+        hp: Number(profile.hp),
+        hp_init: cfg.hp_init,
+        seq: Number(profile.seq),
+        round_no: Number(profile.round_no),
+        total_levels: Number(profile.total_levels),
+        round_levels: Number(profile.round_levels),
+        best_round_levels: Number(profile.best_round_levels),
+        total_correct: Number(profile.total_correct),
+        total_wrong: Number(profile.total_wrong),
+        deaths: Number(profile.deaths),
+        alive: Number(profile.alive) === 1,
+        pending_correction: Number(profile.pending_correction) === 1,
+        level,
+        question,
+        deadline: profile.current_deadline || null,
+        config: {
+          hp_gain: cfg.hp_gain,
+          hp_repeat_gain: cfg.hp_repeat_gain,
+          hp_penalty: cfg.hp_penalty,
+          time_choice: cfg.time_choice,
+          time_blank: cfg.time_blank,
+          require_correction: cfg.require_correction,
+        },
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('[survival] 读取状态失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+app.post('/api/student/survival/start', authenticate, async (req, res) => {
+  try {
+    if (!(await survivalGate(req, res))) return;
+    const sync = await syncSurvivalLevels();
+    if (!sync.count) return res.status(400).json({ data: null, error: '还没有可用的关卡，请联系老师' });
+    const cfg = await getSurvivalConfig();
+    const studentId = req.user.userId;
+    const profile = await loadSurvivalProfile(studentId);
+
+    // 已在局中且有题：接着打，不重开
+    if (Number(profile.alive) === 1 && profile.current_question_id) {
+      const [qs] = await pool.query(
+        'SELECT id, type, content, options FROM questions WHERE id = ? LIMIT 1',
+        [profile.current_question_id]
+      );
+      const [lv] = await pool.query('SELECT * FROM survival_levels WHERE seq = ? LIMIT 1', [profile.seq]);
+      if (qs.length) {
+        return res.json({
+          data: {
+            resumed: true,
+            level: lv.length ? survivalLevelOut(lv[0]) : null,
+            question: survivalQuestionOut(qs[0]),
+            deadline: profile.current_deadline || null,
+            hp: Number(profile.hp),
+            round_no: Number(profile.round_no),
+          },
+          error: null,
+        });
+      }
+    }
+
+    // 重生：断线后重新接入，回到第 1 关
+    const [firstRows] = await pool.query('SELECT * FROM survival_levels WHERE is_active = 1 ORDER BY seq ASC LIMIT 1');
+    const first = firstRows[0];
+    if (!first) return res.status(400).json({ data: null, error: '还没有启用的关卡' });
+
+    const question = await pickSurvivalQuestion(studentId, first);
+    if (!question) return res.status(400).json({ data: null, error: '第一关没有可用题目，请联系老师' });
+
+    const seconds = question.type === 'fill_blank' ? cfg.time_blank : cfg.time_choice;
+    await pool.query(
+      `UPDATE survival_profiles
+          SET hp = ?, seq = ?, round_no = ?, alive = 1, pending_correction = 0,
+              round_levels = 0, current_question_id = ?, current_started_at = NOW(),
+              current_deadline = ${seconds > 0 ? 'DATE_ADD(NOW(), INTERVAL ? SECOND)' : 'NULL'},
+              last_played_at = NOW()
+        WHERE student_id = ?`,
+      seconds > 0
+        ? [cfg.hp_init, first.seq, Number(profile.round_no) || 1, question.id, seconds, studentId]
+        : [cfg.hp_init, first.seq, Number(profile.round_no) || 1, question.id, studentId]
+    );
+
+    res.json({
+      data: {
+        resumed: false,
+        reborn: Number(profile.deaths) > 0,
+        level: survivalLevelOut(first),
+        question: survivalQuestionOut(question),
+        deadline: seconds > 0 ? new Date(Date.now() + seconds * 1000).toISOString() : null,
+        hp: cfg.hp_init,
+        round_no: Number(profile.round_no) || 1,
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('[survival] 开始失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+app.post('/api/student/survival/answer', authenticate, async (req, res) => {
+  try {
+    if (!(await survivalGate(req, res))) return;
+    const cfg = await getSurvivalConfig();
+    const studentId = req.user.userId;
+    const body = req.body || {};
+    const questionId = String(body.question_id || '').trim();
+    const answer = body.answer;
+
+    const profile = await loadSurvivalProfile(studentId);
+    if (!profile) return res.status(500).json({ data: null, error: '档案读取失败' });
+    if (Number(profile.pending_correction) === 1) {
+      return res.status(400).json({ data: null, error: '这道题要先订正才能继续' });
+    }
+    if (!profile.current_question_id || String(profile.current_question_id) !== questionId) {
+      return res.status(400).json({ data: null, error: '题目已过期，请刷新后重试' });
+    }
+
+    const [qs] = await pool.query(
+      'SELECT id, type, content, options, answers, explanation, cluster_id FROM questions WHERE id = ? LIMIT 1',
+      [questionId]
+    );
+    if (!qs.length) return res.status(404).json({ data: null, error: '题目不存在' });
+    const question = qs[0];
+
+    const isTimeout = !!profile.current_deadline && new Date(profile.current_deadline).getTime() < Date.now();
+    const judged = isTimeout ? { isCorrect: false } : judgeQuestionAnswer(question, answer);
+    const hpBefore = Number(profile.hp);
+
+    // 当天是否已做对过这道题：决定 +10 还是 +2（防刷同一题）
+    let alreadyToday = false;
+    if (judged.isCorrect) {
+      const [[hit]] = await pool.query(
+        `SELECT COUNT(*) AS n FROM survival_answers
+          WHERE student_id = ? AND question_id = ? AND is_correct = 1 AND is_correction = 0
+            AND created_at >= CURDATE()`,
+        [studentId, questionId]
+      );
+      alreadyToday = Number(hit.n) > 0;
+    }
+
+    const delta = judged.isCorrect
+      ? (alreadyToday ? cfg.hp_repeat_gain : cfg.hp_gain)
+      : -cfg.hp_penalty;
+    const hpAfter = hpBefore + delta;
+
+    await pool.query(
+      `INSERT INTO survival_answers
+        (id, student_id, seq, round_no, question_id, cluster_id, is_correct, is_correction,
+         hp_before, hp_after, hp_delta, elapsed_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+      [
+        `sv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        studentId,
+        Number(profile.seq),
+        Number(profile.round_no),
+        questionId,
+        question.cluster_id || null,
+        judged.isCorrect ? 1 : 0,
+        hpBefore,
+        hpAfter,
+        delta,
+        profile.current_started_at
+          ? Math.max(0, Date.now() - new Date(profile.current_started_at).getTime())
+          : null,
+      ]
+    );
+
+    if (judged.isCorrect) {
+      const roundLevels = Number(profile.round_levels) + 1;
+      const totalLevels = Number(profile.total_levels) + 1;
+      await pool.query(
+        `UPDATE survival_profiles
+            SET hp = ?, round_levels = ?, total_levels = ?, total_correct = total_correct + 1,
+                pending_correction = 0, current_question_id = NULL, current_deadline = NULL
+          WHERE student_id = ?`,
+        [hpAfter, roundLevels, totalLevels, studentId]
+      );
+      const next = await survivalAdvance(
+        studentId, Number(profile.seq), Number(profile.round_no), cfg, roundLevels
+      );
+      if (next && next.finishedRound) {
+        await pool.query(
+          `UPDATE survival_profiles
+              SET best_round_levels = GREATEST(best_round_levels, ?), round_levels = 0
+            WHERE student_id = ?`,
+          [roundLevels, studentId]
+        );
+      }
+      return res.json({
+        data: {
+          correct: true,
+          timeout: false,
+          hp_before: hpBefore,
+          hp_after: hpAfter,
+          hp_delta: delta,
+          repeat: alreadyToday,
+          dead: false,
+          total_levels: totalLevels,
+          round_levels: roundLevels,
+          finished_round: !!(next && next.finishedRound),
+          level: next ? survivalLevelOut(next.level) : null,
+          question: next ? survivalQuestionOut(next.question) : null,
+          deadline: next ? next.deadline || null : null,
+          explanation: question.explanation || '',
+        },
+        error: null,
+      });
+    }
+
+    // 答错：扣血；血尽则断线
+    const dead = hpAfter <= 0;
+    if (dead) {
+      await pool.query(
+        `UPDATE survival_profiles
+            SET hp = ?, deaths = deaths + 1, alive = 0, pending_correction = 0,
+                total_wrong = total_wrong + 1, round_levels = 0, round_no = round_no + 1,
+                best_round_levels = GREATEST(best_round_levels, ?),
+                current_question_id = NULL, current_deadline = NULL, last_played_at = NOW()
+          WHERE student_id = ?`,
+        [cfg.hp_init, Number(profile.round_levels), studentId]
+      );
+    } else {
+      await pool.query(
+        `UPDATE survival_profiles
+            SET hp = ?, total_wrong = total_wrong + 1, pending_correction = ?, last_played_at = NOW()
+          WHERE student_id = ?`,
+        [hpAfter, cfg.require_correction ? 1 : 0, studentId]
+      );
+    }
+
+    res.json({
+      data: {
+        correct: false,
+        timeout: isTimeout,
+        hp_before: hpBefore,
+        hp_after: dead ? cfg.hp_init : hpAfter,
+        hp_delta: delta,
+        dead,
+        need_correction: !dead && !!cfg.require_correction,
+        explanation: question.explanation || '',
+        correct_answer: (() => {
+          const arr = taskGetAnswersArray(question.answers);
+          return arr.length ? String(arr[0]) : '';
+        })(),
+        // 断线结算要用：服务端这时候已经把档案重置了，所以统计值必须在这里一起返回，
+        // 否则前端只能拿「重置后」的数字，显示成「在第 0 层断线」（2026-10-27）
+        ...(dead ? {
+          round_levels: Number(profile.round_levels),
+          best_round_levels: Math.max(Number(profile.best_round_levels), Number(profile.round_levels)),
+          total_levels: Number(profile.total_levels),
+          total_correct: Number(profile.total_correct),
+          total_wrong: Number(profile.total_wrong) + 1,
+          deaths: Number(profile.deaths) + 1,
+        } : {}),
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('[survival] 作答失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+app.post('/api/student/survival/correct', authenticate, async (req, res) => {
+  try {
+    if (!(await survivalGate(req, res))) return;
+    const cfg = await getSurvivalConfig();
+    const studentId = req.user.userId;
+    const body = req.body || {};
+    const questionId = String(body.question_id || '').trim();
+
+    const profile = await loadSurvivalProfile(studentId);
+    if (!profile || Number(profile.pending_correction) !== 1) {
+      return res.status(400).json({ data: null, error: '这道题不需要订正' });
+    }
+
+    const [qs] = await pool.query(
+      'SELECT id, type, content, options, answers, explanation FROM questions WHERE id = ? LIMIT 1',
+      [questionId]
+    );
+    if (!qs.length) return res.status(404).json({ data: null, error: '题目不存在' });
+    const question = qs[0];
+    const judged = judgeQuestionAnswer(question, body.answer);
+
+    await pool.query(
+      `INSERT INTO survival_answers
+        (id, student_id, seq, round_no, question_id, cluster_id, is_correct, is_correction,
+         hp_before, hp_after, hp_delta)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 0)`,
+      [
+        `sv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        studentId,
+        Number(profile.seq),
+        Number(profile.round_no),
+        questionId,
+        question.cluster_id || null,
+        judged.isCorrect ? 1 : 0,
+        Number(profile.hp),
+        Number(profile.hp),
+      ]
+    );
+
+    if (!judged.isCorrect) {
+      return res.json({
+        data: { correct: false, message: '还不对，再看看解析' },
+        error: null,
+      });
+    }
+
+    // 订正通过：不扣血也不加血，直接进入下一关
+    const roundLevels = Number(profile.round_levels) + 1;
+    const totalLevels = Number(profile.total_levels) + 1;
+    await pool.query(
+      `UPDATE survival_profiles
+          SET pending_correction = 0, round_levels = ?, total_levels = ?,
+              current_question_id = NULL, current_deadline = NULL
+        WHERE student_id = ?`,
+      [roundLevels, totalLevels, studentId]
+    );
+    const next = await survivalAdvance(
+      studentId, Number(profile.seq), Number(profile.round_no), cfg, roundLevels
+    );
+
+    res.json({
+      data: {
+        correct: true,
+        hp: Number(profile.hp),
+        total_levels: totalLevels,
+        round_levels: roundLevels,
+        finished_round: !!(next && next.finishedRound),
+        level: next ? survivalLevelOut(next.level) : null,
+        question: next ? survivalQuestionOut(next.question) : null,
+        deadline: next ? next.deadline || null : null,
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('[survival] 订正失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 排行榜：榜单 10 分钟缓存，自己的位次实时算（刚打完就能看到自己动了）
+let survivalRankCache = { at: 0, limit: 0, depth: [], hp: [], players: 0 };
+const SURVIVAL_RANK_TTL = 10 * 60 * 1000;
+
+async function buildSurvivalRank(limit) {
+  const [depth] = await pool.query(
+    `SELECT sp.student_id, sp.total_levels, sp.hp, sp.best_round_levels,
+            p.username, p.real_name, c.name AS class_name
+       FROM survival_profiles sp
+       JOIN profiles p ON p.id = sp.student_id
+       LEFT JOIN classes c ON c.id = p.class_id
+      WHERE sp.total_levels > 0
+      ORDER BY sp.total_levels DESC, sp.best_round_levels DESC, sp.updated_at ASC
+      LIMIT ?`,
+    [limit]
+  );
+  const [hpList] = await pool.query(
+    `SELECT sp.student_id, sp.total_levels, sp.hp,
+            p.username, p.real_name, c.name AS class_name
+       FROM survival_profiles sp
+       JOIN profiles p ON p.id = sp.student_id
+       LEFT JOIN classes c ON c.id = p.class_id
+      WHERE sp.alive = 1 AND sp.hp > 0
+      ORDER BY sp.hp DESC, sp.total_levels DESC, sp.updated_at ASC
+      LIMIT ?`,
+    [limit]
+  );
+  const [[players]] = await pool.query(
+    'SELECT COUNT(*) AS n FROM survival_profiles WHERE total_levels > 0'
+  );
+  return {
+    depth: depth.map((r, i) => ({
+      rank: i + 1,
+      username: r.username || '',
+      real_name: r.real_name || '',
+      class_name: r.class_name || '',
+      total_levels: Number(r.total_levels),
+      hp: Number(r.hp),
+    })),
+    hp: hpList.map((r, i) => ({
+      rank: i + 1,
+      username: r.username || '',
+      real_name: r.real_name || '',
+      class_name: r.class_name || '',
+      total_levels: Number(r.total_levels),
+      hp: Number(r.hp),
+    })),
+    players: Number(players.n) || 0,
+  };
+}
+
+app.get('/api/student/survival/rank', authenticate, async (req, res) => {
+  try {
+    if (!(await survivalGate(req, res))) return;
+    const cfg = await getSurvivalConfig();
+    const limit = Math.min(200, Math.max(10, Number(cfg.rank_limit) || 100));
+    const now = Date.now();
+    if (survivalRankCache.at && survivalRankCache.limit === limit && now - survivalRankCache.at < SURVIVAL_RANK_TTL) {
+      // 命中缓存
+    } else {
+      const built = await buildSurvivalRank(limit);
+      survivalRankCache = { at: now, limit, ...built };
+    }
+
+    const studentId = req.user.userId;
+    const [mine] = await pool.query(
+      'SELECT hp, total_levels, alive FROM survival_profiles WHERE student_id = ? LIMIT 1',
+      [studentId]
+    );
+    const me = mine.length ? mine[0] : { hp: cfg.hp_init, total_levels: 0, alive: 0 };
+    const [[dRank]] = await pool.query(
+      'SELECT COUNT(*) AS n FROM survival_profiles WHERE total_levels > ?',
+      [Number(me.total_levels)]
+    );
+    const [[hRank]] = await pool.query(
+      'SELECT COUNT(*) AS n FROM survival_profiles WHERE alive = 1 AND hp > ?',
+      [Number(me.hp)]
+    );
+
+    res.json({
+      data: {
+        depth: survivalRankCache.depth,
+        hp: survivalRankCache.hp,
+        players: survivalRankCache.players,
+        me: {
+          username: req.user.username || '',
+          hp: Number(me.hp),
+          total_levels: Number(me.total_levels),
+          alive: Number(me.alive) === 1,
+          depth_rank: Number(me.total_levels) > 0 ? Number(dRank.n) + 1 : null,
+          hp_rank: Number(me.alive) === 1 ? Number(hRank.n) + 1 : null,
+        },
+        refreshed_at: new Date(survivalRankCache.at || now).toISOString(),
+        next_refresh_at: new Date((survivalRankCache.at || now) + SURVIVAL_RANK_TTL).toISOString(),
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('[survival] 排行榜失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// ---------- 教师端 ----------
+
+app.get('/api/teacher/survival/config', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const cfg = await getSurvivalConfig();
+    const [classes] = await pool.query(
+      'SELECT id, name, survival_enabled FROM classes ORDER BY name'
+    );
+    const [[cnt]] = await pool.query('SELECT COUNT(*) AS n FROM survival_levels WHERE is_active = 1');
+    res.json({
+      data: {
+        config: cfg,
+        levels_enabled: Number(cnt.n) || 0,
+        classes: classes.map((c) => ({
+          id: String(c.id),
+          name: c.name,
+          survival_enabled: Number(c.survival_enabled) === 1,
+        })),
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('[survival] 教师端配置失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+app.put('/api/teacher/survival/config', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const saved = await saveSurvivalConfig(req.body || {});
+    const cfg = await getSurvivalConfig();
+    survivalRankCache = { at: 0, limit: 0, depth: [], hp: [], players: 0 };
+    res.json({ data: { saved, config: cfg }, error: null });
+  } catch (error) {
+    console.error('[survival] 保存配置失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 班级开关：与其它模块一致，班级开关批量同步到该班每个学生
+app.post('/api/teacher/survival/class-toggle', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const classId = String((req.body && req.body.class_id) || '').trim();
+    const enabled = !!(req.body && req.body.enabled);
+    if (!classId) return res.status(400).json({ data: null, error: '缺少班级' });
+    if (!(await assertTeacherOwnsClass(req, res, classId))) return;
+
+    await pool.query('UPDATE classes SET survival_enabled = ? WHERE id = ?', [enabled ? 1 : 0, classId]);
+    const [r] = await pool.query(
+      "UPDATE profiles SET survival_enabled = ? WHERE class_id = ? AND role = 'student'",
+      [enabled ? 1 : 0, classId]
+    );
+    res.json({ data: { class_id: classId, enabled, students: r.affectedRows }, error: null });
+  } catch (error) {
+    console.error('[survival] 班级开关失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 各班战况
+app.get('/api/teacher/survival/overview', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT c.id, c.name, c.survival_enabled,
+              COUNT(DISTINCT p.id) AS students,
+              COUNT(DISTINCT CASE WHEN sp.total_levels > 0 THEN sp.student_id END) AS players,
+              ROUND(AVG(NULLIF(sp.total_levels, 0))) AS avg_levels,
+              MAX(sp.total_levels) AS max_levels,
+              ROUND(AVG(NULLIF(sp.hp, 0))) AS avg_hp,
+              SUM(sp.deaths) AS deaths,
+              COUNT(DISTINCT CASE WHEN sp.last_played_at >= DATE_SUB(NOW(), INTERVAL 1 DAY) THEN sp.student_id END) AS active_today
+         FROM classes c
+         LEFT JOIN profiles p ON p.class_id = c.id AND p.role = 'student'
+         LEFT JOIN survival_profiles sp ON sp.student_id = p.id
+        GROUP BY c.id, c.name, c.survival_enabled
+        ORDER BY c.name`
+    );
+    res.json({
+      data: rows.map((r) => ({
+        id: String(r.id),
+        name: r.name,
+        enabled: Number(r.survival_enabled) === 1,
+        students: Number(r.students) || 0,
+        players: Number(r.players) || 0,
+        avg_levels: Number(r.avg_levels) || 0,
+        max_levels: Number(r.max_levels) || 0,
+        avg_hp: Number(r.avg_hp) || 0,
+        deaths: Number(r.deaths) || 0,
+        active_today: Number(r.active_today) || 0,
+      })),
+      error: null,
+    });
+  } catch (error) {
+    console.error('[survival] 战况失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+app.get('/api/teacher/survival/levels', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const sync = await syncSurvivalLevels();
+    const [rows] = await pool.query(
+      `SELECT l.*, (SELECT COUNT(*) FROM survival_answers a WHERE a.seq = l.seq) AS attempts
+         FROM survival_levels l ORDER BY l.seq ASC`
+    );
+    res.json({
+      data: rows.map((r) => ({
+        seq: Number(r.seq),
+        code: r.code,
+        title: r.title,
+        unit_index: Number(r.unit_index),
+        unit_name: r.unit_name,
+        chapter_name: r.chapter_name,
+        cluster_id: r.cluster_id,
+        question_count: Number(r.question_count),
+        extra_question_ids: parseJsonArrayField(r.extra_question_ids),
+        is_active: Number(r.is_active) === 1,
+        attempts: Number(r.attempts) || 0,
+      })),
+      sync,
+      error: null,
+    });
+  } catch (error) {
+    console.error('[survival] 关卡列表失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+app.put('/api/teacher/survival/levels/:seq', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const seq = Number(req.params.seq);
+    if (!Number.isFinite(seq)) return res.status(400).json({ data: null, error: '关卡号不对' });
+    const b = req.body || {};
+    const sets = [];
+    const params = [];
+    if (typeof b.title === 'string') { sets.push('title = ?'); params.push(clip(b.title, 120)); }
+    if (b.is_active !== undefined) { sets.push('is_active = ?'); params.push(b.is_active ? 1 : 0); }
+    if (b.extra_question_ids !== undefined) {
+      const ids = (Array.isArray(b.extra_question_ids) ? b.extra_question_ids : [])
+        .map((x) => String(x || '').trim()).filter(Boolean).slice(0, 50);
+      sets.push('extra_question_ids = ?');
+      params.push(ids.length ? JSON.stringify(ids) : null);
+    }
+    if (!sets.length) return res.status(400).json({ data: null, error: '没有要改的字段' });
+    params.push(seq);
+    await pool.query(`UPDATE survival_levels SET ${sets.join(', ')} WHERE seq = ?`, params);
+    res.json({ data: { seq }, error: null });
+  } catch (error) {
+    console.error('[survival] 改关卡失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 单元内顺序随机化：把每单元内的关卡重排一次（解决「总在第 2 单元卡死」）
+app.post('/api/teacher/survival/shuffle', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT seq, unit_index FROM survival_levels ORDER BY seq');
+    if (!rows.length) return res.status(400).json({ data: null, error: '还没有关卡' });
+    const byUnit = new Map();
+    for (const r of rows) {
+      const u = Number(r.unit_index) || 1;
+      if (!byUnit.has(u)) byUnit.set(u, []);
+      byUnit.get(u).push(Number(r.seq));
+    }
+    const unitKeys = [...byUnit.keys()].sort((a, b) => a - b);
+    const order = [];
+    for (const u of unitKeys) {
+      const list = byUnit.get(u);
+      for (let i = list.length - 1; i > 0; i -= 1) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [list[i], list[j]] = [list[j], list[i]];
+      }
+      order.push(...list);
+    }
+    // seq 是主键，直接改会撞键：先挪到负数区再写回
+    for (let i = 0; i < order.length; i += 1) {
+      await pool.query('UPDATE survival_levels SET seq = ? WHERE seq = ?', [-(i + 1), order[i]]);
+    }
+    for (let i = 0; i < order.length; i += 1) {
+      await pool.query('UPDATE survival_levels SET seq = ? WHERE seq = ?', [i + 1, -(i + 1)]);
+    }
+    res.json({ data: { count: order.length }, error: null });
+  } catch (error) {
+    console.error('[survival] 随机化失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
 app.post('/api/ai-qa/ask', authenticate, async (req, res) => {
   try {
     const licenseResult = await licenseManager.checkFeatureLicense(FEATURES.AI);

@@ -11,6 +11,7 @@ import { clusterLabel } from '../../data/chapterTaxonomy';
 import { isOperationType } from '../../utils/questionType';
 import { EquipmentDropEffect } from './game/EquipmentDropEffect';
 import { useGameEventStore } from '../../store/gameEventStore';
+import { SurvivalGame } from './SurvivalGame';
 
 // PK 对战组件懒加载（避免影响主模块首屏）
 const PKBattle = lazy(() => import('./pk-battle/PKBattle').then(m => ({ default: m.PKBattle })));
@@ -149,6 +150,8 @@ export const TestModule: React.FC = () => {
   // 先看到测试列表容易误以为是考试（2026-10-24 吴老反馈学生几次搞混）。
   const [showExamList, setShowExamList] = useState(true);
   const [showPKBattle, setShowPKBattle] = useState(false);
+  /** 生存游戏：测试模块内的第四个标签（2026-10-27） */
+  const [showSurvival, setShowSurvival] = useState(false);
   const [currentExamTest, setCurrentExamTest] = useState<any>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   // 限时到点强制交卷（v3.1.17）：examTimeUp 控制「时间到」遮罩提示，
@@ -2042,26 +2045,37 @@ export const TestModule: React.FC = () => {
     <div className="p-6">
       <div className="flex gap-4 mb-6">
         <button
-          onClick={() => { setShowExamList(false); setShowPKBattle(false); }}
-          className={`px-4 py-2 rounded-lg transition-colors ${!showExamList && !showPKBattle ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+          onClick={() => { setShowExamList(false); setShowPKBattle(false); setShowSurvival(false); }}
+          className={`px-4 py-2 rounded-lg transition-colors ${!showExamList && !showPKBattle && !showSurvival ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
         >
           <i className="fa-solid fa-clipboard-list mr-2"></i>测试列表
         </button>
         <button
-          onClick={() => { setShowExamList(true); setShowPKBattle(false); }}
+          onClick={() => { setShowExamList(true); setShowPKBattle(false); setShowSurvival(false); }}
           className={`px-4 py-2 rounded-lg transition-colors ${showExamList ? 'bg-purple-500 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
         >
           <i className="fa-solid fa-file-alt mr-2"></i>考试列表
         </button>
         <button
-          onClick={() => { setShowExamList(false); setShowPKBattle(true); }}
+          onClick={() => { setShowExamList(false); setShowPKBattle(true); setShowSurvival(false); }}
           className={`px-4 py-2 rounded-lg transition-colors ${showPKBattle ? 'bg-pink-500 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
         >
           <i className="fa-solid fa-bolt mr-2"></i>对战 PK
         </button>
+        <button
+          onClick={() => { setShowExamList(false); setShowPKBattle(false); setShowSurvival(true); }}
+          className={`px-4 py-2 rounded-lg transition-colors ${showSurvival ? 'bg-cyan-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+          title="一关一题，信号耗尽就断线"
+        >
+          <i className="fa-solid fa-heart-pulse mr-2"></i>生存挑战
+        </button>
       </div>
 
-      {showPKBattle ? (
+      {showSurvival ? (
+        <div className="h-[560px] overflow-hidden rounded-xl">
+          <SurvivalGame />
+        </div>
+      ) : showPKBattle ? (
         <Suspense fallback={<div className="flex items-center justify-center h-full"><i className="fa-solid fa-circle-notch fa-spin text-3xl text-purple-500"></i></div>}>
           <PKBattle />
         </Suspense>

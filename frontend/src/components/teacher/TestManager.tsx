@@ -8,6 +8,7 @@ import { ClusterFilter, buildClusterTree, type ClusterTree } from '../common/Clu
 import { CHAPTER_TAXONOMY } from '../../data/chapterTaxonomy';
 import { MasteredScopePicker, countInScope } from './MasteredScopePicker';
 import { isOperationType } from '../../utils/questionType';
+import { SurvivalManager } from './SurvivalManager';
 
 const parseTags = (tags: any): string[] => {
   if (!tags) return [];
@@ -60,7 +61,7 @@ export const TestManager: React.FC = () => {
   const [filterClusterSecondary, setFilterClusterSecondary] = useState<string[]>([]);
   // 默认打开「试卷」不是「普通测试」：老师进这个页面十次有九次是去排考试，
   // 老是先落在普通测试上再点一次，2026-10-24 吴老要求改默认。
-  const [activeSubTab, setActiveSubTab] = useState<'tests' | 'exams'>('exams');
+  const [activeSubTab, setActiveSubTab] = useState<'tests' | 'exams' | 'survival'>('exams');
   const { profile } = useAuth();
 
   /**
@@ -342,7 +343,20 @@ export const TestManager: React.FC = () => {
           <i className="fa-solid fa-file-alt mr-2"></i>
           试卷
         </button>
+        <button
+          onClick={() => setActiveSubTab('survival')}
+          className={`px-4 py-3 font-medium transition-colors ${
+            activeSubTab === 'survival'
+              ? 'text-cyan-700 border-b-2 border-cyan-600'
+              : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <i className="fa-solid fa-heart-pulse mr-2"></i>
+          生存游戏
+        </button>
       </div>
+
+      {activeSubTab === 'survival' && <SurvivalManager />}
 
       {activeSubTab === 'tests' && (<>
       <div className="flex items-center justify-between mb-6">
