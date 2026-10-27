@@ -11549,7 +11549,12 @@ async function survivalAdvance(studentId, fromSeq, fromRound, cfg, roundLevels) 
             ? [level.seq, roundNo, q2.id, seconds, roundLevels, studentId]
             : [level.seq, roundNo, q2.id, roundLevels, studentId]
         );
-        return { level, question: q2, roundNo, finishedRound };
+        // ⛔ 必须把 deadline 带回去：/answer、/correct 都是拿这里的值给前端起倒计时，
+        //    漏了会导致「第 2 关以后全部不限时」（2026-10-27）
+        return {
+          level, question: q2, roundNo, finishedRound,
+          deadline: seconds > 0 ? new Date(Date.now() + seconds * 1000).toISOString() : null,
+        };
       }
     }
     return null;
@@ -11567,7 +11572,10 @@ async function survivalAdvance(studentId, fromSeq, fromRound, cfg, roundLevels) 
       : [level.seq, roundNo, question.id, roundLevels, studentId]
   );
 
-  return { level, question, roundNo, finishedRound };
+  return {
+    level, question, roundNo, finishedRound,
+    deadline: seconds > 0 ? new Date(Date.now() + seconds * 1000).toISOString() : null,
+  };
 }
 
 function survivalLevelOut(lv) {
@@ -11609,10 +11617,19 @@ app.get('/api/student/survival/state', authenticate, async (req, res) => {
     let level = null;
     if (profile.current_question_id) {
       const [qs] = await pool.query(
-        'SELECT id, type, content, options FROM questions WHERE id = ? LIMIT 1',
+        'SELECT id, type, content, options, answers, explanation FROM questions WHERE id = ? LIMIT 1',
         [profile.current_question_id]
       );
-      if (qs.length) question = survivalQuestionOut(qs[0]);
+      if (qs.length) {
+        question = survivalQuestionOut(qs[0]);
+        // 待订正时把解析与正确答案一起给前端：否则刷新后订正区只剩一个空壳，
+        // 学生看不到自己错在哪（答错时本来就会下发这两项，不存在额外泄题）
+        if (Number(profile.pending_correction) === 1) {
+          const ansArr = taskGetAnswersArray(qs[0].answers);
+          question.correct_answer = ansArr.length ? String(ansArr[0]) : '';
+          question.explanation = qs[0].explanation || '';
+        }
+      }
       const [lv] = await pool.query('SELECT * FROM survival_levels WHERE seq = ? LIMIT 1', [profile.seq]);
       level = lv.length ? survivalLevelOut(lv[0]) : null;
     }
@@ -11673,9 +11690,11 @@ app.post('/api/student/survival/start', authenticate, async (req, res) => {
             resumed: true,
             level: lv.length ? survivalLevelOut(lv[0]) : null,
             question: survivalQuestionOut(qs[0]),
-            deadline: profile.current_deadline || null,
+            // 待订正时不能再带 deadline：前端会据此起倒计时，到点自动交卷又被拒
+            deadline: Number(profile.pending_correction) === 1 ? null : (profile.current_deadline || null),
             hp: Number(profile.hp),
             round_no: Number(profile.round_no),
+            pending_correction: Number(profile.pending_correction) === 1,
           },
           error: null,
         });
@@ -11844,9 +11863,12 @@ app.post('/api/student/survival/answer', authenticate, async (req, res) => {
         [cfg.hp_init, Number(profile.round_levels), studentId]
       );
     } else {
+      // 答错后本题不推进：订正阶段不限时，deadline 必须清掉，
+      // 否则前端（以及刷新后的 /state）会拿过期时间反复自动交卷（2026-10-27）
       await pool.query(
         `UPDATE survival_profiles
-            SET hp = ?, total_wrong = total_wrong + 1, pending_correction = ?, last_played_at = NOW()
+            SET hp = ?, total_wrong = total_wrong + 1, pending_correction = ?,
+                current_deadline = NULL, last_played_at = NOW()
           WHERE student_id = ?`,
         [hpAfter, cfg.require_correction ? 1 : 0, studentId]
       );
