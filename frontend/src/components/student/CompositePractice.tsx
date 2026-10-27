@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { backendClient } from '../../api/backendClient';
 import { useAuth } from '../../hooks/useAuth';
+import { sanitizeHtml } from '../../utils/htmlUtils';
 
 /**
  * 综合题练习（学生端，2026-10-26）
@@ -303,8 +304,8 @@ export const CompositePracticeModule: React.FC = () => {
                 </div>
               </div>
               <div
-                className="markdown-content mt-3 text-sm leading-7 text-gray-800"
-                dangerouslySetInnerHTML={{ __html: active.content }}
+                className="question-rich-content mt-3 text-sm leading-7 text-gray-800"
+                dangerouslySetInnerHTML={{ __html: sanitizeHtml(active.content || '') }}
               />
             </div>
 
@@ -328,8 +329,8 @@ export const CompositePracticeModule: React.FC = () => {
                         {i + 1}
                       </span>
                       <div
-                        className="markdown-content min-w-0 text-sm text-gray-800"
-                        dangerouslySetInnerHTML={{ __html: sq.content }}
+                        className="question-rich-content min-w-0 text-sm text-gray-800"
+                        dangerouslySetInnerHTML={{ __html: sanitizeHtml(sq.content || '') }}
                       />
                       {ok === true && <i className="fa-solid fa-check mt-1 text-green-600"></i>}
                       {ok === false && <i className="fa-solid fa-xmark mt-1 text-rose-600"></i>}
@@ -366,7 +367,13 @@ export const CompositePracticeModule: React.FC = () => {
                               <span className={`flex h-5 w-5 flex-shrink-0 items-center justify-center rounded text-xs ${picked ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600'}`}>
                                 {letter}
                               </span>
-                              <span className="min-w-0">{stripOptionPrefix(String(opt))}</span>
+                              {/* ⛔ 选项必须是富文本：题库里的选项大量是图片（8 处综合题选项是 <img>），
+                                  用文本节点渲染会把 <img src=...> 原样显示成代码。
+                                  与练习/测试/错题集一致：sanitizeHtml + question-rich-content。 */}
+                              <span
+                                className="inline-block min-w-0 question-rich-content"
+                                dangerouslySetInnerHTML={{ __html: sanitizeHtml(stripOptionPrefix(String(opt))) }}
+                              />
                             </button>
                           );
                         })}
@@ -440,12 +447,15 @@ export const CompositePracticeModule: React.FC = () => {
                       // 复用学生端现有的 AI 答疑浮窗：把材料 + 所有小题（含选项）拼成纯文本
                       const toText = (html: string) =>
                         String(html || '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
-                      let text = toText(active.content);
+                      // 图片占位：纯文本化后图片会变成空串，AI 只会看到「根据下图…」却没有图，
+                      // 所以遇到只有图片的题干/选项要写明，别让它凭空猜（2026-10-27）
+                      const textOrImg = (html: string) => toText(html) || '（此处是图片）';
+                      let text = textOrImg(active.content);
                       active.subs.forEach((sq, i) => {
-                        text += `\n\n(${i + 1}) ${toText(sq.content)}`;
+                        text += `\n\n(${i + 1}) ${textOrImg(sq.content)}`;
                         if (sq.type !== 'fill_blank') {
                           sq.options.forEach((o, oi) => {
-                            text += `\n${LETTERS[oi]}. ${toText(stripOptionPrefix(String(o)))}`;
+                            text += `\n${LETTERS[oi]}. ${textOrImg(stripOptionPrefix(String(o)))}`;
                           });
                         }
                       });

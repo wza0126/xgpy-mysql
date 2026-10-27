@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { authHeaders } from '../../utils/authToken';
+import { sanitizeHtml } from '../../utils/htmlUtils';
 import {
   buildVoiceChoices,
   findVoiceByName,
@@ -833,7 +834,12 @@ const QuizPanel: React.FC<{ page: LecturePage; onNext?: () => void }> = ({ page,
                     <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded text-xs ${showRight ? 'bg-emerald-500 text-white' : on ? 'bg-rose-500 text-white' : 'bg-gray-100 text-gray-600'}`}>
                       {letter}
                     </span>
-                    <span className="min-w-0">{opt}</span>
+                    {/* ⛔ 题库选项可能是图片（综合题里就有 3 道题的选项全是大图），
+                        用文本节点渲染会把 <img src=...> 原样显示成代码 */}
+                    <span
+                      className="inline-block min-w-0 question-rich-content"
+                      dangerouslySetInnerHTML={{ __html: sanitizeHtml(String(opt)) }}
+                    />
                   </button>
                 );
               })}

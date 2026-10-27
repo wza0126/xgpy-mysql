@@ -10523,6 +10523,11 @@ function parseQuizQuestionRow(row) {
   if (/```|<pre|<code|\bprint\s*\(|\binput\s*\(/i.test(rawStem)) return null;
   // 多行题干基本都是「执行下列代码 / 读程序写结果」，压成一行没法读，检测页不要
   if (/\r?\n/.test(rawStem.trim())) return null;
+  // 题干带图的题也不收（2026-10-27）：检测页题干是压平的纯文本，图片会被剥掉，
+  // 学生只看到「根据下图回答…」却没有图，比不给题更糟。
+  // 选项带图的同样跳过：四个按钮各塞一张大图，检测页会被撑成一屏一张。
+  if (/<img/i.test(rawStem)) return null;
+  if (opts.some((o) => /<img/i.test(String(o == null ? '' : o)))) return null;
   const stem = rawStem.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim().slice(0, 200);
   if (!stem) return null;
 
