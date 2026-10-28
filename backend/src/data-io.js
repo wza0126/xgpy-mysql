@@ -40,10 +40,15 @@ const DOMAIN_DEFS = [
   //    不登记会落「其他」域且 defaultOff → 教师默认备份静默丢掉辛苦调好的讲解风格。
   // ⛔ lectures（迁移 108）必须归域：微课程是老师手写的课件资产（大纲/要求/讲解词全是老师的心血），
   //    不登记会落「其他」域且 defaultOff → 教师默认备份静默丢掉整批课程。
-  { id: 'ai', name: 'AI与编程', tables: ['ai_qa_history', 'ai_qa_knowledge_base', 'ai_works', 'ai_workshop_config', 'ai_work_purchases', 'ai_work_ratings', 'ai_work_reviews', 'ai_work_versions', 'explain_styles', 'explain_scripts', 'lectures', 'python_tasks', 'python_submissions', 'python_drafts', 'python_gradings', 'python_wrong_problems', 'python_magic_progress', 'code_realm_progress', 'code_snippets',
-    // python_explain_scripts：AI 讲解脚本缓存（重生成要花额度，值得备份）
-    // python_task_class_status：编程题按班启停的例外记录，丢了会让「关了又自己开了」
-    'python_explain_scripts', 'python_task_class_status', 'ai_analysis_reports', 'study_galaxy_config'] },
+  // ⛔ 分享题目给别的学校时，「AI 教学资产」可以给，「AI 学生数据」绝不能给。
+  //    原来这两类混在一个域里：勾一次就带走 5 万条学生问答、979 条提交、含姓名的学情分析。
+  { id: 'aiteach', name: 'AI 教学资产', tables: ['python_tasks', 'lectures', 'explain_styles', 'explain_scripts',
+    'python_explain_scripts', 'ai_workshop_config', 'study_galaxy_config', 'code_snippets'] },
+  // ⚠️ 全是本校学生的痕迹，分享/迁移到别的学校时不要勾
+  { id: 'ai', name: 'AI 学生数据', tables: ['ai_qa_history', 'ai_qa_knowledge_base', 'ai_works',
+    'ai_work_purchases', 'ai_work_ratings', 'ai_work_reviews', 'ai_work_versions',
+    'python_submissions', 'python_drafts', 'python_gradings', 'python_wrong_problems',
+    'python_magic_progress', 'python_task_class_status', 'code_realm_progress', 'ai_analysis_reports'] },
   // ⛔ pk_daily_rewards 必须归域：PK 每日奖励领取记录（有真实数据）。
   //    未登记会落「其他」域且 defaultOff → 教师默认备份静默漏掉这张表。
   //    （question_cluster_tasks 故意不归域：它只是聚类任务的临时作业状态，有自动清理逻辑。）
