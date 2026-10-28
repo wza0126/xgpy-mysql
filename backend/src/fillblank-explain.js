@@ -85,10 +85,24 @@ function buildPrompt(task, blanks) {
     return `第${b.index}空：正确答案 = ${b.answers[0] || '（题库未配置）'}${alts}\n        所在行：${line}`;
   }).join('\n');
 
+  /**
+   * 题干里可能内嵌 base64 配图（`![说明](data:image/png;base64,....)`）。
+   * ⛔ 直接进 prompt 会出事：一张图的 base64 有几万字符，clip 600 之后
+   *    整段几乎全是乱码（实测第50题 92% 是 base64），既白烧 token，
+   *    又把说明文字挤出去，模型还看不懂。
+   *    这里先把图片换成占位，并去掉 HTML 标签，再按 600 字截断。
+   */
+  const cleanForAi = (s) => String(s == null ? '' : s)
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '（题目配图）')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .trim();
+
   const userPrompt = [
     `【题目】${task.title || ''}`,
-    task.description ? `【题目说明】${clip(task.description, 600)}` : '',
-    task.hint ? `【老师给的提示】${clip(task.hint, 120)}` : '',
+    task.description ? `【题目说明】${clip(cleanForAi(task.description), 600)}` : '',
+    task.hint ? `【老师给的提示】${clip(cleanForAi(task.hint), 120)}` : '',
     '',
     '【代码模板（①②③ 是要填的空）】',
     '```python',
