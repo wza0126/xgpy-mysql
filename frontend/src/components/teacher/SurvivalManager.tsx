@@ -14,6 +14,7 @@ import { backendClient } from '../../api/backendClient';
 
 interface Cfg {
   hp_init: number;
+  hp_rebirth: number;
   hp_gain: number;
   hp_repeat_gain: number;
   hp_penalty: number;
@@ -54,7 +55,8 @@ interface LevelRow {
 }
 
 const FIELD_DEFS: { key: keyof Cfg; label: string; hint: string; min: number; max: number }[] = [
-  { key: 'hp_init', label: '初始信号', hint: '进入游戏时的血量（100 = 10 格）', min: 10, max: 10000 },
+  { key: 'hp_init', label: '初始信号', hint: '首次进入游戏时的血量（100 = 10 格）', min: 10, max: 10000 },
+  { key: 'hp_rebirth', label: '重生信号', hint: '断线后从重生点复活时的血量，低于初始值可提高难度', min: 10, max: 10000 },
   { key: 'hp_gain', label: '答对加分', hint: '当天首次做对这道题', min: 0, max: 1000 },
   { key: 'hp_repeat_gain', label: '重复答对加分', hint: '同一题当天再做对（防刷分）', min: 0, max: 1000 },
   { key: 'hp_penalty', label: '答错扣血', hint: '扣到 0 即断线', min: 0, max: 1000 },
