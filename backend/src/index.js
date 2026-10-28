@@ -11361,6 +11361,7 @@ app.post('/api/student/lectures/:id/visit', authenticate, requireStudent, async 
 
 const SURVIVAL_DEFAULTS = {
   hp_init: 100,        // 初始信号强度（10 格 × 10）
+  hp_rebirth: 50,      // 死亡后重生的信号强度（2026-10-28：不给满血，加难度）
   hp_gain: 10,         // 答对一次（当天首次做对这道题）
   hp_repeat_gain: 2,   // 同一题当天再答对
   hp_penalty: 30,      // 答错
@@ -11395,7 +11396,7 @@ async function getSurvivalConfig() {
 /** 写配置：只接受白名单里的键，值做范围约束，避免被写成负数把游戏搞坏 */
 async function saveSurvivalConfig(patch) {
   const bounds = {
-    hp_init: [10, 10000], hp_gain: [0, 1000], hp_repeat_gain: [0, 1000],
+    hp_init: [10, 10000], hp_rebirth: [10, 10000], hp_gain: [0, 1000], hp_repeat_gain: [0, 1000],
     hp_penalty: [0, 1000], time_choice: [0, 600], time_blank: [0, 600],
     require_correction: [0, 1], rank_limit: [10, 500],
   };
@@ -11892,6 +11893,8 @@ app.post('/api/student/survival/start', authenticate, async (req, res) => {
     }
 
     const seconds = question.type === 'fill_blank' ? cfg.time_blank : cfg.time_choice;
+    // 首次开局满血；死过之后重生只给 hp_rebirth（2026-10-28 吴老要求，加大难度）
+    const startHp = Number(profile.deaths) > 0 ? cfg.hp_rebirth : cfg.hp_init;
     await pool.query(
       `UPDATE survival_profiles
           SET hp = ?, seq = ?, round_no = ?, alive = 1, pending_correction = 0,
@@ -11900,8 +11903,8 @@ app.post('/api/student/survival/start', authenticate, async (req, res) => {
               last_played_at = NOW()
         WHERE student_id = ?`,
       seconds > 0
-        ? [cfg.hp_init, cp.seq, Number(profile.round_no) || 1, question.id, seconds, studentId]
-        : [cfg.hp_init, cp.seq, Number(profile.round_no) || 1, question.id, studentId]
+        ? [startHp, cp.seq, Number(profile.round_no) || 1, question.id, seconds, studentId]
+        : [startHp, cp.seq, Number(profile.round_no) || 1, question.id, studentId]
     );
 
     res.json({
@@ -11917,7 +11920,7 @@ app.post('/api/student/survival/start', authenticate, async (req, res) => {
         level: survivalLevelOut(cp),
         question: survivalQuestionOut(question),
         deadline: seconds > 0 ? new Date(Date.now() + seconds * 1000).toISOString() : null,
-        hp: cfg.hp_init,
+        hp: startHp,
         round_no: Number(profile.round_no) || 1,
         pending_correction: false,
       },
@@ -12042,7 +12045,7 @@ app.post('/api/student/survival/answer', authenticate, async (req, res) => {
                 best_round_levels = GREATEST(best_round_levels, ?),
                 current_question_id = NULL, current_deadline = NULL, last_played_at = NOW()
           WHERE student_id = ?`,
-        [cfg.hp_init, Number(profile.round_levels), studentId]
+        [cfg.hp_rebirth, Number(profile.round_levels), studentId]
       );
     } else {
       // 答错后本题不推进：订正阶段不限时，deadline 必须清掉，
@@ -12073,7 +12076,7 @@ app.post('/api/student/survival/answer', authenticate, async (req, res) => {
         correct: false,
         timeout: isTimeout,
         hp_before: hpBefore,
-        hp_after: dead ? cfg.hp_init : hpAfter,
+        hp_after: dead ? cfg.hp_rebirth : hpAfter,
         hp_delta: delta,
         dead,
         need_correction: !dead && !!cfg.require_correction,
@@ -14467,6 +14470,16 @@ function matchClusterFilter(clusterId, clusters) {
   return clusters.some((c) => clusterId === c || clusterId.startsWith(`${c}/`));
 }
 
+/**
+ * 取综合题题干里的题号：`<p><strong>15、家庭智能设备</strong></p>` → 15。
+ * 综合题的顺序必须按这个号走，不能按 cluster_id 或 id 排 —— 一按章节排，
+ * 「1、2、3…」的顺序就散了（2026-10-28 吴老反馈）。取不到号的排最后。
+ */
+function compositeNoOf(content) {
+  const m = /<strong>\s*(\d+)\s*、/.exec(String(content || ''));
+  return m ? Number(m[1]) : 9999;
+}
+
 // 题库目录：只返回算筛选项与题数所需的四个字段（实测约 1/10 体积）
 app.get('/api/student/practice-catalog', authenticate, async (req, res) => {
   try {
@@ -14503,8 +14516,11 @@ app.get('/api/student/composite/questions', authenticate, async (req, res) => {
       `SELECT id, content, options, cluster_id, sub_topic, tags, answers, practice_enabled
          FROM questions
         WHERE practice_enabled = 1 AND type = 'composite'
-        ORDER BY cluster_id ASC, id ASC`
+        ORDER BY id ASC`
     );
+    // 按题干里的「N、标题」序号排，不用 cluster_id：一按章节排，1、2、3 的顺序就乱了
+    // （2026-10-28 吴老反馈：导入新题后原来的 1–14 题不再排在最前）
+    rows.sort((a, b) => compositeNoOf(a.content) - compositeNoOf(b.content) || String(a.id).localeCompare(String(b.id)));
     const data = rows.map((r) => {
       const subs = taskGetAnswersArray(r.answers) || [];
       return {
@@ -14547,10 +14563,11 @@ app.get('/api/student/composite/progress', authenticate, async (req, res) => {
     if (!studentId) return res.status(401).json({ data: null, error: '未登录' });
 
     const [qs] = await pool.query(
-      `SELECT id, answers FROM questions
+      `SELECT id, content, answers FROM questions
         WHERE practice_enabled = 1 AND type = 'composite'
-        ORDER BY cluster_id ASC, id ASC`
+        ORDER BY id ASC`
     );
+    qs.sort((a, b) => compositeNoOf(a.content) - compositeNoOf(b.content));
 
     const data = [];
     let totalFull = 0;
@@ -14630,8 +14647,10 @@ app.get('/api/teacher/composite/questions', authenticate, requireTeachingRole, a
     const [rows] = await pool.query(
       `SELECT id, content, cluster_id, sub_topic, practice_enabled, exam_enabled, answers, created_at
          FROM questions WHERE type = 'composite'
-        ORDER BY practice_enabled DESC, cluster_id ASC, id ASC`
+        ORDER BY practice_enabled DESC, id ASC`
     );
+    // 按题干序号排（1、2、3…），不按 cluster_id —— 否则导入新题后旧题顺序会散
+    rows.sort((a, b) => compositeNoOf(a.content) - compositeNoOf(b.content));
     const data = rows.map((r) => {
       const subs = taskGetAnswersArray(r.answers) || [];
       return {
@@ -14739,10 +14758,11 @@ app.get('/api/teacher/composite/matrix', authenticate, requireTeachingRole, asyn
     );
 
     const [qs] = await pool.query(
-      `SELECT id, answers, practice_enabled, cluster_id, sub_topic
+      `SELECT id, content, answers, practice_enabled, cluster_id, sub_topic
          FROM questions WHERE type = 'composite'
-        ORDER BY cluster_id ASC, id ASC`,
+        ORDER BY id ASC`,
     );
+    qs.sort((a, b) => compositeNoOf(a.content) - compositeNoOf(b.content));
 
     const questions = [];
     const metaMap = new Map();
