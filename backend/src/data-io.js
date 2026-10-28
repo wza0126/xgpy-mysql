@@ -25,18 +25,25 @@ const DOMAIN_DEFS = [
   // ⛔ wps_op_submissions 必须归域：不进 DOMAIN_DEFS 会落「其他」域且 defaultOff，导出静默丢数据。
   //    操作题提交与判分明细属于答题记录，与 student_answers 同域。
   { id: 'answers', name: '答题记录', tables: ['student_answers', 'wps_op_submissions', 'wrong_questions', 'question_explained_marks'] },
-  { id: 'points', name: '积分与游戏化', tables: ['point_transactions', 'pets', 'pet_config', 'pet_foods', 'student_pets', 'student_equipments', 'student_skins', 'student_buffs', 'equipments', 'prizes', 'prize_class_visibility', 'exchange_records', 'pet_tips', 'internet_codes'] },
+  { id: 'points', name: '积分与游戏化', tables: ['point_transactions', 'pets', 'pet_config', 'pet_foods', 'student_pets', 'student_equipments', 'student_skins', 'student_buffs', 'equipments', 'prizes', 'prize_class_visibility', 'exchange_records', 'pet_tips', 'pet_announcements', 'internet_codes'] },
   { id: 'tasks', name: '课堂任务', tables: ['task_resource', 'task_question', 'task_class', 'task_study_log', 'notes', 'game_tasks', 'student_task_claims'] },
   // ⛔ 代码农场四表必须归域：不登记会落「其他」域且 defaultOff，教师默认备份会静默漏掉学生地块与日志。
   //    与「积分与游戏化」分域，便于单独导出/搬移游戏进度。
   //    farm_code_slots（迁移 100）= 学生自己的 5 个代码容器，属于**学生成果**，备份绝不能漏。
   { id: 'desktopgame', name: '桌面游戏', tables: ['farm_config', 'farm_plots', 'farm_logs', 'farm_code_slots'] },
+  // ⛔ survival_* 三表（迁移 119/120）必须归域：关卡标题/启停是老师配的资产，
+  //    档案与答题日志是学生进度。不登记会落「其他」域且 defaultOff → 备份静默丢掉整个生存挑战。
+  //    顺序：关卡（被引用）→ 档案 → 日志。
+  { id: 'survival', name: '生存挑战', tables: ['survival_levels', 'survival_profiles', 'survival_answers'] },
   { id: 'learning', name: '学习活动', tables: ['word_list', 'student_word_progress', 'learn_visited_records', 'studious_checkins', 'keyboard_lesson_progress', 'typing_rooms', 'typing_scores', 'typing_duel_records', 'roll_call_layout', 'roll_call_seating', 'roll_call_attendance'] },
   // ⛔ explain_styles / explain_scripts（迁移 107）必须归域：风格库是老师手写的内容，
   //    不登记会落「其他」域且 defaultOff → 教师默认备份静默丢掉辛苦调好的讲解风格。
   // ⛔ lectures（迁移 108）必须归域：微课程是老师手写的课件资产（大纲/要求/讲解词全是老师的心血），
   //    不登记会落「其他」域且 defaultOff → 教师默认备份静默丢掉整批课程。
-  { id: 'ai', name: 'AI与编程', tables: ['ai_qa_history', 'ai_qa_knowledge_base', 'ai_works', 'ai_workshop_config', 'ai_work_purchases', 'ai_work_ratings', 'ai_work_reviews', 'ai_work_versions', 'explain_styles', 'explain_scripts', 'lectures', 'python_tasks', 'python_submissions', 'python_drafts', 'python_gradings', 'python_wrong_problems', 'python_magic_progress', 'code_realm_progress', 'code_snippets'] },
+  { id: 'ai', name: 'AI与编程', tables: ['ai_qa_history', 'ai_qa_knowledge_base', 'ai_works', 'ai_workshop_config', 'ai_work_purchases', 'ai_work_ratings', 'ai_work_reviews', 'ai_work_versions', 'explain_styles', 'explain_scripts', 'lectures', 'python_tasks', 'python_submissions', 'python_drafts', 'python_gradings', 'python_wrong_problems', 'python_magic_progress', 'code_realm_progress', 'code_snippets',
+    // python_explain_scripts：AI 讲解脚本缓存（重生成要花额度，值得备份）
+    // python_task_class_status：编程题按班启停的例外记录，丢了会让「关了又自己开了」
+    'python_explain_scripts', 'python_task_class_status', 'ai_analysis_reports', 'study_galaxy_config'] },
   // ⛔ pk_daily_rewards 必须归域：PK 每日奖励领取记录（有真实数据）。
   //    未登记会落「其他」域且 defaultOff → 教师默认备份静默漏掉这张表。
   //    （question_cluster_tasks 故意不归域：它只是聚类任务的临时作业状态，有自动清理逻辑。）
