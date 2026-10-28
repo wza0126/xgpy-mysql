@@ -388,10 +388,12 @@ export const PythonProgramming: React.FC = () => {
               value={answers[currentIdx] || ''}
               onChange={(e) => updateBlankAnswer(currentIdx, e.target.value)}
               disabled={isSubmitted}
-              className={`inline-block mx-1 px-2 py-0.5 border rounded font-mono text-sm min-w-16 text-center focus:outline-none focus:ring-1 focus:ring-yellow-400 ${
+              className={`inline-block mx-1 px-2 py-0.5 border rounded font-mono text-sm text-center focus:outline-none focus:ring-1 focus:ring-yellow-400 ${
                 graded ? 'disabled:opacity-100' : 'disabled:opacity-70'
               } ${inputClass}`}
-              style={{ width: Math.max(60, (answers[currentIdx]?.length || 4) * 10 + 16) }}
+              // 宽度用 ch（等宽字体下 1ch = 1 字符）：跟着内容长但仍按字符网格走，
+              // 且设上限，避免长答案把整行后面的代码（注释、右括号）推得乱跳
+              style={{ width: `${Math.min(24, Math.max(6, (answers[currentIdx]?.length || 4) + 2))}ch` }}
               spellCheck={false}
             />
             {graded && (
