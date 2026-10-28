@@ -5338,6 +5338,50 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
   }
 });
 
+// ============== 教师端：让指定学生重考某场考试 ==============
+/**
+ * 场景：个别学生没好好做，老师要把这次成绩作废、让他重做一遍。
+ *
+ * 做法 = 删掉这些学生在这场考试的 exam_records + exam_progress。
+ * 删完之后学生端看到的是「未参加」，每日次数限制也不再拦（当天就能重做）。
+ *
+ * ⛔ 只按 (test_id, student_id) 精确删，student_ids 来自前端勾选，绝不用无界条件
+ *    （2026-10-25 曾用 `like '%'` 清会话表，一次清空全校登录态）。
+ */
+app.post('/api/teacher/exams/:testId/retake', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const testId = String(req.params.testId || '').trim();
+    const ids = Array.isArray(req.body?.student_ids)
+      ? req.body.student_ids.map((x) => String(x || '').trim()).filter(Boolean)
+      : [];
+    if (!testId) return res.status(400).json({ data: null, error: '缺少试卷 id' });
+    if (!ids.length) return res.status(400).json({ data: null, error: '请先选择要重考的学生' });
+    if (ids.length > 200) return res.status(400).json({ data: null, error: '一次最多 200 人' });
+
+    const [tests] = await pool.query('SELECT id, title FROM tests WHERE id = ? LIMIT 1', [testId]);
+    if (!tests.length) return res.status(404).json({ data: null, error: '试卷不存在' });
+
+    // 先按学生删掉「已开考但没交卷」的进度（这类可能还没有 exam_records 行）
+    await pool.query(
+      'DELETE FROM exam_progress WHERE test_id = ? AND student_id IN (?)',
+      [testId, ids]
+    );
+    const [del] = await pool.query(
+      'DELETE FROM exam_records WHERE test_id = ? AND student_id IN (?)',
+      [testId, ids]
+    );
+
+    console.log(`[retake] 教师 ${req.user.userId} 让 ${ids.length} 名学生重考「${tests[0].title}」，清除记录 ${del.affectedRows} 条`);
+    res.json({
+      data: { removed: del.affectedRows, students: ids.length, test_title: tests[0].title },
+      error: null,
+    });
+  } catch (error) {
+    console.error('Error in teacher retake:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
 // ============== 业务API：保存考试进度（断点续考）==============
 app.post('/api/business/exam-progress', authenticate, async (req, res) => {
   try {

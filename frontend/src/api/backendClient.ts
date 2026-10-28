@@ -770,7 +770,7 @@ export interface BackendClient {
   getExamProgress(examRecordId: string): Promise<any>;
   deleteExamProgress(examRecordId: string): Promise<any>;
   isExamClosed(testId: string): Promise<any>;
-  closeExam(testId: string): Promise<any>;
+  closeExam(data: { test_id: string }): Promise<any>;
 }
 
 export const backendClient: BackendClient = new MariaDBClient() as any;

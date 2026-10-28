@@ -475,6 +475,35 @@ export const ExamManager: React.FC = () => {
   };
 
   /**
+   * 让某个学生重考：作废他这次成绩，删掉 exam_records 与未交卷的进度。
+   * ⛔ 后端按 (test_id, student_id) 精确删，只影响这一个人这一场，其他学生不动。
+   */
+  const retakeExamFor = async (studentId: string, studentName: string, score?: number | null) => {
+    if (!selectedExam) return;
+    const scoreText = score == null ? '' : `（当前 ${score} 分）`;
+    const ok = window.confirm(
+      `让「${studentName}」重考「${selectedExam.title}」？\n\n` +
+      `· 这次的成绩${scoreText}将作废，学生可以立刻重新作答\n` +
+      `· 已经拿到的积分、上网码不会退回\n` +
+      `· 只影响这一个学生，其他同学不受影响`
+    );
+    if (!ok) return;
+    try {
+      const res: any = await backendClient.post(`/api/teacher/exams/${selectedExam.id}/retake`, {
+        student_ids: [studentId],
+      });
+      await fetchData();
+      alert(
+        res?.data?.removed
+          ? `已作废，${studentName} 现在可以重考了`
+          : `${studentName} 原本就没有交卷记录，现在可以直接重考`
+      );
+    } catch (e) {
+      alert(`操作失败：${(e as Error).message}`);
+    }
+  };
+
+  /**
    * AI 语音讲评。
    * 传了 question → 只讲这一题；不传 → 讲本卷「正确率最低」的前 10 题（只算有人作答的题）。
    */
@@ -1684,6 +1713,7 @@ export const ExamManager: React.FC = () => {
                                 <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">上网码</th>
                                 <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">状态</th>
                                 <th className="px-4 py-3 text-right text-sm font-medium text-gray-600">完成时间</th>
+                                <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">操作</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-gray-200">
@@ -1735,6 +1765,19 @@ export const ExamManager: React.FC = () => {
                                     {record.is_absent
                                       ? '-'
                                       : (record.completed_at ? formatDateTime(record.completed_at) : '-')}
+                                  </td>
+                                  <td className="px-4 py-3 text-center">
+                                    {record.is_absent ? (
+                                      <span className="text-xs text-gray-400">可直接参加</span>
+                                    ) : (
+                                      <button
+                                        onClick={() => retakeExamFor(record.student_id, record.student?.real_name || record.student?.username || '该学生', record.score)}
+                                        className="rounded border border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-700 hover:bg-amber-100"
+                                        title="作废这次成绩，让学生重新做一遍"
+                                      >
+                                        <i className="fa-solid fa-rotate-left mr-1"></i>重考
+                                      </button>
+                                    )}
                                   </td>
                                 </tr>
                               ))}
