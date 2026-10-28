@@ -4,6 +4,16 @@
  * 数据来源：C:\wza\xgpydev\_import_payload.json（由 docx 解析 + 去重 + 排序生成）
  * 幂等：按 title 判重，已存在则跳过
  * ⛔ 只新增，不更新、不删除任何已有记录
+ *
+ * ⚠️⚠️ 首次用这个数据源导入时踩过大坑（2026-10-28）：
+ *    _import_payload.json 的题干来自 editor_sdk 的 `doc_resolve_document_structure`
+ *    返回的 **text_preview 字段**，它有 200 字节硬上限（约 75 个汉字），
+ *    长段落被静默截断 —— 22 道题的题干、2 道题的答案都少了后半截，
+ *    学生在页面上看到的是半句话，根本没法做题。
+ *
+ *    要拿 docx 全文，**必须直接解 zip 读 word/document.xml**（按 w:p → w:t 拼文本），
+ *    别用 text_preview、也不要指望把 text_preview_length 调大（上限就是 200）。
+ *    修复脚本见 fix-fillblank-truncation.js。
  */
 const fs = require('fs');
 const crypto = require('crypto');
