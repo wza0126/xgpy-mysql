@@ -68,7 +68,9 @@ interface RunResult {
 
 export const PythonProgramming: React.FC = () => {
   const { user } = useAuth();
-  const [activeTab, setActiveTab] = useState<'tasks' | 'fill_blank' | 'drafts' | 'practice'>('tasks');
+  // 默认落在「编程填空」：83 道填空是日常练习主入口，作业任务才是按周布置的少数
+  //（2026-10-28 吴老要求，原来默认停在「作业任务」，学生每次都要多点一下）
+  const [activeTab, setActiveTab] = useState<'tasks' | 'fill_blank' | 'drafts' | 'practice'>('fill_blank');
   const [tasks, setTasks] = useState<PythonTask[]>([]);
   /** 编程填空的结构分类筛选（空 = 全部，默认显示所有题） */
   const [fillCategory, setFillCategory] = useState<string>('');
