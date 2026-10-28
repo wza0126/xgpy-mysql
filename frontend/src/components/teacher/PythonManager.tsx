@@ -5,11 +5,15 @@ import { LatexRenderer } from '../common/LatexRenderer';
 import { FillBlankExplainPlayer } from '../student/FillBlankExplainPlayer';
 import { PythonMatrixPanel } from './PythonMatrixPanel';
 
-interface PythonTask {
-  id: string;
+/** 编程填空的结构分类，取值与 python_tasks.category 一致（迁移 121） */
+const PY_CATEGORIES = ['顺序结构', '分支结构', 'for循环', 'while循环', '自定义函数'] as const;
+
+interface PythonTask {  id: string;
   title: string;
   description?: string;
   task_type: string;
+  /** 填空题的分类：顺序结构 / 分支结构 / for循环 / while循环 / 自定义函数（编程作业为 null） */
+  category?: string | null;
   class_ids?: string[];
   total_score: number;
   deadline?: string;
@@ -105,6 +109,21 @@ export const PythonManager: React.FC = () => {
   const [exportClassId, setExportClassId] = useState<string>('');
   /** 任务列表的班级视图：既是筛选条件，也是批量启用/禁用的作用班级 */
   const [taskClassId, setTaskClassId] = useState<string>('');
+  /** 编程填空的结构分类筛选（空 = 不筛） */
+  const [categoryFilter, setCategoryFilter] = useState<string>('');
+
+  /**
+   * 当前筛选后真正显示在列表里的任务。
+   * ⛔ 全选、空态判断、列表渲染都必须用这一份，
+   *    否则会「筛出 8 道、一点全选把 94 道全选了」（2026-10-28 吴老提的问题）。
+   */
+  const visibleTasks = tasks.filter((t) => {
+    if (taskFilter !== 'all' && t.task_type !== taskFilter) return false;
+    if (categoryFilter && (t.category || '') !== categoryFilter) return false;
+    return true;
+  });
+  const allVisibleSelected =
+    visibleTasks.length > 0 && visibleTasks.every((t) => selectedTasks.includes(t.id));
   /** 作业完成情况：全班学生（含未提交） */
   const [progress, setProgress] = useState<ProgressStudent[]>([]);
   const [progressFilter, setProgressFilter] = useState<'all' | 'submitted' | 'unsubmitted'>('all');
@@ -283,10 +302,14 @@ export const PythonManager: React.FC = () => {
   };
 
   const selectAllTasks = () => {
-    if (selectedTasks.length === tasks.length) {
-      setSelectedTasks([]);
+    // ⛔ 只能对「当前筛选后可见的题」全选/取消，不能默默把隐藏的题也带上
+    //    （2026-10-28 吴老要求：94 道题里筛出来的这一批才是一批）
+    const ids = visibleTasks.map((t) => t.id);
+    if (allVisibleSelected) {
+      const drop = new Set(ids);
+      setSelectedTasks((prev) => prev.filter((id) => !drop.has(id)));
     } else {
-      setSelectedTasks(tasks.map(t => t.id));
+      setSelectedTasks((prev) => Array.from(new Set([...prev, ...ids])));
     }
   };
 
@@ -664,14 +687,14 @@ export const PythonManager: React.FC = () => {
               <div className="flex items-center justify-between mb-3">
                 <h3 className="font-medium text-gray-700">作业任务</h3>
                 {tasks.length > 0 && (
-                  <label className="flex items-center gap-1 text-sm text-gray-600 cursor-pointer">
+                  <label className="flex items-center gap-1 text-sm text-gray-600 cursor-pointer" title="只全选当前筛选后显示的题">
                     <input
                       type="checkbox"
-                      checked={selectedTasks.length === tasks.length}
+                      checked={allVisibleSelected}
                       onChange={selectAllTasks}
                       className="rounded"
                     />
-                    <span>全选</span>
+                    <span>全选{visibleTasks.length !== tasks.length ? `（当前 ${visibleTasks.length} 道）` : ''}</span>
                   </label>
                 )}
               </div>
@@ -724,6 +747,23 @@ export const PythonManager: React.FC = () => {
                   编程填空
                 </button>
               </div>
+
+              {/* 按结构筛选：只对填空类有意义，选了具体分类时编程作业自然不出现 */}
+              <div className="mb-3">
+                <select
+                  value={categoryFilter}
+                  onChange={(e) => setCategoryFilter(e.target.value)}
+                  className="w-full rounded-lg border border-gray-300 px-2 py-1.5 text-sm focus:ring-2 focus:ring-purple-500"
+                >
+                  <option value="">全部结构（共 {tasks.filter((t) => t.task_type === 'fill_blank').length} 道填空）</option>
+                  {PY_CATEGORIES.map((c) => {
+                    const n = tasks.filter((t) => t.category === c).length;
+                    return (
+                      <option key={c} value={c}>{c}（{n}）</option>
+                    );
+                  })}
+                </select>
+              </div>
               {selectedTasks.length > 0 && (
                 <div className="mb-3 rounded-lg border border-purple-200 bg-purple-50 p-2">
                   <div className="mb-2 flex items-center justify-between">
@@ -762,13 +802,13 @@ export const PythonManager: React.FC = () => {
               )}
               {loading ? (
                 <div className="text-center text-gray-400 py-4">加载中...</div>
-              ) : tasks.filter(t => taskFilter === 'all' ? true : t.task_type === taskFilter).length === 0 ? (
+              ) : visibleTasks.length === 0 ? (
                 <div className="text-center text-gray-400 py-4">
                   {taskFilter === 'fill_blank' ? '暂无填空题' : taskFilter === 'code' ? '暂无编程作业' : '暂无任务'}
                 </div>
               ) : (
                 <div className="space-y-2">
-                  {tasks.filter(t => taskFilter === 'all' ? true : t.task_type === taskFilter).map(task => (
+                  {visibleTasks.map(task => (
                     <div
                       key={task.id}
                       className={`p-3 rounded-lg cursor-pointer transition ${
@@ -1169,6 +1209,25 @@ export const PythonManager: React.FC = () => {
                     </label>
                   </div>
                 </div>
+
+                {/* 填空分类：学生端 / 教师端按它筛选，新增题一定要选，否则筛不到 */}
+                {formData.task_type === 'fill_blank' && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      结构分类 <span className="text-xs font-normal text-gray-400">（筛选用）</span>
+                    </label>
+                    <select
+                      value={formData.category || ''}
+                      onChange={(e) => setFormData({ ...formData, category: e.target.value || null })}
+                      className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-purple-500"
+                    >
+                      <option value="">未分类</option>
+                      {PY_CATEGORIES.map((c) => (
+                        <option key={c} value={c}>{c}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
 
                 {formData.task_type === 'fill_blank' && (
                   <div className="bg-purple-50 rounded-lg p-4 space-y-4 border border-purple-200">

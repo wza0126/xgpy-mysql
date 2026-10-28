@@ -491,5 +491,9 @@ module.exports = [
   {
     "version": "120_survival_levels_rebuild.sql",
     "sql": "-- 重建生存关卡：编号与学习模块对齐（2026-10-27 吴老发现）\n--\n-- 问题：旧实现的关卡编号是「单元.章.该章内第几个知识点」，其中第三段按\n--      cluster_id 的**拼音字典序**排，于是\n--        「数据与信息」章排出来是 1.1.1 大数据 / 1.1.2 数据、信息、知识与智慧的关系\n--                                    / 1.1.3 数据、信息与知识的概念\n--      而学习模块（chapter-taxonomy.js 词表，教材顺序）是\n--        1.1.1 数据、信息与知识的概念\n--        1.1.2 数据、信息、知识与智慧的关系\n--        1.1.3 大数据\n--      两边对不上，老师按编号找题会找错。\n--\n-- 修法：syncSurvivalLevels 改为直接用 chapter-taxonomy.js 的 SECTION_CODES\n--      （学习模块、题库聚类、练习筛选都用这同一套），关卡数正好 70。\n--\n-- 本迁移只负责清空，让后端下次访问时按新规则自动重建：\n--   * 关卡表 70 行全部重来（重生点标记与剧情由生成逻辑一并写入）\n--   * 学生档案的 seq 指向旧编号，必须重置，否则会停在一个对不上的关卡上\n--   * 答题日志（survival_answers）保留原样，它是历史流水，不参与关卡逻辑\n\nDELETE FROM `survival_levels`;\n\nUPDATE `survival_profiles`\n   SET `seq` = 1,\n       `current_question_id` = NULL,\n       `current_started_at` = NULL,\n       `current_deadline` = NULL,\n       `pending_correction` = 0,\n       `round_levels` = 0,\n       `alive` = 0;\n"
+  },
+  {
+    "version": "121_python_task_category.sql",
+    "sql": "-- 编程填空按结构分类（2026-10-28 吴老要求）\n--\n-- 目的：学生端练习、教师端作业列表都能按「顺序结构 / 分支结构 / for循环 / while循环 / 自定义函数」\n--      筛选。分类存库而不是写死在前端，老师以后新增题目也能补分类。\n--\n-- 口径：一道题只归一类，优先级 def > while > for > if > 无\n--      （即\"主体结构\"，循环里套分支算循环）。\n-- ⛔ 注意：不少题把 while / def 整个挖成了 ① 占位符，按关键字自动判会被判成「顺序结构」。\n--    首次分类时人工核过 83 道题，把 4 道修正了（第12、31、66、68题）。\n\nALTER TABLE `python_tasks`\n  ADD COLUMN IF NOT EXISTS `category` VARCHAR(20) NULL\n    COMMENT '顺序结构/分支结构/for循环/while循环/自定义函数；编程题(code)为 NULL' AFTER `task_type`;\n\nALTER TABLE `python_tasks`\n  ADD INDEX IF NOT EXISTS `idx_python_tasks_category` (`category`);\n"
   }
 ];

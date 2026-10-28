@@ -5,11 +5,16 @@ import { LatexRenderer } from '../common/LatexRenderer';
 import FillBlankExplainPlayer from './FillBlankExplainPlayer';
 import { authHeaders } from '../../utils/authToken';
 
+/** 编程填空的结构分类，取值与 python_tasks.category 一致 */
+const FILL_CATEGORIES = ['顺序结构', '分支结构', 'for循环', 'while循环', '自定义函数'] as const;
+
 interface PythonTask {
   id: string;
   title: string;
   description?: string;
   task_type: string;
+  /** 填空分类：顺序结构 / 分支结构 / for循环 / while循环 / 自定义函数 */
+  category?: string | null;
   total_score: number;
   deadline?: string;
   reference_code?: string;
@@ -65,6 +70,13 @@ export const PythonProgramming: React.FC = () => {
   const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<'tasks' | 'fill_blank' | 'drafts' | 'practice'>('tasks');
   const [tasks, setTasks] = useState<PythonTask[]>([]);
+  /** 编程填空的结构分类筛选（空 = 全部，默认显示所有题） */
+  const [fillCategory, setFillCategory] = useState<string>('');
+  /** 按分类筛过的填空列表（默认不筛，就是全部） */
+  const fillTasks = tasks.filter(
+    (t) => t.task_type === 'fill_blank' && (!fillCategory || (t.category || '') === fillCategory)
+  );
+  const allFillTasks = tasks.filter((t) => t.task_type === 'fill_blank');
   const [drafts, setDrafts] = useState<PythonDraft[]>([]);
   const [submissions, setSubmissions] = useState<Record<string, PythonSubmission>>({});
   const [selectedTask, setSelectedTask] = useState<PythonTask | null>(null);
@@ -640,13 +652,34 @@ export const PythonProgramming: React.FC = () => {
           {activeTab === 'fill_blank' && (
             <div className="p-4">
               <h3 className="font-medium text-gray-700 mb-3">编程填空</h3>
+              {/* 按结构筛选：默认「全部」，把 83 道一次列出来 */}
+              <div className="mb-3 flex flex-wrap gap-1.5">
+                {[{ key: '', label: '全部' }, ...FILL_CATEGORIES.map((c) => ({ key: c, label: c }))].map((opt) => {
+                  const active = fillCategory === opt.key;
+                  const n = opt.key ? allFillTasks.filter((t) => t.category === opt.key).length : allFillTasks.length;
+                  return (
+                    <button
+                      key={opt.key || 'all'}
+                      onClick={() => setFillCategory(opt.key)}
+                      className={`rounded-full px-2.5 py-1 text-xs transition ${
+                        active ? 'bg-purple-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                      }`}
+                    >
+                      {opt.label}
+                      <span className={`ml-1 ${active ? 'text-white/70' : 'text-gray-400'}`}>{n}</span>
+                    </button>
+                  );
+                })}
+              </div>
               {loading ? (
                 <div className="text-center text-gray-400 py-4">加载中...</div>
-              ) : tasks.filter(t => t.task_type === 'fill_blank').length === 0 ? (
-                <div className="text-center text-gray-400 py-4">暂无填空题</div>
+              ) : fillTasks.length === 0 ? (
+                <div className="text-center text-gray-400 py-4">
+                  {fillCategory ? `「${fillCategory}」下还没有题目` : '暂无填空题'}
+                </div>
               ) : (
                 <div className="space-y-2">
-                  {tasks.filter(t => t.task_type === 'fill_blank').map(task => {
+                  {fillTasks.map(task => {
                     const taskSubmission = submissions[task.id];
                     const actualScore = taskSubmission?.grading?.total_score ?? taskSubmission?.total_score ?? taskSubmission?.totalScore;
                     const isGraded = taskSubmission?.status === 'graded' && actualScore != null;

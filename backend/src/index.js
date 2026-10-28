@@ -8558,7 +8558,7 @@ app.post('/api/python/teacher/tasks', authenticate, requireTeachingRole, async (
   try {
     const user = req.user;
     const {
-      title, description, task_type, class_ids, total_score, deadline, 
+      title, description, task_type, category, class_ids, total_score, deadline, 
       allow_late_submission, allow_run_code, max_run_seconds,
       reference_code, expected_output, hint, required_keywords,
       blank_template, blank_answers, blank_weights
@@ -8577,14 +8577,15 @@ app.post('/api/python/teacher/tasks', authenticate, requireTeachingRole, async (
 
     await pool.query(
       `INSERT INTO python_tasks 
-      (id, title, description, task_type, class_ids, total_score, deadline,
+      (id, title, description, task_type, category, class_ids, total_score, deadline,
       allow_late_submission, allow_run_code, max_run_seconds,
       reference_code, expected_output, hint, required_keywords,
       blank_template, blank_answers, blank_weights,
       is_active, created_by, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, NOW(), NOW())`,
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, NOW(), NOW())`,
       [
         id, title, description || '', task_type || 'code',
+        category || null,
         JSON.stringify(classes),
         total_score || 100, deadline || null,
         allow_late_submission || false,
@@ -8718,7 +8719,7 @@ app.put('/api/python/teacher/tasks/:taskId', authenticate, requireTeachingRole, 
     const updateData = req.body;
 
     const allowed = [
-      'title', 'description', 'task_type', 'class_ids', 'total_score',
+      'title', 'description', 'task_type', 'category', 'class_ids', 'total_score',
       'deadline', 'allow_late_submission', 'allow_run_code',
       'max_run_seconds', 'reference_code', 'expected_output',
       'hint', 'required_keywords', 'is_active',
