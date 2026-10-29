@@ -10,6 +10,27 @@ export interface DroppedEquipment {
 }
 
 const DISPLAY_DURATION = 2000;
+// 关闭特效时的轻量文字提示停留时长（够看清掉了什么）
+const LIGHT_DURATION = 4500;
+
+/**
+ * 特效开关（教师端「刷题打怪系统 → 打怪系统」可关）。
+ * 模块级缓存 30 秒：这个组件在练习/测试/错题/PK 四个页面各挂一份，
+ * 不缓存会在每个页面各请求一次；老师改开关后 30 秒内生效。
+ */
+let effectFlagsPromise: Promise<{ equip: boolean }> | null = null;
+let effectFlagsAt = 0;
+function loadEffectFlags(): Promise<{ equip: boolean }> {
+  const now = Date.now();
+  if (!effectFlagsPromise || now - effectFlagsAt > 30000) {
+    effectFlagsAt = now;
+    effectFlagsPromise = fetch('/api/public/game-flags')
+      .then((r) => r.json())
+      .then((j) => ({ equip: (j?.data?.equip_effect_enabled ?? true) !== false }))
+      .catch(() => ({ equip: true }));
+  }
+  return effectFlagsPromise;
+}
 
 /**
  * 装备掉落弹窗。
@@ -32,19 +53,47 @@ export const EquipmentDropEffect: React.FC = () => {
   const [isVisible, setIsVisible] = useState(false);
   const [prevEventCount, setPrevEventCount] = useState(eventCount);
 
+  // 老师关掉「装备掉落特效」时走轻量模式：不播动效，只弹一条文字说掉了什么。
+  // 关特效不等于不告诉学生 —— 否则学生根本不知道掉了装备（2026-10-29 吴老要求）。
+  const [lightweight, setLightweight] = useState(false);
+  const [lightEquips, setLightEquips] = useState<DroppedEquipment[]>([]);
+  const [lightVisible, setLightVisible] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    loadEffectFlags().then((f) => {
+      if (alive) setLightweight(!f.equip);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!lightVisible) return;
+    const timer = setTimeout(() => setLightVisible(false), LIGHT_DURATION);
+    return () => clearTimeout(timer);
+  }, [lightVisible, lightEquips]);
+
   useEffect(() => {
     console.log('[EquipmentDropEffect] 事件变化 - lastEvent:', lastEvent, 'eventCount:', eventCount, 'prevEventCount:', prevEventCount);
     if (eventCount !== prevEventCount && lastEvent === 'equipment_drop' && eventPayload) {
       const dropped: DroppedEquipment[] = eventPayload.equipments || [];
       console.log('[EquipmentDropEffect] 检测到装备掉落事件，装备数量:', dropped.length);
       if (dropped.length > 0) {
-        setEquipments(dropped);
-        setCurrentIndex(0);
-        setIsVisible(true);
+        if (lightweight) {
+          // 轻量模式：一次列全（考试交卷可能连掉好几件，逐件播反而看不清）
+          setLightEquips(dropped);
+          setLightVisible(true);
+        } else {
+          setEquipments(dropped);
+          setCurrentIndex(0);
+          setIsVisible(true);
+        }
       }
       setPrevEventCount(eventCount);
     }
-  }, [eventCount, lastEvent, eventPayload, prevEventCount]);
+  }, [eventCount, lastEvent, eventPayload, prevEventCount, lightweight]);
 
   useEffect(() => {
     if (!isVisible || equipments.length === 0) return;
@@ -63,6 +112,7 @@ export const EquipmentDropEffect: React.FC = () => {
   const currentEquipment = equipments[currentIndex];
 
   return (
+    <>
     <AnimatePresence>
       {isVisible && currentEquipment && (
         <motion.div
@@ -168,5 +218,38 @@ export const EquipmentDropEffect: React.FC = () => {
         </motion.div>
       )}
     </AnimatePresence>
+
+    {/*
+      关闭「装备掉落特效」后的轻量提示：
+      纯静态 DOM（无 motion、无 blur、无循环动画），只做一次 CSS 淡入，
+      告诉学生掉了什么，4.5 秒自动消失。不能用全屏层，否则等于没关。
+    */}
+    {lightVisible && lightEquips.length > 0 && (
+      <div className="fixed top-20 left-1/2 -translate-x-1/2 z-[9999] pointer-events-none px-3">
+        <div
+          className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gray-900/95 text-white shadow-lg text-sm max-w-[92vw]"
+          style={{ animation: 'equipDropIn 0.25s ease-out' }}
+        >
+          <span className="text-lg leading-none shrink-0">🎁</span>
+          <span className="min-w-0">
+            <span className="font-semibold">获得装备</span>
+            <span className="mx-1.5 text-gray-400">|</span>
+            {lightEquips.map((eq, idx) => (
+              <span key={`${eq.id}-${idx}`} className="whitespace-nowrap">
+                {idx > 0 && <span className="text-gray-500">、</span>}
+                <span className="mr-0.5">{eq.icon || '⚔️'}</span>
+                <span className="font-medium">{eq.name}</span>
+                {Number(eq.crit_bonus) > 0 && (
+                  <span className="text-amber-300"> +{eq.crit_bonus}%</span>
+                )}
+              </span>
+            ))}
+          </span>
+        </div>
+        {/* 一次性淡入关键帧，用完即弃；不含模糊与循环，弱机无压力 */}
+        <style>{`@keyframes equipDropIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }`}</style>
+      </div>
+    )}
+    </>
   );
 };

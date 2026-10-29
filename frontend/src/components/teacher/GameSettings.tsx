@@ -15,6 +15,8 @@ export const GameSettings: React.FC = () => {
     crit_max_rate: 30,
     // 暴击全屏特效开关：1 开 / 0 关。学生机性能差时关掉，暴击积分与 Buff 不受影响
     crit_effect_enabled: 1,
+    // 装备掉落动效开关：1 开 / 0 关。关掉后改弹顶部文字提示，掉落与加成不变
+    equip_effect_enabled: 1,
     honor_perfect_buff_crit: 5,
     honor_perfect_buff_minutes: 10,
     honor_critstreak_buff_crit: 10,
@@ -150,6 +152,7 @@ export const GameSettings: React.FC = () => {
       crit_base_rate: '基础暴击率(%)',
       crit_max_rate: '暴击率上限(%)',
       crit_effect_enabled: '暴击特效开关(1开/0关)',
+      equip_effect_enabled: '装备掉落动效开关(1开/0关)',
       honor_perfect_buff_crit: '十连对Buff暴击加成(%)',
       honor_perfect_buff_minutes: '十连对Buff时长(分钟)',
       honor_critstreak_buff_crit: '三连暴击Buff暴击加成(%)',
@@ -171,6 +174,14 @@ export const GameSettings: React.FC = () => {
     configs.crit_effect_enabled === '0' ||
     configs.crit_effect_enabled === false ||
     configs.crit_effect_enabled === 'false'
+  );
+
+  // 装备掉落动效开关，判断口径同上
+  const equipEffectOn = !(
+    configs.equip_effect_enabled === 0 ||
+    configs.equip_effect_enabled === '0' ||
+    configs.equip_effect_enabled === false ||
+    configs.equip_effect_enabled === 'false'
   );
 
   if (loading) {
@@ -305,7 +316,7 @@ export const GameSettings: React.FC = () => {
                   </h4>
                   <ul className="text-sm text-gray-700 space-y-1">
                     <li>• <strong>暴击机制：</strong>答题时有概率触发暴击，获得额外积分奖励</li>
-                    <li>• <strong>暴击特效：</strong>可在下方「暴击设置」里关闭全屏动画（练习卡顿时用），关后积分与 Buff 照常结算，保存后约 15 秒内对学生生效</li>
+                    <li>• <strong>动画特效：</strong>下方「动画特效」可关闭暴击全屏动画与装备掉落动效（练习卡顿时用）；关掉后积分、Buff、掉落概率全部照常，装备改为顶部文字提示，保存后约 15 秒内生效</li>
                     <li>• <strong>连对奖励：</strong>连续答对10题可获得额外积分和暴击加成Buff</li>
                     <li>• <strong>三连暴击：</strong>连续3次暴击触发更强的暴击Buff</li>
                     <li>• <strong>勤学好问：</strong>当天 AI 答疑成功提问满 {configs.honor_studious_questions ?? 10} 次获得暴击加成Buff（每日限一次）</li>
@@ -341,26 +352,32 @@ export const GameSettings: React.FC = () => {
                         className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
                       />
                     </div>
+                  </div>
+                </div>
 
-                    {/* 暴击特效开关：只关动画，不关暴击本身。学生机性能差、练习时卡顿时用 */}
-                    <div className={`col-span-2 flex items-start justify-between gap-4 p-3 rounded-lg border ${
+                {/* 动画特效开关：只关动画，不关游戏数值。学生机性能差、练习卡顿时用 */}
+                <div>
+                  <h4 className="font-medium text-gray-700 mb-4 flex items-center gap-2">
+                    <i className="fa-solid fa-wand-sparkles"></i>动画特效
+                  </h4>
+                  <div className="space-y-3">
+                    <div className={`flex items-start justify-between gap-4 p-3 rounded-lg border ${
                       critEffectOn ? 'bg-white border-gray-200' : 'bg-gray-50 border-gray-300'
                     }`}>
                       <div className="min-w-0">
                         <div className="text-sm font-medium text-gray-800 flex items-center gap-2">
-                          <i className={`fa-solid ${critEffectOn ? 'fa-wand-magic-sparkles text-purple-500' : 'fa-ban text-gray-400'}`}></i>
-                          播放暴击特效
+                          <i className={`fa-solid ${critEffectOn ? 'fa-bolt text-purple-500' : 'fa-ban text-gray-400'}`}></i>
+                          暴击全屏特效
                         </div>
                         <div className="text-xs text-gray-500 mt-1 leading-5">
-                          关闭后暴击的<b>积分与 Buff 照常结算</b>，只是不再播全屏动画。
-                          学生机较慢、练习时出现卡顿时建议关闭。
+                          关闭后暴击的<b>积分与 Buff 照常结算</b>，只是不再播全屏金光动画。
                         </div>
                       </div>
                       <button
                         type="button"
                         role="switch"
                         aria-checked={critEffectOn}
-                        aria-label="播放暴击特效"
+                        aria-label="暴击全屏特效"
                         onClick={() => setConfigs({ ...configs, crit_effect_enabled: critEffectOn ? 0 : 1 })}
                         className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors mt-0.5 ${
                           critEffectOn ? 'bg-purple-600' : 'bg-gray-300'
@@ -371,7 +388,39 @@ export const GameSettings: React.FC = () => {
                         }`} />
                       </button>
                     </div>
+
+                    <div className={`flex items-start justify-between gap-4 p-3 rounded-lg border ${
+                      equipEffectOn ? 'bg-white border-gray-200' : 'bg-gray-50 border-gray-300'
+                    }`}>
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium text-gray-800 flex items-center gap-2">
+                          <i className={`fa-solid ${equipEffectOn ? 'fa-gift text-amber-500' : 'fa-ban text-gray-400'}`}></i>
+                          装备掉落动效
+                        </div>
+                        <div className="text-xs text-gray-500 mt-1 leading-5">
+                          关闭后不再弹大窗口播动画，改为顶部一条文字提示（掉的是哪件、加多少暴击），
+                          <b>掉落概率与加成本身不变</b>。
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={equipEffectOn}
+                        aria-label="装备掉落动效"
+                        onClick={() => setConfigs({ ...configs, equip_effect_enabled: equipEffectOn ? 0 : 1 })}
+                        className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors mt-0.5 ${
+                          equipEffectOn ? 'bg-purple-600' : 'bg-gray-300'
+                        }`}
+                      >
+                        <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                          equipEffectOn ? 'translate-x-[22px]' : 'translate-x-0.5'
+                        }`} />
+                      </button>
+                    </div>
                   </div>
+                  <p className="text-xs text-gray-500 mt-2 leading-5">
+                    两项都只关动画，<b>不影响任何游戏数值</b>。学生机较慢的房间建议都关掉。
+                  </p>
                 </div>
 
                 <div>

@@ -252,9 +252,33 @@ app.get('/api/public/site-config', async (req, res) => {
   }
 });
 
-// 认证中间件
-async function authenticate(req, res, next) {
+/**
+ * 前端动画特效开关（无需鉴权）。
+ *
+ * 学生机性能差时，老师可在「刷题打怪系统」里关掉暴击/装备掉落的整屏动效。
+ * 学生端在页面首次渲染时读一次即可（组件侧另有 30 秒模块级缓存）。
+ */
+app.get('/api/public/game-flags', async (req, res) => {
   try {
+    const [critEffect, equipEffect] = await Promise.all([
+      getBoolConfig('crit_effect_enabled', true),
+      getBoolConfig('equip_effect_enabled', true),
+    ]);
+    res.json({
+      data: {
+        crit_effect_enabled: critEffect,
+        equip_effect_enabled: equipEffect,
+      },
+      error: null,
+    });
+  } catch (error) {
+    console.error('Error in GET /api/public/game-flags:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 认证中间件
+async function authenticate(req, res, next) {  try {
     const authHeader = req.headers.authorization;
     if (!authHeader) {
       return res.status(401).json({ data: null, error: 'Unauthorized - No token provided' });
