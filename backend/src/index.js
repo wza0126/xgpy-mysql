@@ -3656,6 +3656,10 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
       [student_id]
     );
 
+    // 暴击全屏特效开关（默认开）。学生机性能差时可让老师一键关掉动画，
+    // 暴击的积分/Buff 结算完全不受影响。
+    const critEffectEnabled = await getBoolConfig('crit_effect_enabled', true);
+
     // 最近 10 题正确率：仅用于前端判断「连续蒙题」并弹学习提醒，
     // 真正的扣分复核在 /api/student/practice/low-accuracy-penalty（服务端重算，前端绕不过）。
     // 这里只多一次按索引取 10 行的查询，不改动任何积分/游戏逻辑。
@@ -3679,8 +3683,7 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
         success: true, 
         answer_id: answerId,
         // 服务端判分结果：前端应以它为准刷新「对/错」展示与连对状态
-        is_correct,
-        server_judged: judgement.judged,
+        is_correct,        server_judged: judgement.judged,
         recent10,
         // 答案与解析只在「提交之后」随回执下发（题目本身已对学生脱敏），
         // 供前端答后展示正确答案与讲解；复合题额外给逐小题对错。
@@ -3693,6 +3696,9 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
         power_multiplier: Math.round(power_multiplier * 100) / 100,
         crit_rate: Math.round(crit_rate * 10) / 10,
         is_crit: is_crit,
+        // 暴击特效开关（教师端「打怪系统 → 暴击特效」）。false 时前端只播不动的提示，
+        // 暴击的积分与 Buff 照常结算 —— 关的只是动画，不是效果。
+        crit_effect_enabled: critEffectEnabled,
         crit_final_score: Math.round(crit_final_score),
         final_score: Math.round(final_score),
         current_streak: newStreak,
@@ -13649,8 +13655,7 @@ async function getVisitedSet(studentId, clusterId) {
  * 读取「掌握题目阈值」（system_config.master_question_threshold，默认 3）。
  * 与练习模块 / submit-answer 门禁用的是同一个配置，保证口径一致 —— 不要另设阈值。
  */
-async function getMasterThreshold() {
-  const [rows] = await pool.query(
+async function getMasterThreshold() {  const [rows] = await pool.query(
     "SELECT value FROM system_config WHERE config_key = 'master_question_threshold' LIMIT 1"
   );
   if (!rows.length) return 3;
@@ -13660,6 +13665,37 @@ async function getMasterThreshold() {
   }
   const parsed = parseInt(typeof v === 'object' && v !== null ? v.value : v, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 3;
+}
+
+/**
+ * 读取布尔型系统配置（存的是 {"value":1} 这种结构），带 15 秒内存缓存。
+ * 用于「暴击特效开关」这类每次提交都要读、但改动很少的开关，
+ * 避免每题都查一次 system_config。
+ */
+const boolConfigCache = new Map();
+async function getBoolConfig(configKey, defaultValue = true) {
+  const cached = boolConfigCache.get(configKey);
+  if (cached && Date.now() - cached.at < 15000) return cached.val;
+  let val = defaultValue;
+  try {
+    const [rows] = await pool.query(
+      'SELECT value FROM system_config WHERE config_key = ? LIMIT 1',
+      [configKey]
+    );
+    if (rows.length) {
+      let v = rows[0].value;
+      if (typeof v === 'string') {
+        try { v = JSON.parse(v); } catch {}
+      }
+      if (v && typeof v === 'object') v = v.value;
+      // 兼容 1/0、"true"/"false"、"1"/"0"
+      val = !(v === 0 || v === '0' || v === false || v === 'false' || v === null || v === undefined);
+    }
+  } catch (e) {
+    console.warn(`[CONFIG] 读取 ${configKey} 失败，用默认值 ${defaultValue}:`, e.message);
+  }
+  boolConfigCache.set(configKey, { val, at: Date.now() });
+  return val;
 }
 
 /**

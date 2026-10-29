@@ -639,7 +639,8 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
           const gameData = result.data as any;
           console.log('[GAME] API response:', { final_score: gameData.final_score, power_multiplier: gameData.power_multiplier, is_crit: gameData.is_crit, crit_rate: gameData.crit_rate, curr_streak: gameData.current_streak });
           setGameResult(gameData as unknown as SubmitResult);
-          if (gameData.is_crit) {
+          // 教师端可关掉暴击全屏动画（学生机慢时容易卡）；积分与 Buff 照常结算，只是不播动画
+          if (gameData.is_crit && gameData.crit_effect_enabled !== false) {
             setShowCritEffect(true);
           }
           if (gameData.new_honor) {

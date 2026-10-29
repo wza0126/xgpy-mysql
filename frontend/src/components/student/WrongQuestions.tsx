@@ -383,7 +383,8 @@ export const WrongQuestions: React.FC = () => {
       if (result.data) {
         const gameData = result.data as any;
         setGameResult(gameData as unknown as SubmitResult);
-        if (gameData.is_crit) {
+        // 教师端可关掉暴击全屏动画（学生机慢时容易卡）；积分与 Buff 照常结算，只是不播动画
+        if (gameData.is_crit && gameData.crit_effect_enabled !== false) {
           setShowCritEffect(true);
         }
         if (gameData.new_honor) {

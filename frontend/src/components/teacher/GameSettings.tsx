@@ -13,6 +13,8 @@ export const GameSettings: React.FC = () => {
     pet_change_threshold: 100,
     crit_base_rate: 5,
     crit_max_rate: 30,
+    // 暴击全屏特效开关：1 开 / 0 关。学生机性能差时关掉，暴击积分与 Buff 不受影响
+    crit_effect_enabled: 1,
     honor_perfect_buff_crit: 5,
     honor_perfect_buff_minutes: 10,
     honor_critstreak_buff_crit: 10,
@@ -147,6 +149,7 @@ export const GameSettings: React.FC = () => {
       pet_change_threshold: '换养萌宠积分',
       crit_base_rate: '基础暴击率(%)',
       crit_max_rate: '暴击率上限(%)',
+      crit_effect_enabled: '暴击特效开关(1开/0关)',
       honor_perfect_buff_crit: '十连对Buff暴击加成(%)',
       honor_perfect_buff_minutes: '十连对Buff时长(分钟)',
       honor_critstreak_buff_crit: '三连暴击Buff暴击加成(%)',
@@ -161,6 +164,14 @@ export const GameSettings: React.FC = () => {
     };
     return descriptions[key] || key;
   };
+
+  // 暴击特效开关状态：DB 里可能是 1 / "1" / true，统一按「非 0 即开」
+  const critEffectOn = !(
+    configs.crit_effect_enabled === 0 ||
+    configs.crit_effect_enabled === '0' ||
+    configs.crit_effect_enabled === false ||
+    configs.crit_effect_enabled === 'false'
+  );
 
   if (loading) {
     return (
@@ -294,6 +305,7 @@ export const GameSettings: React.FC = () => {
                   </h4>
                   <ul className="text-sm text-gray-700 space-y-1">
                     <li>• <strong>暴击机制：</strong>答题时有概率触发暴击，获得额外积分奖励</li>
+                    <li>• <strong>暴击特效：</strong>可在下方「暴击设置」里关闭全屏动画（练习卡顿时用），关后积分与 Buff 照常结算，保存后约 15 秒内对学生生效</li>
                     <li>• <strong>连对奖励：</strong>连续答对10题可获得额外积分和暴击加成Buff</li>
                     <li>• <strong>三连暴击：</strong>连续3次暴击触发更强的暴击Buff</li>
                     <li>• <strong>勤学好问：</strong>当天 AI 答疑成功提问满 {configs.honor_studious_questions ?? 10} 次获得暴击加成Buff（每日限一次）</li>
@@ -328,6 +340,36 @@ export const GameSettings: React.FC = () => {
                         onChange={(e) => setConfigs({ ...configs, crit_max_rate: parseFloat(e.target.value) || 30 })}
                         className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
                       />
+                    </div>
+
+                    {/* 暴击特效开关：只关动画，不关暴击本身。学生机性能差、练习时卡顿时用 */}
+                    <div className={`col-span-2 flex items-start justify-between gap-4 p-3 rounded-lg border ${
+                      critEffectOn ? 'bg-white border-gray-200' : 'bg-gray-50 border-gray-300'
+                    }`}>
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium text-gray-800 flex items-center gap-2">
+                          <i className={`fa-solid ${critEffectOn ? 'fa-wand-magic-sparkles text-purple-500' : 'fa-ban text-gray-400'}`}></i>
+                          播放暴击特效
+                        </div>
+                        <div className="text-xs text-gray-500 mt-1 leading-5">
+                          关闭后暴击的<b>积分与 Buff 照常结算</b>，只是不再播全屏动画。
+                          学生机较慢、练习时出现卡顿时建议关闭。
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={critEffectOn}
+                        aria-label="播放暴击特效"
+                        onClick={() => setConfigs({ ...configs, crit_effect_enabled: critEffectOn ? 0 : 1 })}
+                        className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors mt-0.5 ${
+                          critEffectOn ? 'bg-purple-600' : 'bg-gray-300'
+                        }`}
+                      >
+                        <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                          critEffectOn ? 'translate-x-[22px]' : 'translate-x-0.5'
+                        }`} />
+                      </button>
                     </div>
                   </div>
                 </div>
