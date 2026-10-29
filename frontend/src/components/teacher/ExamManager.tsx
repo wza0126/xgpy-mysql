@@ -1583,18 +1583,82 @@ export const ExamManager: React.FC = () => {
                       {(() => {
                         const roster = buildExamRoster(selectedExam, filterClassId);
                         const joined = roster.filter((r) => !r.is_absent).length;
+                        // 平均分只算真正交卷的（completed_at 非空）：缺考与开考未交都按 0 计入会把平均分拉低
+                        const submittedRows = roster.filter((r) => !r.is_absent && !!r.completed_at);
                         const absent = roster.length - joined;
                         const clsName = classes.find((c) => c.id === filterClassId)?.name;
+                        const avg = submittedRows.length
+                          ? Math.round(
+                              (submittedRows.reduce((sum, r) => sum + (Number(r.score) || 0), 0) /
+                                submittedRows.length) *
+                                10
+                            ) / 10
+                          : null;
                         return (
                           <span>
                             {filterClassId ? `班级筛选: ${clsName}，` : ''}
                             应考 <b className="text-gray-700">{roster.length}</b> 人 ·
                             已参加 <b className="text-purple-600">{joined}</b> 人 ·
-                            未参加 <b className={absent > 0 ? 'text-amber-600' : 'text-gray-400'}>{absent}</b> 人
+                            未参加 <b className={absent > 0 ? 'text-amber-600' : 'text-gray-400'}>{absent}</b> 人 ·
+                            平均分 <b className="text-blue-600">{avg == null ? '—' : avg}</b>
                           </span>
                         );
                       })()}
                     </p>
+
+                    {/* 各班平均分：点一下直接按该班筛选，再点一下取消（与下方班级下拉联动） */}
+                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                      <span className="text-xs text-gray-500 mr-0.5">各班平均分：</span>
+                      {(() => {
+                        const full = buildExamRoster(selectedExam, '');
+                        const map = new Map<
+                          string,
+                          { name: string; sum: number; n: number; absent: number; total: number }
+                        >();
+                        for (const r of full) {
+                          const cid = r.student?.class_id || '';
+                          const nm = classes.find((c) => c.id === cid)?.name || '未分班';
+                          const e = map.get(cid) || { name: nm, sum: 0, n: 0, absent: 0, total: 0 };
+                          e.total += 1;
+                          // 没交卷（缺考或开考未交）都不计入平均分，只记在"缺考"里
+                          if (r.is_absent || !r.completed_at) e.absent += 1;
+                          else {
+                            e.sum += Number(r.score) || 0;
+                            e.n += 1;
+                          }
+                          map.set(cid, e);
+                        }
+                        const list = [...map.entries()].sort((a, b) =>
+                          a[1].name.localeCompare(b[1].name, 'zh-CN')
+                        );
+                        if (!list.length) return <span className="text-xs text-gray-400">—</span>;
+                        return list.map(([cid, e]) => {
+                          const classAvg = e.n ? Math.round((e.sum / e.n) * 10) / 10 : null;
+                          const active = filterClassId === cid;
+                          return (
+                            <button
+                              key={cid || 'no-class'}
+                              type="button"
+                              onClick={() => setFilterClassId(active ? '' : cid)}
+                              title={`${e.name}：应考 ${e.total} 人，已交 ${e.n} 人，缺考 ${e.absent} 人${
+                                classAvg == null ? '，尚无人交卷' : `，平均 ${classAvg} 分`
+                              }`}
+                              className={`px-2 py-0.5 text-xs rounded-full border transition-colors ${
+                                active
+                                  ? 'bg-purple-100 border-purple-300 text-purple-700 font-medium'
+                                  : 'bg-white border-gray-200 text-gray-600 hover:border-purple-300 hover:text-purple-600'
+                              }`}
+                            >
+                              {e.name}
+                              <span className="mx-1 text-gray-300">|</span>
+                              <span className={classAvg == null ? 'text-gray-300' : 'font-medium'}>
+                                {classAvg == null ? '无人交卷' : `均 ${classAvg}`}
+                              </span>
+                            </button>
+                          );
+                        });
+                      })()}
+                    </div>
                   </div>
                   <button
                     onClick={() => setShowRecordsModal(false)}
