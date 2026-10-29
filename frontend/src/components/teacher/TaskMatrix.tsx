@@ -8,7 +8,9 @@ import React, { useMemo, useState } from 'react';
  * 但都能无损映射成下面的 MatrixRow / MatrixColumn，所以表格只写一份。
  *
  * 排序（2026-10-27 吴老要求）：
- *   · 学号 / 姓名 / 每题列 / 已完成 / 得分，点表头即排，再点一下反向
+ *   · 学号 / 姓名 / 已完成 / 得分 / 每题列，点表头即排，再点一下反向
+ *   · 已完成与得分贴近姓名（2026-10-29 要求）：题目列动辄近百列，
+ *     这两项原来在最右侧，要一路横向滚到底才看得到
  *   · 题目列按「没做排最前」处理（value=null 视作 -1）——
  *     老师点一下某题列头，第一眼看到的就是谁还没交
  *   · 同值一律再按学号兜底，翻页/刷新时行不会来回跳
@@ -204,6 +206,9 @@ export const TaskMatrix: React.FC<Props> = ({
             <tr className="bg-gray-50 text-xs text-gray-600 shadow-sm">
               <Th k="username" className="sticky left-0 z-30 bg-gray-50 text-left">{idLabel}</Th>
               <Th k="real_name" className="sticky left-[82px] z-30 bg-gray-50 text-left">{nameLabel}</Th>
+              {/* 汇总两列放在姓名右侧：题目列很多，原来看「已交/得分」要一路滚到最右（2026-10-29 吴老要求） */}
+              <Th k="done">{doneLabel}</Th>
+              <Th k="earned">{earnedLabel}</Th>
               {columns.map((q) => (
                 <Th
                   key={q.id}
@@ -217,8 +222,6 @@ export const TaskMatrix: React.FC<Props> = ({
                   </span>
                 </Th>
               ))}
-              <Th k="done">{doneLabel}</Th>
-              <Th k="earned">{earnedLabel}</Th>
             </tr>
           </thead>
           <tbody>
@@ -226,6 +229,14 @@ export const TaskMatrix: React.FC<Props> = ({
               <tr key={r.id} className="border-t border-gray-100 hover:bg-purple-50/40">
                 <td className="sticky left-0 z-10 bg-white px-3 py-1.5 text-xs text-gray-600">{r.username}</td>
                 <td className="sticky left-[82px] z-10 bg-white px-3 py-1.5 text-gray-800">{r.real_name || '—'}</td>
+                <td className="px-3 py-1.5 text-center text-xs text-gray-600">
+                  {r.done}/{r.doneTotal ?? columns.length}
+                </td>
+                <td className="px-3 py-1.5 text-center text-xs">
+                  <span className={r.earned > 0 ? 'font-medium text-purple-700' : 'text-gray-300'}>
+                    {r.earned}/{r.full}
+                  </span>
+                </td>
                 {columns.map((q) => {
                   const c = r.cells[q.id];
                   if (!c || c.value == null) {
@@ -256,14 +267,6 @@ export const TaskMatrix: React.FC<Props> = ({
                     </td>
                   );
                 })}
-                <td className="px-3 py-1.5 text-center text-xs text-gray-600">
-                  {r.done}/{r.doneTotal ?? columns.length}
-                </td>
-                <td className="px-3 py-1.5 text-center text-xs">
-                  <span className={r.earned > 0 ? 'font-medium text-purple-700' : 'text-gray-300'}>
-                    {r.earned}/{r.full}
-                  </span>
-                </td>
               </tr>
             ))}
           </tbody>
@@ -272,15 +275,15 @@ export const TaskMatrix: React.FC<Props> = ({
               <td className="sticky left-0 z-30 bg-gray-50 px-3 py-2" colSpan={2}>
                 {footerLabel || `全班 ${rows.length} 人`}
               </td>
+              <td className="px-3 py-2 text-center">
+                {rows.reduce((n, r) => n + r.done, 0)} 题次
+              </td>
+              <td className="px-3 py-2" />
               {columns.map((q) => (
                 <td key={q.id} className="px-1 py-2 text-center">
                   {colDone[q.id] > 0 ? `${colDone[q.id]}人` : '—'}
                 </td>
               ))}
-              <td className="px-3 py-2 text-center">
-                {rows.reduce((n, r) => n + r.done, 0)} 题次
-              </td>
-              <td className="px-3 py-2" />
             </tr>
           </tfoot>
         </table>
