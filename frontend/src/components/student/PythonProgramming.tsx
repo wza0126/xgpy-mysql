@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { useAuth } from '../../hooks/useAuth';
 import { backendClient } from '../../api/backendClient';
 import { LatexRenderer } from '../common/LatexRenderer';
@@ -7,6 +8,75 @@ import { authHeaders } from '../../utils/authToken';
 
 /** 编程填空的结构分类，取值与 python_tasks.category 一致 */
 const FILL_CATEGORIES = ['顺序结构', '分支结构', 'for循环', 'while循环', '自定义函数'] as const;
+
+/**
+ * 填空判分悬浮框。
+ *
+ * ⛔ 不要用 `absolute top-full left-1/2` 贴在输入框下面：
+ *    代码编辑器外层是 overflow-auto 的定高容器，答案一长浮层就被裁掉半边，
+ *    靠右的填空还会横向溢出到容器外看不见（2026-10-29 吴老反馈）。
+ *
+ * 这里 createPortal 挂到 body + fixed 定位，并用实测尺寸把浮层夹在视口内：
+ * 水平方向自动夹紧（不越出左右边），垂直方向默认向下、下方不够就翻到上方；
+ * 编辑器内部滚动时按输入框新位置重算，滚出视口就自动收起。
+ */
+function BlankTip({ anchorEl, children }: { anchorEl: HTMLElement; children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const place = () => {
+      const el = ref.current;
+      if (!el) return;
+      const a = anchorEl.getBoundingClientRect();
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      // 输入框已滚出视口（或已卸载）就不显示，否则会贴在屏幕边缘很怪
+      if (!a.width || !a.height || a.bottom < 0 || a.top > vh) {
+        setPos(null);
+        return;
+      }
+      const M = 8; // 与视口边缘留白
+      const w = el.offsetWidth;
+      const h = el.offsetHeight;
+
+      let left = a.left + a.width / 2 - w / 2;
+      left = Math.max(M, Math.min(left, vw - w - M));
+
+      let top = a.bottom + 6;
+      if (top + h > vh - M) {
+        const up = a.top - h - 6;
+        top = up >= M ? up : Math.max(M, vh - h - M);
+      }
+      setPos({ left, top });
+    };
+    place();
+    window.addEventListener('scroll', place, true);
+    window.addEventListener('resize', place);
+    return () => {
+      window.removeEventListener('scroll', place, true);
+      window.removeEventListener('resize', place);
+    };
+  }, [anchorEl]);
+
+  return createPortal(
+    <div
+      ref={ref}
+      className="fixed z-[9999] w-max whitespace-normal break-words px-3 py-2 rounded-lg bg-gray-800 border border-gray-500 shadow-xl text-xs leading-5 text-gray-100 pointer-events-none"
+      style={{
+        left: pos ? pos.left : 0,
+        top: pos ? pos.top : 0,
+        visibility: pos ? 'visible' : 'hidden',
+        maxWidth: 'min(20rem, calc(100vw - 16px))',
+        maxHeight: 'calc(100vh - 16px)',
+        overflowY: 'auto',
+      }}
+    >
+      {children}
+    </div>,
+    document.body,
+  );
+}
 
 interface PythonTask {
   id: string;
@@ -90,7 +160,7 @@ export const PythonProgramming: React.FC = () => {
   const [submission, setSubmission] = useState<PythonSubmission | null>(null);
   const [loading, setLoading] = useState(true);
   const [blankAnswers, setBlankAnswers] = useState<string[]>([]);
-  const [hoverBlank, setHoverBlank] = useState<number | null>(null);
+  const [hoverBlank, setHoverBlank] = useState<{ idx: number; el: HTMLElement } | null>(null);
   /** 老师是否给本班放开了「隐藏功能 → 讲解」（决定 AI 语音讲解按钮出不出现） */
   const [explainEnabled, setExplainEnabled] = useState(false);
   /** 全屏讲解器开关 */
@@ -111,8 +181,11 @@ export const PythonProgramming: React.FC = () => {
     return () => { alive = false; };
   }, []);
 
-  // 换题时关掉讲解器，避免停在上一条题的讲解里
-  useEffect(() => { setFillExplainOpen(false); }, [selectedTask?.id]);
+  // 换题时关掉讲解器，避免停在上一条题的讲解里；也清掉残留在旧位置上的填空浮层
+  useEffect(() => {
+    setFillExplainOpen(false);
+    setHoverBlank(null);
+  }, [selectedTask?.id]);
 
   // 扫描代码中的 input() 调用次数（忽略注释行）
   const inputCount = (() => {
@@ -380,8 +453,13 @@ export const PythonProgramming: React.FC = () => {
           <span
             key={`blank-${lineIdx}-${match.index}`}
             className="relative inline-block"
-            onMouseEnter={() => setHoverBlank(currentIdx)}
-            onMouseLeave={() => setHoverBlank((cur) => (cur === currentIdx ? null : cur))}
+            onMouseEnter={(e) => {
+              if (!graded) return;
+              // 用输入框本身做锚点（外层 span 还含 ✓/✗，取它会让浮层偏右）
+              const box = (e.currentTarget as HTMLElement).querySelector('input') || e.currentTarget;
+              setHoverBlank({ idx: currentIdx, el: box as HTMLElement });
+            }}
+            onMouseLeave={() => setHoverBlank((cur) => (cur && cur.idx === currentIdx ? null : cur))}
           >
             <input
               type="text"
@@ -401,14 +479,14 @@ export const PythonProgramming: React.FC = () => {
                 {correct ? '✓' : '✗'}
               </span>
             )}
-            {graded && hoverBlank === currentIdx && (
-              <span className="absolute left-1/2 -translate-x-1/2 top-full mt-1 z-30 w-max max-w-xs whitespace-normal break-words px-3 py-2 rounded-lg bg-gray-800 border border-gray-500 shadow-xl text-xs leading-5 text-gray-100 pointer-events-none">
+            {graded && hoverBlank?.idx === currentIdx && (
+              <BlankTip anchorEl={hoverBlank.el}>
                 <span className={`font-bold ${correct ? 'text-green-400' : 'text-red-400'}`}>
                   第 {result.index} 空 · {correct ? '✅ 正确' : '❌ 错误'}
                 </span>
                 <span className="block mt-1 text-gray-300">
                   正确答案：
-                  <span className="font-mono text-green-300">
+                  <span className="font-mono text-green-300 break-all">
                     {result.correct_answers?.length ? result.correct_answers.join('  或  ') : '（未配置）'}
                   </span>
                 </span>
@@ -418,7 +496,7 @@ export const PythonProgramming: React.FC = () => {
                     <span className="font-mono text-red-300">{result.student_answer || '（空）'}</span>
                   </span>
                 )}
-              </span>
+              </BlankTip>
             )}
           </span>
         );
