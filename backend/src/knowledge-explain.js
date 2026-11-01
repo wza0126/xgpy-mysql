@@ -156,11 +156,17 @@ function buildSystemPrompt() {
 
 /**
  * 构造提示词。
- * @param {{chapter:string, section:string, code?:string, text:string, sampleQuestions?:string[], questionCount?:number}} ctx
+ * @param {{chapter:string, section:string, code?:string, text:string,
+ *          focus?:string, sampleQuestions?:string[], questionCount?:number}} ctx
+ *   focus —— 老师指定的「本节讲解重点」（可选）。有值时重新分配篇幅：
+ *            重点内容各自独立成要点展开，其余合并带过。
+ *            ⛔ 不传 ≠ 传空串：不传表示"沿用这一节已存的重点"，传空串表示"取消定制"。
+ *               调用方（buildKnowledgeExplain）负责区分，这里只管有值就加段。
  */
 function buildPrompt(ctx) {
   const systemPrompt = buildSystemPrompt();
 
+  const focus = String(ctx.focus || '').trim();
   const samples = (ctx.sampleQuestions || []).filter(Boolean).slice(0, 4);
   const userPrompt = [
     `【教材章节】${ctx.chapter}`,
@@ -169,6 +175,14 @@ function buildPrompt(ctx) {
     '【该知识点的讲义原文】',
     clip(ctx.text, MAX_LECTURE_CHARS),
     '',
+    focus
+      ? [
+          '【本次讲解重点（老师指定，务必照此分配篇幅）】',
+          focus,
+          '要求：重点内容每一块单独作为一个要点展开（讲清规则、给出带数值的例子、点出易错处）；',
+          '不在重点里的内容合并成一两句带过，不要单独设要点，也不要整段略过不提。',
+        ].join('\n')
+      : '',
     samples.length
       ? `【本节练习题题干摘录，仅供你判断学测怎么考，不要把题干抄进讲稿】\n${samples.map((s, i) => `${i + 1}. ${clip(s, 70)}`).join('\n')}`
       : '',

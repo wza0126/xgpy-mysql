@@ -10104,7 +10104,8 @@ app.post('/api/teacher/explain/fill-blank', authenticate, requireTeacher, async 
  * ⛔ 模型挂了走兜底（把讲义原文分段朗读），功能不会点开一片空白；兜底结果**不缓存**，下次重试。
  */
 async function buildKnowledgeExplain(chapterId, section, opts = {}) {
-  const { force = false, rateKey = null, rateMax = 20, rateWindow = 10 * 60 * 1000 } = opts;
+  // focus：undefined = 沿用这一节已存的讲解重点；'' = 取消定制；有文本 = 设成新重点
+  const { force = false, focus, rateKey = null, rateMax = 20, rateWindow = 10 * 60 * 1000 } = opts;
   const { SECTIONS_BY_CHAPTER, SECTION_CODES } = require('./chapter-taxonomy');
   const { getChapterLecture } = require('./learn-content');
 
@@ -10145,29 +10146,39 @@ async function buildKnowledgeExplain(chapterId, section, opts = {}) {
     console.warn('[知识点讲解] 取练习题干失败（不影响讲解生成）:', e.message);
   }
 
+  // 先读一次缓存行：既用于判命中，也用于取「这一节是否已经有老师指定的重点」。
+  // ⛔ 即使 force 也要读：老师重生成时不传 focus 应当**沿用上次的重点**，
+  //    否则"重生成一下"就把定制好的重点弄丢了。
+  let cachedRow = null;
+  try {
+    const [rows] = await pool.query(
+      'SELECT content_hash, script, model, focus FROM knowledge_explain_scripts WHERE section_path = ? LIMIT 1',
+      [sectionPath],
+    );
+    cachedRow = rows.length ? rows[0] : null;
+  } catch (e) {
+    // 缓存读失败（表还没迁移 / JSON 坏了）→ 当作没命中，继续生成
+    console.warn('[知识点讲解] 读缓存失败，重新生成:', e.message);
+  }
+
+  const storedFocus = cachedRow && cachedRow.focus ? String(cachedRow.focus) : '';
+  const effectiveFocus = focus === undefined ? storedFocus : String(focus || '').trim();
+
   const contentHash = require('crypto').createHash('sha1')
     // ⛔ 提示词版本要进哈希：改了讲法（提示词）而讲义没变时，旧讲稿必须失效重生成，
     //    否则学生听到的还是上一版讲法，改了提示词等于没改。
-    .update([KNOWLEDGE_PROMPT_VERSION, chapter, sec, text].join('\u0001'))
+    // ⛔ 只有 focus 非空才拼进去：否则会给所有"没定制重点"的已有讲稿算出新哈希，全部失效重生成。
+    .update([KNOWLEDGE_PROMPT_VERSION, chapter, sec, text].concat(effectiveFocus ? [effectiveFocus] : []).join('\u0001'))
     .digest('hex');
 
-  if (!force) {
+  if (!force && cachedRow && cachedRow.content_hash === contentHash) {
     try {
-      const [cached] = await pool.query(
-        'SELECT content_hash, script, model FROM knowledge_explain_scripts WHERE section_path = ? LIMIT 1',
-        [sectionPath],
-      );
-      if (cached.length && cached[0].content_hash === contentHash) {
-        const script = JSON.parse(cached[0].script);
-        return {
-          section_path: sectionPath, chapter, section: sec, code, question_count: questionCount,
-          script, cached: true, model: cached[0].model,
-        };
-      }
-    } catch (e) {
-      // 缓存读失败（表还没迁移 / JSON 坏了）→ 当作没命中，继续生成
-      console.warn('[知识点讲解] 读缓存失败，重新生成:', e.message);
-    }
+      const script = JSON.parse(cachedRow.script);
+      return {
+        section_path: sectionPath, chapter, section: sec, code, question_count: questionCount,
+        script, cached: true, model: cachedRow.model, focus: effectiveFocus,
+      };
+    } catch { /* 缓存坏了，往下重新生成 */ }
   }
 
   // 只有真要调用模型才计次（命中缓存不该被限频拦）
@@ -10177,7 +10188,7 @@ async function buildKnowledgeExplain(chapterId, section, opts = {}) {
     throw e;
   }
 
-  const ctx = { chapter, section: sec, code, text, sampleQuestions, questionCount };
+  const ctx = { chapter, section: sec, code, text, focus: effectiveFocus, sampleQuestions, questionCount };
   const { systemPrompt, userPrompt, promptVersion } = buildKnowledgePrompt(ctx);
   let script;
   let model = null;
@@ -10225,11 +10236,11 @@ async function buildKnowledgeExplain(chapterId, section, opts = {}) {
   if (!degraded) {
     try {
       await pool.query(
-        `INSERT INTO knowledge_explain_scripts (section_path, content_hash, script, model)
-         VALUES (?, ?, ?, ?)
+        `INSERT INTO knowledge_explain_scripts (section_path, content_hash, script, model, focus)
+         VALUES (?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE content_hash = VALUES(content_hash), script = VALUES(script),
-                                 model = VALUES(model), updated_at = NOW(3)`,
-        [sectionPath, contentHash, JSON.stringify(script), model],
+                                 model = VALUES(model), focus = VALUES(focus), updated_at = NOW(3)`,
+        [sectionPath, contentHash, JSON.stringify(script), model, effectiveFocus || null],
       );
     } catch (e) {
       console.warn('[知识点讲解] 写缓存失败（不影响本次讲解）:', e.message);
@@ -10238,7 +10249,7 @@ async function buildKnowledgeExplain(chapterId, section, opts = {}) {
 
   return {
     section_path: sectionPath, chapter, section: sec, code, question_count: questionCount,
-    script, cached: false, degraded, model, prompt_version: promptVersion,
+    script, cached: false, degraded, model, focus: effectiveFocus, prompt_version: promptVersion,
   };
 }
 
@@ -10280,6 +10291,9 @@ app.post('/api/teacher/explain/knowledge', authenticate, requireTeacher, async (
     const teacherId = (req.user && (req.user.userId || req.user.id)) || 'teacher';
     const data = await buildKnowledgeExplain(body.chapter_id, body.section, {
       force: !!body.force,
+      // ⛔ 只有教师端能设「讲解重点」：这是教学口径，学生端传什么都不认。
+      //    不传（undefined）= 沿用这一节已存的重点。
+      focus: typeof body.focus === 'string' ? body.focus : undefined,
       rateKey: `kpexplain-t:${teacherId}`,
       rateMax: 30,
     });
