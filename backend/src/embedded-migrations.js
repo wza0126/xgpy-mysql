@@ -499,5 +499,9 @@ module.exports = [
   {
     "version": "122_knowledge_explain_scripts.sql",
     "sql": "-- 知识点 · AI 讲解脚本缓存（2026-11-01）\n--\n-- 学习模块每个知识点（= chapter-taxonomy 的一个小节）标题后面挂一个耳机按钮，\n-- 点开把这节讲义讲成一节「微型课」：导入 → 若干要点 → 易错点 → 考点 → 一句话记住 → 随堂一问。\n--\n-- 为什么一个知识点一份脚本全校共用：\n--   · 同一节内容所有班级听到的应该是同一套口径，老师课前核对一次即可；\n--   · 生成一次要几秒 + token，每人每次重新生成既不划算也不稳定。\n--\n-- ⛔ content_hash 存「该小节讲义正文」的哈希：老师在考点精讲里改了这节内容，\n--    缓存自动失效重新生成，否则学生听到的是过时的讲解。\n-- ⛔ 只存 AI 生成的讲稿（讲解词 / 板书 / 例子 / 易错 / 随堂问题目），\n--    不存任何新的知识结论的「正确答案」性质的题库数据 —— 知识点讲解没有标准答案，\n--    但讲义原文是权威口径，脚本必须忠实于它。\nCREATE TABLE IF NOT EXISTS `knowledge_explain_scripts` (\n  `section_path` VARCHAR(160) NOT NULL COMMENT '知识点路径：章名/小节名（与 questions.cluster_id 二级口径一致）',\n  `content_hash` CHAR(64) NOT NULL DEFAULT '' COMMENT '讲义正文哈希，变了就重新生成',\n  `script` LONGTEXT NOT NULL COMMENT '脚本 JSON：{intro,objectives,points,pitfalls,exam,mnemonic,quiz}',\n  `model` VARCHAR(64) DEFAULT NULL COMMENT '生成模型',\n  `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),\n  `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),\n  PRIMARY KEY (`section_path`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='知识点 AI 讲解脚本缓存';\n"
+  },
+  {
+    "version": "123_knowledge_explain_focus.sql",
+    "sql": "-- 知识点讲解 · 老师指定的「讲解重点」（2026-11-01）\n--\n-- 背景：同一节讲义，不同老师想突出的点不一样。例如「运算符与表达式」这一节，\n-- 讲义把 7 个算术运算符 + 5 个关系运算符 + 3 个逻辑运算符 + 优先级全列了一遍，\n-- 平均用力讲下来每个都只有一两句；而实际上学测主要考 // % ** 和关系运算符。\n--\n-- 做法：允许老师给某节指定「本次讲解重点」，生成时按重点重新分配篇幅\n--       （重点各自独立成要点展开，其余合并带过）。\n--\n-- ⛔ 这一列是**这一节的长期设置**，不是某次生成的临时参数：\n--    学生端生成时也会自动带上它，保证全校听到的是同一份口径；\n--    否则老师定制一份、学生一端生成就被覆盖了。\n-- ⛔ 为空 = 没有定制，走通用的「按讲义结构平均拆」。\nALTER TABLE `knowledge_explain_scripts`\n  ADD COLUMN IF NOT EXISTS `focus` TEXT DEFAULT NULL COMMENT '老师指定的讲解重点（为空表示未定制）' AFTER `model`;\n"
   }
 ];
