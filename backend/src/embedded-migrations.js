@@ -495,5 +495,9 @@ module.exports = [
   {
     "version": "121_python_task_category.sql",
     "sql": "-- 编程填空按结构分类（2026-10-28 吴老要求）\n--\n-- 目的：学生端练习、教师端作业列表都能按「顺序结构 / 分支结构 / for循环 / while循环 / 自定义函数」\n--      筛选。分类存库而不是写死在前端，老师以后新增题目也能补分类。\n--\n-- 口径：一道题只归一类，优先级 def > while > for > if > 无\n--      （即\"主体结构\"，循环里套分支算循环）。\n-- ⛔ 注意：不少题把 while / def 整个挖成了 ① 占位符，按关键字自动判会被判成「顺序结构」。\n--    首次分类时人工核过 83 道题，把 4 道修正了（第12、31、66、68题）。\n\nALTER TABLE `python_tasks`\n  ADD COLUMN IF NOT EXISTS `category` VARCHAR(20) NULL\n    COMMENT '顺序结构/分支结构/for循环/while循环/自定义函数；编程题(code)为 NULL' AFTER `task_type`;\n\nALTER TABLE `python_tasks`\n  ADD INDEX IF NOT EXISTS `idx_python_tasks_category` (`category`);\n"
+  },
+  {
+    "version": "122_knowledge_explain_scripts.sql",
+    "sql": "-- 知识点 · AI 讲解脚本缓存（2026-11-01）\n--\n-- 学习模块每个知识点（= chapter-taxonomy 的一个小节）标题后面挂一个耳机按钮，\n-- 点开把这节讲义讲成一节「微型课」：导入 → 若干要点 → 易错点 → 考点 → 一句话记住 → 随堂一问。\n--\n-- 为什么一个知识点一份脚本全校共用：\n--   · 同一节内容所有班级听到的应该是同一套口径，老师课前核对一次即可；\n--   · 生成一次要几秒 + token，每人每次重新生成既不划算也不稳定。\n--\n-- ⛔ content_hash 存「该小节讲义正文」的哈希：老师在考点精讲里改了这节内容，\n--    缓存自动失效重新生成，否则学生听到的是过时的讲解。\n-- ⛔ 只存 AI 生成的讲稿（讲解词 / 板书 / 例子 / 易错 / 随堂问题目），\n--    不存任何新的知识结论的「正确答案」性质的题库数据 —— 知识点讲解没有标准答案，\n--    但讲义原文是权威口径，脚本必须忠实于它。\nCREATE TABLE IF NOT EXISTS `knowledge_explain_scripts` (\n  `section_path` VARCHAR(160) NOT NULL COMMENT '知识点路径：章名/小节名（与 questions.cluster_id 二级口径一致）',\n  `content_hash` CHAR(64) NOT NULL DEFAULT '' COMMENT '讲义正文哈希，变了就重新生成',\n  `script` LONGTEXT NOT NULL COMMENT '脚本 JSON：{intro,objectives,points,pitfalls,exam,mnemonic,quiz}',\n  `model` VARCHAR(64) DEFAULT NULL COMMENT '生成模型',\n  `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),\n  `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),\n  PRIMARY KEY (`section_path`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='知识点 AI 讲解脚本缓存';\n"
   }
 ];
