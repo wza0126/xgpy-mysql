@@ -99,6 +99,8 @@ function speechify(text: string): string {
     .replace(/<=/g, ' 小于等于 ')
     .replace(/>=/g, ' 大于等于 ')
     .replace(/\*/g, ' 乘 ')
+    // ⛔ 整除必须在单斜杠之前：否则 `//` 会被读成"除以 除以"（2026-11-01 吴老反馈同类问题）
+    .replace(/\/\//g, ' 整除 ')
     .replace(/\//g, ' 除以 ')
     .replace(/%/g, ' 取余 ')
     .replace(/\+/g, ' 加 ')
