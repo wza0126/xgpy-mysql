@@ -107,6 +107,14 @@ const {
   normalizeScript: normalizeFillBlankScript,
   buildFallbackScript: buildFillBlankFallback,
 } = require('./fillblank-explain');
+const {
+  PROMPT_VERSION: KNOWLEDGE_PROMPT_VERSION,
+  extractSectionText: extractKnowledgeText,
+  buildPrompt: buildKnowledgePrompt,
+  normalizeScript: normalizeKnowledgeScript,
+  buildFallbackScript: buildKnowledgeFallback,
+  isUsableRaw: isUsableKnowledgeRaw,
+} = require('./knowledge-explain');
 // 模型输出 JSON 的容错解析：偶发裸引号/漏逗号/被截断时也能救回来
 const { extractJsonObject, salvageJsonObjects } = require('./json-repair');
 const secureAuth = new SecureAuth(pool);
@@ -10079,6 +10087,205 @@ app.post('/api/teacher/explain/fill-blank', authenticate, requireTeacher, async 
     res.json({ data, error: null });
   } catch (error) {
     sendFillBlankExplainError(res, error, '教师端编程填空讲解失败:');
+  }
+});
+
+// ===== 学生端：学习模块 · 知识点 AI 讲解 =====
+// 与编程填空共用同一个 ai_explain 开关（学生管理 → 隐藏功能 → 讲解），
+// 但讲法完全不同：不是「一空一步」，而是「导入 → 要点 → 易错 → 考点 → 口诀 → 随堂问」的一节微型课。
+// 见 knowledge-explain.js 顶部说明。
+/**
+ * 生成（或读缓存）某个知识点的讲解脚本。
+ *
+ * ⛔ 知识点 = chapter-taxonomy 的一个小节，路径为「章名/小节名」（与 questions.cluster_id 二级口径一致）。
+ *    必须用 SECTIONS_BY_CHAPTER 校验小节名真实存在：否则调用方随便传个字符串就能
+ *    让模型凭空编出一节讲义里没有的课，学生听到的就是编造的考点。
+ * ⛔ 缓存按「讲义正文哈希」失效：老师在考点精讲里改了这节，学生听到的就自动是新版。
+ * ⛔ 模型挂了走兜底（把讲义原文分段朗读），功能不会点开一片空白；兜底结果**不缓存**，下次重试。
+ */
+async function buildKnowledgeExplain(chapterId, section, opts = {}) {
+  const { force = false, rateKey = null, rateMax = 20, rateWindow = 10 * 60 * 1000 } = opts;
+  const { SECTIONS_BY_CHAPTER, SECTION_CODES } = require('./chapter-taxonomy');
+  const { getChapterLecture } = require('./learn-content');
+
+  const chapter = String(chapterId || '').trim();
+  const sec = String(section || '').trim();
+  if (!chapter || !sec) { const e = new Error('缺少章节或知识点参数'); e.status = 400; throw e; }
+
+  const secs = SECTIONS_BY_CHAPTER[chapter];
+  if (!secs) { const e = new Error('章节不存在'); e.status = 404; throw e; }
+  if (!secs.includes(sec)) { const e = new Error('这一章下没有这个知识点'); e.status = 404; throw e; }
+
+  const lec = getChapterLecture(chapter);
+  const text = extractKnowledgeText(chapter, lec ? lec.html : '', sec);
+  if (!text || text.replace(/\s/g, '').length < 40) {
+    const e = new Error('这一节的讲义还没写，暂时没法生成讲解');
+    e.status = 404;
+    throw e;
+  }
+
+  const sectionPath = `${chapter}/${sec}`;
+  const code = SECTION_CODES[sectionPath] || '';
+
+  // 挂在同一小节下的练习题题干：只给模型判断「学测怎么考」，不进讲稿正文
+  let sampleQuestions = [];
+  let questionCount = 0;
+  try {
+    const [qrows] = await pool.query(
+      `SELECT content FROM questions
+        WHERE practice_enabled = 1 AND cluster_id = ?${SQL_PRACTICE_SCOPE} LIMIT 6`,
+      [sectionPath],
+    );
+    questionCount = qrows.length;
+    sampleQuestions = qrows
+      .map((r) => require('./knowledge-explain').htmlToPlain(r.content || '').replace(/\s+/g, ' ').trim())
+      .filter((t) => t.length >= 6)
+      .slice(0, 4);
+  } catch (e) {
+    console.warn('[知识点讲解] 取练习题干失败（不影响讲解生成）:', e.message);
+  }
+
+  const contentHash = require('crypto').createHash('sha1')
+    // ⛔ 提示词版本要进哈希：改了讲法（提示词）而讲义没变时，旧讲稿必须失效重生成，
+    //    否则学生听到的还是上一版讲法，改了提示词等于没改。
+    .update([KNOWLEDGE_PROMPT_VERSION, chapter, sec, text].join('\u0001'))
+    .digest('hex');
+
+  if (!force) {
+    try {
+      const [cached] = await pool.query(
+        'SELECT content_hash, script, model FROM knowledge_explain_scripts WHERE section_path = ? LIMIT 1',
+        [sectionPath],
+      );
+      if (cached.length && cached[0].content_hash === contentHash) {
+        const script = JSON.parse(cached[0].script);
+        return {
+          section_path: sectionPath, chapter, section: sec, code, question_count: questionCount,
+          script, cached: true, model: cached[0].model,
+        };
+      }
+    } catch (e) {
+      // 缓存读失败（表还没迁移 / JSON 坏了）→ 当作没命中，继续生成
+      console.warn('[知识点讲解] 读缓存失败，重新生成:', e.message);
+    }
+  }
+
+  // 只有真要调用模型才计次（命中缓存不该被限频拦）
+  if (rateKey && !allowExplainRate(rateKey, rateMax, rateWindow)) {
+    const e = new Error(`讲解生成太频繁，歇一会儿再点（${Math.round(rateWindow / 60000)} 分钟内最多 ${rateMax} 次）`);
+    e.status = 429;
+    throw e;
+  }
+
+  const ctx = { chapter, section: sec, code, text, sampleQuestions, questionCount };
+  const { systemPrompt, userPrompt, promptVersion } = buildKnowledgePrompt(ctx);
+  let script;
+  let model = null;
+  let degraded = false;
+  try {
+    const config = await getAiQaConfig(pool);
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ];
+    let lastMsg = '';
+    // 最多试两次：模型偶尔把字段全塞进 intro，或输出到一半被截断。
+    // 第二次把它自己的坏输出附回去再要一次，比无脑重试有效。
+    for (let attempt = 1; attempt <= 2 && !script; attempt += 1) {
+      // ⛔ 必须给足 max_tokens：一节微课的 JSON（5 个要点 + 易错 + 考点 + 随堂问）约 2000 字。
+      //    实测 2600 时 finish_reason 直接是 length、只输出 636 字就被砍断
+      //    （该模型似乎把内部思考也算进预算），4096 才稳定跑完。
+      const raw = await callAiApi(config, messages, { max_tokens: 4096 });
+      try {
+        const obj = extractJsonObject(raw);
+        if (!isUsableKnowledgeRaw(obj)) {
+          throw new Error(`模型输出不合格（第 ${attempt} 次）：字段可能被嵌套进 intro 或被截断`);
+        }
+        script = normalizeKnowledgeScript(obj, ctx);
+        model = config.ai_model || null;
+      } catch (e) {
+        lastMsg = e.message;
+        if (attempt < 2) {
+          messages.push({ role: 'assistant', content: String(raw).slice(0, 4000) });
+          messages.push({
+            role: 'user',
+            content: '上面这份输出不合格：要么把 objectives/points 等字段嵌进了 intro 里面，要么没写完就断了。'
+              + '请重新输出完整 JSON，顶层只有 intro、objectives、points、pitfalls、exam、mnemonic、quiz 这 7 个键。',
+          });
+        }
+      }
+    }
+    if (!script) throw new Error(lastMsg || '模型多次输出不合格');
+  } catch (e) {
+    console.error('生成知识点讲解失败，改用兜底脚本:', e.message);
+    script = buildKnowledgeFallback(ctx);
+    degraded = true;
+  }
+
+  if (!degraded) {
+    try {
+      await pool.query(
+        `INSERT INTO knowledge_explain_scripts (section_path, content_hash, script, model)
+         VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE content_hash = VALUES(content_hash), script = VALUES(script),
+                                 model = VALUES(model), updated_at = NOW(3)`,
+        [sectionPath, contentHash, JSON.stringify(script), model],
+      );
+    } catch (e) {
+      console.warn('[知识点讲解] 写缓存失败（不影响本次讲解）:', e.message);
+    }
+  }
+
+  return {
+    section_path: sectionPath, chapter, section: sec, code, question_count: questionCount,
+    script, cached: false, degraded, model, prompt_version: promptVersion,
+  };
+}
+
+function sendKnowledgeExplainError(res, error, tag) {
+  if (error.status === 400 || error.status === 404 || error.status === 429) {
+    return res.status(error.status).json({ data: null, error: error.message });
+  }
+  console.error(tag, error);
+  res.status(500).json({ data: null, error: error.message || '生成讲解失败' });
+}
+
+// 学生端：需要老师为该生开通 AI 讲解（与 AI 讲堂、编程填空同一个开关）
+app.post('/api/student/explain/knowledge', authenticate, requireStudent, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    if (!(await isAiExplainEnabledFor(userId))) {
+      return res.status(403).json({ data: null, error: '老师还没有为你开通 AI 讲解' });
+    }
+    const body = req.body || {};
+    const data = await buildKnowledgeExplain(body.chapter_id, body.section, {
+      force: !!body.force,
+      rateKey: `kpexplain:${userId}`,
+      rateMax: 25,
+    });
+    res.json({ data, error: null });
+  } catch (error) {
+    sendKnowledgeExplainError(res, error, '知识点讲解失败:');
+  }
+});
+
+// 教师端：课前核对 AI 讲得对不对、上课直接投屏放。与学生端共用同一份缓存脚本。
+app.post('/api/teacher/explain/knowledge', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const licenseResult = await licenseManager.checkFeatureLicense(FEATURES.AI);
+    if (!licenseResult.allowed) {
+      return res.status(403).json({ data: null, error: 'AI 功能需要授权激活后才能使用', licenseStatus: licenseResult.status });
+    }
+    const body = req.body || {};
+    const teacherId = (req.user && (req.user.userId || req.user.id)) || 'teacher';
+    const data = await buildKnowledgeExplain(body.chapter_id, body.section, {
+      force: !!body.force,
+      rateKey: `kpexplain-t:${teacherId}`,
+      rateMax: 30,
+    });
+    res.json({ data, error: null });
+  } catch (error) {
+    sendKnowledgeExplainError(res, error, '教师端知识点讲解失败:');
   }
 });
 

@@ -18,6 +18,7 @@ import { backendClient } from '../../api/backendClient';
 import { getSelfTest } from '../../data/learnSelfTest';
 import { useDesktopStore } from '../../store/desktopStore';
 import { PracticeModule } from './PracticeModule';
+import { KnowledgeExplainPlayer } from './KnowledgeExplainPlayer';
 import { peekPendingLearnChapter, clearPendingLearnChapter, onOpenLearnChapter } from '../../utils/learnNav';
 
 interface ChapterSection {
@@ -68,6 +69,12 @@ export const LearnModule: React.FC = () => {
 
   const [selectedChapter, setSelectedChapter] = useState<string | null>(null);
   const [chapterDetail, setChapterDetail] = useState<any>(null);
+  /**
+   * 知识点 AI 语音讲解（隐藏功能，与「AI 讲堂」「编程填空讲解」同一个 ai_explain 开关）。
+   * 老师没放开时：讲义标题后面不出现耳机按钮，其它一切照旧。
+   */
+  const [explainEnabled, setExplainEnabled] = useState(false);
+  const [kpTarget, setKpTarget] = useState<{ chapter: string; section: string; code?: string; questionCount?: number } | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   // 外部跳进来时（星域「下一个目标」/ 知识点地图）默认展开目标章，学生一眼看到该章的小节
   const [expanded, setExpanded] = useState<Set<string>>(() =>
@@ -129,6 +136,19 @@ export const LearnModule: React.FC = () => {
     return true;
   };
 
+  // 讲解开关：与「AI 讲堂」同一个 ai_explain 开关，由老师按班级/学生控制。
+  // ⛔ 只探测一次，失败就当没开通（耳机按钮不出现，不影响看讲义）。
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const res = await backendClient.get('/api/student/explain/enabled');
+        if (alive) setExplainEnabled(!!res?.data?.enabled);
+      } catch { /* 探测失败就静默隐藏 */ }
+    })();
+    return () => { alive = false; };
+  }, []);
+
   // 加载讲义样式（一次性）
   useEffect(() => {
     if (!document.getElementById('xs-lp-css')) {
@@ -162,6 +182,34 @@ export const LearnModule: React.FC = () => {
 .xs-lecture .lp-inline-practice:focus-visible { opacity: 1; }
 .xs-lecture .lp-inline-practice:hover { background: #4f46e5; border-color: #4f46e5; color: #fff; }
 .xs-lecture .xs-anchor { display: block; height: 0; overflow: hidden; }
+/* 知识点 AI 语音讲解：标题后的耳机小按钮（隐藏功能，老师放开 ai_explain 才注入）。
+   刻意做小、默认半透明，平时不抢注意力；鼠标移到标题上才变清晰。 */
+.xs-lecture .kp-explain-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-left: 8px;
+  border: 1px solid #bae6fd;
+  border-radius: 6px;
+  background: #e0f2fe;
+  color: #0284c7;
+  font-size: 11px;
+  line-height: 1;
+  vertical-align: middle;
+  cursor: pointer;
+  opacity: .55;
+  transition: opacity .15s, background-color .15s, border-color .15s, color .15s;
+}
+.xs-lecture h2:hover > .kp-explain-btn,
+.xs-lecture h3:hover > .kp-explain-btn,
+.xs-lecture h4:hover > .kp-explain-btn,
+.xs-lecture h5:hover > .kp-explain-btn,
+.xs-lecture h6:hover > .kp-explain-btn,
+.xs-lecture .kp-explain-btn:hover,
+.xs-lecture .kp-explain-btn:focus-visible { opacity: 1; }
+.xs-lecture .kp-explain-btn:hover { background: #0284c7; border-color: #0284c7; color: #fff; }
 `;
       document.head.appendChild(style);
     }
@@ -495,6 +543,84 @@ export const LearnModule: React.FC = () => {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chapterDetail?.html, current?.cluster_id, loadingDetail, masteryTick]);
+
+  /**
+   * 【AI 语音讲解】讲义渲染后，给每个知识点标题右侧挂一个耳机按钮。
+   *
+   * 与上面「去练习」的区别（这段不能并进去）：
+   *   · 「去练习」只给**有题**的小节挂；耳机要给**每个**有讲义锚点的小节挂，
+   *     哪怕这节零题也能听（新课往往先讲后练）；所以过滤条件不同，必须单独一段。
+   *   · 重试逻辑照抄上面那段（AnimatePresence 换章时 ref 还指着旧节点）。
+   *
+   * 按钮顺序：耳机在前、「去练习」在后 —— 先听懂，再去练。
+   * ⛔ 用 data-kp-key 标记保证幂等；data-* 传参避免闭包持有旧的 sec 对象。
+   */
+  useEffect(() => {
+    if (!explainEnabled) return;
+    if (!chapterDetail?.html || !current) return;
+    const wantChapter = current.cluster_id;
+    const secs = current.sections.filter((s) => s.anchor);
+    if (!secs.length) return;
+
+    const INJECT_RETRY = 24;
+    let tries = 0;
+    let timer: number | null = null;
+    let disposed = false;
+
+    const run = () => {
+      if (disposed) return;
+      const host = lectureRef.current;
+      if (!host) { retry(); return; }
+      if (!host.querySelector(`#${CSS.escape(secs[0].anchor!)}`)) { retry(); return; }
+
+      secs.forEach((sec) => {
+        const marker = `kpExplainBtn_${sec.path}`;
+        if (host.querySelector(`[data-kp-key="${marker}"]`)) return;
+        const head = host.querySelector(`#${CSS.escape(sec.anchor!)}`);
+        const heading = (head?.tagName && /^H[1-6]$/.test(head.tagName)
+          ? head
+          : head?.nextElementSibling) as HTMLElement | null;
+        if (!heading) return;
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.dataset.kpKey = marker;
+        btn.dataset.kpName = sec.name;
+        btn.className = 'kp-explain-btn';
+        btn.title = `AI 语音讲解：${sec.name}（老师已为你开通）`;
+        btn.setAttribute('aria-label', `AI 语音讲解：${sec.name}`);
+        btn.innerHTML = '<i class="fa-solid fa-headphones"></i>';
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          console.log(`[learn] 知识点讲解点击：${btn.dataset.kpName} (${wantChapter})`);
+          setKpTarget({
+            chapter: wantChapter,
+            section: btn.dataset.kpName || '',
+            code: sec.code || '',
+            questionCount: sec.question_count || 0,
+          });
+        });
+        const pill = heading.querySelector('.lp-inline-practice');
+        if (pill) heading.insertBefore(btn, pill);
+        else heading.appendChild(btn);
+      });
+    };
+
+    const retry = () => {
+      if (disposed || tries >= INJECT_RETRY) return;
+      tries++;
+      timer = window.setTimeout(run, 150);
+    };
+
+    run();
+
+    return () => {
+      disposed = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [explainEnabled, chapterDetail?.html, current?.cluster_id, loadingDetail]);
 
   /** 标记已看（仅进度用，不再触发 buff） */
   const markVisited = (key: string, text: string) => {
@@ -873,6 +999,19 @@ export const LearnModule: React.FC = () => {
           </AnimatePresence>
         </div>
       </div>
+
+      {/* 知识点 AI 语音讲解（全屏）。
+          key 用「章/节」：换知识点时强制重挂，否则会停在上一个知识点的讲稿上。 */}
+      {kpTarget && (
+        <KnowledgeExplainPlayer
+          key={`${kpTarget.chapter}/${kpTarget.section}`}
+          chapter={kpTarget.chapter}
+          section={kpTarget.section}
+          code={kpTarget.code}
+          questionCount={kpTarget.questionCount}
+          onClose={() => setKpTarget(null)}
+        />
+      )}
     </div>
   );
 };
