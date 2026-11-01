@@ -188,6 +188,15 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
   // 闸② 答错后「下一题」延迟：强制在解析页停留几秒，避免错了立刻翻页（答对不延迟）。
   const [nextGateLeft, setNextGateLeft] = useState(0);
   const NEXT_GATE_SECONDS = 3;
+  /**
+   * 订正（2026-11-01 吴老要求，对齐生存挑战）：
+   * 答错后必须在原题上重新答对，才能点「下一题」。
+   * ⛔ 订正是**纯前端本地判定**（用提交回执里下发的正确答案比对），不调提交接口 ——
+   *    因此不计答题次数、不积分、不算掌握、不写 student_answers，后台统计完全不受影响。
+   */
+  const [correcting, setCorrecting] = useState(false);
+  const [correctionOk, setCorrectionOk] = useState(false);
+  const [correctionHint, setCorrectionHint] = useState('');
   // 闸③ 最近 10 题正确率过低：弹窗提醒先看知识点；扣分由服务端复核执行，这里只负责提示。
   const [lowAccNotice, setLowAccNotice] = useState<{ rate: number; n: number; ok: number; points: number } | null>(null);
   const lowAccWarnedRef = useRef(false);
@@ -470,7 +479,8 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
   }, [nextGateLeft]);
 
   // 闸①/② 的总开关：任何触发方式（点选项、回车、点提交按钮）在锁定期间都不生效
-  const answerLocked = showResult || readGateLeft > 0;
+  // 订正模式下重新放开作答（此时 showResult 仍为 true，但允许改答案重答）
+  const answerLocked = (showResult && !correcting) || readGateLeft > 0;
 
   // overrideAnswer：快速作答（点选项即交 / 填空回车即交）时，答案还没来得及进 state，
   // 由调用方直接传入，避免读到闭包里的旧值。「提交答案」按钮的 onClick 会把事件对象
@@ -576,6 +586,10 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
         setShowResult(true);
         // 闸②：答错后强制在解析页停留 3 秒（答对不延迟，不打断正确节奏）
         setNextGateLeft(correct ? 0 : NEXT_GATE_SECONDS);
+        // 答错 → 进入订正态：选项/输入框重新可点，边看解析边改；答对才解锁「下一题」
+        setCorrecting(!correct);
+        setCorrectionOk(false);
+        setCorrectionHint('');
         // 标记"当前这一屏题已提交"，未切题前不再允许提交
         answeredQuestionIdRef.current = currentQuestion.id;
 
@@ -728,9 +742,78 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
     }
   };
 
+  /* ============ 订正：答错后重新答对才能进下一题 ============ */
+  // 正确答案来自提交回执（merge 进 currentQuestion 的 answers 字段）。
+  // ⛔ 这个是**字符串**（形如 '{"answers":["A"]}'），必须过 getAnswers 解一层，
+  //    直接 Array.isArray 判断会永远判错（2026-11-01 冒烟时踩到）。
+  const correctionAnswers = getAnswers((currentQuestion as any)?.answers ?? null);
+
+  const correctionPass = () => {
+    setCorrecting(false);
+    setCorrectionOk(true);
+    setCorrectionHint('');
+    setSubmitNotice('订正正确 ✓ 可以进入下一题了（订正不计答题次数、不加分）');
+  };
+  const correctionFail = () => {
+    setCorrectionHint('还不对，再看看下面的解析');
+  };
+
+  /** 选择题订正：点一个字母直接判（本地，不提交）。
+   *  题库里 choice 的 answers 有时是字母、有时是选项原文，两种都要认。 */
+  const correctChoice = (letter: string, optIndex: number) => {
+    const list = (Array.isArray(correctionAnswers) ? correctionAnswers : [correctionAnswers])
+      .filter((a: any) => a != null)
+      .map((a: any) => String(a));
+    const opts = getOptions((currentQuestion as any)?.options) || [];
+    const strip = (s: string) => String(s || '').replace(/<[^>]+>/g, '');
+    const pickedLetter = letter.trim().toUpperCase();
+    const pickedText = normalizeAnswer(strip(String(opts[optIndex] ?? '')));
+    const ok = list.some((a: string) => {
+      const up = a.trim().toUpperCase();
+      if (/^[A-Z]$/.test(up)) return up === pickedLetter;          // 答案是字母
+      return normalizeAnswer(strip(a)) === pickedText;             // 答案是选项原文
+    });
+    if (ok) correctionPass();
+    else correctionFail();
+  };
+
+  /** 填空题订正：口径与后端 taskCheckAnswerCorrect 的 fill_blank 分支一致
+   *  （把 answers 里的每一项都当作同一空的「可接受写法」），别用多空版判定 */
+  const correctFill = (val: string) => {
+    const raw = correctionAnswers;
+    const arr = Array.isArray(raw) ? raw : raw ? [raw] : [];
+    const flat = arr.flatMap((a: any) => (Array.isArray(a) ? a : [a])).map((a: any) => String(a));
+    if (flat.some((a) => normalizeAnswer(a) === normalizeAnswer(String(val || '')))) correctionPass();
+    else correctionFail();
+  };
+
+  /** 复合题订正：所有小题重新作答后点「确认订正」，全对才通过 */
+  const correctComposite = () => {
+    const subQs = getCompositeSubQuestions((currentQuestion as any)?.answers) as any[];
+    if (!subQs.length) return;
+    const allOk = subQs.every((sq, i) => {
+      const sqAnswers = getAnswers(sq.answers);
+      if (sq.type === 'choice') {
+        const list = (Array.isArray(sqAnswers) ? sqAnswers : [sqAnswers])
+          .filter((a: any) => a != null)
+          .map((a: any) => String(a));
+        const ua = String(compositeAnswers[i] || '').trim();
+        if (!ua) return false;
+        return checkChoiceAnswer(ua, list, !!sq.multiple || (Array.isArray(list) && list.length > 1));
+      }
+      const blanks = (compositeBlankAnswers[i] || []).map((b) => String(b || ''));
+      if (!blanks.length || blanks.some((b) => !b.trim())) return false;
+      return checkFillBlankAnswer(blanks, sqAnswers);
+    });
+    if (allOk) correctionPass();
+    else correctionFail();
+  };
+
   const handleNext = () => {
     // 闸②：答错后的解析停留时间还没走完，不允许翻页（键盘 Enter/空格也会走到这里，一并拦住）
     if (nextGateLeft > 0) return;
+    // 订正未完成：锁死翻页（键盘流也走这里）
+    if (showResult && !isCorrect && !correctionOk) return;
     setSelectedAnswer('');
     setCompositeAnswers({});
     setCompositeBlankAnswers({});
@@ -740,6 +823,9 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
     // 切题后解锁：新的一屏题目允许提交一次
     answeredQuestionIdRef.current = null;
     setNextGateLeft(0);
+    setCorrecting(false);
+    setCorrectionOk(false);
+    setCorrectionHint('');
 
     const remainingQuestions = filteredQuestions.filter((q) => !masteredQuestionIds.has(q.id));
     if (remainingQuestions.length === 0) {
@@ -1128,6 +1214,8 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                           if (answerLocked) return;
                           const letter = String.fromCharCode(65 + index);
                           setSelectedAnswer(letter);
+                          // 订正：本地判对错，不提交、不计次数
+                          if (correcting) { correctChoice(letter, index); return; }
                           if (quickMode) handleSubmit(letter);
                         }}
                         disabled={answerLocked}
@@ -1135,7 +1223,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                           selectedAnswer === String.fromCharCode(65 + index)
                             ? 'border-blue-500 bg-blue-50'
                             : 'border-gray-200 hover:border-blue-300'
-                        } ${showResult ? 'cursor-not-allowed' : ''}`}
+                        } ${answerLocked ? 'cursor-not-allowed' : ''}`}
                       >
                         <span className="font-medium mr-2 align-top">{String.fromCharCode(65 + index)}.</span>
                         <span className="inline-block question-rich-content" dangerouslySetInnerHTML={{ __html: sanitizeHtml(option) }} />
@@ -1153,12 +1241,14 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                       onKeyDown={(e) => {
                         // 快速作答：填空题输入完按回车即提交判分。
                         // 必须过滤中文输入法合成态：选字时的回车不能当成提交。
-                        if (!quickMode) return;
                         if (e.key !== 'Enter') return;
                         if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                         const val = (e.target as HTMLInputElement).value;
                         if (!val.trim()) return;
                         e.preventDefault();
+                        // 订正：本地判对错，不提交、不计次数
+                        if (correcting) { correctFill(val); return; }
+                        if (!quickMode) return;
                         handleSubmit(val);
                       }}
                       disabled={answerLocked}
@@ -1172,7 +1262,8 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                   <div className="mt-4 space-y-4">
                     {getCompositeSubQuestions(currentQuestion.answers).map((sq: any, sqIdx: number) => {
                       const sqResult = subQuestionResults.find(r => r.index === sqIdx);
-                      const resultBg = showResult
+                      // 订正时不显示对错底色（否则照着绿色选项点就完了），解析仍然可读
+                      const resultBg = showResult && !correcting && !correctionOk
                         ? (sqResult?.isCorrect ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200')
                         : 'bg-gray-50 border-gray-200';
                       
@@ -1188,7 +1279,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                               {sq.type === 'choice' ? (sq.multiple ? '多选题' : '单选题') : '填空题'}
                             </span>
                             <span className="text-xs text-gray-500">{sq.score}分</span>
-                            {showResult && (
+                            {showResult && !correcting && !correctionOk && (
                               <span className={`text-sm font-medium ${sqResult?.isCorrect ? 'text-green-600' : 'text-red-600'}`}>
                                 {sqResult?.isCorrect ? `✓ 正确 +${sqResult.score}分` : '✗ 错误'}
                               </span>
@@ -1214,7 +1305,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                                 
                                 let borderClass = 'border-gray-200 hover:border-blue-300';
                                 let bgClass = '';
-                                if (showResult) {
+                                if (showResult && !correcting && !correctionOk) {
                                   if (isCorrectOption) {
                                     borderClass = 'border-green-500';
                                     bgClass = 'bg-green-50';
@@ -1247,7 +1338,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                                       }
                                     }}
                                     disabled={answerLocked}
-                                    className={`w-full p-3 rounded-lg border-2 text-left transition-all ${borderClass} ${bgClass} ${showResult ? 'cursor-not-allowed' : ''}`}
+                                    className={`w-full p-3 rounded-lg border-2 text-left transition-all ${borderClass} ${bgClass} ${answerLocked ? 'cursor-not-allowed' : ''}`}
                                   >
                                     <span className="font-medium mr-2 align-top">{optionLetter}.</span>
                                     <span className="inline-block question-rich-content" dangerouslySetInnerHTML={{ __html: sanitizeHtml(option) }} />
@@ -1349,6 +1440,42 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
                     </span>
                   )}
                 </div>
+
+                {/* 订正提示（答错才出现）：和生存挑战一样，答对才能走 */}
+                {!isCorrect && (
+                  <div className={`mb-3 rounded-lg border px-3 py-2.5 text-sm ${
+                    correctionOk ? 'border-green-300 bg-white text-green-700' : 'border-amber-300 bg-white text-amber-800'
+                  }`}>
+                    <div className="flex items-start gap-2">
+                      <i className={`fa-solid ${correctionOk ? 'fa-circle-check' : 'fa-pen-to-square'} mt-0.5`}></i>
+                      <div className="flex-1">
+                        {correctionOk ? (
+                          <span>
+                            <b>订正正确</b>，可以进入下一题了。
+                            <span className="text-gray-500">订正不计答题次数，也没有积分奖励。</span>
+                          </span>
+                        ) : (
+                          <>
+                            <div><b>需要订正：</b>请在上方重新作答，答对后才能进入下一题。</div>
+                            <div className="text-xs text-gray-600 mt-1">
+                              订正不算答题次数、不加积分、不计掌握，可以对着下面的解析改。
+                              {correctionHint && <span className="text-red-600 font-medium ml-1">{correctionHint}</span>}
+                            </div>
+                            {currentQuestion.type === 'composite' && (
+                              <button
+                                onClick={correctComposite}
+                                className="mt-2 px-4 py-1.5 rounded-lg bg-amber-500 text-white text-sm font-medium hover:bg-amber-600 transition-colors"
+                              >
+                                确认订正
+                              </button>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 <div className="text-gray-700">
                   {currentQuestion.type === 'composite' && subQuestionResults.length > 0 && (
                     <div className="mb-3">
@@ -1466,11 +1593,23 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
               ) : (
                 <button
                   onClick={handleNext}
-                  disabled={nextGateLeft > 0}
-                  title={nextGateLeft > 0 ? '请先看完解析' : '进入下一题'}
-                  className="px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  disabled={nextGateLeft > 0 || (!isCorrect && !correctionOk)}
+                  title={
+                    !isCorrect && !correctionOk
+                      ? '订正正确后才能进入下一题'
+                      : nextGateLeft > 0
+                      ? '请先看完解析'
+                      : '进入下一题'
+                  }
+                  className={`px-6 py-2 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                    !isCorrect && !correctionOk ? 'bg-gray-400' : 'bg-blue-500 hover:bg-blue-600'
+                  }`}
                 >
-                  {nextGateLeft > 0 ? `请先看解析 ${nextGateLeft}s` : '下一题'}
+                  {!isCorrect && !correctionOk
+                    ? '订正后才能下一题'
+                    : nextGateLeft > 0
+                    ? `请先看解析 ${nextGateLeft}s`
+                    : '下一题'}
                 </button>
               )}
             </div>
