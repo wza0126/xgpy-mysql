@@ -14565,7 +14565,10 @@ function parseAnnouncementClasses(raw) {
 /** 单行公告 → 对外结构（remaining_seconds 用服务端时钟算，学生机时间不准也不受影响） */
 function mapAnnouncementRow(r) {
   const endsMs = r.ends_at ? new Date(r.ends_at).getTime() : 0;
+  const startMs = r.scheduled_at ? new Date(r.scheduled_at).getTime() : 0;
   const remaining = Number.isFinite(endsMs) ? Math.ceil((endsMs - Date.now()) / 1000) : 0;
+  // 定时发布：还没到开始时间 → pending（教师端显示「待发布」，学生端不返回）
+  const pending = startMs > Date.now();
   return {
     id: r.id,
     content: String(r.content || '').trim(),
@@ -14573,20 +14576,35 @@ function mapAnnouncementRow(r) {
     created_by: r.created_by || null,
     created_by_name: r.created_by_name || null,
     started_at: r.started_at || null,
+    scheduled_at: r.scheduled_at || null,
     ends_at: r.ends_at || null,
+    pending,
+    starts_in_seconds: pending ? Math.max(0, Math.ceil((startMs - Date.now()) / 1000)) : 0,
     remaining_seconds: Math.max(0, remaining),
-    active: endsMs > Date.now(),
+    active: endsMs > Date.now() && !pending,
   };
 }
 
-/** 当前所有生效公告（多条并存，最新在前） */
+/** 当前所有生效公告（多条并存，最新在前）—— 不含「还没到点」的定时公告 */
 async function listActiveAnnouncements() {
   const [rows] = await pool.query(
-    `SELECT id, content, class_ids, created_by, created_by_name, started_at, ends_at
+    `SELECT id, content, class_ids, created_by, created_by_name, started_at, scheduled_at, ends_at
        FROM pet_announcements
-      WHERE ends_at > NOW(3)
+      WHERE ends_at > NOW(3) AND (scheduled_at IS NULL OR scheduled_at <= NOW(3))
       ORDER BY created_at DESC
       LIMIT 10`
+  );
+  return rows.map(mapAnnouncementRow);
+}
+
+/** 教师端列表：生效中 + 待发布（定时公告要能看见、能取消） */
+async function listAnnouncementsForTeacher() {
+  const [rows] = await pool.query(
+    `SELECT id, content, class_ids, created_by, created_by_name, started_at, scheduled_at, ends_at
+       FROM pet_announcements
+      WHERE ends_at > NOW(3)
+      ORDER BY (scheduled_at IS NOT NULL AND scheduled_at > NOW(3)) DESC, scheduled_at ASC, created_at DESC
+      LIMIT 20`
   );
   return rows.map(mapAnnouncementRow);
 }
@@ -14632,10 +14650,11 @@ app.get('/api/pet/announcement', authenticate, async (req, res) => {
   }
 });
 
-// 教师端：生效中的公告列表（多条并存，面板上一条一条停）
+// 教师端：生效中 + 待发布的公告列表（多条并存，面板上一条一条停/取消）
 app.get('/api/pet/announcement/teacher', authenticate, requireTeachingRole, async (req, res) => {
   try {
-    const items = await listActiveAnnouncements();
+    // 教师端要连「待发布」的定时公告一起返回，否则定了时却看不见、也取消不了
+    const items = await listAnnouncementsForTeacher();
     res.json({ data: { items, total: items.length }, error: null });
   } catch (err) {
     console.error('读萌宠公告失败:', err);
@@ -14644,6 +14663,7 @@ app.get('/api/pet/announcement/teacher', authenticate, requireTeachingRole, asyn
 });
 
 // 教师端：发布一条公告（可多条并存；content + 自动关闭秒数 + 目标班级，班级为空 = 全部班级）
+// scheduled_at：可选，定时发布（ISO 字符串或 'YYYY-MM-DD HH:mm'）；不传 = 立即发布
 app.post('/api/pet/announcement', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const content = String((req.body && req.body.content) || '').trim();
@@ -14653,9 +14673,26 @@ app.post('/api/pet/announcement', authenticate, requireTeachingRole, async (req,
       : [];
     if (!content) return res.status(400).json({ data: null, error: '公告内容不能为空' });
     if (content.length > 500) return res.status(400).json({ data: null, error: '公告内容不超过 500 字' });
-    if (!(duration >= 5 && duration <= 3600)) {
-      return res.status(400).json({ data: null, error: '自动关闭时间需在 5~3600 秒之间' });
+    // 时长放宽到 1 分钟 ~ 24 小时：预设最长 30 分钟，自定义可能更长（整节课/半天）
+    if (!(duration >= 60 && duration <= 86400)) {
+      return res.status(400).json({ data: null, error: '自动关闭时间需在 1 分钟 ~ 24 小时之间' });
     }
+
+    // 定时发布：解析时间；无效值直接拒绝，过去的时间按「立即」处理（老师点了发布就是要发）
+    let scheduledAt = null;
+    const rawScheduled = req.body && req.body.scheduled_at;
+    if (rawScheduled) {
+      const t = new Date(String(rawScheduled).replace(' ', 'T'));
+      if (Number.isNaN(t.getTime())) {
+        return res.status(400).json({ data: null, error: '定时发布时间格式不对' });
+      }
+      const now = Date.now();
+      if (t.getTime() > now + 14 * 24 * 3600 * 1000) {
+        return res.status(400).json({ data: null, error: '定时发布时间最多提前 14 天' });
+      }
+      if (t.getTime() > now + 30 * 1000) scheduledAt = t;
+    }
+
     const uid = req.user.userId || req.user.id;
     const [[me]] = await pool.query(
       'SELECT real_name, username FROM profiles WHERE id = ? LIMIT 1',
@@ -14663,14 +14700,19 @@ app.post('/api/pet/announcement', authenticate, requireTeachingRole, async (req,
     );
     const name = String((me && (me.real_name || me.username)) || '').trim() || '老师';
     const id = uuidv4();
+    // 结束时间从「开始时间」往后算，定时公告不会在还没开始时就过期
     await pool.query(
       `INSERT INTO pet_announcements
-         (id, content, class_ids, created_by, created_by_name, started_at, ends_at)
-       VALUES (?, ?, ?, ?, ?, NOW(3), DATE_ADD(NOW(3), INTERVAL ? SECOND))`,
-      [id, content, classIds.length ? JSON.stringify(classIds) : null, uid, name, duration]
+         (id, content, class_ids, created_by, created_by_name, started_at, scheduled_at, ends_at)
+       VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, NOW(3)), DATE_ADD(COALESCE(?, NOW(3)), INTERVAL ? SECOND))`,
+      [
+        id, content, classIds.length ? JSON.stringify(classIds) : null, uid, name,
+        scheduledAt || new Date(),          // started_at：计划开始（立即发布 = 现在）
+        scheduledAt, scheduledAt, duration,
+      ]
     );
     const [rows] = await pool.query(
-      `SELECT id, content, class_ids, created_by, created_by_name, started_at, ends_at
+      `SELECT id, content, class_ids, created_by, created_by_name, started_at, scheduled_at, ends_at
          FROM pet_announcements WHERE id = ? LIMIT 1`,
       [id]
     );
@@ -14681,11 +14723,11 @@ app.post('/api/pet/announcement', authenticate, requireTeachingRole, async (req,
   }
 });
 
-// 教师端：停止某条公告（结束时间设成现在；行保留，便于追溯）
+// 教师端：停止/取消某条公告（结束时间设成现在；定时未开始的也一并作废；行保留便于追溯）
 app.delete('/api/pet/announcement/:id', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const [r] = await pool.query(
-      'UPDATE pet_announcements SET ends_at = NOW(3) WHERE id = ? AND ends_at > NOW(3)',
+      'UPDATE pet_announcements SET ends_at = NOW(3), scheduled_at = NOW(3) WHERE id = ? AND ends_at > NOW(3)',
       [req.params.id]
     );
     res.json({ data: { stopped: r.affectedRows || 0 }, error: null });
