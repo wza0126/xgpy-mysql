@@ -9,12 +9,25 @@ import { sanitizeHtml, htmlToPlainText } from '../../utils/htmlUtils';
 import { parseDbClusterFilters, matchDbClusterFilters } from '../../utils/clusterFilters';
 import { clusterLabel } from '../../data/chapterTaxonomy';
 import { isOperationType } from '../../utils/questionType';
+import { API_CONFIG } from '../../api/config';
+import { getAuthToken } from '../../utils/authToken';
 import { EquipmentDropEffect } from './game/EquipmentDropEffect';
 import { useGameEventStore } from '../../store/gameEventStore';
 import { SurvivalGame } from './SurvivalGame';
 
 // PK 对战组件懒加载（避免影响主模块首屏）
 const PKBattle = lazy(() => import('./pk-battle/PKBattle').then(m => ({ default: m.PKBattle })));
+
+const API_BASE = API_CONFIG.apiUrl;
+
+/** 我领过的上网码（测试 / 考试 / 任务三条来源） */
+interface MyInternetCode {
+  code: string;
+  used_at: string;
+  source: string;
+  source_label: string;
+  title: string;
+}
 
 interface ExamRecord {
   id: string;
@@ -138,9 +151,13 @@ export const TestModule: React.FC = () => {
   const [activeExam, setActiveExam] = useState<ExamSession | null>(null);
   const [showResult, setShowResult] = useState(false);
   const [examResult, setExamResult] = useState<{ score: number; correct: number; points: number; internetCodes: number; codes: string[]; questions: Question[]; answers: Record<string, string>; isPassed: boolean } | null>(null);
-  const [testResult, setTestResult] = useState<{ score: number; correct: number; points: number; internetCode?: string; questions: Question[]; answers: Record<string, string>; droppedEquipments?: any[] } | null>(null);
+  const [testResult, setTestResult] = useState<{ score: number; correct: number; points: number; internetCode?: string; internetCodeReason?: string | null; internetCodeReward?: number; allowInternetCode?: boolean; passingScore?: number; questions: Question[]; answers: Record<string, string>; droppedEquipments?: any[] } | null>(null);
   const [showTestDetail, setShowTestDetail] = useState(false);
   const [selectedTestRecord, setSelectedTestRecord] = useState<TestRecord | null>(null);
+  // 「我的上网码」：测试/考试/任务领过的码统一查（离开结果页之后也能找回来）
+  const [myCodes, setMyCodes] = useState<MyInternetCode[]>([]);
+  const [showMyCodes, setShowMyCodes] = useState(false);
+  const [loadingMyCodes, setLoadingMyCodes] = useState(false);
   const [testDetailData, setTestDetailData] = useState<{ questions: Question[]; answers: Record<string, string> } | null>(null);
   const [showExamDetail, setShowExamDetail] = useState(false);
   const [selectedExamRecord, setSelectedExamRecord] = useState<ExamRecord | null>(null);
@@ -405,8 +422,25 @@ export const TestModule: React.FC = () => {
     }
   };
 
-  const startExam = async (exam: Test) => {
-    if (!profile) return;
+  /** 打开「我的上网码」：拉最近 60 条（测试/考试/任务），按时间倒序 */
+  const openMyCodes = async () => {
+    setShowMyCodes(true);
+    setLoadingMyCodes(true);
+    try {
+      const r = await fetch(`${API_BASE}/api/student/internet-codes`, {
+        headers: { Authorization: `Bearer ${getAuthToken()}` },
+      });
+      const j = await r.json().catch(() => null);
+      setMyCodes(Array.isArray(j?.data) ? j.data : []);
+    } catch (e) {
+      console.error('查询上网码失败:', e);
+      setMyCodes([]);
+    } finally {
+      setLoadingMyCodes(false);
+    }
+  };
+
+  const startExam = async (exam: Test) => {    if (!profile) return;
 
     // 检查考试是否已结束
     try {
@@ -1174,7 +1208,15 @@ export const TestModule: React.FC = () => {
       const droppedEquipments = dropped_equipments || [];
       console.log('[handleSubmitTest] 掉落装备:', droppedEquipments, '数量:', droppedEquipments.length);
       
-      setTestResult({ score, correct, points: points_earned, internetCode: internet_code, questions: mergeRevealIntoQuestions(activeTest.questions, (result.data as any)?.reveal_questions || []), answers: activeTest.answers, droppedEquipments });
+      setTestResult({
+        score, correct, points: points_earned, internetCode: internet_code,
+        internetCodeReason: (result.data as any)?.internet_code_reason ?? null,
+        internetCodeReward: (result.data as any)?.internet_code_reward ?? 0,
+        allowInternetCode: (result.data as any)?.allow_internet_code ?? false,
+        passingScore: (result.data as any)?.passing_score ?? 60,
+        questions: mergeRevealIntoQuestions(activeTest.questions, (result.data as any)?.reveal_questions || []),
+        answers: activeTest.answers, droppedEquipments,
+      });
       setShowResult(true);
       setActiveTest(null);
       
@@ -1500,6 +1542,31 @@ export const TestModule: React.FC = () => {
                     <i className="fa-solid fa-copy"></i>
                   </button>
                 </div>
+              </div>
+            )}
+            {/* 没拿到码时把原因说清楚（2026-11-02）：原来这里什么都不显示，学生以为系统坏了又去重考 */}
+            {!testResult.internetCode && testResult.internetCodeReason && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 max-w-lg mx-auto text-left">
+                <p className="text-sm font-medium text-amber-800 mb-1">
+                  <i className="fa-solid fa-circle-info mr-1"></i>本次没有发放上网码
+                </p>
+                <p className="text-sm text-amber-700 leading-relaxed">
+                  {testResult.internetCodeReason === 'daily'
+                    ? '今天已经从测试里领过 1 个上网码了（每个测试每天只发 1 个，重考不再发）。之前那个码可以在下面「测试记录」或「我的上网码」里查看。'
+                    : testResult.internetCodeReason === 'failed'
+                      ? `本次得分 ${testResult.score}，没有达到及格线 ${testResult.passingScore ?? 60} 分，及格才发上网码。`
+                      : testResult.internetCodeReason === 'nostock'
+                        ? '上网码库存暂时发完了，请找老师补充后再交卷。'
+                        : '这个测试本身不奖励上网码。'}
+                </p>
+                {testResult.internetCodeReason === 'daily' && (
+                  <button
+                    onClick={openMyCodes}
+                    className="mt-2 text-sm text-purple-600 hover:text-purple-700 font-medium"
+                  >
+                    <i className="fa-solid fa-wifi mr-1"></i>查看我领过的上网码
+                  </button>
+                )}
               </div>
             )}
             {testResult.droppedEquipments && testResult.droppedEquipments.length > 0 && (
@@ -2199,7 +2266,15 @@ export const TestModule: React.FC = () => {
 
       {testHistory.length > 0 && (
         <div>
-          <h3 className="text-lg font-bold text-gray-800 mb-4">测试记录</h3>
+          <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+            <h3 className="text-lg font-bold text-gray-800">测试记录</h3>
+            <button
+              onClick={openMyCodes}
+              className="px-3 py-1.5 text-sm bg-purple-50 text-purple-700 rounded-lg hover:bg-purple-100 transition-colors"
+            >
+              <i className="fa-solid fa-wifi mr-1"></i>我的上网码
+            </button>
+          </div>
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
             <table className="w-full">
               <thead className="bg-gray-50">
@@ -2208,6 +2283,7 @@ export const TestModule: React.FC = () => {
                   <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">得分</th>
                   <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">正确率</th>
                   <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">获得积分</th>
+                  <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">上网码</th>
                   <th className="px-4 py-3 text-right text-sm font-medium text-gray-600">完成时间</th>
                 </tr>
               </thead>
@@ -2216,8 +2292,8 @@ export const TestModule: React.FC = () => {
                   <tr
                     key={record.id}
                     className="hover:bg-gray-50 cursor-pointer"
-                    onDoubleClick={() => fetchTestDetail(record)}
-                    title="双击查看详情"
+                    onClick={() => fetchTestDetail(record)}
+                    title="点击查看详情"
                   >
                     <td className="px-4 py-3 text-sm text-gray-800">{(record as any).test?.title || (record as any).test?.name}</td>
                     <td className="px-4 py-3 text-center text-sm font-bold text-blue-600">{record.score}</td>
@@ -2225,14 +2301,22 @@ export const TestModule: React.FC = () => {
                       {record.total_count ? Math.round((record.correct_count || 0) / record.total_count * 100) : 0}%
                     </td>
                     <td className="px-4 py-3 text-center text-sm text-green-600">+{record.points_earned}</td>
+                    <td className="px-4 py-3 text-center text-sm">
+                      {(record as any).internet_code ? (
+                        <span className="font-mono text-purple-600">{(record as any).internet_code}</span>
+                      ) : (
+                        <span className="text-gray-400">—</span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-right text-sm text-gray-500">
-                      {new Date(record.completed_at || '').toLocaleDateString()}
+                      {new Date(record.completed_at || '').toLocaleString('zh-CN', { hour12: false })}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+          <p className="text-xs text-gray-400 mt-2">点击任意一行可以看这次的逐题作答；「上网码」一列为空表示那一次没有发码。</p>
         </div>
       )}
 
@@ -2259,6 +2343,12 @@ export const TestModule: React.FC = () => {
                     得分: <span className="font-bold text-blue-600">{selectedTestRecord.score}</span> |
                     正确: <span className="font-bold text-green-600">{selectedTestRecord.correct_count}/{selectedTestRecord.total_count}</span>
                   </p>
+                  {(selectedTestRecord as any).internet_code && (
+                    <p className="text-sm mt-1 text-purple-600">
+                      <i className="fa-solid fa-wifi mr-1"></i>本次上网码：
+                      <span className="font-mono font-bold">{(selectedTestRecord as any).internet_code}</span>
+                    </p>
+                  )}
                 </div>
                 <button
                   onClick={() => setShowTestDetail(false)}
@@ -2327,6 +2417,76 @@ export const TestModule: React.FC = () => {
                 >
                   关闭
                 </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* 我的上网码：测试 / 考试 / 任务领过的码都在这里，离开结果页也查得回来 */}
+      <AnimatePresence>
+        {showMyCodes && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+            onClick={() => setShowMyCodes(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.9 }}
+              animate={{ scale: 1 }}
+              exit={{ scale: 0.9 }}
+              className="bg-white rounded-2xl p-6 max-w-2xl w-full max-h-[85vh] overflow-hidden"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h3 className="text-lg font-bold text-gray-800">我的上网码</h3>
+                  <p className="text-xs text-gray-500 mt-1">测试、考试、任务奖励的上网码；同一天里每个测试只发 1 个</p>
+                </div>
+                <button onClick={() => setShowMyCodes(false)} className="text-gray-400 hover:text-gray-600">
+                  <i className="fa-solid fa-times text-xl"></i>
+                </button>
+              </div>
+
+              <div className="max-h-[65vh] overflow-y-auto">
+                {loadingMyCodes ? (
+                  <p className="text-sm text-gray-500 py-10 text-center">
+                    <i className="fa-solid fa-spinner fa-spin mr-2"></i>正在查询…
+                  </p>
+                ) : myCodes.length === 0 ? (
+                  <p className="text-sm text-gray-500 py-10 text-center">还没有领过上网码</p>
+                ) : (
+                  <table className="w-full">
+                    <thead className="bg-gray-50 sticky top-0">
+                      <tr>
+                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-600">上网码</th>
+                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-600">来源</th>
+                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-600">名称</th>
+                        <th className="px-3 py-2 text-right text-xs font-medium text-gray-600">领取时间</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {myCodes.map((c, i) => (
+                        <tr key={c.code + i}>
+                          <td className="px-3 py-2">
+                            <span className="font-mono text-sm text-purple-700 font-bold select-all">{c.code}</span>
+                          </td>
+                          <td className="px-3 py-2 text-xs text-gray-600">{c.source_label}</td>
+                          <td className="px-3 py-2 text-xs text-gray-600">{c.title || '—'}</td>
+                          <td className="px-3 py-2 text-xs text-gray-500 text-right">
+                            {new Date(c.used_at).toLocaleString('zh-CN', { hour12: false })}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+
+              <div className="mt-4 pt-3 border-t border-gray-200 text-xs text-gray-500">
+                码可以直接选中复制；只显示你自己的记录。
               </div>
             </motion.div>
           </motion.div>

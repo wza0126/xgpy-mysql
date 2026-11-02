@@ -4768,6 +4768,11 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
     const isPassed = score >= passingScore;
     const pointsEarned = isPassed ? Math.round((score / 100) * (test.points_reward || 50)) : 0;
     let internetCode = null;
+    // 没发码的原因，回给结果页做提示（2026-11-02：学生重考没码却看不到任何说明，以为系统坏了）
+    //   failed=没到及格线 / disabled=这个测试不奖励码 / daily=今天已经从测试领过 / nostock=库存发完
+    let internetCodeReason = null;
+    if (!isPassed) internetCodeReason = 'failed';
+    else if (!test.allow_internet_code || !(test.internet_code_reward > 0)) internetCodeReason = 'disabled';
 
     // 处理认证码奖励（先查，确保 test_record 写入正确的 internet_code）
     if (isPassed && test.allow_internet_code && test.internet_code_reward > 0) {
@@ -4791,7 +4796,11 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
             'UPDATE internet_codes SET is_used = true, used_by = ?, used_by_username = ?, used_at = NOW(), source = \'test\', source_id = ? WHERE id = ? AND is_used = false',
             [student_id, studentUsername, test_id, availableCodes[0].id]
           );
+        } else {
+          internetCodeReason = 'nostock';
         }
+      } else {
+        internetCodeReason = 'daily';
       }
     }
 
@@ -4918,6 +4927,11 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
         is_passed: isPassed,
         points_earned: pointsEarned,
         internet_code: internetCode,
+        // 没发码的原因（failed / disabled / daily / nostock），发到码时为 null
+        internet_code_reason: internetCodeReason,
+        internet_code_reward: test.internet_code_reward || 0,
+        allow_internet_code: !!test.allow_internet_code,
+        passing_score: passingScore,
         test_record_id: testRecordId,
         dropped_equipments: droppedEquipments,
         // 交卷后下发本次题目的答案与解析，供结果页回顾（题目本身已对学生脱敏）
@@ -16418,6 +16432,39 @@ app.get('/api/student/test-history', authenticate, async (req, res) => {
     res.json({ data: records, error: null });
   } catch (error) {
     console.error('Error in GET /api/student/test-history:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+// 学生「我领过的上网码」：测试 / 考试 / 任务三种来源最终都落在 internet_codes（used_by = 学生）
+// 2026-11-02 加：原来离开结果页就再也查不到自己领的码，学生会以为丢了又去重考（然后踩每天一次的限）
+app.get('/api/student/internet-codes', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.userId || req.user.id;
+    const [rows] = await pool.query(
+      `SELECT ic.code, ic.used_at, ic.source, ic.source_id,
+              t.title AS test_title, g.name AS task_name
+         FROM internet_codes ic
+         LEFT JOIN tests t ON ic.source IN ('test','exam') AND t.id = ic.source_id COLLATE utf8mb4_unicode_ci
+         LEFT JOIN game_tasks g ON ic.source = 'mission' AND g.id = ic.source_id COLLATE utf8mb4_unicode_ci
+        WHERE ic.used_by = ? AND ic.is_used = 1
+        ORDER BY ic.used_at DESC
+        LIMIT 60`,
+      [userId]
+    );
+    const data = rows.map((r) => ({
+      code: r.code,
+      used_at: r.used_at,
+      source: r.source || 'other',
+      source_label: r.source === 'test' ? '测试奖励'
+        : r.source === 'exam' ? '考试奖励'
+          : r.source === 'mission' ? '任务奖励'
+            : '老师发放',
+      title: r.test_title || r.task_name || '',
+    }));
+    res.json({ data, error: null });
+  } catch (error) {
+    console.error('Error in GET /api/student/internet-codes:', error);
     res.status(500).json({ data: null, error: error.message });
   }
 });
