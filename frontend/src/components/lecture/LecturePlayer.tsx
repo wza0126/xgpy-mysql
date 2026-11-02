@@ -285,7 +285,7 @@ export const LecturePlayer: React.FC<Props> = ({ lecture, audience = 'teacher', 
     if (!sysVoices.edge.length && !ttsConfig) return;
     setChoice((prev) => pickDefaultChoice(list, prev || localStorage.getItem(VOICE_KEY) || '', {
       xfyunDefaultId: ttsConfig?.voice || voice,
-      preferEdge: ttsConfig?.edgeDefault || normalizeNameList(ttsConfig?.edgeFavorites)[0] || '晓晓',
+      preferEdge: ttsConfig?.edgeDefault || normalizeNameList(ttsConfig?.edgeFavorites)[0] || '云健',
     }));
   }, [sysVoices, ttsConfig, voice, showAllVoices]);
 

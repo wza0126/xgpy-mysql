@@ -38,11 +38,26 @@ export interface XfyunVoice {
 
 const EDGE_NATURAL_RE = /Online\s*\(Natural\)/i;
 
-/** 系统里所有中文音色（Edge 在线 + 本机 SAPI 都会返回） */
+/**
+ * 粤语音色一律排除。
+ * ⛔ 2026-11-02 事故：学生机 Edge 在内网拿不到在线音色时降级到本机，
+ *    而 `listZhVoices()` 用 `/^zh/` 把 `zh-HK`（粤语：曉曼/雲龍/曉佳）也算成中文，
+ *    系统装了中文(香港)语音包的机器上粤语排最前 → 整节课用粤语念，学生完全听不懂。
+ * ⛔ 不能只看 lang：有的环境把粤语音色的 lang 也报成 zh-CN，名字也必须拦。
+ */
+const CANTONESE_RE = /Cantonese|zh[-_]?hk|HiuMaan|WanLung|HiuGaai|曉曼|雲龍|曉佳/i;
+export function isCantoneseVoice(v: { name?: string; lang?: string }): boolean {
+  return CANTONESE_RE.test(String(v.lang || '') + ' ' + String(v.name || ''));
+}
+
+/** 系统里所有**普通话**音色（Edge 在线 + 本机 SAPI 都会返回；粤语已剔除） */
 export function listZhVoices(): SpeechSynthesisVoice[] {
   if (typeof window === 'undefined' || !window.speechSynthesis) return [];
   const all = window.speechSynthesis.getVoices() || [];
-  return all.filter((v) => /^zh([-_]|$)/i.test(v.lang || '') || /Chinese/i.test(v.name || ''));
+  return all.filter((v) => {
+    if (isCantoneseVoice(v)) return false;
+    return /^zh([-_]|$)/i.test(v.lang || '') || /Chinese/i.test(v.name || '');
+  });
 }
 
 /** 是否 Edge 的在线自然音色（Azure Neural） */
@@ -70,13 +85,18 @@ export function shortVoiceLabel(name: string): string {
     .trim();
 }
 
-/** 默认 Edge 音色：优先「晓晓」，否则第一个中文在线音色 */
+/** 默认 Edge 音色：优先「云健」，其次「晓晓」，再不行用第一个在线音色 */
 export function pickEdgeVoice(
   edge: SpeechSynthesisVoice[],
-  prefer = '晓晓',
+  prefer = '云健',
 ): SpeechSynthesisVoice | null {
   if (!edge.length) return null;
-  return edge.find((v) => (v.name || '').includes(prefer)) || edge[0];
+  const fallback = ['云健', '晓晓', '云希'];
+  for (const name of [prefer, ...fallback]) {
+    const hit = edge.find((v) => (v.name || '').includes(name));
+    if (hit) return hit;
+  }
+  return edge[0];
 }
 
 /** 下拉里「更多发音人…」的哨兵值（不是真音色，选中它只是展开列表） */
@@ -86,11 +106,13 @@ export const VOICE_CUSTOM = '__custom__';
 
 /**
  * Edge 在线音色默认只摆这几个（其余收进「更多」）。
- * ⛔ 实测 Edge 有 14 个中文在线音色，全铺开和讯飞的十几项加起来就是二十多项，
- *    课堂上要从里面找「晓晓」很费劲 —— 这是老师明确提过的「选择成本」。
+ * ⛔ 实测 Edge 有 11 个普通话在线音色，全铺开和讯飞的十几项加起来就是二十多项，
+ *    课堂上要从里面找「云健」很费劲 —— 这是老师明确提过的「选择成本」。
+ * ⛔ 2026-11-02：原清单里的「晓辰」Edge 根本没有（只有 6 个标准 + 晓北/晓妮 + 3 个台湾），
+ *    白占一个名额；已换成真实存在的 8 个，并把「云健」排到第一（默认发音人）。
  */
-const EDGE_COMPACT = ['晓晓', '云希', '云健', '晓伊', '云扬', '晓辰'];
-const EDGE_COMPACT_MAX = 6;
+const EDGE_COMPACT = ['云健', '晓晓', '云希', '晓伊', '云扬', '云夏', '晓北', '晓妮'];
+const EDGE_COMPACT_MAX = 8;
 
 /** 收藏的 vcn 归一化：去空、去重、限量（后端也会截，这里是前端兜底） */
 export function normalizeFavorites(list?: unknown, max = 8): string[] {
@@ -282,7 +304,7 @@ export function pickDefaultChoice(
   const hasHigher = choices.some((c) => c.engine === 'edge' || c.engine === 'xfyun');
   if (savedChoice && !(savedChoice.engine === 'local' && hasHigher)) return saved;
 
-  const prefer = opts.preferEdge || '晓晓';
+  const prefer = opts.preferEdge || '云健';
   const edge = choices.filter((c) => c.engine === 'edge');
   if (edge.length) {
     return (edge.find((c) => c.label.includes(prefer)) || edge[0]).value;

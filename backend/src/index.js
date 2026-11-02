@@ -9866,7 +9866,7 @@ async function explainTtsConfigHandler(req, res) {
         // 系统设置里勾的「课堂常用发音人」：播放器只摆这几个，其余的收进「更多」
         favorites: cfg.favorites,
         edgeFavorites,
-        // 播放器打开时优先落到这个 Edge 音色（老师可在系统设置里指定，默认晓晓）
+        // 播放器打开时优先落到这个 Edge 音色（老师可在系统设置里指定，默认云健）
         edgeDefault: cfg.edgeVoice,
         speed: cfg.speed,
         volume: cfg.volume,

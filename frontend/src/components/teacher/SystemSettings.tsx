@@ -99,7 +99,7 @@ export const SystemSettings: React.FC = () => {
     xfyun_api_secret: '',
     xfyun_voice: 'xiaoyan',
     // 默认 Edge 音色（浏览器免费音色，优先使用；不可用时落回讯飞）
-    edge_default_voice: '晓晓',
+    edge_default_voice: '云健',
     // 课堂常用发音人：播放器里只摆这几个，其余收进「更多」（空数组 = 全部显示）
     xfyun_voice_favorites: [] as string[],
     // Edge 常用音色（短名，如 晓晓）：Edge 音色由浏览器提供，只有用 Edge 打开本页才看得见
@@ -285,7 +285,7 @@ export const SystemSettings: React.FC = () => {
 
   /** 默认 Edge 音色的候选：优先用浏览器真的检测到的，再补常见名字兜底（Chrome 下检测不到也能选） */
   const edgeDefaultOptions = (() => {
-    const set = new Set<string>(['晓晓', '晓伊', '晓北', '晓涵', '晓辰', '云希', '云扬', '云健', '云野']);
+    const set = new Set<string>(['云健', '晓晓', '云希', '晓伊', '云扬', '云夏', '晓北', '晓妮', '曉臻', '曉雨', '雲哲']);
     edgeVoices.forEach((v) => {
       const short = String(v.name || '').replace(/^Microsoft\s*/i, '').replace(/\s*Online.*$/i, '').trim();
       if (short) set.add(short);
@@ -1290,7 +1290,7 @@ export const SystemSettings: React.FC = () => {
                     <div className="col-span-3">
                       <label className="block text-sm font-medium text-gray-700 mb-1">默认 Edge 音色（免费，优先用）</label>
                       <select
-                        value={configs.edge_default_voice || '晓晓'}
+                        value={configs.edge_default_voice || '云健'}
                         onChange={(e) => setConfigs({ ...configs, edge_default_voice: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-amber-500"
                       >
