@@ -14,6 +14,55 @@ function mysqlNow() {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
+/**
+ * 代码归一化：抹平「与语义无关的空白」，用于判分比较。
+ *
+ * ⛔ 2026-11-04 学生反馈：标准答案写 `a + b`，填 `a+b` 判错。原来只做 trim()，
+ *    是字符级精确比较 —— 学生多一个空格、少一个空格就丢分，而 Python 里这两种写法完全等价。
+ * ⛔ 但**不能把所有空白都删掉**：`elif score < 60` 删成 `elifscore<60` 就不是 Python 了，
+ *    于是 `elifscore < 60`（错答案）也会被判对。所以规则是：
+ *      · 两个「词字符」（字母/数字/下划线/中日文）之间的空白 → 保留一个空格
+ *      · 其余位置（运算符、括号、逗号、冒号两侧）的空白 → 全部丢掉
+ *    效果：`a + b` ≡ `a+b`，`elif score<60` ≡ `elif score < 60`，但 `elifscore` 仍然判错。
+ * ⛔ 引号内的空格必须原样保留：`print("hello world")` 不能被压成 `helloworld`。
+ */
+const ID_CHAR_RE = /[A-Za-z0-9_\u4e00-\u9fa5\u3040-\u30ff]/;
+
+function normalizeCode(input) {
+  const s = String(input == null ? '' : input);
+  let out = '';
+  let quote = null;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (quote) {
+      out += ch;
+      if (ch === '\\' && i + 1 < s.length) { // 转义字符整体跳过，别把 \" 当成收尾
+        out += s[++i];
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; out += ch; continue; }
+    if (/\s/.test(ch)) {
+      let j = i;
+      while (j + 1 < s.length && /\s/.test(s[j + 1])) j++; // 连续空白一次处理完
+      i = j;
+      const prev = out[out.length - 1] || '';
+      const next = s[i + 1] || '';
+      if (prev && next && ID_CHAR_RE.test(prev) && ID_CHAR_RE.test(next)) out += ' ';
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/** 两个代码片段是否等价（忽略与语义无关的空白差异） */
+function sameCode(a, b) {
+  return normalizeCode(a) === normalizeCode(b);
+}
+
 class PythonGrader {
   constructor(options = {}) {
     this.syntaxWeight = options.syntaxWeight || 0.4;
@@ -129,7 +178,8 @@ class PythonGrader {
       const weight = blankWeights[i] != null ? Number(blankWeights[i]) : (100 / blankAnswers.length);
       totalWeight += weight;
 
-      const isCorrect = correctAnswers.some(ans => ans.trim() === studentAnswer);
+      // 忽略引号外的空白差异：`a + b` 与 `a+b` 都算对（见 normalizeCode 的说明）
+      const isCorrect = !!studentAnswer && correctAnswers.some((ans) => sameCode(ans, studentAnswer));
       if (isCorrect) {
         earnedWeight += weight;
       }
@@ -612,5 +662,9 @@ ${code}
     return comments.join('\n');
   }
 }
+
+// 供单测/replay 直接调用（判分逻辑的唯一实现在上面）
+PythonGrader.normalizeCode = normalizeCode;
+PythonGrader.sameCode = sameCode;
 
 module.exports = PythonGrader;
