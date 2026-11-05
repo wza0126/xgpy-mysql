@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence, useAnimationControls } from 'framer-motion';
 import { backendClient } from '../../api/backendClient';
 import { StudentPet, Pet, PetTip } from '../../types';
 import { useAuth } from '../../hooks/useAuth';
@@ -64,8 +64,29 @@ export const DesktopPet: React.FC<DesktopPetProps> = ({
   const [canUseApp, setCanUseApp] = useState(true);
   const [mood, setMood] = useState<DesktopMood>('idle');
   const [prevEventCount, setPrevEventCount] = useState(0);
+  // 待机小动作：每隔 9~16 秒自己蹦一下，让桌宠不像一张贴图
+  const jumpControls = useAnimationControls();
+  const [hovered, setHovered] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const clickTimerRef = useRef<ReturnType<typeof setTimeout>>();
+
+  useEffect(() => {
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const loop = () => {
+      timer = setTimeout(() => {
+        if (!alive) return;
+        jumpControls.start({
+          y: [0, -11, -4, 0],
+          scaleY: [1, 0.94, 1.04, 1],
+          transition: { duration: 0.65, ease: 'easeOut' },
+        }).catch(() => { });
+        loop();
+      }, 9000 + Math.random() * 7000);
+    };
+    loop();
+    return () => { alive = false; clearTimeout(timer); };
+  }, [jumpControls]);
 
   useEffect(() => {
     if (profile) {
@@ -301,16 +322,19 @@ export const DesktopPet: React.FC<DesktopPetProps> = ({
   if (!studentPet || !petDetails || !isVisible) return null;
 
   const petImage = getPetImage();
+  // 名字牌上显示的等级：优先展示等级（display_level），没有就用成长等级
+  const displayLevel = studentPet.display_level || studentPet.growth_level || 1;
 
   const moodVariants = {
     idle: {
-      y: [0, -4, 0],
-      scale: [1, 1.02, 1],
-      rotate: [0, -2, 2, 0],
+      // 呼吸 + 浮动 + 轻摆，三者周期错开，避免整体像机械地一起动
+      y: [0, -5, 0],
+      scale: [1, 1.028, 1],
+      rotate: [0, -1.6, 0, 1.6, 0],
       transition: {
-        y: { repeat: Infinity, duration: 3, ease: 'easeInOut' },
-        scale: { repeat: Infinity, duration: 3, ease: 'easeInOut' },
-        rotate: { repeat: Infinity, duration: 4, ease: 'easeInOut' },
+        y: { repeat: Infinity, duration: 3.2, ease: 'easeInOut' },
+        scale: { repeat: Infinity, duration: 2.6, ease: 'easeInOut' },
+        rotate: { repeat: Infinity, duration: 5.2, ease: 'easeInOut' },
       },
     },
     happy: {
@@ -375,41 +399,53 @@ export const DesktopPet: React.FC<DesktopPetProps> = ({
 
   const renderPetContent = (width: number, height: number, showShadow: boolean) => (
     <>
-      <motion.div
-        className="relative"
-        animate={moodVariants[mood]}
-        style={{ filter: moodFilter[mood] }}
-      >
-        <div
-          className="rounded-full overflow-hidden relative"
-          style={{ width, height, background: 'transparent' }}
+      {/* 三层叠加，各管一件事：
+          最外层 = 待机随机蹦跳（useAnimationControls 一次性触发，和常驻循环互不干扰）
+          中间层 = 鼠标悬停时凑近一点
+          最内层 = 心情循环（呼吸/浮动/轻摆） */}
+      <motion.div animate={jumpControls}>
+        <motion.div
+          whileHover={{ scale: 1.05, y: -3 }}
+          transition={{ type: 'spring', stiffness: 320, damping: 18 }}
         >
           <motion.div
-            className="absolute inset-0 rounded-full"
-            // ⛔ 别再用 background 数组做动画：framer-motion 会逐帧插值 CSS 渐变字符串，
-            //    浏览器每帧都要重新生成并光栅化整块渐变，是纯 CPU 开销。
-            //    改成 opacity 呼吸，视觉几乎一样，且能走合成器（2026-10-24 性能优化）。
-            style={{ background: 'radial-gradient(circle at 32% 28%, rgba(255,255,255,0.45) 0%, transparent 50%)' }}
-            animate={{ opacity: [0.55, 1, 0.55] }}
-            transition={{ repeat: Infinity, duration: 3, ease: 'easeInOut' }}
-          />
-          {petImage ? (
-            <img
-              src={petImage}
-              alt={petDetails.name}
-              className="w-full h-full object-contain"
-              style={{ background: 'transparent' }}
-            />
-          ) : (
-            <div className="w-full h-full bg-gradient-to-br from-pink-400 to-purple-500 flex items-center justify-center">
-              <i className="fa-solid fa-paw text-white text-3xl"></i>
+            className="relative"
+            animate={moodVariants[mood]}
+            style={{ filter: moodFilter[mood] }}
+          >
+            <div
+              className="rounded-full overflow-hidden relative"
+              style={{ width, height, background: 'transparent' }}
+            >
+              <motion.div
+                className="absolute inset-0 rounded-full"
+                // ⛔ 别再用 background 数组做动画：framer-motion 会逐帧插值 CSS 渐变字符串，
+                //    浏览器每帧都要重新生成并光栅化整块渐变，是纯 CPU 开销。
+                //    改成 opacity 呼吸，视觉几乎一样，且能走合成器（2026-10-24 性能优化）。
+                style={{ background: 'radial-gradient(circle at 32% 28%, rgba(255,255,255,0.45) 0%, transparent 50%)' }}
+                animate={{ opacity: [0.55, 1, 0.55] }}
+                transition={{ repeat: Infinity, duration: 3, ease: 'easeInOut' }}
+              />
+              {petImage ? (
+                <img
+                  src={petImage}
+                  alt={petDetails.name}
+                  className="w-full h-full object-contain"
+                  style={{ background: 'transparent' }}
+                  draggable={false}
+                />
+              ) : (
+                <div className="w-full h-full bg-gradient-to-br from-pink-400 to-purple-500 flex items-center justify-center">
+                  <i className="fa-solid fa-paw text-white text-3xl"></i>
+                </div>
+              )}
             </div>
-          )}
-        </div>
 
-        <AnimatePresence>
-          {moodOverlay[mood]}
-        </AnimatePresence>
+            <AnimatePresence>
+              {moodOverlay[mood]}
+            </AnimatePresence>
+          </motion.div>
+        </motion.div>
       </motion.div>
 
       {showShadow && (
@@ -422,6 +458,18 @@ export const DesktopPet: React.FC<DesktopPetProps> = ({
           }}
           transition={{ repeat: Infinity, duration: 2, ease: 'easeInOut' }}
         />
+      )}
+
+      {/* 名字 + 等级小牌：桌面上一眼知道这是谁、养到几级（56px 的专注模式小按钮不显示） */}
+      {width >= 96 && (
+        <div
+          className="pointer-events-none absolute left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full border border-white/15 bg-slate-900/60 px-2 py-[1px] text-[10px] font-medium text-white shadow-sm"
+          style={{ bottom: -16, backdropFilter: 'blur(4px)' }}
+          title={`${petDetails.name} · ${displayLevel} 级`}
+        >
+          {petDetails.name}
+          <span className="ml-1 text-amber-300">Lv.{displayLevel}</span>
+        </div>
       )}
     </>
   );
