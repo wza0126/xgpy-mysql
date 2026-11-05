@@ -1036,8 +1036,14 @@ export const Desktop: React.FC = () => {
             <i className="fa-solid fa-sign-out-alt"></i>
             退出登录
             {effectiveProfile && (
-              <span className="text-gray-200 ml-1 border-l border-gray-600 pl-2">
+              <span className="text-gray-200 ml-1 border-l border-gray-600 pl-2 whitespace-nowrap">
                 {effectiveProfile.username}
+                {/* 账号后面接着显示姓名：学生看一眼就知道自己用谁的账号登的（代理模式下更明显） */}
+                {effectiveProfile.real_name && (
+                  <span className="text-gray-400 ml-1.5" title={effectiveProfile.real_name}>
+                    {effectiveProfile.real_name}
+                  </span>
+                )}
               </span>
             )}
           </button>
