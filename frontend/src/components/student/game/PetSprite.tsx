@@ -155,7 +155,10 @@ export const PetSprite: React.FC<PetSpriteProps> = ({ imageUrl, petName, mood, l
             }}
           >
             <div
-              className="w-20 h-20 rounded-full bg-gradient-to-br from-pink-200 to-purple-200 flex items-center justify-center overflow-hidden shadow-lg"
+              // 透明底：原来这里是 from-pink-200→purple-200 的渐变圆 + shadow-lg，
+              // 宠物图本身已经是透明 PNG，再垫一层粉色就成了「粉色圆片贴纸」。
+              className="w-20 h-20 flex items-center justify-center overflow-hidden"
+              style={{ background: 'transparent', filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.18))' }}
             >
               {imageUrl ? (
                 <img

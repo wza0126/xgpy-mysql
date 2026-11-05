@@ -492,18 +492,9 @@ export const DesktopPet: React.FC<DesktopPetProps> = ({
       >
         <motion.div
           className="w-full h-full rounded-full overflow-hidden relative"
-          style={{
-            background: 'linear-gradient(135deg, #9333ea 0%, #ec4899 100%)',
-            boxShadow: '0 4px 20px rgba(147, 51, 234, 0.4)',
-          }}
-          animate={{
-            boxShadow: [
-              '0 4px 20px rgba(147, 51, 234, 0.4)',
-              '0 4px 30px rgba(236, 72, 153, 0.5)',
-              '0 4px 20px rgba(147, 51, 234, 0.4)',
-            ],
-          }}
-          transition={{ repeat: Infinity, duration: 2, ease: 'easeInOut' }}
+          // 透明底：原来这里铺了一层紫粉渐变 + 呼吸光晕，戴在深色壁纸上像一个色块；
+          // 现在只用 drop-shadow 压出轮廓，宠物自己就是圆的。
+          style={{ background: 'transparent', filter: 'drop-shadow(0 2px 5px rgba(0,0,0,0.32))' }}
         >
           {petImage ? (
             <img
@@ -511,10 +502,11 @@ export const DesktopPet: React.FC<DesktopPetProps> = ({
               alt={petDetails.name}
               className="w-full h-full object-contain"
               style={{ background: 'transparent' }}
+              draggable={false}
             />
           ) : (
             <div className="w-full h-full flex items-center justify-center">
-              <i className="fa-solid fa-paw text-white text-2xl"></i>
+              <i className="fa-solid fa-paw text-white/80 text-2xl"></i>
             </div>
           )}
           
