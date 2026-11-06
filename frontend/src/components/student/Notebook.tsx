@@ -5,6 +5,9 @@ import { Note } from '../../types';
 import { useAuth } from '../../hooks/useAuth';
 import { toDatabaseDateTime } from '../../utils/dateUtils';
 
+/** 单条笔记字符上限：防止学生粘贴大量文本导致列表渲染卡死 */
+const NOTE_MAX_LEN = 255;
+
 export const Notebook: React.FC = () => {
   const [notes, setNotes] = useState<Note[]>([]);
   const [content, setContent] = useState('');
@@ -33,6 +36,10 @@ export const Notebook: React.FC = () => {
 
   const handleSave = async () => {
     if (!profile || !content.trim()) return;
+    if (content.length > NOTE_MAX_LEN) {
+      alert(`单条笔记最多 ${NOTE_MAX_LEN} 个字符（当前 ${content.length} 个），请拆分后再保存`);
+      return;
+    }
 
     if (editingNote) {
       await backendClient
@@ -53,7 +60,12 @@ export const Notebook: React.FC = () => {
 
   const handleEdit = (note: Note) => {
     setEditingNote(note);
-    setContent(note.content || '');
+    const raw = note.content || '';
+    // ⛔ 历史上有学生存过 13 万字符的笔记，直接塞进 textarea 会把页面卡死。
+    //    这里只在「极端长度」时保护性截断，普通长笔记照常显示，让老师/学生自己删减；
+    //    保存时统一按 255 上限校验，不会因为旧数据超长就悄悄丢掉后半截。
+    const RENDER_GUARD = 20000;
+    setContent(raw.length > RENDER_GUARD ? raw.slice(0, RENDER_GUARD) : raw);
   };
 
   const handleDelete = async (id: string) => {
@@ -87,10 +99,15 @@ export const Notebook: React.FC = () => {
             </h3>
             <textarea
               value={content}
-              onChange={(e) => setContent(e.target.value)}
+              onChange={(e) => setContent(e.target.value.slice(0, NOTE_MAX_LEN))}
+              maxLength={NOTE_MAX_LEN}
               placeholder="记录学习笔记、易错知识点、解题思路,保存重要信息..."
               className="w-full h-80 p-4 border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:outline-none resize-none"
             />
+            {/* 单条上限 255：曾有人存了 13 万个 emoji，列表一渲染就卡死 */}
+            <div className={`mt-1 text-right text-xs ${content.length >= NOTE_MAX_LEN ? 'text-rose-500' : 'text-gray-400'}`}>
+              {content.length}/{NOTE_MAX_LEN}
+            </div>
             <div className="flex justify-end gap-3 mt-4">
               {editingNote && (
                 <button
@@ -128,7 +145,9 @@ export const Notebook: React.FC = () => {
                   animate={{ opacity: 1, y: 0 }}
                   className="bg-white rounded-lg p-3 shadow-sm border border-gray-200 hover:shadow-md transition-shadow"
                 >
-                  <p className="text-gray-700 text-sm line-clamp-3 mb-2">{note.content}</p>
+                  <p className="text-gray-700 text-sm line-clamp-3 mb-2">
+                    {(note.content || '').slice(0, 120)}{(note.content || '').length > 120 ? '…' : ''}
+                  </p>
                   <div className="flex items-center justify-between text-xs text-gray-400">
                     <span>{new Date(note.updated_at || '').toLocaleDateString()}</span>
                     <div className="flex gap-2">

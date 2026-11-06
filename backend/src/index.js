@@ -7,12 +7,18 @@ const { LicenseManager, FEATURES } = require('./license-manager');
 const { runMigrations } = require('./migrate');
 const { registerWebProxy, invalidateProxyPerm } = require('./web-proxy');
 const { registerWpsOp } = require('./wps-op');
+// 判分函数统一放在 composite-score.js（任务指标 / 资格校验 / 判分共用同一口径）
+const {
+  taskNormalizeAnswer, taskGetAnswersArray, taskGetOptionsArray, taskNormalizeCorrectAnswers,
+  taskCheckAnswerCorrect, judgeNormalizeBlankAnswers, judgeFillBlankAnswer,
+  judgeCompositeSubResults, getCompositeCredit,
+} = require('./composite-score');
 const { registerAccessOp } = require('./access-op');
 const { registerGameTasks } = require('./game-task');
 const { registerFarm } = require('./farm');
 const { registerStudyGalaxy } = require('./study-galaxy');
 // 操作题累计得分（资格验证第三/四项）与成就殿堂共用同一个口径函数
-const { getOpScore } = require('./game-task-metrics');
+const { getOpScore, getPythonFillScore, getCompositeScore } = require('./game-task-metrics');
 const PythonSandbox = require('./python-sandbox');
 const PythonGrader = require('./python-grader');
 const { v4: uuidv4 } = require('uuid');
@@ -1874,6 +1880,15 @@ app.get('/api/tables/:tableName/:id', authenticate, async (req, res) => {
   }
 });
 
+
+/** 记事本单条字符上限（2026-11-06）：学生在 25010435 账号存过 13 万字符，页面一打开就卡死 */
+const NOTE_MAX_LEN = 255;
+function notesContentError(tableName, data) {
+  if (tableName !== 'notes' || !data || data.content === undefined || data.content === null) return null;
+  const len = String(data.content).length;
+  return len > NOTE_MAX_LEN ? `单条笔记最多 ${NOTE_MAX_LEN} 个字符（当前 ${len} 个），请删减或分成多条` : null;
+}
+
 app.post('/api/tables/:tableName', authenticate, async (req, res) => {
   try {
     const { tableName } = req.params;
@@ -1896,6 +1911,9 @@ app.post('/api/tables/:tableName', authenticate, async (req, res) => {
     console.log('Table:', tableName);
     console.log('Data:', JSON.stringify(data, null, 2));
     
+    const noteInsertErr = notesContentError(tableName, data);
+    if (noteInsertErr) return res.status(400).json({ data: null, error: noteInsertErr });
+
     if (!data.id) {
       data.id = `local_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     }
@@ -1998,6 +2016,9 @@ app.put('/api/tables/:tableName/:id', authenticate, async (req, res) => {
     
     // 删除 id 字段，不要更新 id
     delete data.id;
+
+    const noteUpdateErr = notesContentError(tableName, data);
+    if (noteUpdateErr) return res.status(400).json({ data: null, error: noteUpdateErr });
 
     // ---- profiles 表写保护 ----
     // /api/tables 是通用表写接口，默认任何已登录用户都能改任意表任意字段。
@@ -14177,6 +14198,8 @@ async function checkQualification(studentId, rule) {
   const masteredClusters = parseMasteredClusters(rule?.qualification_mastered_clusters);
   const requiredWpsScore = Number(rule?.qualification_wps_op_score) || 0;
   const requiredAccessScore = Number(rule?.qualification_access_op_score) || 0;
+  const requiredPyFillScore = Number(rule?.qualification_python_fill_score) || 0;
+  const requiredCompositeScore = Number(rule?.qualification_composite_score) || 0;
 
   const [cntRows] = await pool.query(
     'SELECT COUNT(*) AS cnt FROM student_answers WHERE student_id = ? AND is_correct = 1',
@@ -14194,14 +14217,20 @@ async function checkQualification(studentId, rule) {
   // 只在启用时查询，避免每次资格校验都多打两次聚合（未启用条件不影响结果）
   const currentWpsScore = requiredWpsScore > 0 ? await getOpScore(pool, studentId, 'wps') : 0;
   const currentAccessScore = requiredAccessScore > 0 ? await getOpScore(pool, studentId, 'access') : 0;
+  // 编程填空 / 综合题：与任务指标同源（满分 830 / 600），未启用时不查
+  const currentPyFillScore = requiredPyFillScore > 0 ? await getPythonFillScore(pool, studentId) : 0;
+  const currentCompositeScore = requiredCompositeScore > 0 ? await getCompositeScore(pool, studentId) : 0;
 
   const correctPassed = requiredCorrect <= 0 || currentCorrect >= requiredCorrect;
   const masteredPassed = requiredMastered <= 0 || currentMastered >= requiredMastered;
   const wpsScorePassed = requiredWpsScore <= 0 || currentWpsScore >= requiredWpsScore;
   const accessScorePassed = requiredAccessScore <= 0 || currentAccessScore >= requiredAccessScore;
+  const pyFillPassed = requiredPyFillScore <= 0 || currentPyFillScore >= requiredPyFillScore;
+  const compositePassed = requiredCompositeScore <= 0 || currentCompositeScore >= requiredCompositeScore;
 
   return {
-    passed: correctPassed && masteredPassed && wpsScorePassed && accessScorePassed,
+    passed: correctPassed && masteredPassed && wpsScorePassed && accessScorePassed
+      && pyFillPassed && compositePassed,
     correct: {
       required: requiredCorrect,
       current: currentCorrect,
@@ -14228,6 +14257,20 @@ async function checkQualification(studentId, rule) {
       enabled: requiredAccessScore > 0,
       passed: accessScorePassed,
     },
+    python_fill: {
+      required: requiredPyFillScore,
+      current: currentPyFillScore,
+      enabled: requiredPyFillScore > 0,
+      passed: pyFillPassed,
+      full_score: 830,
+    },
+    composite: {
+      required: requiredCompositeScore,
+      current: currentCompositeScore,
+      enabled: requiredCompositeScore > 0,
+      passed: compositePassed,
+      full_score: 600,
+    },
   };
 }
 
@@ -14242,7 +14285,8 @@ async function getTestQualificationRule(testId) {
   const [rows] = await pool.query(
     `SELECT id, title, is_active, qualification_correct_count,
             qualification_mastered_count, qualification_mastered_clusters,
-            qualification_wps_op_score, qualification_access_op_score
+            qualification_wps_op_score, qualification_access_op_score,
+            qualification_python_fill_score, qualification_composite_score
      FROM tests WHERE id = ? LIMIT 1`,
     [testId]
   );
@@ -14389,7 +14433,8 @@ app.post('/api/student/qualification/tests', authenticate, requireStudent, async
     const [rows] = await pool.query(
       `SELECT id, qualification_correct_count,
               qualification_mastered_count, qualification_mastered_clusters,
-              qualification_wps_op_score, qualification_access_op_score
+              qualification_wps_op_score, qualification_access_op_score,
+            qualification_python_fill_score, qualification_composite_score
        FROM tests WHERE id IN (${placeholders})`,
       ids
     );
@@ -14410,7 +14455,8 @@ app.get('/api/student/qualification/pk/:configId', authenticate, requireStudent,
     const [rows] = await pool.query(
       `SELECT id, name, is_active, qualification_correct_count,
               qualification_mastered_count, qualification_mastered_clusters,
-              qualification_wps_op_score, qualification_access_op_score
+              qualification_wps_op_score, qualification_access_op_score,
+            qualification_python_fill_score, qualification_composite_score
        FROM pk_battle_configs WHERE id = ? LIMIT 1`,
       [req.params.configId]
     );
@@ -20345,10 +20391,6 @@ app.post('/api/student/tasks/:taskId/progress', authenticate, async (req, res) =
   }
 });
 
-function taskNormalizeAnswer(ans) {
-  return (ans || '').toLowerCase().trim();
-}
-
 /**
  * 统一解析学生在某个课堂任务中的状态（教师端学生列表 / 分析 / 导出共用）
  * 优先级：已完成(提交过答卷) > 练习中(动过第一题) > 未开始
@@ -20364,145 +20406,12 @@ function taskResolveStudentStatus(statusNum, practiceStartedAt) {
   return 'not_started';
 }
 
-function taskGetAnswersArray(ansField) {
-  if (!ansField) return [];
-  let parsed;
-  try {
-    parsed = typeof ansField === 'string' ? JSON.parse(ansField) : ansField;
-  } catch {
-    parsed = ansField;
-  }
-  if (Array.isArray(parsed?.answers)) return parsed.answers;
-  if (Array.isArray(parsed)) return parsed;
-  if (typeof parsed === 'string') return [parsed];
-  return [];
-}
-
-function taskGetOptionsArray(optField) {
-  if (!optField) return [];
-  let parsed;
-  try {
-    parsed = typeof optField === 'string' ? JSON.parse(optField) : optField;
-  } catch {
-    parsed = optField;
-  }
-  if (Array.isArray(parsed)) return parsed;
-  if (parsed?.options && Array.isArray(parsed.options)) return parsed.options;
-  return [];
-}
-
 // 统一把正确答案规整为数组：选择题输出选项字母（A/B/C...），填空题输出答案文本
 // 兼容存储形态：JSON 数组 / {answers:[...]} / "A" / "A,C" / 选项原文
-function taskNormalizeCorrectAnswers(ansField, questionType, options) {
-  let arr = taskGetAnswersArray(ansField);
-  arr = arr
-    .flatMap(a => (typeof a === 'string' && a.includes(',') ? a.split(',').map(s => s.trim()).filter(Boolean) : [a]))
-    .filter(a => a !== null && a !== undefined && String(a).trim() !== '');
-
-  if (questionType === 'choice' || questionType === 'multiple_choice') {
-    const opts = taskGetOptionsArray(options);
-    const mapped = arr.map(a => {
-      const norm = taskNormalizeAnswer(a);
-      if (/^[a-z]$/.test(norm)) return norm.toUpperCase();
-      const idx = opts.findIndex(o => taskNormalizeAnswer(o) === norm);
-      return idx >= 0 ? String.fromCharCode(65 + idx) : String(a).trim();
-    });
-    return Array.from(new Set(mapped)).sort();
-  }
-
-  return arr.map(a => String(a).trim());
-}
-
-function taskCheckAnswerCorrect(userAnswer, questionType, correctAnswers, options) {
-  const normUser = taskNormalizeAnswer(userAnswer);
-  const answers = taskGetAnswersArray(correctAnswers);
-  const opts = taskGetOptionsArray(options);
-  
-  if (questionType === 'fill_blank') {
-    return answers.some(a => taskNormalizeAnswer(a) === normUser);
-  }
-  
-  if (questionType === 'choice' || questionType === 'multiple_choice') {
-    const isMultiple = questionType === 'multiple_choice' || answers.length > 1;
-    
-    if (isMultiple) {
-      const userList = (userAnswer || '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean).sort();
-      let correctList = [];
-      
-      const allLetterAnswers = answers.every(a => /^[A-Z]$/i.test(taskNormalizeAnswer(a)));
-      if (allLetterAnswers) {
-        correctList = answers.map(a => taskNormalizeAnswer(a).toUpperCase()).sort();
-      } else {
-        answers.forEach(a => {
-          const idx = opts.findIndex(o => taskNormalizeAnswer(o) === taskNormalizeAnswer(a));
-          if (idx >= 0) {
-            correctList.push(String.fromCharCode(65 + idx));
-          }
-        });
-        correctList.sort();
-      }
-      
-      return userList.length === correctList.length && userList.every((v, i) => v === correctList[i]);
-    } else {
-      const isLetterAnswer = /^[A-Z]$/i.test(normUser);
-      
-      if (answers.some(a => taskNormalizeAnswer(a) === normUser)) {
-        return true;
-      }
-      
-      if (isLetterAnswer && opts.length > 0) {
-        const idx = normUser.toUpperCase().charCodeAt(0) - 65;
-        if (idx >= 0 && idx < opts.length) {
-          const optionText = taskNormalizeAnswer(opts[idx]);
-          return answers.some(a => taskNormalizeAnswer(a) === optionText);
-        }
-      }
-      
-      if (!isLetterAnswer && opts.length > 0) {
-        return answers.some(a => {
-          const normAns = taskNormalizeAnswer(a);
-          const ansIdx = opts.findIndex(o => taskNormalizeAnswer(o) === normAns);
-          return ansIdx >= 0 && taskNormalizeAnswer(opts[ansIdx]) === normUser;
-        });
-      }
-      
-      return false;
-    }
-  }
-  
-  return answers.some(a => taskNormalizeAnswer(a) === normUser);
-}
-
 // ==================== 服务端统一判分（练习 / 测试 / 考试共用） ====================
 // 背景：以前 submit-answer 直接采信前端传入的 is_correct，submit-test / submit-exam 直接采信
 //       前端传入的 questions[].answers，学生只要伪造「正确答案」就能拿到积分与装备掉落。
 //       现在一律以题库 questions 表里的正确答案为准，前端传入的判分结果只作参考、不参与计分。
-function judgeNormalizeBlankAnswers(value) {
-  if (!Array.isArray(value)) return [[]];
-  if (value.length === 0) return [[]];
-  if (value.some(item => Array.isArray(item))) {
-    return value.map(item => (Array.isArray(item) ? item : (item ? [item] : [])));
-  }
-  return value.map(item => (item ? [item] : []));
-}
-
-function judgeFillBlankAnswer(userAnswers, correctAnswers) {
-  let userList = Array.isArray(userAnswers)
-    ? userAnswers
-    : (userAnswers === undefined || userAnswers === null || userAnswers === '' ? [] : [userAnswers]);
-  // 去掉尾部的空元素再比长度：有些调用方会把数组补到固定长度（如 ['AI','流程图','','']），
-  // 严格按长度比对会把「两空都填对」判成错（2026-10-26 综合题填空小题不得分就是这个原因）。
-  // 只裁尾部空串不会放过漏填：少填一空时长度仍不足，照样判错。
-  while (userList.length > 0 && String(userList[userList.length - 1] ?? '').trim() === '') {
-    userList = userList.slice(0, -1);
-  }
-  const normalized = judgeNormalizeBlankAnswers(correctAnswers);
-  if (userList.length !== normalized.length) return false;
-  return userList.every((userAns, idx) =>
-    (normalized[idx] || []).some(ca => taskNormalizeAnswer(ca) === taskNormalizeAnswer(userAns))
-  );
-}
-
 // 复合题判分：correctField 为题库里的小题数组（或 JSON 字符串），userAnswerRaw 为学生作答 JSON
 // 约定与前端一致：choice_answers 按小题在数组中的位置（0 基）对应，blank_answers 同理
 function judgeCompositeAnswer(correctField, userAnswerRaw) {
@@ -20552,47 +20461,11 @@ function judgeQuestionAnswer(question, userAnswerRaw) {
 }
 
 // 复合题逐小题对错：答案不再下发到浏览器后，小题的对错标记也由服务端给出
-function judgeCompositeSubResults(correctField, userAnswerRaw) {
-  const subQuestions = taskGetAnswersArray(correctField);
-  if (!Array.isArray(subQuestions)) return [];
-  let parsedUser = {};
-  try {
-    parsedUser = typeof userAnswerRaw === 'string' ? JSON.parse(userAnswerRaw) : (userAnswerRaw || {});
-  } catch {
-    parsedUser = {};
-  }
-  if (!parsedUser || typeof parsedUser !== 'object') parsedUser = {};
-  return subQuestions.map((sq, idx) => {
-    if (!sq || typeof sq !== 'object') return false;
-    if (sq.type === 'fill_blank') {
-      return judgeFillBlankAnswer(parsedUser.blank_answers?.[idx], sq.answers);
-    }
-    if (sq.type === 'choice' || sq.type === 'multiple_choice') {
-      const multiple = sq.multiple === true || sq.type === 'multiple_choice';
-      return taskCheckAnswerCorrect(
-        parsedUser.choice_answers?.[idx],
-        multiple ? 'multiple_choice' : 'choice',
-        sq.answers,
-        sq.options
-      );
-    }
-    return false;
-  });
-}
-
 /**
  * 综合题按小题结算（2026-10-26 吴老定）：一道大题里的每个小题各记各的分。
  * 以前是 allCorrect 才算 1 分 —— 6 个小题错 1 个就整题归零，既不公平也看不出学生到底会几个。
  * 返回 { credit: 答对小题数, weight: 小题总数, subResults: 逐小题对错 }。
  */
-function getCompositeCredit(correctField, userAnswerRaw) {
-  const subs = taskGetAnswersArray(correctField);
-  const weight = Array.isArray(subs) && subs.length ? subs.length : 1;
-  const subResults = judgeCompositeSubResults(correctField, userAnswerRaw);
-  const credit = subResults.filter(Boolean).length;
-  return { credit, weight, subResults };
-}
-
 // 18. 提交答题
 app.post('/api/student/tasks/:taskId/submit', authenticate, async (req, res) => {
   try {
@@ -22262,6 +22135,7 @@ app.post('/api/pk/battle-configs', authenticate, requireTeacher, async (req, res
       qualification_correct_count, qualification_mastered_count,
       qualification_mastered_clusters,
       qualification_wps_op_score, qualification_access_op_score,
+      qualification_python_fill_score, qualification_composite_score,
       points_multiplier, win_bonus_rate, draw_bonus_rate,
       consolation_points, consolation_gap, first_battle_points,
       daily_battles_target, daily_battles_points,
@@ -22289,11 +22163,12 @@ app.post('/api/pk/battle-configs', authenticate, requireTeacher, async (req, res
           tag_filters, cluster_filters, difficulty_min, difficulty_max, is_active, daily_limit,
           qualification_correct_count, qualification_mastered_count, qualification_mastered_clusters,
           qualification_wps_op_score, qualification_access_op_score,
+      qualification_python_fill_score, qualification_composite_score,
           points_multiplier, win_bonus_rate, draw_bonus_rate,
           consolation_points, consolation_gap, first_battle_points,
           daily_battles_target, daily_battles_points,
           equipment_drop_enabled, equipment_drop_multiplier)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, req.user.userId, name, mode || 'timed',
          duration_seconds || 180, question_count || 20,
          tag_filters ? JSON.stringify(tag_filters) : null,
@@ -22304,6 +22179,8 @@ app.post('/api/pk/battle-configs', authenticate, requireTeacher, async (req, res
          qualification_mastered_count || null, masteredClusters,
          qualification_wps_op_score || null,
          qualification_access_op_score || null,
+         qualification_python_fill_score || null,
+         qualification_composite_score || null,
          reward.points_multiplier, reward.win_bonus_rate, reward.draw_bonus_rate,
          reward.consolation_points, reward.consolation_gap, reward.first_battle_points,
          reward.daily_battles_target, reward.daily_battles_points,
@@ -22331,6 +22208,7 @@ app.put('/api/pk/battle-configs/:id', authenticate, requireTeacher, async (req, 
       qualification_correct_count, qualification_mastered_count,
       qualification_mastered_clusters,
       qualification_wps_op_score, qualification_access_op_score,
+      qualification_python_fill_score, qualification_composite_score,
       points_multiplier, win_bonus_rate, draw_bonus_rate,
       consolation_points, consolation_gap, first_battle_points,
       daily_battles_target, daily_battles_points,
@@ -22380,6 +22258,8 @@ app.put('/api/pk/battle-configs/:id', authenticate, requireTeacher, async (req, 
          qualification_mastered_count || null, masteredClusters,
          qualification_wps_op_score || null,
          qualification_access_op_score || null,
+         qualification_python_fill_score || null,
+         qualification_composite_score || null,
          reward.points_multiplier, reward.win_bonus_rate, reward.draw_bonus_rate,
          reward.consolation_points, reward.consolation_gap, reward.first_battle_points,
          reward.daily_battles_target, reward.daily_battles_points,

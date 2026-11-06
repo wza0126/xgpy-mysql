@@ -21,13 +21,13 @@ interface Announcement {
   active: boolean;
 }
 
-/** 预设时长（秒）：课堂上一条公告通常要挂半节课，5 秒/1 分钟那种等于没发 */
+/** 预设时长（秒）：按一节课的节奏来 —— 吴老一节课 40 分钟，所以 40 分钟是最常用档 */
 const DURATION_PRESETS = [
   { label: '5 分钟', value: 300 },
-  { label: '15 分钟', value: 900 },
+  { label: '10 分钟', value: 600 },
   { label: '20 分钟', value: 1200 },
-  { label: '25 分钟', value: 1500 },
-  { label: '30 分钟', value: 1800 },
+  { label: '40 分钟', value: 2400 },
+  { label: '60 分钟', value: 3600 },
 ];
 
 const DRAFT_KEY = 'xgpy_pet_announce_draft';
@@ -64,7 +64,7 @@ function toLocalInput(d: Date): string {
  * 入口：萌宠配置 →「提示语」栏目；通知管理页顶部「萌宠公告」按钮。
  *
  * 2026-11-02 三处增强：
- *   · 自动关闭时长改成 5/15/20/25/30 分钟 + 自定义（原来 5 秒起，等于没发）；
+ *   · 自动关闭时长改成 5/10/20/40/60 分钟 + 自定义（原来 5 秒起，等于没发；40 分钟 = 一节课）；
  *   · 支持**定时发布**：提前把第四节课的公告定好，到点自动出现；
  *   · 新增「公告草稿」文本框，输入自动存本机（localStorage），下次打开还在。
  */

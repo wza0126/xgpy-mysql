@@ -51,6 +51,8 @@ export const TestManager: React.FC = () => {
     qualification_mastered_clusters: [] as string[],
     qualification_wps_op_score: 0,
     qualification_access_op_score: 0,
+    qualification_python_fill_score: 0,
+    qualification_composite_score: 0,
     daily_test_limit: 0,
   });
   const [allTags, setAllTags] = useState<string[]>([]);
@@ -159,6 +161,9 @@ export const TestManager: React.FC = () => {
     // 0 / 空 = 不启用，统一写 null，与后端「NULL 即不限制」口径一致。
     data.qualification_wps_op_score = Number(formData.qualification_wps_op_score) || null;
     data.qualification_access_op_score = Number(formData.qualification_access_op_score) || null;
+    // 编程填空（满分 830）/ 综合题（满分 600）：0 或空 = 不启用
+    data.qualification_python_fill_score = Number(formData.qualification_python_fill_score) || null;
+    data.qualification_composite_score = Number(formData.qualification_composite_score) || null;
 
     try {
       if (editingTest) {
@@ -215,6 +220,8 @@ export const TestManager: React.FC = () => {
       qualification_mastered_clusters: [],
       qualification_wps_op_score: 0,
       qualification_access_op_score: 0,
+      qualification_python_fill_score: 0,
+      qualification_composite_score: 0,
       daily_test_limit: 0,
     });
   };
@@ -294,6 +301,8 @@ export const TestManager: React.FC = () => {
       qualification_mastered_clusters: parseTags(testData.qualification_mastered_clusters),
       qualification_wps_op_score: testData.qualification_wps_op_score || 0,
       qualification_access_op_score: testData.qualification_access_op_score || 0,
+      qualification_python_fill_score: testData.qualification_python_fill_score || 0,
+      qualification_composite_score: testData.qualification_composite_score || 0,
       daily_test_limit: parseInt(testData.daily_test_limit, 10) || 0,
     });
     setShowModal(true);
@@ -735,6 +744,48 @@ export const TestManager: React.FC = () => {
                     </div>
                     <p className="text-xs text-gray-400 mt-1">
                       统计学生在「操作题」里 Access 操作题的历史累计得分（与条件三各自独立，两项都填则都要达标）
+                    </p>
+                  </div>
+
+                  {/* 条件五：累计编程填空得分（满分 830） */}
+                  <div className="bg-white/70 rounded-lg p-3">
+                    <p className="text-xs font-medium text-blue-700 mb-2">条件五 · 累计编程填空得分</p>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-gray-600 whitespace-nowrap">累计得分达到</span>
+                      <input
+                        type="number"
+                        value={formData.qualification_python_fill_score}
+                        onChange={(e) => setFormData({ ...formData, qualification_python_fill_score: parseInt(e.target.value) || 0 })}
+                        className="w-24 p-2 border border-gray-300 rounded-lg text-center"
+                        min={0}
+                        max={830}
+                      />
+                      <span className="text-sm text-gray-600 whitespace-nowrap">分</span>
+                      <span className="text-xs text-gray-400">（满分 830：83 题 × 10 分）</span>
+                    </div>
+                    <p className="text-xs text-gray-400 mt-1">
+                      编程填空题每道按历史最好成绩计，重做不累加；编程作业<b>不计入</b>。填 0 表示不限制
+                    </p>
+                  </div>
+
+                  {/* 条件六：累计综合题得分（满分 600） */}
+                  <div className="bg-white/70 rounded-lg p-3">
+                    <p className="text-xs font-medium text-blue-700 mb-2">条件六 · 累计综合题得分</p>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-gray-600 whitespace-nowrap">累计得分达到</span>
+                      <input
+                        type="number"
+                        value={formData.qualification_composite_score}
+                        onChange={(e) => setFormData({ ...formData, qualification_composite_score: parseInt(e.target.value) || 0 })}
+                        className="w-24 p-2 border border-gray-300 rounded-lg text-center"
+                        min={0}
+                        max={600}
+                      />
+                      <span className="text-sm text-gray-600 whitespace-nowrap">分</span>
+                      <span className="text-xs text-gray-400">（满分 600：30 题）</span>
+                    </div>
+                    <p className="text-xs text-gray-400 mt-1">
+                      综合题按小题分值结算，取每道题的历史最好成绩之和，与「综合题练习」页显示的「我已得」同口径。填 0 表示不限制
                     </p>
                   </div>
                 </div>

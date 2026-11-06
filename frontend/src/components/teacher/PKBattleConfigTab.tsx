@@ -66,6 +66,8 @@ interface PKBattleConfig {
   qualification_mastered_clusters: string[] | string | null;
   qualification_wps_op_score: number | null;
   qualification_access_op_score: number | null;
+  qualification_python_fill_score: number | null;
+  qualification_composite_score: number | null;
   // ===== 奖励配置（迁移 086）=====
   points_multiplier: number | string | null;
   win_bonus_rate: number | string | null;
@@ -111,6 +113,8 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
     qualification_mastered_clusters: [] as string[],
     qualification_wps_op_score: '' as string | number,
     qualification_access_op_score: '' as string | number,
+    qualification_python_fill_score: '' as string | number,
+    qualification_composite_score: '' as string | number,
     // ===== 奖励配置 =====
     points_multiplier: 1 as string | number,
     win_bonus_rate: 0.5 as string | number,
@@ -195,6 +199,8 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
       qualification_mastered_clusters: [],
       qualification_wps_op_score: '',
       qualification_access_op_score: '',
+      qualification_python_fill_score: '',
+      qualification_composite_score: '',
       points_multiplier: 1,
       win_bonus_rate: 0.5,
       draw_bonus_rate: 0,
@@ -233,6 +239,8 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
       qualification_mastered_clusters: parseJsonArray(cfg.qualification_mastered_clusters),
       qualification_wps_op_score: cfg.qualification_wps_op_score ?? '',
       qualification_access_op_score: cfg.qualification_access_op_score ?? '',
+      qualification_python_fill_score: cfg.qualification_python_fill_score ?? '',
+      qualification_composite_score: cfg.qualification_composite_score ?? '',
       points_multiplier: cfg.points_multiplier != null ? Number(cfg.points_multiplier) : 1,
       win_bonus_rate: cfg.win_bonus_rate != null ? Number(cfg.win_bonus_rate) : 0.5,
       draw_bonus_rate: cfg.draw_bonus_rate != null ? Number(cfg.draw_bonus_rate) : 0,
@@ -354,6 +362,15 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
         formData.qualification_access_op_score === ''
           ? null
           : Number(formData.qualification_access_op_score),
+      // 编程填空（满分 830）/ 综合题（满分 600）：空 = 不启用
+      qualification_python_fill_score:
+        formData.qualification_python_fill_score === ''
+          ? null
+          : Number(formData.qualification_python_fill_score),
+      qualification_composite_score:
+        formData.qualification_composite_score === ''
+          ? null
+          : Number(formData.qualification_composite_score),
       // ===== 奖励配置 =====
       points_multiplier: numOr(formData.points_multiplier, 1),
       win_bonus_rate: numOr(formData.win_bonus_rate, 0.5),
@@ -558,6 +575,18 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
                     <span>
                       <i className="fa-solid fa-database mr-1"></i>
                       需Access操作题累计 {cfg.qualification_access_op_score} 分
+                    </span>
+                  )}
+                  {cfg.qualification_python_fill_score != null && cfg.qualification_python_fill_score > 0 && (
+                    <span>
+                      <i className="fa-solid fa-keyboard mr-1"></i>
+                      需编程填空累计 {cfg.qualification_python_fill_score} 分
+                    </span>
+                  )}
+                  {cfg.qualification_composite_score != null && cfg.qualification_composite_score > 0 && (
+                    <span>
+                      <i className="fa-solid fa-list-check mr-1"></i>
+                      需综合题累计 {cfg.qualification_composite_score} 分
                     </span>
                   )}
                   {tags.length > 0 && (
@@ -883,6 +912,52 @@ export const PKBattleConfigTab: React.FC<Props> = ({ clusterTree, allTags }) => 
                     </div>
                     <p className="text-xs text-gray-400 mt-1">
                       统计学生在「操作题」里 Access 操作题的历史累计得分（与条件三各自独立，两项都填则都要达标）
+                    </p>
+                  </div>
+
+                  {/* 条件五：累计编程填空得分（满分 830） */}
+                  <div className="bg-white/70 rounded-lg p-3">
+                    <p className="text-xs font-medium text-blue-700 mb-2">条件五 · 累计编程填空得分</p>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-gray-600 whitespace-nowrap">累计得分达到</span>
+                      <input
+                        type="number"
+                        value={formData.qualification_python_fill_score}
+                        onChange={(e) =>
+                          setFormData({ ...formData, qualification_python_fill_score: e.target.value })
+                        }
+                        className="w-24 p-2 border border-gray-300 rounded-lg text-center"
+                        min={0}
+                        max={830}
+                      />
+                      <span className="text-sm text-gray-600 whitespace-nowrap">分</span>
+                      <span className="text-xs text-gray-400">（满分 830：83 题 × 10 分）</span>
+                    </div>
+                    <p className="text-xs text-gray-400 mt-1">
+                      每题按历史最好成绩计，重做不累加；编程作业<b>不计入</b>。留空 = 不限制
+                    </p>
+                  </div>
+
+                  {/* 条件六：累计综合题得分（满分 600） */}
+                  <div className="bg-white/70 rounded-lg p-3">
+                    <p className="text-xs font-medium text-blue-700 mb-2">条件六 · 累计综合题得分</p>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-gray-600 whitespace-nowrap">累计得分达到</span>
+                      <input
+                        type="number"
+                        value={formData.qualification_composite_score}
+                        onChange={(e) =>
+                          setFormData({ ...formData, qualification_composite_score: e.target.value })
+                        }
+                        className="w-24 p-2 border border-gray-300 rounded-lg text-center"
+                        min={0}
+                        max={600}
+                      />
+                      <span className="text-sm text-gray-600 whitespace-nowrap">分</span>
+                      <span className="text-xs text-gray-400">（满分 600：30 题）</span>
+                    </div>
+                    <p className="text-xs text-gray-400 mt-1">
+                      按小题分值结算，取每题历史最好成绩之和，与「综合题练习」页的「我已得」同口径。留空 = 不限制
                     </p>
                   </div>
                 </div>

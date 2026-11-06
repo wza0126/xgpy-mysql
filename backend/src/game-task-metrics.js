@@ -108,6 +108,60 @@ async function getOpScore(pool, studentId, kind) {
   return scalar(pool, sql, args, 's');
 }
 
+/**
+ * 累计编程填空得分：每道题取**历史最好**一次（老师调过分按调整后算），再加总。
+ * 83 道题 × 每題 10 分 = 满分 830。
+ * ⛔ 只算 task_type='fill_blank' 且 is_active=1；编程作业（code）不计入这个指标。
+ */
+async function getPythonFillScore(pool, studentId) {
+  return scalar(pool,
+    'SELECT COALESCE(SUM(t.best), 0) AS s FROM (' +
+    '  SELECT MAX(COALESCE(g.adjusted_score, g.total_score)) AS best' +
+    '    FROM python_gradings g JOIN python_tasks t ON t.id = g.task_id' +
+    "   WHERE g.student_id = ? AND t.task_type = 'fill_blank' AND t.is_active = 1" +
+    '   GROUP BY g.task_id) t',
+    [studentId], 's');
+}
+
+/**
+ * 累计综合题得分：每道题取历史最好的「按小题分值累计」成绩，再加总（30 题 = 满分 600）。
+ * ⛔ 判分必须走 composite-score.getCompositeCredit —— 与练习页显示的「我已得」同源，
+ *    不能在这里另写一套比对逻辑（两套口径打架，学生看到的分数会对不上）。
+ */
+async function getCompositeScore(pool, studentId) {
+  const { getCompositeCredit, taskGetAnswersArray } = require('./composite-score');
+  const [qs] = await pool.query(
+    "SELECT id, answers FROM questions WHERE practice_enabled = 1 AND type = 'composite'"
+  );
+  if (!qs.length) return 0;
+
+  const [rows] = await pool.query(
+    "SELECT question_id, answer FROM student_answers WHERE student_id = ? AND source = 'practice'",
+    [studentId]
+  );
+  const byQuestion = new Map();
+  for (const r of rows) {
+    if (!byQuestion.has(r.question_id)) byQuestion.set(r.question_id, []);
+    byQuestion.get(r.question_id).push(r.answer);
+  }
+
+  let total = 0;
+  for (const q of qs) {
+    const attempts = byQuestion.get(q.id);
+    if (!attempts || !attempts.length) continue;
+    const subs = taskGetAnswersArray(q.answers) || [];
+    const scoreOf = (i) => Number(subs[i] && subs[i].score) || 1;
+    let best = 0;
+    for (const raw of attempts) {
+      const { subResults } = getCompositeCredit(q.answers, raw);
+      const earned = subResults.reduce((sum, ok, i) => sum + (ok ? scoreOf(i) : 0), 0);
+      if (earned > best) best = earned;
+    }
+    total += best;
+  }
+  return total;
+}
+
 const METRIC_DEFS = {
   // ============================================================
   // 一、当日口径（scope:'daily'）—— 一期每日任务用
@@ -355,6 +409,32 @@ const METRIC_DEFS = {
     async calc(pool, studentId, params) {
       const kind = params && params.kind;
       return { value: await getOpScore(pool, studentId, kind) };
+    },
+  },
+
+  // ---- 累计编程填空得分 ----
+  total_python_fill_score: {
+    label: '累计编程填空得分',
+    unit: '分',
+    hint: '83 道编程填空题各自历史最好得分之和（满分 830，每题 10 分）；同一道题重做只按最好一次计，老师调过分的按调整后算。编程作业不计入',
+    scope: 'total',
+    series: 'op',
+    params: [],
+    async calc(pool, studentId) {
+      return { value: await getPythonFillScore(pool, studentId) };
+    },
+  },
+
+  // ---- 累计综合题得分 ----
+  total_composite_score: {
+    label: '累计综合题得分',
+    unit: '分',
+    hint: '30 道综合题各自历史最好得分之和（满分 600）；综合题按小题分值结算，与「综合题练习」页显示的「我已得」同口径',
+    scope: 'total',
+    series: 'master',
+    params: [],
+    async calc(pool, studentId) {
+      return { value: await getCompositeScore(pool, studentId) };
     },
   },
 
