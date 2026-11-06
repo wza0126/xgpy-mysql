@@ -650,5 +650,7 @@ module.exports = {
   getProgressBatch,
   getMasterThreshold,
   getOpScore,
+  getPythonFillScore,
+  getCompositeScore,
   DEFAULT_MASTER_THRESHOLD,
 };
