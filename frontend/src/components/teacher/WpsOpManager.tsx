@@ -677,6 +677,22 @@ export const WpsOpManager: React.FC = () => {
 
   useEffect(() => { load(); }, [load]);
 
+  /** 上架 / 下架：只改 practice_enabled，不动题干与判分配置 */
+  const toggleEnabled = async (row: any) => {
+    const next = Number(row.practice_enabled) === 1 ? 0 : 1;
+    try {
+      const { error } = await backendClient.from('questions').update({ practice_enabled: next }).eq('id', row.id);
+      if (error) throw new Error((error as any).error || (error as any).message || '操作失败');
+      setMsg({
+        type: 'ok',
+        text: next === 1 ? '已上架，学生端可以练这道题了' : '已下架，学生端不再显示这道题',
+      });
+      await load();
+    } catch (e: any) {
+      setMsg({ type: 'err', text: e?.message || '操作失败' });
+    }
+  };
+
   useEffect(() => { setSpecJson(JSON.stringify(spec, null, 2)); }, [spec]);
 
   const clusterOptions = useMemo(() => {
@@ -1866,6 +1882,19 @@ export const WpsOpManager: React.FC = () => {
                   )}
                 </div>
                 <div className="flex flex-none gap-2">
+                  {/* 上下架：practice_enabled 决定学生端能不能看到这道题。
+                      原来这里只有「编辑/删除」，老师找不到上架入口，题目一直是隐藏状态。 */}
+                  <button
+                    onClick={() => toggleEnabled(r)}
+                    title={Number(r.practice_enabled) === 1 ? '下架后学生看不到这道题' : '上架后学生可以练习这道题'}
+                    className={`rounded border px-3 py-1 text-xs ${
+                      Number(r.practice_enabled) === 1
+                        ? 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                        : 'border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                    }`}
+                  >
+                    {Number(r.practice_enabled) === 1 ? '下架' : '上架'}
+                  </button>
                   <button onClick={() => startEdit(r)} className="rounded border border-gray-300 px-3 py-1 text-xs text-gray-700 hover:bg-gray-50">编辑</button>
                   <button onClick={() => remove(r)} className="rounded border border-rose-200 px-3 py-1 text-xs text-rose-600 hover:bg-rose-50">删除</button>
                 </div>
