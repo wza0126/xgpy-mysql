@@ -595,16 +595,15 @@ export const DesktopPet: React.FC<DesktopPetProps> = ({
       >
         <div
           className="relative w-full h-full rounded-full overflow-hidden"
-          style={{
-            background: 'linear-gradient(135deg, #f9a8d4 0%, #c4b5fd 100%)',
-            boxShadow: '0 2px 10px rgba(0,0,0,0.12)',
-          }}
+          // 透明底：这里原来铺的是 #f9a8d4→#c4b5fd 粉紫渐变（v3.6.6 只改了专注模式那条分支，
+          // 而学生默认是「收起态」，看到的其实是这一条），现在只留投影。
+          style={{ background: 'transparent', filter: 'drop-shadow(0 2px 5px rgba(0,0,0,0.3))' }}
         >
           {petImage ? (
-            <img src={petImage} alt={petDetails.name} className="w-full h-full object-contain" />
+            <img src={petImage} alt={petDetails.name} className="w-full h-full object-contain" draggable={false} />
           ) : (
             <div className="w-full h-full flex items-center justify-center">
-              <i className="fa-solid fa-paw text-white text-2xl"></i>
+              <i className="fa-solid fa-paw text-white/80 text-2xl"></i>
             </div>
           )}
         </div>

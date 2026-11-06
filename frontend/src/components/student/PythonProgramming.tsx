@@ -688,6 +688,26 @@ export const PythonProgramming: React.FC = () => {
           {activeTab === 'tasks' && (
             <div className="p-4">
               <h3 className="font-medium text-gray-700 mb-3">作业任务</h3>
+              {/* 作业合计：所有作业的满分之和 + 我已经拿到的分数（老师调过分按调整后算） */}
+              {(() => {
+                const list = tasks.filter(t => t.task_type !== 'fill_blank');
+                const full = list.reduce((s, t) => s + (Number(t.total_score) || 0), 0);
+                let earned = 0, done = 0;
+                for (const t of list) {
+                  const g: any = submissions[t.id]?.grading;
+                  const sc = g ? (g.adjusted_score ?? g.total_score) : (t as any).grade_score;
+                  if (sc != null && sc !== '') { earned += Number(sc); done += 1; }
+                }
+                if (!list.length) return null;
+                return (
+                  <div className="mb-3 rounded-lg bg-sky-50 border border-sky-100 px-3 py-2 text-[11px] text-sky-800 leading-relaxed">
+                    共 <b>{list.length}</b> 题 · 满分 <b>{full}</b> 分
+                    <span className="mx-1 text-sky-300">|</span>
+                    已得 <b className="text-sky-700">{earned}</b> 分
+                    <span className="ml-1 text-sky-500">（{done}/{list.length} 题已批改）</span>
+                  </div>
+                );
+              })()}
               {loading ? (
                 <div className="text-center text-gray-400 py-4">加载中...</div>
               ) : tasks.filter(t => t.task_type !== 'fill_blank').length === 0 ? (
@@ -734,6 +754,26 @@ export const PythonProgramming: React.FC = () => {
           {activeTab === 'fill_blank' && (
             <div className="p-4">
               <h3 className="font-medium text-gray-700 mb-3">编程填空</h3>
+              {/* 填空合计：全部填空题满分之和 + 我已得分数（只统计已批改的） */}
+              {(() => {
+                const list = allFillTasks;
+                const full = list.reduce((s, t) => s + (Number(t.total_score) || 0), 0);
+                let earned = 0, done = 0;
+                for (const t of list) {
+                  const g: any = submissions[t.id]?.grading;
+                  const sc = g ? (g.adjusted_score ?? g.total_score) : (t as any).grade_score;
+                  if (sc != null && sc !== '') { earned += Number(sc); done += 1; }
+                }
+                if (!list.length) return null;
+                return (
+                  <div className="mb-3 rounded-lg bg-purple-50 border border-purple-100 px-3 py-2 text-[11px] text-purple-800 leading-relaxed">
+                    共 <b>{list.length}</b> 题 · 满分 <b>{full}</b> 分
+                    <span className="mx-1 text-purple-300">|</span>
+                    已得 <b className="text-purple-700">{earned}</b> 分
+                    <span className="ml-1 text-purple-500">（{done}/{list.length} 题已批改）</span>
+                  </div>
+                );
+              })()}
               {/* 按结构筛选：默认「全部」，把 83 道一次列出来 */}
               <div className="mb-3 flex flex-wrap gap-1.5">
                 {[{ key: '', label: '全部' }, ...FILL_CATEGORIES.map((c) => ({ key: c, label: c }))].map((opt) => {

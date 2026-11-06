@@ -8245,7 +8245,8 @@ app.get('/api/python/tasks', authenticate, async (req, res) => {
       SELECT t.*,
       s.status as submission_status,
       s.id as submission_id,
-      g.total_score as grade_score
+      /* 老师调过分就以 adjusted_score 为准，与全站分数口径一致 */
+      COALESCE(g.adjusted_score, g.total_score) as grade_score
       FROM python_tasks t
       LEFT JOIN python_submissions s ON t.id = s.task_id AND s.student_id = ?
       LEFT JOIN python_gradings g ON s.id = g.submission_id
