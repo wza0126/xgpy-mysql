@@ -507,5 +507,9 @@ module.exports = [
   {
     "version": "124_pet_announcement_schedule.sql",
     "sql": "-- 萌宠公告 · 定时发布（2026-11-02）\n--\n-- 背景：原来只能在「上课前那一刻」发，老师想提前发（比如早读就定好第四节课的公告）做不到。\n--\n-- 做法：加一列 scheduled_at = 计划开始时间。\n--   · 立即发布：scheduled_at = NOW()，ends_at = NOW() + 时长（与历史行为一致）\n--   · 定时发布：scheduled_at = 指定时间，ends_at = scheduled_at + 时长\n--   · 生效判定统一成 scheduled_at <= NOW() AND ends_at > NOW()\n--\n-- ⛔ 历史行 scheduled_at 为 NULL，回填成 started_at，保证老数据继续按「已在生效」处理。\n-- ⛔ 学生端读到「未到时间」的行必须过滤掉，否则学生会在公告还没开始时就看到公告。\nALTER TABLE `pet_announcements`\n  ADD COLUMN IF NOT EXISTS `scheduled_at` DATETIME(3) NULL DEFAULT NULL\n    COMMENT '计划开始时间；NULL 视为立即生效（历史数据）' AFTER `ends_at`;\n\nUPDATE `pet_announcements` SET `scheduled_at` = `started_at` WHERE `scheduled_at` IS NULL;\n\nALTER TABLE `pet_announcements` ADD INDEX IF NOT EXISTS `idx_pa_scheduled` (`scheduled_at`);\n"
+  },
+  {
+    "version": "125_python_composite_qualification.sql",
+    "sql": "-- 普通测试 / 考试 / 试卷 PK 资格验证新增两项：累计编程填空得分、累计综合题得分（2026-11-06）\n--\n-- 口径与「刷题打怪系统 → 任务系统」的两个指标完全一致（src/game-task-metrics.js）：\n--   · 累计编程填空得分 total_python_fill_score：83 道题各自历史最好得分之和，满分 830（每题 10 分）\n--     ⛔ 编程作业（task_type='code'）不计入\n--   · 累计综合题得分   total_composite_score  ：30 道题各自历史最好得分之和，满分 600\n--     ⛔ 判分必须走 composite-score.getCompositeCredit（按小题分值累计），与练习页同源\n--\n-- 与原有的「做对题数」「已掌握题数」「WPS/Access 操作题得分」是 AND 关系：\n-- 全部条件同时满足才能参加。任一阈值为 NULL / 0 即视为该条件不启用。\n--\n-- 与迁移 085 / 116 的写法保持一致：tests 与 pk_battle_configs 两张表各自加同名列。\nALTER TABLE `tests`\nADD COLUMN IF NOT EXISTS `qualification_python_fill_score` INT DEFAULT NULL COMMENT '所需累计编程填空得分，NULL表示不限制',\nADD COLUMN IF NOT EXISTS `qualification_composite_score` INT DEFAULT NULL COMMENT '所需累计综合题得分，NULL表示不限制';\n\nALTER TABLE `pk_battle_configs`\nADD COLUMN IF NOT EXISTS `qualification_python_fill_score` INT DEFAULT NULL COMMENT '所需累计编程填空得分，NULL表示不限制',\nADD COLUMN IF NOT EXISTS `qualification_composite_score` INT DEFAULT NULL COMMENT '所需累计综合题得分，NULL表示不限制';\n"
   }
 ];
