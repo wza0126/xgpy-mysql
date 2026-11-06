@@ -491,6 +491,18 @@ export const PKLobby: React.FC<{
                   {qual.access_op.passed ? ' ✓' : ''}
                 </p>
               )}
+              {qual.python_fill?.enabled && (
+                <p className="pl-6">
+                  · 编程填空累计得 <b>{qual.python_fill.required}</b> 分（当前 <b>{qual.python_fill.current}</b> 分，满分 830）
+                  {qual.python_fill.passed ? ' ✓' : ''}
+                </p>
+              )}
+              {qual.composite?.enabled && (
+                <p className="pl-6">
+                  · 综合题累计得 <b>{qual.composite.required}</b> 分（当前 <b>{qual.composite.current}</b> 分，满分 600）
+                  {qual.composite.passed ? ' ✓' : ''}
+                </p>
+              )}
             </>
           ) : (
             <>

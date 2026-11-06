@@ -1048,6 +1048,7 @@ export const TestModule: React.FC = () => {
     if (qualCheck && (
       qualCheck.correct?.enabled || qualCheck.mastered?.enabled
       || qualCheck.wps_op?.enabled || qualCheck.access_op?.enabled
+      || qualCheck.python_fill?.enabled || qualCheck.composite?.enabled
     ) && !qualCheck.passed) {
       const parts: string[] = [];
       if (qualCheck.correct?.enabled && !qualCheck.correct.passed) {
@@ -1064,6 +1065,12 @@ export const TestModule: React.FC = () => {
       }
       if (qualCheck.access_op?.enabled && !qualCheck.access_op.passed) {
         parts.push(`Access操作题累计得 ${qualCheck.access_op.required} 分（当前 ${qualCheck.access_op.current} 分）`);
+      }
+      if (qualCheck.python_fill?.enabled && !qualCheck.python_fill.passed) {
+        parts.push(`编程填空累计得 ${qualCheck.python_fill.required} 分（当前 ${qualCheck.python_fill.current} 分，满分 830）`);
+      }
+      if (qualCheck.composite?.enabled && !qualCheck.composite.passed) {
+        parts.push(`综合题累计得 ${qualCheck.composite.required} 分（当前 ${qualCheck.composite.current} 分，满分 600）`);
       }
       alert(`资格不足：需要先${parts.join('，且')}才能参加该测试`);
       return;
