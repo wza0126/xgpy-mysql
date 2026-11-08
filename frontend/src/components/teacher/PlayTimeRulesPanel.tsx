@@ -112,6 +112,15 @@ export const PlayTimeRulesPanel: React.FC = () => {
             ))}
           </div>
 
+          <div className="mt-4 bg-white/70 rounded-lg p-3 text-xs text-gray-500 space-y-1">
+            <p className="font-medium text-gray-600 mb-1">学生端的计时行为（改参数不会改变这些）</p>
+            <p>· 只有「按时长」的应用、且它是学生当前操作的窗口时才计时，每 30 秒扣一次。</p>
+            <p>· 学生关掉窗口、最小化，或点一下别的窗口，立刻停止扣时——不会出现「没在玩还在扣」。</p>
+            <p>· 切到浏览器其他标签页时，那一次不扣。</p>
+            <p>· 时长池全局共用，不按应用分池；余额不清零，可以攒到以后用。</p>
+            <p>· 时长用完或当天额度用完，应用会自动关闭并弹出提示。</p>
+          </div>
+
           <div className="flex justify-end mt-4">
             <button
               onClick={save}

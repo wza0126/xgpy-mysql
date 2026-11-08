@@ -577,7 +577,7 @@ export const AppCenter: React.FC = () => {
         <button
           onClick={() => { loadPlaytime(); setShowTimeModal(true); }}
           className="ml-auto flex items-center gap-2 bg-sky-100 hover:bg-sky-200 px-4 py-2 rounded-full transition-colors"
-          title="游戏时间：按时长的应用会消耗这里的时间，用钻石兑换"
+          title="游戏时间：只有标了「按时长」的应用才消耗这里的时间。每 30 秒扣一次，关掉窗口或点别的窗口就停止。用钻石兑换。"
         >
           <i className="fa-solid fa-hourglass-half text-sky-600"></i>
           <span className="font-bold text-sky-700">{playtime?.balance_minutes ?? 0} 分钟</span>
@@ -741,6 +741,15 @@ export const AppCenter: React.FC = () => {
                 1 颗钻石 = {playtime?.rules?.diamond_to_minutes ?? 5} 分钟 · 单次最多 {playtime?.rules?.max_exchange_minutes ?? 30} 分钟 ·
                 当前有 <i className="fa-solid fa-gem text-sky-500"></i> {profile?.diamond_balance ?? 0} 颗
               </p>
+            </div>
+
+            <div className="bg-gray-50 rounded-lg p-3 mb-4 text-xs text-gray-500 space-y-1">
+              <p className="font-medium text-gray-600 mb-1">怎么用</p>
+              <p>· 兑换到的时间存在「时长池」里，所有按时长的应用共用。</p>
+              <p>· 打开应用就开始计时，每 30 秒扣一次（点进去看一眼也算半分钟）。</p>
+              <p>· 关掉窗口、最小化，或者点一下别的窗口，立刻停止扣时。</p>
+              <p>· 每天最多玩 {playtime?.today?.cap_minutes ?? '-'} 分钟，超出后即使有时长也要等明天。</p>
+              <p>· 钻石只能通过测试、考试、任务和老师发放获得，积分换不了。</p>
             </div>
 
             <div className="flex gap-3">

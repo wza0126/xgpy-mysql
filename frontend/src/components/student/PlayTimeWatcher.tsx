@@ -22,7 +22,7 @@ const HEARTBEAT_SECONDS = 30;
 type LockInfo = { title: string; reason: 'no_balance' | 'daily_cap'; capMinutes: number } | null;
 
 export const PlayTimeWatcher: React.FC = () => {
-  const { windows, closeWindow } = useDesktopStore();
+  const { windows, activeWindowId, closeWindow } = useDesktopStore();
   const [timeAppIds, setTimeAppIds] = useState<string[]>([]);
   const [lock, setLock] = useState<LockInfo>(null);
   const [warning, setWarning] = useState<string | null>(null);
@@ -47,16 +47,19 @@ export const PlayTimeWatcher: React.FC = () => {
     return () => { alive = false; };
   }, []);
 
-  // 当前正在前台玩的时长应用（多个窗口同时开时只算最上面那个，避免重复扣时）
+  // 只有当「当前激活的窗口」本身就是按时长应用时才计时：
+  // 学生一点别的窗口（哪怕游戏窗口还开着、没最小化），计时立刻暂停。
+  // ⛔ 不能只判断「窗口开着且没最小化」——两个窗口并排时游戏那边会照扣，
+  //    学生会说「我没在玩怎么还在扣时间」。
   const active = useMemo(() => {
-    if (!timeAppIds.length) return null;
-    const open = windows.filter(
-      (w) => w.isOpen && !w.isMinimized && w.id.startsWith('app_') && timeAppIds.includes(w.id.slice(4))
-    );
-    if (!open.length) return null;
-    const top = open.reduce((a, b) => (a.zIndex > b.zIndex ? a : b));
-    return { windowId: top.id, appId: top.id.slice(4), title: top.title };
-  }, [windows, timeAppIds]);
+    if (!timeAppIds.length || !activeWindowId) return null;
+    if (!activeWindowId.startsWith('app_')) return null;
+    const appId = activeWindowId.slice(4);
+    if (!timeAppIds.includes(appId)) return null;
+    const w = windows.find((x) => x.id === activeWindowId && x.isOpen && !x.isMinimized);
+    if (!w) return null;
+    return { windowId: w.id, appId, title: w.title };
+  }, [windows, timeAppIds, activeWindowId]);
 
   // ⛔ 不能把 active 放进计时 effect 的依赖：拖窗口、切窗口都会改 zIndex，
   //    active 对象一变 effect 就重建、立刻 tick 一次 → 白扣 30 秒。
@@ -135,9 +138,13 @@ export const PlayTimeWatcher: React.FC = () => {
                 ? `今天已经玩满 ${lock.capMinutes} 分钟了，明天再来。`
                 : '游戏时间用完了。'}
             </p>
-            <p className="text-gray-500 text-sm mb-5">
-              去测试、考试或完成任务可以赚钻石，1 颗钻石换几分钟游戏时间。
+            <p className="text-gray-500 text-sm mb-4">
+              去「测试」「考试」或「任务」可以赚钻石，再用钻石兑换游戏时间。
             </p>
+            <div className="bg-gray-50 rounded-lg p-3 text-left text-xs text-gray-500 mb-5 space-y-1">
+              <p><i className="fa-solid fa-circle-info mr-1 text-gray-400"></i>计时按 30 秒一次扣，打开应用就开始。</p>
+              <p><i className="fa-solid fa-circle-info mr-1 text-gray-400"></i>关掉窗口、最小化，或点一下别的窗口，就会停止扣时。</p>
+            </div>
             <button
               onClick={() => { setLock(null); lockRef.current = false; }}
               className="w-full py-2.5 bg-sky-500 hover:bg-sky-600 text-white rounded-lg font-medium transition-colors"
