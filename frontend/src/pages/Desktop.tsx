@@ -1048,6 +1048,33 @@ export const Desktop: React.FC = () => {
             )}
           </button>
         )}
+        {/* 钱包：积分（刷题劳动量）+ 钻石（测试/考试/任务凭证），点一下进兑换中心 */}
+        {effectiveProfile && (
+          <button
+            onClick={() => {
+              openWindow({
+                id: 'exchange',
+                title: '兑换',
+                icon: 'fa-gift',
+                isMinimized: false,
+                isMaximized: false,
+                component: moduleComponents['exchange'],
+              });
+              activateWindow('exchange');
+            }}
+            className="bg-gray-800/80 hover:bg-gray-700 text-white px-3 py-2 rounded-lg flex items-center gap-3 transition-colors"
+            title="积分：做题/任务获得；钻石：测试、考试、任务、老师发放（两者不互通）"
+          >
+            <span className="flex items-center gap-1">
+              <i className="fa-solid fa-coins text-yellow-400"></i>
+              <span className="whitespace-nowrap">{effectiveProfile.current_points || 0}</span>
+            </span>
+            <span className="flex items-center gap-1 border-l border-gray-600 pl-3">
+              <i className="fa-solid fa-gem text-sky-400"></i>
+              <span className="whitespace-nowrap">{effectiveProfile.diamond_balance || 0}</span>
+            </span>
+          </button>
+        )}
         {/* 代理模式下显示提示 */}
         {isProxyMode && effectiveProfile && (
           <div className="bg-cyan-800/80 text-white px-4 py-2 rounded-lg flex items-center gap-2">

@@ -30,6 +30,8 @@ const ICON_MAP: Record<string, string> = {
 
 const REWARD_LABEL: Record<string, string> = {
   points: '积分',
+  // 钻石：与积分不互通，只能通过奖励发放，不能拿积分换
+  diamond: '钻石',
   internet_code: '上网码',
   app: '应用解锁',
   equipment: '装备',
@@ -538,10 +540,21 @@ export const GameTaskManager: React.FC = () => {
       )}
 
       {showForm && (
-        <div className="mt-6 p-5 bg-purple-50 border border-purple-200 rounded-xl">
-          <h4 className="font-semibold text-purple-800 mb-4">
-            {isEdit ? '编辑任务' : '新建任务'}
-          </h4>
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4">
+          <div className="my-8 w-full max-w-3xl bg-white rounded-2xl shadow-2xl">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
+              <h4 className="font-semibold text-purple-800">
+                {isEdit ? '编辑任务' : '新建任务'}
+              </h4>
+              <button
+                onClick={() => setShowForm(false)}
+                className="w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+                title="关闭"
+              >
+                <i className="fa-solid fa-xmark"></i>
+              </button>
+            </div>
+            <div className="p-5">
 
           <div className="grid grid-cols-2 gap-4 mb-4">
             <div>
@@ -780,6 +793,8 @@ export const GameTaskManager: React.FC = () => {
               {saving ? <i className="fa-solid fa-spinner fa-spin mr-1"></i> : <i className="fa-solid fa-save mr-1"></i>}
               {isEdit ? '保存修改' : '保存并发布'}
             </button>
+          </div>
+            </div>
           </div>
         </div>
       )}

@@ -100,8 +100,16 @@ export const ExchangeModule: React.FC = () => {
     try {
       const { item } = showConfirm;
       const cost = item.points_cost || 0;
+      // 2026-11-08：商品可以用积分或钻石计价，余额要按对应币种校验
+      const useDiamond = (item as any).currency === 'diamond';
 
-      if ((profile.current_points || 0) < cost) {
+      if (useDiamond) {
+        if ((profile.diamond_balance || 0) < cost) {
+          alert('钻石不足! 钻石只能通过测试、考试、任务和老师发放获得');
+          setShowConfirm(null);
+          return;
+        }
+      } else if ((profile.current_points || 0) < cost) {
         alert('积分不足!');
         setShowConfirm(null);
         return;
@@ -165,10 +173,19 @@ export const ExchangeModule: React.FC = () => {
   return (
     <div className="p-6">
       <div className="flex items-center justify-between mb-6">
-        <h2 className="text-xl font-bold text-gray-800">积分兑换</h2>
-        <div className="flex items-center gap-2 bg-yellow-100 px-4 py-2 rounded-full">
-          <i className="fa-solid fa-coins text-yellow-600"></i>
-          <span className="font-bold text-yellow-700">{profile?.current_points || 0} 积分</span>
+        <h2 className="text-xl font-bold text-gray-800">兑换中心</h2>
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 bg-yellow-100 px-4 py-2 rounded-full">
+            <i className="fa-solid fa-coins text-yellow-600"></i>
+            <span className="font-bold text-yellow-700">{profile?.current_points || 0} 积分</span>
+          </div>
+          <div
+            className="flex items-center gap-2 bg-sky-100 px-4 py-2 rounded-full"
+            title="钻石来源：测试、考试、任务、老师发放（与积分不互通）"
+          >
+            <i className="fa-solid fa-gem text-sky-600"></i>
+            <span className="font-bold text-sky-700">{profile?.diamond_balance || 0} 钻石</span>
+          </div>
         </div>
       </div>
 
@@ -176,6 +193,8 @@ export const ExchangeModule: React.FC = () => {
         {prizes.map((prize) => {
           const skinConfig = prize.type === 'skin' ? getSkinById((prize as any).skin_id) : null;
           const skinOwned = isSkinOwned(prize);
+          const priceCurrency: 'points' | 'diamond' = (prize as any).currency === 'diamond' ? 'diamond' : 'points';
+          const myBalance = priceCurrency === 'diamond' ? (profile?.diamond_balance || 0) : (profile?.current_points || 0);
           return (
           <motion.div
             key={prize.id}
@@ -234,13 +253,13 @@ export const ExchangeModule: React.FC = () => {
               <p className="text-sm text-gray-500 text-center mb-3">{prize.description}</p>
             )}
             <div className="flex items-center justify-between">
-              <span className="text-yellow-600 font-bold">
-                <i className="fa-solid fa-coins mr-1"></i>
+              <span className={`font-bold ${priceCurrency === 'diamond' ? 'text-sky-600' : 'text-yellow-600'}`}>
+                <i className={`fa-solid mr-1 ${priceCurrency === 'diamond' ? 'fa-gem' : 'fa-coins'}`}></i>
                 {prize.points_cost}
               </span>
               <button
                 onClick={() => !skinOwned && setShowConfirm({ item: prize, type: 'prize' })}
-                disabled={skinOwned || (profile?.current_points || 0) < (prize.points_cost || 0)}
+                disabled={skinOwned || myBalance < (prize.points_cost || 0)}
                 className={`px-4 py-1 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm ${
                   skinOwned ? 'bg-gray-400' :
                   prize.type === 'equipment' ? 'bg-orange-500 hover:bg-orange-600' :
@@ -317,7 +336,11 @@ export const ExchangeModule: React.FC = () => {
                         )}
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-center text-sm text-red-600">-{record.points_cost}</td>
+                    <td className="px-4 py-3 text-center text-sm text-red-600">
+                      {(record as any).currency === 'diamond'
+                        ? <>-{(record as any).diamond_cost || 0} <i className="fa-solid fa-gem text-sky-500"></i></>
+                        : <>-{record.points_cost} <i className="fa-solid fa-coins text-yellow-500"></i></>}
+                    </td>
                     <td className="px-4 py-3 text-right text-sm text-gray-500">
                       {new Date(record.exchanged_at || '').toLocaleDateString()}
                     </td>
@@ -349,7 +372,11 @@ export const ExchangeModule: React.FC = () => {
               <p className="text-gray-600 mb-6">
                 确定要兑换 <span className="font-bold">{showConfirm.item.name}</span> 吗？
                 <br />
-                将消耗 <span className="text-yellow-600 font-bold">{showConfirm.item.points_cost}</span> 积分
+                将消耗{' '}
+                <span className={`font-bold ${(showConfirm.item as any).currency === 'diamond' ? 'text-sky-600' : 'text-yellow-600'}`}>
+                  {showConfirm.item.points_cost}
+                </span>{' '}
+                {(showConfirm.item as any).currency === 'diamond' ? '钻石' : '积分'}
               </p>
               {showConfirm.item.type === 'equipment' && (
                 <div className="bg-orange-50 border border-orange-200 rounded-lg p-3 mb-4">

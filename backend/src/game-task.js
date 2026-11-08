@@ -20,8 +20,10 @@
 
 const { v4: uuidv4 } = require('uuid');
 const metrics = require('./game-task-metrics');
+// 钻石入账统一走钱包模块（唯一索引保证同一来源只发一次）
+const { grantDiamonds } = require('./diamond');
 
-const REWARD_TYPES = ['points', 'internet_code', 'app', 'equipment'];
+const REWARD_TYPES = ['points', 'diamond', 'internet_code', 'app', 'equipment'];
 const MAX_REWARD_ITEMS = 6;
 const MAX_BATCH = 500; // 单次批量操作上限
 
@@ -156,6 +158,7 @@ async function evaluateStudents(pool, students, conditions, logic) {
 function rewardLine(r, equipMap) {
   const n = Math.max(1, Math.round(r.value));
   if (r.type === 'points') return `+${n} 积分`;
+  if (r.type === 'diamond') return `+${n} 钻石`;
   if (r.type === 'internet_code') return `上网码 ×${n}`;
   if (r.type === 'equipment') return `${(equipMap && equipMap[r.target_id]) || '装备'} ×${n}`;
   if (r.type === 'app') return '解锁应用 ×1';
@@ -220,6 +223,21 @@ async function grantRewards(conn, { studentId, studentUsername, task, rewards, c
         [studentId, n, pointsReason, sourceType, sourceId]
       );
       granted.push({ type: 'points', value: n, label: `+${n} 积分` });
+    }
+
+    else if (r.type === 'diamond') {
+      // ⛔ 这里刻意不传 source_id：幂等已由 student_task_claims 唯一键保证。
+      //    若用任务 id 做钻石幂等键，daily 任务第二天就会被唯一索引挡掉，发不出奖。
+      const dg = await grantDiamonds(conn, {
+        studentId,
+        amount: n,
+        reason: pointsReason,
+        // 老师手动发放传的是 'notification'，钻石流水枚举里对应 'manual'
+        sourceType: ['test', 'exam', 'mission'].includes(sourceType) ? sourceType : 'manual',
+        sourceId: null,
+        teacherId: (ctx && ctx.teacherId) || null,
+      });
+      if (dg.granted) granted.push({ type: 'diamond', value: dg.amount, label: `+${dg.amount} 钻石` });
     }
 
     else if (r.type === 'internet_code') {

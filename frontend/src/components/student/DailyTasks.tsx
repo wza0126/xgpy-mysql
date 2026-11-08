@@ -60,6 +60,7 @@ function rewardText(rewards: RewardItem[]): string {
   return rewards
     .map((r) => {
       if (r.type === 'points') return `+${r.value} 积分`;
+      if (r.type === 'diamond') return `+${r.value} 钻石`;
       if (r.type === 'internet_code') return `上网码 ×${r.value}`;
       if (r.type === 'app') return '应用解锁';
       if (r.type === 'equipment') return `装备 ×${r.value}`;

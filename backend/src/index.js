@@ -19,6 +19,8 @@ const { registerFarm } = require('./farm');
 const { registerStudyGalaxy } = require('./study-galaxy');
 // 操作题累计得分（资格验证第三/四项）与成就殿堂共用同一个口径函数
 const { getOpScore, getPythonFillScore, getCompositeScore } = require('./game-task-metrics');
+// 钻石钱包：所有入账/扣减必须走这里（唯一索引保证同一来源只发一次）
+const { grantDiamonds, spendDiamonds, adjustDiamonds, getDiamondWallet } = require('./diamond');
 const PythonSandbox = require('./python-sandbox');
 const PythonGrader = require('./python-grader');
 const { v4: uuidv4 } = require('uuid');
@@ -1167,7 +1169,7 @@ app.get('/api/teacher/students/overview', authenticate, requireTeacher, async (r
     }
 
     const [students] = await pool.query(
-      `SELECT p.id, p.username, p.real_name, p.class_id, p.current_points, p.focus_force_enabled
+      `SELECT p.id, p.username, p.real_name, p.class_id, p.current_points, p.diamond_balance, p.focus_force_enabled
          FROM profiles p
         WHERE ${where.join(' AND ')}`,
       params
@@ -1239,6 +1241,7 @@ app.get('/api/teacher/students/overview', authenticate, requireTeacher, async (r
         real_name: s.real_name,
         class_id: s.class_id,
         current_points: Number(s.current_points) || 0,
+        diamond_balance: Number(s.diamond_balance) || 0,
         total_answers: total,
         correct_answers: correct,
         wrong_answers: Math.max(0, total - correct),
@@ -2975,18 +2978,20 @@ app.post('/api/business/exchange-prize', authenticate, async (req, res) => {
     }
     
     const prizePoints = prize.points_cost || 0;
+    // 2026-11-08：商品可以用积分或钻石计价（老师自由选择），价格列仍复用 points_cost
+    const payWithDiamond = (prize.currency || 'points') === 'diamond';
     
     if (prizePoints <= 0) {
       await connection.rollback();
       return res.status(400).json({
         data: null,
-        error: '奖品积分配置错误'
+        error: payWithDiamond ? '奖品钻石价格配置错误' : '奖品积分配置错误'
       });
     }
     
-    // 2. 检查学生积分（带排他锁）
+    // 2. 检查学生余额（带排他锁）
     const [students] = await connection.query(
-      'SELECT id, current_points, username FROM profiles WHERE id = ? FOR UPDATE', 
+      'SELECT id, current_points, diamond_balance, username FROM profiles WHERE id = ? FOR UPDATE', 
       [student_id]
     );
     
@@ -3000,7 +3005,8 @@ app.post('/api/business/exchange-prize', authenticate, async (req, res) => {
     
     const student = students[0];
     
-    if (student.current_points < prizePoints) {
+    // 钻石商品不在这里拦，统一由 spendDiamonds 的 FOR UPDATE 原子扣减判定
+    if (!payWithDiamond && student.current_points < prizePoints) {
       await connection.rollback();
       return res.status(400).json({ 
         data: null, 
@@ -3103,38 +3109,58 @@ app.post('/api/business/exchange-prize', authenticate, async (req, res) => {
       }
     }
 
-    // 4. 扣除积分
-    // 条件写进 WHERE 做原子扣减（并发下第二个请求 affectedRows=0 直接失败），
-    // GREATEST(0, ...) 作为第二道下限兜底，确保积分不会被扣成负数。
-    const [deductResult] = await connection.query(`
-      UPDATE profiles
-      SET current_points = GREATEST(0, current_points - ?),
-          max_points = GREATEST(max_points, current_points)
-      WHERE id = ? AND current_points >= ?
-    `, [prizePoints, student_id, prizePoints]);
+    // 4. 扣除（积分 / 钻石）
+    // 兑换记录 id 先算出来：钻石流水用它做幂等来源，保证「一条兑换记录 ↔ 一条扣款流水」
+    const exchangeRecordId = `local_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-    if (!deductResult.affectedRows) {
-      await connection.rollback();
-      return res.status(400).json({
-        data: null,
-        error: '积分不足'
+    if (payWithDiamond) {
+      // 钻石：spendDiamonds 内部 SELECT ... FOR UPDATE 校验余额并写流水
+      const spent = await spendDiamonds(connection, {
+        studentId: student_id,
+        amount: prizePoints,
+        reason: `兑换：${prize.name}`,
+        sourceId: exchangeRecordId,
       });
+      if (!spent.ok) {
+        await connection.rollback();
+        return res.status(400).json({ data: null, error: spent.error || '钻石不足' });
+      }
+    } else {
+      // 积分：条件写进 WHERE 做原子扣减（并发下第二个请求 affectedRows=0 直接失败），
+      // GREATEST(0, ...) 作为第二道下限兜底，确保积分不会被扣成负数。
+      const [deductResult] = await connection.query(`
+        UPDATE profiles
+        SET current_points = GREATEST(0, current_points - ?),
+            max_points = GREATEST(max_points, current_points)
+        WHERE id = ? AND current_points >= ?
+      `, [prizePoints, student_id, prizePoints]);
+
+      if (!deductResult.affectedRows) {
+        await connection.rollback();
+        return res.status(400).json({
+          data: null,
+          error: '积分不足'
+        });
+      }
+
+      // 5. 记录积分流水（钻石的扣款流水由 spendDiamonds 自己写）
+      await connection.query(`
+        INSERT INTO point_transactions (
+          student_id, amount, reason, source_type, created_at
+        ) VALUES (?, ?, ?, 'system', NOW())
+      `, [student_id, -prizePoints, `兑换：${prize.name}`]);
     }
     
-    // 5. 记录积分流水
-    await connection.query(`
-      INSERT INTO point_transactions (
-        student_id, amount, reason, source_type, created_at
-      ) VALUES (?, ?, ?, 'system', NOW())
-    `, [student_id, -prizePoints, `兑换：${prize.name}`]);
-    
-    // 6. 创建兑换记录
-    const exchangeRecordId = `local_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    // 6. 创建兑换记录（币种与实际花费分开记，报表按 currency 汇总）
     await connection.query(`
       INSERT INTO exchange_records (
-        id, student_id, prize_id, prize_name, points_cost, exchanged_at, code
-      ) VALUES (?, ?, ?, ?, ?, NOW(), ?)
-    `, [exchangeRecordId, student_id, prize_id, prize.name, prizePoints, assignedCode]);
+        id, student_id, prize_id, prize_name, points_cost, exchanged_at, code, currency, diamond_cost
+      ) VALUES (?, ?, ?, ?, ?, NOW(), ?, ?, ?)
+    `, [exchangeRecordId, student_id, prize_id, prize.name,
+        payWithDiamond ? 0 : prizePoints,
+        assignedCode,
+        payWithDiamond ? 'diamond' : 'points',
+        payWithDiamond ? prizePoints : 0]);
     
     // 7. 如果有赋值到兑换码，标记为已使用
     if (assignedCode && prize.type === 'internet_code') {
@@ -4862,6 +4888,20 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
       }
     }
 
+    // 钻石：测试是随机组卷、每次卷子不同，且有每日次数限制（本就是鼓励多测），
+    // 所以**每次及格都发**。幂等键用本次提交记录 id —— 同一条提交被重复处理也不会重复入账。
+    let diamondEarned = 0;
+    if (isPassed && (test.diamond_reward || 0) > 0) {
+      const dg = await grantDiamonds(connection, {
+        studentId: student_id,
+        amount: test.diamond_reward,
+        reason: `测试及格: ${test.title || ''}`,
+        sourceType: 'test',
+        sourceId: testRecordId,
+      });
+      if (dg.granted) diamondEarned = dg.amount;
+    }
+
     // 处理学生答案和错题
     for (const q of questions) {
       const userAnswer = (answers[q.id] || '').trim();
@@ -4947,6 +4987,8 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
         total: totalWeight,
         is_passed: isPassed,
         points_earned: pointsEarned,
+        // 本次入账的钻石数（0 = 不及格 / 该测试未配置钻石 / 已发过）
+        diamond_earned: diamondEarned,
         internet_code: internetCode,
         // 没发码的原因（failed / disabled / daily / nostock），发到码时为 null
         internet_code_reason: internetCodeReason,
@@ -5301,6 +5343,20 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
       await grantAppCenterOnPass(connection, test, student_id, '考试');
     }
 
+    // 钻石：考试**同一次只发首次及格那一次**，重考不再发（吴老 2026-11-08 定）。
+    // 幂等键用 test_id —— 重考、或同一场考试被重复处理，都不会二次入账。
+    let examDiamondEarned = 0;
+    if (isPassed && (test.diamond_reward || 0) > 0) {
+      const dg = await grantDiamonds(connection, {
+        studentId: student_id,
+        amount: test.diamond_reward,
+        reason: `考试及格: ${test.title || ''}`,
+        sourceType: 'exam',
+        sourceId: test_id,
+      });
+      if (dg.granted) examDiamondEarned = dg.amount;
+    }
+
     // 只发「本次新增」的积分（重考同分不再重复发）
     if (pointsToAward > 0) {
       const [students] = await connection.query(
@@ -5390,6 +5446,8 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
         is_passed: isPassed,
         points_earned: pointsToAward,
         points_earned_total: accumulatedPoints,
+        // 本次入账的钻石数（0 = 不及格 / 未配置 / 这场考试之前已发过）
+        diamond_earned: examDiamondEarned,
         internet_codes: internetCodes,
         exam_record_id: examRecordId,
         dropped_equipments: droppedEquipments,
@@ -16527,6 +16585,22 @@ app.get('/api/student/test-history', authenticate, async (req, res) => {
 
 // 学生「我领过的上网码」：测试 / 考试 / 任务三种来源最终都落在 internet_codes（used_by = 学生）
 // 2026-11-02 加：原来离开结果页就再也查不到自己领的码，学生会以为丢了又去重考（然后踩每天一次的限）
+// ============== 钻石钱包（学生端） ==============
+/**
+ * 余额 + 最近流水。
+ * 钻石从 2026-11-08 引入：来源受限（测试/考试/任务/老师发放），用于兑换上网码等高价值物品。
+ * ⛔ 钻石与积分永不互通，不要在这里做任何换算。
+ */
+app.get('/api/student/diamond-wallet', authenticate, async (req, res) => {
+  try {
+    const wallet = await getDiamondWallet(pool, req.user.userId, req.query.limit);
+    res.json({ data: wallet, error: null });
+  } catch (err) {
+    console.error('获取钻石钱包失败:', err);
+    res.status(500).json({ data: null, error: '获取钻石钱包失败' });
+  }
+});
+
 app.get('/api/student/internet-codes', authenticate, async (req, res) => {
   try {
     const userId = req.user.userId || req.user.id;
@@ -17169,6 +17243,53 @@ app.post('/api/student/points/adjust', authenticate, async (req, res) => {
  * 归属校验：只能重置「自己班」的学生（super_admin 不受限）。
  * 返回 { success_count, failed: [{ id, error }] }，单条失败不影响其它。
  */
+// ============== 钻石钱包（教师端：学生管理 → 编辑学生） ==============
+/**
+ * 调整单个学生的钻石余额。
+ * 入参二选一：
+ *   · balance：直接给目标余额（前端编辑框用这个，直觉）
+ *   · delta  ：增减量
+ * 每次调整都写一条 adjust 流水，后台改钱不能不留痕。
+ */
+app.post('/api/teacher/students/diamonds/adjust', authenticate, requireTeacher, async (req, res) => {
+  const { student_id, balance, delta, reason } = req.body || {};
+  if (!student_id) return res.status(400).json({ data: null, error: '缺少学生ID' });
+
+  const hasBalance = balance !== undefined && balance !== null && balance !== '';
+  const hasDelta = delta !== undefined && delta !== null && delta !== '';
+  if (!hasBalance && !hasDelta) return res.status(400).json({ data: null, error: '请提供目标余额或增减量' });
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [[cur]] = await conn.query('SELECT diamond_balance FROM profiles WHERE id = ? FOR UPDATE', [student_id]);
+    if (!cur) {
+      await conn.rollback();
+      return res.status(404).json({ data: null, error: '学生不存在' });
+    }
+    const current = Number(cur.diamond_balance) || 0;
+    const target = hasBalance ? Math.max(0, Math.round(Number(balance) || 0)) : current + Math.round(Number(delta) || 0);
+    const r = await adjustDiamonds(conn, {
+      studentId: student_id,
+      delta: target - current,
+      reason: String(reason || '').trim() || `老师调整钻石（${current} → ${target}）`,
+      teacherId: req.user.userId,
+    });
+    if (!r.ok) {
+      await conn.rollback();
+      return res.status(400).json({ data: null, error: r.error || '调整失败' });
+    }
+    await conn.commit();
+    res.json({ data: { balance: r.balance, changed: r.changed }, error: null });
+  } catch (err) {
+    try { await conn.rollback(); } catch (_) {}
+    console.error('调整钻石失败:', err);
+    res.status(500).json({ data: null, error: '调整失败' });
+  } finally {
+    conn.release();
+  }
+});
+
 app.post('/api/teacher/students/reset-password', authenticate, requireTeachingRole, async (req, res) => {
   try {
     const rawIds = Array.isArray(req.body?.student_ids) ? req.body.student_ids : [];

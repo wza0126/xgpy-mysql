@@ -36,6 +36,7 @@ export const TestManager: React.FC = () => {
     cluster_filters: [] as { primary: string; secondary: string }[],
     question_count: 20,
     points_reward: 50,
+    diamond_reward: 0,
     time_limit: 30,
     passing_score: 60,
     is_active: true,
@@ -205,6 +206,7 @@ export const TestManager: React.FC = () => {
       cluster_filters: [],
       question_count: 20,
       points_reward: 50,
+      diamond_reward: 0,
       time_limit: 30,
       passing_score: 60,
       is_active: true,
@@ -286,6 +288,7 @@ export const TestManager: React.FC = () => {
       cluster_filters: clusterFilters,
       question_count: test.question_count || 20,
       points_reward: test.points_reward || 50,
+      diamond_reward: test.diamond_reward || 0,
       time_limit: test.time_limit || 30,
       passing_score: testData.passing_score || 60,
       is_active: test.is_active || false,
@@ -635,6 +638,26 @@ export const TestManager: React.FC = () => {
                       min={0}
                     />
                   </div>
+                </div>
+
+                <div className="p-4 bg-sky-50 rounded-xl">
+                  <label className="block text-sm font-medium text-sky-800 mb-1">
+                    及格奖励钻石
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      value={formData.diamond_reward}
+                      onChange={(e) => setFormData({ ...formData, diamond_reward: Math.max(0, parseInt(e.target.value) || 0) })}
+                      className="w-24 p-2 border border-gray-300 rounded-lg text-center"
+                      min={0}
+                    />
+                    <span className="text-sm text-gray-600">颗</span>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-1">
+                    达到及格线才发。测试每次及格都发（随机组卷、且有每日次数限制）；
+                    考试同一场只发首次及格那一次，重考不再发。填 0 表示这场不发钻石。
+                  </p>
                 </div>
 
                 <div className="p-4 bg-orange-50 rounded-xl">

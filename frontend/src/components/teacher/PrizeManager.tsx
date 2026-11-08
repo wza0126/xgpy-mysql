@@ -13,6 +13,8 @@ type PrizeFormData = {
   name: string;
   description: string;
   points_cost: number;
+  // 支付方式：积分（默认）或钻石。价格数字复用 points_cost，由这里决定扣哪种钱
+  currency: 'points' | 'diamond';
   type: 'normal' | 'internet_code' | 'equipment' | 'skin';
   stock: number;
   daily_limit: number;
@@ -40,6 +42,7 @@ export const PrizeManager: React.FC = () => {
     name: '',
     description: '',
     points_cost: 0,
+    currency: 'points',
     type: 'normal',
     stock: -1,
     daily_limit: 0,
@@ -279,6 +282,7 @@ export const PrizeManager: React.FC = () => {
       name: '',
       description: '',
       points_cost: 0,
+      currency: 'points',
       type: 'normal',
       stock: -1,
       daily_limit: 0,
@@ -294,6 +298,7 @@ export const PrizeManager: React.FC = () => {
       name: prize.name,
       description: prize.description || '',
       points_cost: prize.points_cost || 0,
+      currency: (((prize as any).currency === 'diamond') ? 'diamond' : 'points') as 'points' | 'diamond',
       type: prize.type,
       stock: prize.stock || -1,
       daily_limit: prize.daily_limit || 0,
@@ -374,7 +379,15 @@ export const PrizeManager: React.FC = () => {
                      '普通奖品'}
                   </span>
                 </td>
-                <td className="px-6 py-4 text-center text-yellow-600 font-medium">{prize.points_cost}</td>
+                <td className="px-6 py-4 text-center font-medium">
+                  {(prize as any).currency === 'diamond' ? (
+                    <span className="text-sky-600">
+                      <i className="fa-solid fa-gem mr-1"></i>{prize.points_cost}
+                    </span>
+                  ) : (
+                    <span className="text-yellow-600">{prize.points_cost}</span>
+                  )}
+                </td>
                 <td className="px-6 py-4 text-center text-gray-600">
                   {prize.stock === -1 ? '无限' : prize.stock}
                 </td>
@@ -659,7 +672,40 @@ export const PrizeManager: React.FC = () => {
                 )}
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">所需积分</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">支付方式</label>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setFormData({ ...formData, currency: 'points' })}
+                      className={`flex-1 py-2.5 rounded-lg border text-sm font-medium transition-colors ${
+                        formData.currency === 'points'
+                          ? 'bg-yellow-50 border-yellow-400 text-yellow-700'
+                          : 'bg-white border-gray-300 text-gray-500 hover:bg-gray-50'
+                      }`}
+                    >
+                      积分
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFormData({ ...formData, currency: 'diamond' })}
+                      className={`flex-1 py-2.5 rounded-lg border text-sm font-medium transition-colors ${
+                        formData.currency === 'diamond'
+                          ? 'bg-sky-50 border-sky-400 text-sky-700'
+                          : 'bg-white border-gray-300 text-gray-500 hover:bg-gray-50'
+                      }`}
+                    >
+                      <i className="fa-solid fa-gem mr-1"></i>钻石
+                    </button>
+                  </div>
+                  <p className="text-xs text-gray-400 mt-1">
+                    钻石来源受限（测试、考试、任务、老师发放），只适合上网码这类高价值物品
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    {formData.currency === 'diamond' ? '所需钻石' : '所需积分'}
+                  </label>
                   <input
                     type="number"
                     value={formData.points_cost}

@@ -51,6 +51,8 @@ const OPS = [
 
 const REWARD_TYPES = [
   { type: 'points', label: '积分' },
+  // 钻石：来源受限的成绩/任务凭证，与积分不互通（不能拿积分换钻石）
+  { type: 'diamond', label: '钻石' },
   { type: 'internet_code', label: '上网码' },
   { type: 'equipment', label: '装备' },
 ];
@@ -227,6 +229,7 @@ export const RewardGrantModal: React.FC<{
   const rewardText = (r: RewardRow) => {
     const n = Math.max(1, Math.round(r.value || 0));
     if (r.type === 'points') return `+${n} 积分`;
+    if (r.type === 'diamond') return `+${n} 钻石`;
     if (r.type === 'internet_code') return `上网码 ×${n}`;
     if (r.type === 'equipment') {
       const e = equipments.find((x) => x.id === r.target_id);

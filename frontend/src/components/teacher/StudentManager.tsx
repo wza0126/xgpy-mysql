@@ -17,6 +17,8 @@ interface StudentWithStats extends Profile {
   total_mastered?: number;
   /** 个人强制专注（1=该学生单独进入专注模式，与班级开关取并集） */
   focus_force_enabled?: boolean | number;
+  /** 钻石余额（2026-11-08 引入，与积分不互通） */
+  diamond_balance?: number;
 }
 
 type SortField = 'real_name' | 'username' | 'current_points' | 'max_points' | 'total_answers' | 'accuracy' | 'total_mastered' | 'is_online';
@@ -84,9 +86,9 @@ export const StudentManager: React.FC = () => {
   const [batchText, setBatchText] = useState('');
   const [batchResults, setBatchResults] = useState<{ success: number; failed: number; errors: string[] }>({ success: 0, failed: 0, errors: [] });
   const [editingStudent, setEditingStudent] = useState<StudentWithStats | null>(null);
-  const [editForm, setEditForm] = useState({ real_name: '', username: '', current_points: 0, max_points: 0, class_id: '' });
+  const [editForm, setEditForm] = useState({ real_name: '', username: '', current_points: 0, max_points: 0, diamond_balance: 0, class_id: '' });
   const [selectedStudents, setSelectedStudents] = useState<Set<string>>(new Set());
-  const [batchEditField, setBatchEditField] = useState<'current_points' | 'max_points'>('current_points');
+  const [batchEditField, setBatchEditField] = useState<'current_points' | 'max_points' | 'diamond_balance'>('current_points');
   const [batchEditValue, setBatchEditValue] = useState(0);
   const [batchResetPassword, setBatchResetPassword] = useState('123456');
   const [sortField, setSortField] = useState<SortField>('real_name');
@@ -365,6 +367,7 @@ export const StudentManager: React.FC = () => {
       username: student.username || '',
       current_points: student.current_points || 0,
       max_points: student.max_points || 0,
+      diamond_balance: student.diamond_balance || 0,
       class_id: student.class_id || '',
     });
     setPasswordForm({ newPassword: '', confirmPassword: '' });
@@ -465,6 +468,22 @@ export const StudentManager: React.FC = () => {
 
       if (passwordError) {
         alert('密码修改失败: ' + passwordError.message);
+        return;
+      }
+    }
+
+    // 钻石余额不走通用 update：那样只改数字、不留痕迹。
+    // 走专用接口写一条 adjust 流水，账本才对得上（余额以流水为准）。
+    const originDiamonds = Number(editingStudent.diamond_balance) || 0;
+    const nextDiamonds = Number(editForm.diamond_balance) || 0;
+    if (nextDiamonds !== originDiamonds) {
+      const { error: dErr } = await backendClient.post('/api/teacher/students/diamonds/adjust', {
+        student_id: editingStudent.id,
+        balance: nextDiamonds,
+        reason: `老师调整钻石余额（${originDiamonds} → ${nextDiamonds}）`,
+      });
+      if (dErr) {
+        alert('钻石余额调整失败: ' + dErr.message);
         return;
       }
     }
@@ -711,6 +730,28 @@ export const StudentManager: React.FC = () => {
   };
 
   const handleSaveBatchEdit = async () => {
+    const count = selectedStudents.size;
+
+    // 钻石：逐个走专用接口（写流水），不能批量 UPDATE 数字
+    if (batchEditField === 'diamond_balance') {
+      for (const studentId of selectedStudents) {
+        const { error } = await backendClient.post('/api/teacher/students/diamonds/adjust', {
+          student_id: studentId,
+          balance: batchEditValue,
+          reason: '老师批量设置钻石余额',
+        });
+        if (error) {
+          alert('批量设置钻石失败: ' + error.message);
+          return;
+        }
+      }
+      setShowBatchEditModal(false);
+      setSelectedStudents(new Set());
+      await fetchStudents();
+      alert(`已批量把 ${count} 个学生的钻石余额设为 ${batchEditValue}`);
+      return;
+    }
+
     const updates: any = {};
     if (batchEditField === 'current_points') {
       updates.current_points = batchEditValue;
@@ -718,7 +759,6 @@ export const StudentManager: React.FC = () => {
       updates.max_points = batchEditValue;
     }
 
-    const count = selectedStudents.size;
     for (const studentId of selectedStudents) {
       await backendClient
         .from('profiles')
@@ -1252,6 +1292,21 @@ export const StudentManager: React.FC = () => {
                 />
               </div>
               <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  <i className="fa-solid fa-gem text-sky-500 mr-1"></i>钻石余额
+                </label>
+                <input
+                  type="number"
+                  value={editForm.diamond_balance}
+                  onChange={(e) => setEditForm({ ...editForm, diamond_balance: Math.max(0, parseInt(e.target.value) || 0) })}
+                  className="w-full p-3 border border-gray-300 rounded-lg"
+                  min={0}
+                />
+                <p className="text-xs text-gray-400 mt-1">
+                  与积分不互通。修改后会写一条调整流水，学生端钱包里能看到原因。
+                </p>
+              </div>
+              <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">所属班级</label>
                 <select
                   value={editForm.class_id}
@@ -1314,6 +1369,7 @@ export const StudentManager: React.FC = () => {
                 >
                   <option value="current_points">当前积分</option>
                   <option value="max_points">最高积分</option>
+                  <option value="diamond_balance">钻石余额</option>
                 </select>
               </div>
               <div>
