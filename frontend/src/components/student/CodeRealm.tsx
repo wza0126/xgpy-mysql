@@ -3,6 +3,44 @@ import { useAuth } from '../../hooks/useAuth';
 import { backendClient } from '../../api/backendClient';
 import { CHAPTERS, KEYWORDS, RealmChapter, RealmQuestion } from './code-realm/CodeRealmData';
 
+/**
+ * 剧情 / 题目文本渲染
+ * ============================================================
+ * 数据里的伪代码是这样写的：'伪代码补全：\n\nfor 时钟 in 所有时钟:\n    if 时钟.时间错误():'
+ * 原来用 whitespace-pre-line，它保留换行但**压缩行首空格** → 缩进全丢，代码看不出层次。
+ * 这里改成逐行渲染：空白行留出高度，代码行用等宽字体 + 淡绿色 + whitespace-pre-wrap 保住缩进，
+ * 普通中文用正常字体。这样既不会把整个题干变成等宽，也能看清 for/if 的嵌套关系。
+ */
+const CODE_LINE_START = /^(for|if|elif|else|while|def|return|print|input|break|continue|int|str|float|list|range)\b/;
+function isCodeLine(line: string): boolean {
+  if (!line.trim()) return false;
+  if (/^\s{2,}\S/.test(line)) return true;              // 行首两个以上空格 → 缩进代码
+  if (CODE_LINE_START.test(line.trim())) return true;     // 关键字开头
+  if (/_{2,}/.test(line)) return true;                    // 填空下划线 ____
+  return false;
+}
+
+const StoryText: React.FC<{ text: string; className?: string }> = ({ text, className = '' }) => (
+  <div className={className}>
+    {String(text || '').split('\n').map((line, i) => {
+      if (!line.trim()) return <div key={i} className="h-2" />;
+      const code = isCodeLine(line);
+      return (
+        <div
+          key={i}
+          className={
+            code
+              ? 'font-mono whitespace-pre-wrap text-[13px] leading-relaxed text-emerald-200'
+              : 'whitespace-pre-wrap leading-relaxed'
+          }
+        >
+          {line}
+        </div>
+      );
+    })}
+  </div>
+);
+
 type View = 'intro' | 'map' | 'chapter' | 'boss' | 'book' | 'ending' | 'studio';
 
 interface RealmProgress {
@@ -462,7 +500,7 @@ export const CodeRealm: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
                   </div>
                   <div className="flex-1 rounded-xl border border-indigo-400/30 bg-indigo-950/60 backdrop-blur px-4 py-3 shadow-lg">
                     <div className="text-xs text-amber-300 font-bold mb-1">{scene.npcName}</div>
-                    <div className="text-sm leading-relaxed text-gray-100 whitespace-pre-line">{scene.lines[lineIndex]}</div>
+                    <StoryText className="text-sm text-gray-100" text={scene.lines[lineIndex]} />
                     {(lineIndex + 1 < scene.lines.length || !scene.q) && (
                       <button onClick={handleNextLine} className="mt-3 text-xs text-indigo-300 hover:text-amber-300 transition-colors">
                         {lineIndex + 1 < scene.lines.length ? '继续' : '下一步'} <i className="fa-solid fa-chevron-right ml-1"></i>
@@ -475,7 +513,7 @@ export const CodeRealm: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
                 {scene.q && lineIndex + 1 >= scene.lines.length && picked === null && (
                   <div className="mt-4 rounded-xl border border-amber-400/40 bg-black/30 px-4 py-3">
                     <div className="text-xs text-amber-300 font-bold mb-2"><i className="fa-solid fa-bolt mr-1"></i>咒语试炼</div>
-                    <div className="text-sm text-gray-100 whitespace-pre-line mb-3">{scene.q.prompt}</div>
+                    <StoryText className="text-sm text-gray-100 mb-3" text={scene.q.prompt} />
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                       {scene.q.options.map((opt, i) => (
                         <button
@@ -544,7 +582,7 @@ export const CodeRealm: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
                     {bossQ && (
                       <div className="rounded-xl border border-red-400/40 bg-black/40 px-4 py-4">
                         <div className="text-xs text-red-300 font-bold mb-2"><i className="fa-solid fa-bolt mr-1"></i>第 {bossQIndex + 1} 问 · 答对才能削弱魔王</div>
-                        <div className="text-sm text-gray-100 whitespace-pre-line mb-3">{bossQ.prompt}</div>
+                        <StoryText className="text-sm text-gray-100 mb-3" text={bossQ.prompt} />
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                           {bossQ.options.map((opt, i) => (
                             <button
