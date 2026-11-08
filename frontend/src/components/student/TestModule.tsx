@@ -2205,9 +2205,12 @@ export const TestModule: React.FC = () => {
             const dailyExhausted = dailyLimit > 0 && todayUsed >= dailyLimit;
             // 资格：四项条件（做对题数 + 已掌握题数 + WPS/Access 操作题累计得分）由服务端裁定，需同时满足
             const qual = qualificationMap[test.id];
+            // ⛔ 加了新资格维度必须同步这里，否则只配了「编程填空/综合题」的测试
+            //    卡片上整块资格不显示，学生会以为没有门槛
             const qualEnabled = !!qual && (
               qual.correct?.enabled || qual.mastered?.enabled
               || qual.wps_op?.enabled || qual.access_op?.enabled
+              || (qual as any).python_fill?.enabled || (qual as any).composite?.enabled
             );
             const qualificationLack = qualEnabled && !qual.passed;
             const blocked = dailyExhausted || qualificationLack;
@@ -2226,7 +2229,21 @@ export const TestModule: React.FC = () => {
               </div>
               <div className="space-y-2 text-sm text-gray-600 mb-4">
                 <p><i className="fa-solid fa-clock mr-2"></i>限时 {test.time_limit} 分钟</p>
-                <p><i className="fa-solid fa-gift mr-2"></i>奖励 {test.points_reward} 积分</p>
+                {test.points_reward > 0 && (
+                  <p><i className="fa-solid fa-gift mr-2"></i>及格奖励 {test.points_reward} 积分</p>
+                )}
+                {(test as any).diamond_reward > 0 && (
+                  <p className="text-sky-600">
+                    <i className="fa-solid fa-gem mr-2"></i>
+                    及格奖励 <b>{(test as any).diamond_reward}</b> 颗钻石
+                  </p>
+                )}
+                {test.allow_internet_code && (test as any).internet_code_reward > 0 && (
+                  <p className="text-purple-600">
+                    <i className="fa-solid fa-wifi mr-2"></i>
+                    及格奖励上网码 {(test as any).internet_code_reward} 个
+                  </p>
+                )}
                 {dailyLimit > 0 && (
                   <p className={dailyExhausted ? 'text-red-600' : 'text-gray-600'}>
                     <i className={`fa-solid fa-calendar-day mr-2 ${dailyExhausted ? 'text-red-500' : ''}`}></i>
@@ -2280,6 +2297,28 @@ export const TestModule: React.FC = () => {
                         {qual.access_op.passed
                           ? ' ✓ 已达标'
                           : `（当前 ${qual.access_op.current} 分）`}
+                      </span>
+                    </div>
+                  )}
+                  {(qual as any).python_fill?.enabled && (
+                    <div className="flex items-center gap-1 text-sm">
+                      <i className={`fa-solid fa-keyboard ${(qual as any).python_fill.passed ? 'text-green-500' : 'text-amber-500'}`}></i>
+                      <span className={(qual as any).python_fill.passed ? 'text-green-600' : 'text-amber-600'}>
+                        需累计编程填空得 {(qual as any).python_fill.required} 分
+                        {(qual as any).python_fill.passed
+                          ? ' ✓ 已达标'
+                          : `（当前 ${(qual as any).python_fill.current} 分，满分 830）`}
+                      </span>
+                    </div>
+                  )}
+                  {(qual as any).composite?.enabled && (
+                    <div className="flex items-center gap-1 text-sm">
+                      <i className={`fa-solid fa-layer-group ${(qual as any).composite.passed ? 'text-green-500' : 'text-amber-500'}`}></i>
+                      <span className={(qual as any).composite.passed ? 'text-green-600' : 'text-amber-600'}>
+                        需累计综合题得 {(qual as any).composite.required} 分
+                        {(qual as any).composite.passed
+                          ? ' ✓ 已达标'
+                          : `（当前 ${(qual as any).composite.current} 分，满分 600）`}
                       </span>
                     </div>
                   )}
@@ -2572,6 +2611,13 @@ export const TestModule: React.FC = () => {
                       <p><i className="fa-solid fa-check-circle mr-2"></i>及格分数: {examTest.passing_score} 分</p>
                       {examTest.points_reward > 0 && (
                         <p><i className="fa-solid fa-gift mr-2"></i>及格奖励 {examTest.points_reward} 积分</p>
+                      )}
+                      {(examTest as any).diamond_reward > 0 && (
+                        <p className="text-sky-600">
+                          <i className="fa-solid fa-gem mr-2"></i>
+                          及格奖励 <b>{(examTest as any).diamond_reward}</b> 颗钻石
+                          <span className="text-xs text-gray-400 ml-1">（同一场只发首次及格）</span>
+                        </p>
                       )}
                       {examTest.allow_internet_code && examTest.internet_code_reward > 0 && (
                         <div className="flex items-center flex-wrap gap-2">
