@@ -300,7 +300,8 @@ export const AppCenter: React.FC = () => {
       
       const success = await acquireApp(app);
       if (success) {
-        alert(app.price_type === 'free' ? '获取成功！' : '兑换成功！');
+        // 按时长应用获取时也不扣积分，只说「获取成功」
+        alert(app.price_type === 'points' ? '兑换成功！' : '获取成功！');
         setActiveTab('myApps');
       } else {
         alert('获取应用失败，请重试！');
@@ -613,6 +614,12 @@ export const AppCenter: React.FC = () => {
                     {renderAppIcon(app)}
                     <h3 className="font-medium text-gray-800 mb-1 mt-3">{app.name}</h3>
                     <p className="text-sm text-gray-500 mb-2">{app.description}</p>
+                    {app.price_type === 'time' && (
+                      <div className="inline-block px-2 py-0.5 rounded-full text-xs bg-sky-100 text-sky-700 mb-2">
+                        <i className="fa-solid fa-hourglass-half mr-1"></i>
+                        按时长
+                      </div>
+                    )}
                     <div className="text-xs text-gray-400">
                       使用次数: {getUsageCount(app.id)}
                     </div>
@@ -647,16 +654,25 @@ export const AppCenter: React.FC = () => {
                     <h3 className="font-medium text-gray-800 mb-1 mt-3">{app.name}</h3>
                     <p className="text-sm text-gray-500 mb-3">{app.description}</p>
                     <div className={`inline-block px-3 py-1 rounded-full text-sm font-medium ${
-                      app.price_type === 'free' 
-                        ? 'bg-green-100 text-green-700' 
+                      app.price_type === 'free'
+                        ? 'bg-green-100 text-green-700'
                         : app.price_type === 'per_use'
                         ? 'bg-orange-100 text-orange-700'
+                        : app.price_type === 'time'
+                        ? 'bg-sky-100 text-sky-700'
                         : 'bg-yellow-100 text-yellow-700'
                     }`}>
-                      {app.price_type === 'free' ? '免费' : 
+                      {app.price_type === 'free' ? '免费' :
                        app.price_type === 'per_use' ? `${app.points_price} 积分/次` :
+                       app.price_type === 'time' ? '按时长' :
                        `${app.points_price} 积分`}
                     </div>
+                    {app.price_type === 'time' && (
+                      <p className="text-xs text-sky-600 mt-2">
+                        <i className="fa-solid fa-hourglass-half mr-1"></i>
+                        打开后按分钟消耗「游戏时间」，用钻石兑换
+                      </p>
+                    )}
                     {owned || app.price_type === 'per_use' ? (
                       <button
                         onClick={() => handleLaunchApp(app)}
@@ -676,11 +692,14 @@ export const AppCenter: React.FC = () => {
                         className={`mt-3 w-full py-2 rounded-lg font-medium transition-colors ${
                           app.price_type === 'free'
                             ? 'bg-green-500 text-white hover:bg-green-600'
+                            : app.price_type === 'time'
+                            ? 'bg-sky-500 text-white hover:bg-sky-600'
                             : 'bg-yellow-500 text-white hover:bg-yellow-600'
                         } disabled:opacity-50`}
                       >
-                        {processingAppId === app.id ? '处理中...' : 
-                         app.price_type === 'free' ? '免费获取' : '积分兑换'}
+                        {processingAppId === app.id ? '处理中...' :
+                         app.price_type === 'free' ? '免费获取' :
+                         app.price_type === 'time' ? '获取' : '积分兑换'}
                       </button>
                     )}
                   </div>
