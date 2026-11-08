@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { backendClient } from '../../api/backendClient';
+import { PlayTimeRulesPanel } from './PlayTimeRulesPanel';
 import { useAuth } from '../../hooks/useAuth';
 import { LicenseGuard } from '../common/LicenseGuard';
 
@@ -9,7 +10,8 @@ interface App {
   description: string;
   icon: string;
   type: 'learning_tool' | 'coding_practice' | 'game' | 'simulation' | 'external_link' | 'html_page' | 'ai_qa' | 'mental_health' | 'python_magic_academy' | 'code_realm' | 'typing_trainer';
-  price_type: 'free' | 'points' | 'per_use';
+  // time = 按时长（消耗学生的游戏时长池，不扣积分）
+  price_type: 'free' | 'points' | 'per_use' | 'time';
   points_price: number;
   category: string;
   is_active: boolean;
@@ -455,6 +457,8 @@ export function AppManager() {
   return (
     <LicenseGuard featureName="应用管理" featureIcon="fa-th-large">
       <div className="p-6">
+      <PlayTimeRulesPanel />
+
       <div className="flex justify-between items-center mb-6">
         <h2 className="text-2xl font-bold text-gray-800">应用管理</h2>
         <div className="flex gap-4">
@@ -514,11 +518,13 @@ export function AppManager() {
                 <div className="flex flex-wrap gap-2 mb-3">
                       <span className={`px-2 py-1 rounded-full text-xs font-medium ${
                         app.price_type === 'free' ? 'bg-green-100 text-green-700' :
-                        app.price_type === 'per_use' ? 'bg-orange-100 text-orange-700' : 
+                        app.price_type === 'per_use' ? 'bg-orange-100 text-orange-700' :
+                        app.price_type === 'time' ? 'bg-sky-100 text-sky-700' :
                         'bg-yellow-100 text-yellow-700'
                       }`}>
                         {app.price_type === 'free' ? '免费' :
-                         app.price_type === 'per_use' ? `${app.points_price} 积分/次` : 
+                         app.price_type === 'per_use' ? `${app.points_price} 积分/次` :
+                         app.price_type === 'time' ? '按时长' :
                          `${app.points_price} 积分`}
                       </span>
                       <span className="px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
@@ -804,7 +810,12 @@ export function AppManager() {
                     <option value="free">免费</option>
                     <option value="points">积分兑换</option>
                     <option value="per_use">按次收费</option>
+                    <option value="time">按时长（消耗游戏时间）</option>
                   </select>
+                  <p className="text-xs text-gray-500 mt-1">
+                    「按时长」不扣积分，改用学生自己用钻石兑换的游戏时间，玩一分钟扣一分钟。
+                    学习类应用建议保持免费，别让学生不敢打开。
+                  </p>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -818,7 +829,7 @@ export function AppManager() {
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                   />
                   <p className="text-xs text-gray-500 mt-1">
-                    根据价格类型：积分兑换 = 一次性，按次收费 = 每次使用扣积分
+                    根据价格类型：积分兑换 = 一次性，按次收费 = 每次使用扣积分；选「按时长」时此项不生效
                   </p>
                 </div>
               </div>

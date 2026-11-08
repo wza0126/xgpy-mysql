@@ -29,7 +29,14 @@ const SOURCE_LABELS = {
   manual: '老师发放',
   adjust: '余额调整',
   exchange: '兑换消耗',
+  play_time: '兑换游戏时长',
 };
+
+// 每日产出上限（A 档，吴老 2026-11-08 定）：
+//   · 测试 / 考试 / 任务计入配额 —— 防止反复刷同一场测试换钻石
+//   · 老师手动发放、后台调整**不计入** —— 否则课上手发会被「今日已达上限」挡住
+// 放在这里而不是各个发钻点，是因为发钻入口有 3 处，漏一处就漏一个口子。
+const playtime = require('./playtime');
 
 function genId() {
   return `dt_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
@@ -42,6 +49,23 @@ function genId() {
 async function grantDiamonds(conn, { studentId, amount, reason, sourceType = 'manual', sourceId = null, teacherId = null }) {
   const n = Math.round(Number(amount) || 0);
   if (!studentId || n <= 0) return { granted: false, amount: 0, reason: '金额无效' };
+
+  // 每日产出上限：只拦测试/考试/任务，老师手动发放与后台调整不受限
+  if (playtime.EARN_CAPPED_SOURCES.includes(sourceType)) {
+    const rules = await playtime.getRules(conn);
+    if (rules.daily_earn_cap > 0) {
+      const earnedToday = await playtime.getTodayEarned(conn, studentId);
+      if (earnedToday + n > rules.daily_earn_cap) {
+        return {
+          granted: false,
+          amount: 0,
+          reason: 'daily_cap',
+          daily_cap: rules.daily_earn_cap,
+          earned_today: earnedToday,
+        };
+      }
+    }
+  }
 
   // INSERT IGNORE + 唯一索引：天然幂等，affectedRows=0 即「这个来源已经发过了」
   const [result] = await conn.query(

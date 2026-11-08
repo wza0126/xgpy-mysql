@@ -18,7 +18,8 @@ interface App {
   description: string;
   icon: string;
   type: string;
-  price_type: 'free' | 'points' | 'per_use';
+  // time = 按时长（消耗全局时长池，不扣积分），2026-11-08 新增
+  price_type: 'free' | 'points' | 'per_use' | 'time';
   points_price: number;
   category: string;
   is_active: boolean;
@@ -58,6 +59,37 @@ export const AppCenter: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [processingAppId, setProcessingAppId] = useState<string | null>(null);
+  // 游戏时长池（2026-11-08）：钻石换分钟，按时长应用打开时消耗
+  const [playtime, setPlaytime] = useState<any>(null);
+  const [showTimeModal, setShowTimeModal] = useState(false);
+  const [timeDiamonds, setTimeDiamonds] = useState(1);
+  const [exchangingTime, setExchangingTime] = useState(false);
+
+  const loadPlaytime = async () => {
+    try {
+      const r: any = await backendClient.get('/api/student/playtime');
+      if (r?.data) setPlaytime(r.data);
+    } catch { /* 未开启时长功能时静默失败 */ }
+  };
+
+  useEffect(() => { loadPlaytime(); }, []);
+
+  const doExchangeTime = async () => {
+    if (exchangingTime) return;
+    setExchangingTime(true);
+    try {
+      const r: any = await backendClient.post('/api/student/playtime/exchange', { diamonds: timeDiamonds });
+      if (r?.error) { alert(r.error); return; }
+      if (r?.data?.wallet) setPlaytime(r.data.wallet);
+      await refreshProfile();
+      setShowTimeModal(false);
+      alert(`兑换成功：${r?.data?.minutes ?? 0} 分钟游戏时间`);
+    } catch (e: any) {
+      alert('兑换失败：' + (e?.message || '请重试'));
+    } finally {
+      setExchangingTime(false);
+    }
+  };
 
   // 图标映射表 - 根据应用ID或名称提供合适的图标
   const getIconForApp = (app: App) => {
@@ -325,6 +357,26 @@ export const AppCenter: React.FC = () => {
 
     console.log('Python魔法学院调试 - app:', { id: app.id, type: app.type, name: app.name });
 
+    // 按时长计费：先向服务端确认「有没有时间玩」，有就进，没有就引导去赚钻石
+    if (app.price_type === 'time') {
+      try {
+        const chargeResult: any = await backendClient.post('/api/student/apps/charge', { app_id: app.id });
+        if (chargeResult?.error) { alert(chargeResult.error); return; }
+        const d = chargeResult?.data || {};
+        if (!d.can_play) {
+          alert('游戏时间不够了。\n做测试、考试或完成任务可以赚钻石，1 颗钻石换几分钟游戏时间。');
+          setShowTimeModal(true);
+          return;
+        }
+        if (typeof d.play_minutes_balance === 'number') {
+          setPlaytime((prev: any) => prev ? { ...prev, balance_minutes: d.play_minutes_balance, balance_seconds: d.play_seconds_balance } : prev);
+        }
+      } catch (e: any) {
+        alert('检查游戏时间失败：' + (e?.message || '请重试'));
+        return;
+      }
+    }
+
     // Python魔法学院：免费应用，直接同步打开窗口，不触发后台状态更新
     if (app.type === 'python_magic_academy' || app.id === 'app_python_magic_academy') {
       const windowId = `app_${app.id}`;
@@ -522,8 +574,16 @@ export const AppCenter: React.FC = () => {
         >
           应用市场
         </button>
+        <button
+          onClick={() => { loadPlaytime(); setShowTimeModal(true); }}
+          className="ml-auto flex items-center gap-2 bg-sky-100 hover:bg-sky-200 px-4 py-2 rounded-full transition-colors"
+          title="游戏时间：按时长的应用会消耗这里的时间，用钻石兑换"
+        >
+          <i className="fa-solid fa-hourglass-half text-sky-600"></i>
+          <span className="font-bold text-sky-700">{playtime?.balance_minutes ?? 0} 分钟</span>
+        </button>
         {activeTab === 'marketplace' && (
-          <div className="ml-auto">
+          <div>
             <select
               value={selectedCategory}
               onChange={(e) => setSelectedCategory(e.target.value)}
@@ -636,6 +696,71 @@ export const AppCenter: React.FC = () => {
           </div>
         )}
       </div>
+
+      {showTimeModal && (
+        <div className="fixed inset-0 z-[9999] bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl p-6 max-w-md w-full">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-gray-800">
+                <i className="fa-solid fa-hourglass-half text-sky-500 mr-2"></i>
+                游戏时间
+              </h3>
+              <button onClick={() => setShowTimeModal(false)} className="text-gray-400 hover:text-gray-600">
+                <i className="fa-solid fa-xmark"></i>
+              </button>
+            </div>
+
+            <div className="bg-sky-50 rounded-xl p-4 mb-4">
+              <div className="flex items-baseline justify-between mb-2">
+                <span className="text-sm text-gray-600">当前剩余</span>
+                <span className="text-2xl font-bold text-sky-600">{playtime?.balance_minutes ?? 0} 分钟</span>
+              </div>
+              <div className="text-xs text-gray-500 space-y-1">
+                <p>今日已赚钻石 {playtime?.today?.earned_diamonds ?? 0}/{playtime?.today?.earn_cap ?? '-'} 颗</p>
+                <p>今日已玩 {playtime?.today?.used_minutes ?? 0}/{playtime?.today?.cap_minutes ?? '-'} 分钟</p>
+              </div>
+            </div>
+
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">用钻石兑换</label>
+              <div className="flex items-center gap-3">
+                <input
+                  type="number"
+                  min={1}
+                  value={timeDiamonds}
+                  onChange={(e) => setTimeDiamonds(Math.max(1, parseInt(e.target.value) || 1))}
+                  className="w-24 p-2 border border-gray-300 rounded-lg text-center"
+                />
+                <span className="text-sm text-gray-600">颗钻石</span>
+                <span className="text-sm text-gray-400">→</span>
+                <span className="text-lg font-bold text-sky-600">
+                  {(timeDiamonds * (playtime?.rules?.diamond_to_minutes ?? 5))} 分钟
+                </span>
+              </div>
+              <p className="text-xs text-gray-400 mt-2">
+                1 颗钻石 = {playtime?.rules?.diamond_to_minutes ?? 5} 分钟 · 单次最多 {playtime?.rules?.max_exchange_minutes ?? 30} 分钟 ·
+                当前有 <i className="fa-solid fa-gem text-sky-500"></i> {profile?.diamond_balance ?? 0} 颗
+              </p>
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowTimeModal(false)}
+                className="flex-1 py-2.5 border border-gray-300 text-gray-600 rounded-lg font-medium hover:bg-gray-50"
+              >
+                取消
+              </button>
+              <button
+                onClick={doExchangeTime}
+                disabled={exchangingTime}
+                className="flex-1 py-2.5 bg-sky-500 hover:bg-sky-600 text-white rounded-lg font-medium disabled:opacity-50"
+              >
+                {exchangingTime ? '兑换中...' : '确认兑换'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

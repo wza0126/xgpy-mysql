@@ -21,6 +21,8 @@ const { registerStudyGalaxy } = require('./study-galaxy');
 const { getOpScore, getPythonFillScore, getCompositeScore } = require('./game-task-metrics');
 // 钻石钱包：所有入账/扣减必须走这里（唯一索引保证同一来源只发一次）
 const { grantDiamonds, spendDiamonds, adjustDiamonds, getDiamondWallet } = require('./diamond');
+// 游戏时长池：钻石换分钟，按时长的应用按秒消耗（全局共用，不按应用分池）
+const playtime = require('./playtime');
 const PythonSandbox = require('./python-sandbox');
 const PythonGrader = require('./python-grader');
 const { v4: uuidv4 } = require('uuid');
@@ -4891,6 +4893,7 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
     // 钻石：测试是随机组卷、每次卷子不同，且有每日次数限制（本就是鼓励多测），
     // 所以**每次及格都发**。幂等键用本次提交记录 id —— 同一条提交被重复处理也不会重复入账。
     let diamondEarned = 0;
+    let diamondReason = null;
     if (isPassed && (test.diamond_reward || 0) > 0) {
       const dg = await grantDiamonds(connection, {
         studentId: student_id,
@@ -4900,6 +4903,8 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
         sourceId: testRecordId,
       });
       if (dg.granted) diamondEarned = dg.amount;
+      // 没发出去要给前端一个能说清的理由，否则学生以为系统坏了
+      else if (dg.reason === 'daily_cap') diamondReason = 'daily_cap';
     }
 
     // 处理学生答案和错题
@@ -4987,8 +4992,9 @@ app.post('/api/business/submit-test', authenticate, async (req, res) => {
         total: totalWeight,
         is_passed: isPassed,
         points_earned: pointsEarned,
-        // 本次入账的钻石数（0 = 不及格 / 该测试未配置钻石 / 已发过）
+        // 本次入账的钻石数（0 = 不及格 / 该测试未配置钻石 / 今日已达上限）
         diamond_earned: diamondEarned,
+        diamond_reason: diamondReason,
         internet_code: internetCode,
         // 没发码的原因（failed / disabled / daily / nostock），发到码时为 null
         internet_code_reason: internetCodeReason,
@@ -5346,6 +5352,7 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
     // 钻石：考试**同一次只发首次及格那一次**，重考不再发（吴老 2026-11-08 定）。
     // 幂等键用 test_id —— 重考、或同一场考试被重复处理，都不会二次入账。
     let examDiamondEarned = 0;
+    let examDiamondReason = null;
     if (isPassed && (test.diamond_reward || 0) > 0) {
       const dg = await grantDiamonds(connection, {
         studentId: student_id,
@@ -5355,6 +5362,7 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
         sourceId: test_id,
       });
       if (dg.granted) examDiamondEarned = dg.amount;
+      else if (dg.reason === 'daily_cap') examDiamondReason = 'daily_cap';
     }
 
     // 只发「本次新增」的积分（重考同分不再重复发）
@@ -5446,8 +5454,9 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
         is_passed: isPassed,
         points_earned: pointsToAward,
         points_earned_total: accumulatedPoints,
-        // 本次入账的钻石数（0 = 不及格 / 未配置 / 这场考试之前已发过）
+        // 本次入账的钻石数（0 = 不及格 / 未配置 / 这场考试之前已发过 / 今日已达上限）
         diamond_earned: examDiamondEarned,
+        diamond_reason: examDiamondReason,
         internet_codes: internetCodes,
         exam_record_id: examRecordId,
         dropped_equipments: droppedEquipments,
@@ -16601,6 +16610,135 @@ app.get('/api/student/diamond-wallet', authenticate, async (req, res) => {
   }
 });
 
+// ============== 游戏时长池（学生端） ==============
+/**
+ * 余额 + 今日进度 + 规则。学生端兑换面板、应用内的「还剩 X 分钟」都用这个。
+ */
+app.get('/api/student/playtime', authenticate, async (req, res) => {
+  try {
+    const wallet = await playtime.getPlayWallet(pool, req.user.userId);
+    res.json({ data: wallet, error: null });
+  } catch (err) {
+    console.error('获取游戏时长失败:', err);
+    res.status(500).json({ data: null, error: '获取游戏时长失败' });
+  }
+});
+
+/**
+ * 钻石换时长。body: { diamonds: 1..N }
+ * ⛔ 只能用钻石买，不能拿积分换 —— 积分可刷，换出来就等于白送时间。
+ */
+app.post('/api/student/playtime/exchange', authenticate, async (req, res) => {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const result = await playtime.exchangePlayTime(conn, {
+      studentId: req.user.userId,
+      diamonds: req.body?.diamonds,
+      spendDiamonds,
+    });
+    if (!result.ok) {
+      await conn.rollback();
+      return res.status(400).json({ data: null, error: result.error || '兑换失败' });
+    }
+    await conn.commit();
+    // 兑换后把最新钱包一起返回，前端不用再发一次请求
+    const wallet = await playtime.getPlayWallet(pool, req.user.userId);
+    res.json({ data: { ...result, wallet }, error: null });
+  } catch (err) {
+    try { await conn.rollback(); } catch (_) {}
+    console.error('兑换游戏时长失败:', err);
+    res.status(500).json({ data: null, error: '兑换失败' });
+  } finally {
+    conn.release();
+  }
+});
+
+/**
+ * 计时心跳。body: { app_id, seconds }
+ * 前端每 30 秒上报一次；locked=true 时前端要弹遮罩把应用挡住。
+ */
+app.post('/api/student/playtime/heartbeat', authenticate, async (req, res) => {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const result = await playtime.consumePlayTime(conn, {
+      studentId: req.user.userId,
+      appId: req.body?.app_id,
+      seconds: req.body?.seconds ?? 30,
+    });
+    if (!result.ok && result.reason === 'invalid') {
+      await conn.rollback();
+      return res.status(400).json({ data: null, error: result.error || '参数无效' });
+    }
+    await conn.commit();
+    res.json({ data: result, error: null });
+  } catch (err) {
+    try { await conn.rollback(); } catch (_) {}
+    console.error('游戏时长心跳失败:', err);
+    res.status(500).json({ data: null, error: '计时失败' });
+  } finally {
+    conn.release();
+  }
+});
+
+// ============== 游戏时长池（教师端） ==============
+/** 读取规则（老师端面板用） */
+app.get('/api/teacher/playtime/rules', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const rules = await playtime.getRules(pool);
+    res.json({ data: rules, error: null });
+  } catch (err) {
+    console.error('读取游戏时长规则失败:', err);
+    res.status(500).json({ data: null, error: '读取失败' });
+  }
+});
+
+/** 保存规则，改完立即生效（存 system_config，不用发版重启） */
+app.post('/api/teacher/playtime/rules', authenticate, requireTeacher, async (req, res) => {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const rules = await playtime.saveRules(conn, req.body || {});
+    await conn.commit();
+    res.json({ data: rules, error: null });
+  } catch (err) {
+    try { await conn.rollback(); } catch (_) {}
+    console.error('保存游戏时长规则失败:', err);
+    res.status(500).json({ data: null, error: '保存失败' });
+  } finally {
+    conn.release();
+  }
+});
+
+/** 老师直接调整某个学生的时长余额（学生管理 → 编辑学生） */
+app.post('/api/teacher/students/playtime/adjust', authenticate, requireTeacher, async (req, res) => {
+  const { student_id, minutes, reason } = req.body || {};
+  if (!student_id) return res.status(400).json({ data: null, error: '缺少学生ID' });
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const r = await playtime.adjustPlayTime(conn, {
+      studentId: student_id,
+      seconds: Math.round(Number(minutes) || 0) * 60,
+      reason: String(reason || '').trim() || '老师调整游戏时长',
+      teacherId: req.user.userId,
+    });
+    if (!r.ok) {
+      await conn.rollback();
+      return res.status(400).json({ data: null, error: r.error || '调整失败' });
+    }
+    await conn.commit();
+    res.json({ data: r, error: null });
+  } catch (err) {
+    try { await conn.rollback(); } catch (_) {}
+    console.error('调整游戏时长失败:', err);
+    res.status(500).json({ data: null, error: '调整失败' });
+  } finally {
+    conn.release();
+  }
+});
+
 app.get('/api/student/internet-codes', authenticate, async (req, res) => {
   try {
     const userId = req.user.userId || req.user.id;
@@ -17389,6 +17527,28 @@ app.post('/api/student/apps/charge', authenticate, async (req, res) => {
     const app = appRows[0];
     if (!app.is_active) {
       return res.status(400).json({ data: null, error: '应用已下架' });
+    }
+
+    // 按时长计费（2026-11-08）：不扣积分，改由时长池按秒消耗
+    // 这里只告诉前端「是不是时长应用、现在能不能进」，真正的扣时在 heartbeat 里做。
+    if (app.price_type === 'time') {
+      const [rows] = await connection.query(
+        'SELECT play_seconds_balance, current_points FROM profiles WHERE id = ?',
+        [studentId]
+      );
+      const balance = Number(rows[0]?.play_seconds_balance) || 0;
+      return res.json({
+        data: {
+          success: true,
+          charged: 0,
+          time_mode: true,
+          can_play: balance > 0,
+          play_seconds_balance: balance,
+          play_minutes_balance: Math.floor(balance / 60),
+          current_points: rows[0]?.current_points ?? 0,
+        },
+        error: null
+      });
     }
 
     const chargeable = app.price_type === 'points' || app.price_type === 'per_use';

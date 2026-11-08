@@ -150,8 +150,8 @@ export const TestModule: React.FC = () => {
   const [activeTest, setActiveTest] = useState<TestSession | null>(null);
   const [activeExam, setActiveExam] = useState<ExamSession | null>(null);
   const [showResult, setShowResult] = useState(false);
-  const [examResult, setExamResult] = useState<{ score: number; correct: number; points: number; diamonds?: number; internetCodes: number; codes: string[]; questions: Question[]; answers: Record<string, string>; isPassed: boolean } | null>(null);
-  const [testResult, setTestResult] = useState<{ score: number; correct: number; points: number; diamonds?: number; internetCode?: string; internetCodeReason?: string | null; internetCodeReward?: number; allowInternetCode?: boolean; passingScore?: number; questions: Question[]; answers: Record<string, string>; droppedEquipments?: any[] } | null>(null);
+  const [examResult, setExamResult] = useState<{ score: number; correct: number; points: number; diamonds?: number; diamondReason?: string | null; internetCodes: number; codes: string[]; questions: Question[]; answers: Record<string, string>; isPassed: boolean } | null>(null);
+  const [testResult, setTestResult] = useState<{ score: number; correct: number; points: number; diamonds?: number; diamondReason?: string | null; internetCode?: string; internetCodeReason?: string | null; internetCodeReward?: number; allowInternetCode?: boolean; passingScore?: number; questions: Question[]; answers: Record<string, string>; droppedEquipments?: any[] } | null>(null);
   const [showTestDetail, setShowTestDetail] = useState(false);
   const [selectedTestRecord, setSelectedTestRecord] = useState<TestRecord | null>(null);
   // 「我的上网码」：测试/考试/任务领过的码统一查（离开结果页之后也能找回来）
@@ -815,6 +815,7 @@ export const TestModule: React.FC = () => {
         points: points_earned, 
         // 2026-11-08：考试及格首次发放钻石（重考不再发），0 表示本次没有
         diamonds: (result.data as any)?.diamond_earned || 0,
+        diamondReason: (result.data as any)?.diamond_reason || null,
         internetCodes: internet_codes.length,
         codes: internet_codes,
         questions: mergeRevealIntoQuestions(activeExam.questions, (result.data as any)?.reveal_questions || []),
@@ -1221,6 +1222,7 @@ export const TestModule: React.FC = () => {
         score, correct, points: points_earned,
         // 测试每次及格都发钻石（随机组卷、有每日次数限制）
         diamonds: (result.data as any)?.diamond_earned || 0,
+        diamondReason: (result.data as any)?.diamond_reason || null,
         internetCode: internet_code,
         internetCodeReason: (result.data as any)?.internet_code_reason ?? null,
         internetCodeReward: (result.data as any)?.internet_code_reward ?? 0,
@@ -1381,7 +1383,7 @@ export const TestModule: React.FC = () => {
                     <p className="text-sm text-gray-600">获得积分</p>
                     <p className="text-3xl font-bold text-yellow-600">+{examResult.points}</p>
                   </div>
-                  {(examResult as any).diamonds > 0 && (
+                  {(examResult as any).diamonds > 0 ? (
                     <div className="bg-sky-50 rounded-lg p-4">
                       <p className="text-sm text-gray-600">获得钻石</p>
                       <p className="text-3xl font-bold text-sky-600">
@@ -1389,7 +1391,12 @@ export const TestModule: React.FC = () => {
                         <i className="fa-solid fa-gem text-xl ml-1"></i>
                       </p>
                     </div>
-                  )}
+                  ) : (examResult as any).diamondReason === 'daily_cap' ? (
+                    <div className="bg-amber-50 rounded-lg p-4">
+                      <p className="text-sm text-gray-600">今日钻石已达上限</p>
+                      <p className="text-xs text-gray-400 mt-1">明天再来，或在任务里继续攒</p>
+                    </div>
+                  ) : null}
                   {examResult.internetCodes > 0 && examResult.codes.length > 0 ? (
                     <div className="col-span-3 bg-purple-50 rounded-lg p-4">
                       <p className="text-sm text-gray-600 mb-3">获得上网码</p>
@@ -1522,7 +1529,7 @@ export const TestModule: React.FC = () => {
                 <p className="text-sm text-gray-600">获得积分</p>
                 <p className="text-3xl font-bold text-yellow-600">+{testResult.points}</p>
               </div>
-              {(testResult as any).diamonds > 0 && (
+              {(testResult as any).diamonds > 0 ? (
                 <div className="bg-sky-50 rounded-lg p-4">
                   <p className="text-sm text-gray-600">获得钻石</p>
                   <p className="text-3xl font-bold text-sky-600">
@@ -1530,7 +1537,12 @@ export const TestModule: React.FC = () => {
                     <i className="fa-solid fa-gem text-xl ml-1"></i>
                   </p>
                 </div>
-              )}
+              ) : (testResult as any).diamondReason === 'daily_cap' ? (
+                <div className="bg-amber-50 rounded-lg p-4">
+                  <p className="text-sm text-gray-600">今日钻石已达上限</p>
+                  <p className="text-xs text-gray-400 mt-1">明天再来，或在任务里继续攒</p>
+                </div>
+              ) : null}
             </div>
             {testResult.internetCode && (
               <div className="bg-purple-50 rounded-lg p-4 max-w-lg mx-auto">

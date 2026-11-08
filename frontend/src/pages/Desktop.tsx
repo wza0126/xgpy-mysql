@@ -22,6 +22,8 @@ import { AiLectureApp } from '../components/student/AiLectureApp';
 import { Notebook } from '../components/student/Notebook';
 import { PetModule } from '../components/student/PetModule';
 import { ExchangeModule } from '../components/student/ExchangeModule';
+// 游戏时长看守：按时长应用在前台时每 30 秒扣时（挂在页面级，关掉应用中心也照扣）
+import { PlayTimeWatcher } from '../components/student/PlayTimeWatcher';
 import { Leaderboard } from '../components/student/Leaderboard';
 import { ProfileModule } from '../components/student/ProfileModule';
 import { AppCenter } from '../components/student/AppCenter';
@@ -1025,6 +1027,8 @@ export const Desktop: React.FC = () => {
           return data.can_open_exchange_module === 1 || data.can_open_exchange_module === true || data.can_open_exchange_module === '1';
         }}
       />
+
+      <PlayTimeWatcher />
 
       <div className="absolute top-4 left-4 z-[9998] flex items-center gap-2">
         {/* 代理模式下不显示退出登录按钮 */}
