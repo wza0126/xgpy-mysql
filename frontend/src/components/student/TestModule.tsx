@@ -2238,7 +2238,7 @@ export const TestModule: React.FC = () => {
                     及格奖励 <b>{(test as any).diamond_reward}</b> 颗钻石
                   </p>
                 )}
-                {test.allow_internet_code && (test as any).internet_code_reward > 0 && (
+                {!!test.allow_internet_code && (test as any).internet_code_reward > 0 && (
                   <p className="text-purple-600">
                     <i className="fa-solid fa-wifi mr-2"></i>
                     及格奖励上网码 {(test as any).internet_code_reward} 个
@@ -2619,12 +2619,12 @@ export const TestModule: React.FC = () => {
                           <span className="text-xs text-gray-400 ml-1">（同一场只发首次及格）</span>
                         </p>
                       )}
-                      {examTest.allow_internet_code && examTest.internet_code_reward > 0 && (
+                      {!!examTest.allow_internet_code && examTest.internet_code_reward > 0 && (
                         <div className="flex items-center flex-wrap gap-2">
                           <p className="flex items-center">
                             <i className="fa-solid fa-wifi mr-2"></i>及格奖励上网码 {examTest.internet_code_reward} 个
                           </p>
-                          {examStatus.record && examStatus.record.is_passed && examStatus.record.internet_codes_earned > 0 && (
+                          {!!examStatus.record && !!examStatus.record.is_passed && examStatus.record.internet_codes_earned > 0 && (
                             <button
                               onClick={async () => {
                                 // 查询上网码
