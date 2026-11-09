@@ -197,7 +197,8 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
   const [correcting, setCorrecting] = useState(false);
   const [correctionOk, setCorrectionOk] = useState(false);
   const [correctionHint, setCorrectionHint] = useState('');
-  // 闸③ 最近 10 题正确率过低：弹窗提醒先看知识点；扣分由服务端复核执行，这里只负责提示。
+  // 闸③ 今日正确率过低（只算今天凌晨起的练习）：弹窗提醒先看知识点；
+  // 扣分由服务端复核执行，这里只负责提示。⛔ 口径改了要和服务端两处 SQL 同步。
   const [lowAccNotice, setLowAccNotice] = useState<{ rate: number; n: number; ok: number; points: number } | null>(null);
   const lowAccWarnedRef = useRef(false);
   // 提交反馈提示（已掌握/重复提交等）
@@ -621,7 +622,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
           );
         }
         
-        // 闸③：最近 10 题正确率过低 → 弹「先看知识点」提醒。
+        // 闸③：今日正确率过低（服务端只算今天凌晨起）→ 弹「先看知识点」提醒。
         // 服务端复核后才真正扣分（10 分钟冷却，避免一次连错被反复扣），前端只负责展示结果。
         // 每轮练习只提示一次，避免同一轮里反复弹窗打断学生。
         const recent = (result.data as any)?.recent10;
@@ -1641,16 +1642,20 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
               <h3 className="text-lg font-bold text-gray-800">正确率过低，先别急着往下点</h3>
             </div>
             <p className="text-sm text-gray-700 leading-relaxed mb-3">
-              你最近 <span className="font-semibold">{lowAccNotice.n}</span> 题只答对{' '}
+              你<span className="font-semibold">今天</span>最近{' '}
+              <span className="font-semibold">{lowAccNotice.n}</span> 题只答对{' '}
               <span className="font-semibold">{lowAccNotice.ok}</span> 题（
               <span className="font-semibold text-red-600">{lowAccNotice.rate}%</span>）。
               说明这类知识点还没弄懂，继续点下去只会反复错同一批题。
             </p>
             {lowAccNotice.points < 0 && (
               <p className="text-sm text-red-600 mb-3">
-                本次扣除 {Math.abs(lowAccNotice.points)} 积分，正确率回到 60% 以上就不会再触发。
+                本次扣除 {Math.abs(lowAccNotice.points)} 积分，今天正确率回到 60% 以上就不会再触发。
               </p>
             )}
+            <p className="text-xs text-gray-400 mb-3">
+              只统计今天凌晨以后做的题，昨天以前的错题不算。
+            </p>
             <p className="text-sm text-gray-600 mb-5">
               建议先花几分钟看知识点讲解，弄懂后再回来练，正确率会明显提高。
             </p>

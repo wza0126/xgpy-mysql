@@ -3741,14 +3741,18 @@ app.post('/api/business/submit-answer', authenticate, async (req, res) => {
     // 暴击的积分/Buff 结算完全不受影响。
     const critEffectEnabled = await getBoolConfig('crit_effect_enabled', true);
 
-    // 最近 10 题正确率：仅用于前端判断「连续蒙题」并弹学习提醒，
+    // 今日正确率：仅用于前端判断「连续蒙题」并弹学习提醒，
     // 真正的扣分复核在 /api/student/practice/low-accuracy-penalty（服务端重算，前端绕不过）。
-    // 这里只多一次按索引取 10 行的查询，不改动任何积分/游戏逻辑。
+    //
+    // ⛔ 必须带 created_at >= CURDATE()：这里原来取「最近 10 条」不分日期，学生今天
+    //    一进来做第 1 题，判的是上周的 10 道题，动不动第一天就被弹窗+扣分（吴老 2026-11-09 反馈）。
+    //    按「今天凌晨」重新起算后，昨天以前的错题不会再拖累今天的第一题。
     let recent10 = { n: 0, ok: 0, rate: 0 };
     try {
       const [recentRows] = await connection.query(
         `SELECT is_correct FROM student_answers
           WHERE student_id = ? AND source = 'practice'
+            AND created_at >= CURDATE()
           ORDER BY created_at DESC, id DESC LIMIT ?`,
         [student_id, LOW_ACC_MIN_SAMPLE]
       );
@@ -3832,9 +3836,12 @@ app.post('/api/student/practice/low-accuracy-penalty', authenticate, async (req,
 
     await connection.beginTransaction();
 
+    // 口径与提交回执一致：只统计「今天（凌晨起）」的练习记录。
+    // 扣分是真实扣钱，口径错了学生会有意见，两处必须同步改。
     const [recentRows] = await connection.query(
       `SELECT is_correct FROM student_answers
         WHERE student_id = ? AND source = 'practice'
+          AND created_at >= CURDATE()
         ORDER BY created_at DESC, id DESC LIMIT ?`,
       [studentId, LOW_ACC_MIN_SAMPLE]
     );
