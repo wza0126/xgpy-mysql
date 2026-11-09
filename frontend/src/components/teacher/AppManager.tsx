@@ -119,6 +119,15 @@ export function AppManager() {
   // 键盘星域双人对决奖励档位（动态行）
   const [rewardRows, setRewardRows] = useState<{ score: number; points: number; equipment_id: string }[]>([]);
 
+  // ===== 列表筛选 / 批量操作 / 表单类型联动 =====
+  const [typeFilter, setTypeFilter] = useState<'all' | App['type']>('all');
+  // 表单里「应用类型」下拉的当前值：新建时不能依赖 editingApp，否则切换类型不会渲染对应配置项
+  const [formType, setFormType] = useState<App['type']>('learning_tool');
+  const [showBatchClassModal, setShowBatchClassModal] = useState(false);
+  const [batchClassIds, setBatchClassIds] = useState<string[]>([]);
+  const [batchClassMode, setBatchClassMode] = useState<'add' | 'replace'>('add');
+  const [batchBusy, setBatchBusy] = useState(false);
+
   // 常用 emoji 图标选项
   const iconOptions = [
     '📚', '📖', '🎓', '✏️', '🖊️', '📝', '📐', '📊',
@@ -251,13 +260,108 @@ export function AppManager() {
     }
   };
 
+  // ===== 批量操作：删除 / 上下架 / 启用班级 =====
   const handleBatchDelete = async () => {
-    if (!confirm(`确定要删除选中的 ${selectedApps.length} 个应用吗？`)) return;
-    
-    for (const appId of selectedApps) {
-      await handleDelete(appId);
+    const ids = [...selectedApps];
+    if (!ids.length) return;
+    if (!confirm(`确定要删除选中的 ${ids.length} 个应用吗？此操作不可撤销。`)) return;
+    setBatchBusy(true);
+    try {
+      for (const appId of ids) {
+        await backendClient.from('apps').delete().eq('id', appId);
+        const { data } = await backendClient.from('app_visibility').select('*').eq('app_id', appId);
+        if (data) {
+          for (const vis of data as AppVisibility[]) {
+            await backendClient.from('app_visibility').delete().eq('id', vis.id);
+          }
+        }
+      }
+      setSelectedApps([]);
+      fetchApps();
+      fetchVisibility();
+    } catch (error) {
+      console.error('Failed to batch delete apps:', error);
+      alert('批量删除失败，部分应用可能已删除，请刷新页面确认');
+    } finally {
+      setBatchBusy(false);
     }
-    setSelectedApps([]);
+  };
+
+  const handleBatchSetActive = async (active: boolean) => {
+    const ids = [...selectedApps];
+    if (!ids.length) return;
+    if (!confirm(`确定要${active ? '上架' : '下架'}选中的 ${ids.length} 个应用吗？`)) return;
+    setBatchBusy(true);
+    try {
+      for (const appId of ids) {
+        await backendClient.from('apps').update({ is_active: active }).eq('id', appId);
+      }
+      fetchApps();
+    } catch (error) {
+      console.error('Failed to batch update apps:', error);
+      alert('批量操作失败，请刷新页面确认');
+    } finally {
+      setBatchBusy(false);
+    }
+  };
+
+  const openBatchClassModal = () => {
+    setBatchClassIds(classes.map(c => c.id));
+    setBatchClassMode('add');
+    setShowBatchClassModal(true);
+  };
+
+  const toggleBatchClass = (classId: string) => {
+    setBatchClassIds(prev =>
+      prev.includes(classId) ? prev.filter(id => id !== classId) : [...prev, classId]
+    );
+  };
+
+  // 复用单应用编辑时的 app_visibility 规则：有记录按记录，无记录视为可见
+  const applyBatchClasses = async () => {
+    const ids = [...selectedApps];
+    if (!ids.length) return;
+    if (batchClassIds.length === 0) {
+      if (batchClassMode === 'add') {
+        alert('请至少勾选一个班级');
+        return;
+      }
+      if (!confirm('未勾选任何班级，将把选中的应用对所有班级隐藏，确定继续吗？')) return;
+    }
+    setBatchBusy(true);
+    try {
+      let seq = 0;
+      const stamp = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+      for (const appId of ids) {
+        for (const cls of classes) {
+          const wantVisible = batchClassIds.includes(cls.id);
+          // 追加模式只处理勾选的班级，其它班级保持原状
+          if (batchClassMode === 'add' && !wantVisible) continue;
+          const existing = appVisibility.find(v => v.app_id === appId && v.class_id === cls.id);
+          if (existing) {
+            if (Boolean(existing.is_visible) !== wantVisible) {
+              await backendClient.from('app_visibility')
+                .update({ is_visible: wantVisible }).eq('id', existing.id);
+            }
+          } else {
+            seq += 1;
+            await backendClient.from('app_visibility').insert({
+              id: `avb_${stamp}_${seq}`,
+              app_id: appId,
+              class_id: cls.id,
+              is_visible: wantVisible
+            });
+          }
+        }
+      }
+      fetchVisibility();
+      setShowBatchClassModal(false);
+    } catch (error) {
+      console.error('Failed to batch set class visibility:', error);
+      alert('批量启用班级失败，请刷新页面确认');
+    } finally {
+      setBatchBusy(false);
+    }
   };
 
   const toggleClass = (classId: string) => {
@@ -268,6 +372,7 @@ export function AppManager() {
 
   const openEditModal = (app: App) => {
     setEditingApp(app);
+    setFormType(app.type);
     const rows = appVisibility.filter(v => v.app_id === app.id);
     // 全部可见（无隐藏记录）→ 默认全选所有班级；部分隐藏 → 只预选可见班级
     const visibleClasses = rows.some(v => !v.is_visible)
@@ -288,6 +393,7 @@ export function AppManager() {
 
   const openCreateModal = () => {
     setEditingApp(null);
+    setFormType('learning_tool');
     setSelectedClasses(classes.map(c => c.id));
     setSelectedIcon('📚');
     setRewardRows([]);
@@ -407,10 +513,23 @@ export function AppManager() {
     return visibleNames.length > 0 ? visibleNames.join(', ') : '无（已全部隐藏）';
   };
 
-  const filteredApps = apps.filter(app =>
-    app.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    app.description.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const filteredApps = apps.filter(app => {
+    const matchesText =
+      (app.name || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (app.description || '').toLowerCase().includes(searchTerm.toLowerCase());
+    return matchesText && (typeFilter === 'all' || app.type === typeFilter);
+  });
+
+  // 全选 / 取消全选只作用于当前筛选结果，不影响筛选之外已勾选的应用
+  const allFilteredSelected = filteredApps.length > 0 && filteredApps.every(app => selectedApps.includes(app.id));
+  const toggleSelectAllFiltered = () => {
+    setSelectedApps(prev => {
+      const visibleIds = filteredApps.map(app => app.id);
+      return allFilteredSelected
+        ? prev.filter(id => !visibleIds.includes(id))
+        : Array.from(new Set([...prev, ...visibleIds]));
+    });
+  };
 
   // ===== 进度弹窗：班级筛选 + 字段排序 =====
   const isRealmGame = progressApp?.type === 'code_realm';
@@ -459,9 +578,20 @@ export function AppManager() {
       <div className="p-6">
       <PlayTimeRulesPanel />
 
-      <div className="flex justify-between items-center mb-6">
+      <div className="flex justify-between items-center mb-6 flex-wrap gap-3">
         <h2 className="text-2xl font-bold text-gray-800">应用管理</h2>
-        <div className="flex gap-4">
+        <div className="flex gap-3 flex-wrap items-center">
+          <select
+            value={typeFilter}
+            onChange={(e) => setTypeFilter(e.target.value as 'all' | App['type'])}
+            className="px-3 py-2 border border-gray-300 rounded-lg bg-white text-sm"
+            title="按应用类型筛选"
+          >
+            <option value="all">全部类型</option>
+            {appTypes.map(type => (
+              <option key={type.value} value={type.value}>{type.label}</option>
+            ))}
+          </select>
           <input
             type="text"
             placeholder="搜索应用..."
@@ -469,6 +599,18 @@ export function AppManager() {
             onChange={(e) => setSearchTerm(e.target.value)}
             className="px-4 py-2 border border-gray-300 rounded-lg"
           />
+          <label
+            className="flex items-center gap-2 px-2 py-2 text-sm text-gray-700 cursor-pointer select-none"
+            title="勾选/取消当前筛选出来的全部应用"
+          >
+            <input
+              type="checkbox"
+              checked={allFilteredSelected}
+              onChange={toggleSelectAllFiltered}
+              className="rounded"
+            />
+            全选
+          </label>
           <button
             onClick={openCreateModal}
             className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
@@ -478,12 +620,47 @@ export function AppManager() {
         </div>
       </div>
 
+      <div className="text-xs text-gray-500 mb-3">
+        共 {apps.length} 个应用，当前显示 {filteredApps.length} 个
+      </div>
+
       {selectedApps.length > 0 && (
-        <div className="mb-4 flex items-center gap-4 p-4 bg-red-50 rounded-lg">
-          <span className="text-red-700 font-medium">已选择 {selectedApps.length} 个应用</span>
+        <div className="mb-4 flex items-center gap-3 p-4 bg-blue-50 border border-blue-200 rounded-lg flex-wrap">
+          <span className="text-blue-800 font-medium mr-1">
+            已选择 {selectedApps.length} 个应用{batchBusy ? ' · 处理中…' : ''}
+          </span>
           <button
+            disabled={batchBusy}
+            onClick={() => handleBatchSetActive(true)}
+            className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors"
+          >
+            批量上架
+          </button>
+          <button
+            disabled={batchBusy}
+            onClick={() => handleBatchSetActive(false)}
+            className="px-4 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 disabled:opacity-50 transition-colors"
+          >
+            批量下架
+          </button>
+          <button
+            disabled={batchBusy}
+            onClick={openBatchClassModal}
+            className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+          >
+            批量启用班级
+          </button>
+          <button
+            disabled={batchBusy}
+            onClick={() => setSelectedApps([])}
+            className="px-4 py-2 border border-gray-300 bg-white text-gray-700 rounded-lg hover:bg-gray-100 disabled:opacity-50 transition-colors"
+          >
+            清空选择
+          </button>
+          <button
+            disabled={batchBusy}
             onClick={handleBatchDelete}
-            className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors"
+            className="ml-auto px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 disabled:opacity-50 transition-colors"
           >
             批量删除
           </button>
@@ -772,7 +949,8 @@ export function AppManager() {
                   </label>
                   <select
                     name="type"
-                    defaultValue={editingApp?.type || 'learning_tool'}
+                    value={formType}
+                    onChange={(e) => setFormType(e.target.value as App['type'])}
                     required
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                   >
@@ -835,7 +1013,8 @@ export function AppManager() {
               </div>
 
               {(() => {
-                const currentType = editingApp?.type || 'learning_tool';
+                // 用表单里当前选中的类型，而不是 editingApp：否则新建时切换类型不会刷新配置项
+                const currentType = formType;
                 const config = editingApp ? getParsedConfig(editingApp) : {};
                 
                 if (currentType === 'learning_tool') {
@@ -1473,6 +1652,110 @@ export function AppManager() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {showBatchClassModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl p-6 w-full max-w-lg max-h-[85vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xl font-semibold">批量启用班级</h3>
+              <button
+                onClick={() => { if (!batchBusy) setShowBatchClassModal(false); }}
+                className="text-gray-500 hover:text-gray-700"
+              >
+                ✕
+              </button>
+            </div>
+            <p className="text-sm text-gray-600 mb-4">
+              为已选中的 <b>{selectedApps.length}</b> 个应用设置可见班级。
+            </p>
+
+            <div className="mb-4 space-y-2">
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="batchClassMode"
+                  className="mt-1"
+                  checked={batchClassMode === 'add'}
+                  onChange={() => setBatchClassMode('add')}
+                />
+                <span className="text-sm text-gray-700">
+                  <b>追加启用</b>：只把勾选的班级设为可见，其它班级保持原状（推荐）
+                </span>
+              </label>
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="batchClassMode"
+                  className="mt-1"
+                  checked={batchClassMode === 'replace'}
+                  onChange={() => setBatchClassMode('replace')}
+                />
+                <span className="text-sm text-gray-700">
+                  <b>仅这些班级可见</b>：勾选的可见，未勾选的全部隐藏（会覆盖原有设置）
+                </span>
+              </label>
+            </div>
+
+            <div className="mb-2 flex items-center justify-between">
+              <label className="block text-sm font-medium text-gray-700">选择班级</label>
+              <div className="flex gap-3 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setBatchClassIds(classes.map(c => c.id))}
+                  className="text-blue-600 hover:underline"
+                >
+                  全选
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBatchClassIds([])}
+                  className="text-blue-600 hover:underline"
+                >
+                  清空
+                </button>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2 mb-4 p-3 border border-gray-200 rounded-lg">
+              {classes.map(cls => (
+                <button
+                  key={cls.id}
+                  type="button"
+                  onClick={() => toggleBatchClass(cls.id)}
+                  className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+                    batchClassIds.includes(cls.id)
+                      ? 'bg-indigo-500 text-white'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
+                >
+                  {cls.name}
+                </button>
+              ))}
+              {classes.length === 0 && <span className="text-sm text-gray-500">暂无班级数据</span>}
+            </div>
+            <p className="text-xs text-amber-600 mb-4">
+              💡 「追加启用」只影响勾选的班级；「仅这些班级可见」会覆盖这些应用原有的可见设置。
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                type="button"
+                disabled={batchBusy}
+                onClick={() => setShowBatchClassModal(false)}
+                className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-100 disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                disabled={batchBusy || classes.length === 0}
+                onClick={applyBatchClasses}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {batchBusy ? '处理中…' : `应用到 ${selectedApps.length} 个应用`}
+              </button>
+            </div>
           </div>
         </div>
       )}
