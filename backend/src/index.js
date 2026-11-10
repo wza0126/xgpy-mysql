@@ -1733,6 +1733,7 @@ app.put('/api/classes/:id/toggles', authenticate, async (req, res) => {
     }
 
     await connection.commit();
+    invalidateQueryCache('classes');
     res.json({ data: { success: true }, error: null });
   } catch (error) {
     try { await connection.rollback(); } catch (_) {}
@@ -1963,7 +1964,8 @@ app.post('/api/tables/:tableName', authenticate, async (req, res) => {
       
       await pool.query(query, [tableName, ...values]);
       
-      res.json({ data: [data], error: null });
+      invalidateQueryCache(tableName);
+    res.json({ data: [data], error: null });
       return;
     }
     
@@ -1983,6 +1985,7 @@ app.post('/api/tables/:tableName', authenticate, async (req, res) => {
     
     await pool.query(query, [tableName, ...values]);
     
+    invalidateQueryCache(tableName);
     res.json({ data: [data], error: null });
   } catch (error) {
     console.error('Error in POST /api/tables:', error);
@@ -2111,6 +2114,8 @@ app.put('/api/tables/:tableName/:id', authenticate, async (req, res) => {
     if (result.affectedRows === 0) {
       res.status(404).json({ data: [], error: 'Not found' });
     } else {
+      // 写成功立刻让该表缓存失效：前端紧接着的 fetch 才会读到新值
+      invalidateQueryCache(tableName);
       res.json({ data: [{ id, ...data }], error: null });
     }
   } catch (error) {
@@ -2138,6 +2143,7 @@ app.delete('/api/tables/:tableName/:id', authenticate, async (req, res) => {
     const [result] = await pool.query('DELETE FROM ?? WHERE id = ?', [tableName, id]);
     
     // 即使没有删除任何行也返回成功，因为记录可能已经不存在了
+    invalidateQueryCache(tableName);
     res.json({ data: [{ id }], error: null });
   } catch (error) {
     console.error('Error in DELETE /api/tables:', error);
@@ -2154,8 +2160,11 @@ app.delete('/api/tables/:tableName/:id', authenticate, async (req, res) => {
 //   3. 逐请求的 body 打印默认关闭（高峰一分钟 7000 行 stdout，会同步阻塞事件循环），
 //      保留 DEBUG_QUERY=1 全量开关，并新增 >500ms 慢查询摘要 —— 排障不受影响。
 const QUERY_DEBUG = process.env.DEBUG_QUERY === '1';
+// ⛔ classes 不缓存（2026-11-10 吴老反馈「班级管理开关点了没反应」）：
+//    backendClient 更新时先 select 再逐行 PUT，写成功后前端 fetchClasses() 又走本接口，
+//    60 秒缓存会把旧值读回去，看起来就像开关没生效。班级表只有几十行、查询 <5ms，不缓存更省心。
 const QUERY_CACHE_TTL = {
-  profiles: 10, classes: 60, pet_config: 60, system_config: 30,
+  profiles: 10, pet_config: 60, system_config: 30,
   apps: 30, equipments: 60, achievements: 60, skins: 60,
 };
 const QUERY_CACHE_MAX = 1500;
@@ -2181,6 +2190,18 @@ function queryCacheSet(key, value, ttlMs) {
     }
   }
   queryCache.set(key, { value, exp: Date.now() + ttlMs });
+}
+
+/**
+ * 写操作后让某张表的缓存立即失效。
+ * ⛔ 必须挂在所有写路由上：否则「写完立刻回读」会拿到 TTL 内的旧值，界面表现为「点了没反应」。
+ */
+function invalidateQueryCache(table) {
+  if (!table) return;
+  const prefix = `${table}|`;
+  for (const k of queryCache.keys()) {
+    if (k.startsWith(prefix)) queryCache.delete(k);
+  }
 }
 
 app.post('/api/query', authenticate, async (req, res) => {
