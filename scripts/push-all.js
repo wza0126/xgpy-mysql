@@ -18,7 +18,9 @@
 
 'use strict';
 
-const { execSync } = require('child_process');
+// ⛔ git push 的「To ... a..b main -> main」是写到 **stderr** 的，
+//    用 execSync 只能拿到 stdout，会误显示成空的。统一走 spawnSync 合并两路。
+const { spawnSync } = require('child_process');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -30,23 +32,23 @@ const argv = process.argv.slice(2);
 const NO_BACKUP = argv.includes('--no-backup');
 const FORCE = argv.includes('--force');
 
+/** 跑一条命令，成功返回 stdout；失败抛出（带合并后的输出） */
 function sh(cmd, timeout = 120000) {
-  return execSync(cmd, {
-    cwd: ROOT,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    timeout,
-  }).trim();
+  const r = spawnSync(cmd, { cwd: ROOT, encoding: 'utf8', timeout, shell: true });
+  const out = `${r.stdout || ''}${r.stderr || ''}`.trim();
+  if (r.status !== 0) {
+    const err = new Error(out || `命令失败: ${cmd}`);
+    err.out = out;
+    throw err;
+  }
+  return out;
 }
 
 /** 执行但不上抛，返回 { ok, out } —— 备份推送要用这个，失败了不该中断流程 */
 function shSoft(cmd, timeout = 180000) {
-  try {
-    return { ok: true, out: sh(cmd, timeout) };
-  } catch (e) {
-    const out = `${e.stdout || ''}${e.stderr || ''}`.trim();
-    return { ok: false, out: out || e.message };
-  }
+  const r = spawnSync(cmd, { cwd: ROOT, encoding: 'utf8', timeout, shell: true });
+  const out = `${r.stdout || ''}${r.stderr || ''}`.trim();
+  return { ok: r.status === 0, out: out || (r.error ? r.error.message : '') };
 }
 
 function head() {
