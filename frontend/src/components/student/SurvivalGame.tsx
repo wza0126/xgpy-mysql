@@ -80,6 +80,8 @@ interface SState {
     time_choice: number;
     time_blank: number;
     require_correction: number;
+    /** 累计通关每跨过多少层发 1 颗钻石，0 = 未开启 */
+    diamond_step: number;
   };
 }
 
@@ -120,6 +122,13 @@ interface RankData {
 
 const LETTERS = ['A', 'B', 'C', 'D', 'E', 'F'];
 type Phase = 'loading' | 'intro' | 'playing' | 'cleared' | 'dead' | 'rank';
+
+/** 本次结算到账的钻石总数（答对 / 订正两条路径共用；服务端已做幂等） */
+const sumDiamonds = (d: any): number => (
+  Array.isArray(d?.diamonds_gained)
+    ? d.diamonds_gained.reduce((s: number, x: any) => s + (Number(x?.amount) || 0), 0)
+    : 0
+);
 
 export const SurvivalGame: React.FC = () => {
   const { profile } = useAuth();
@@ -185,6 +194,8 @@ export const SurvivalGame: React.FC = () => {
     hpDelta: number;
     repeat: boolean;
     corrected: boolean;
+    /** 本层结算到账的钻石（跨过深度步长时才有） */
+    diamonds: number;
   }>(null);
   /** 刚解锁的重生点剧情，展示一次可关闭 */
   const [checkpointStory, setCheckpointStory] = useState<SCheckpoint | null>(null);
@@ -250,6 +261,7 @@ export const SurvivalGame: React.FC = () => {
           hpDelta: 0,
           repeat: false,
           corrected: false,
+          diamonds: 0,
         });
         setPhase('cleared');
       } else {
@@ -323,6 +335,7 @@ export const SurvivalGame: React.FC = () => {
             hpDelta: d.hp_delta,
             repeat: !!d.repeat,
             corrected: false,
+            diamonds: sumDiamonds(d),
           });
           setState((prev) =>
             prev ? { ...prev, total_levels: d.total_levels, round_levels: d.round_levels, hp: d.hp_after } : prev
@@ -412,6 +425,7 @@ export const SurvivalGame: React.FC = () => {
         hpDelta: 0,
         repeat: false,
         corrected: true,
+        diamonds: sumDiamonds(d),
       });
       setState((prev) =>
         prev ? { ...prev, total_levels: d.total_levels, round_levels: d.round_levels, pending_correction: false } : prev
@@ -452,6 +466,7 @@ export const SurvivalGame: React.FC = () => {
         hpDelta: 0,
         repeat: false,
         corrected: true,
+        diamonds: sumDiamonds(d),
       });
       setState((prev) =>
         prev ? { ...prev, total_levels: d.total_levels, round_levels: d.round_levels, pending_correction: false } : prev
@@ -526,6 +541,7 @@ export const SurvivalGame: React.FC = () => {
   }, [phase, nextBusy, diving]);
 
   const startGame = async () => {    setBusy(true);
+    setNotice('');
     try {
       const res: any = await backendClient.post('/api/student/survival/start', {});
       const d = res?.data;
@@ -572,6 +588,11 @@ export const SurvivalGame: React.FC = () => {
   };
 
   const hpInit = state?.hp_init || 100;
+  // 深度钻石进度：累计通关层数每跨过 step 层发 1 颗（服务端按档位幂等发放）
+  const diamondStep = Number(state?.config?.diamond_step) || 0;
+  const totalDepth = Number(state?.total_levels) || 0;
+  const nextDiamondAt = diamondStep > 0 ? (Math.floor(totalDepth / diamondStep) + 1) * diamondStep : 0;
+  const toNextDiamond = nextDiamondAt > 0 ? Math.max(0, nextDiamondAt - totalDepth) : 0;
   const ratio = Math.min(1, Math.max(0, hp / hpInit));
   const cells = Math.max(hp > 0 ? 1 : 0, Math.round(ratio * 10));
   const danger = hp > 0 && hp <= hpInit * 0.3;
@@ -735,7 +756,7 @@ export const SurvivalGame: React.FC = () => {
 
   // ---------- 本层通过（等学生点「下一层」） ----------
   if (phase === 'cleared') {
-    const info = clearedInfo || { code: '', title: '', hpDelta: 0, repeat: false, corrected: false };
+    const info = clearedInfo || { code: '', title: '', hpDelta: 0, repeat: false, corrected: false, diamonds: 0 };
     return shell(
       <div className="relative flex flex-1 items-center justify-center px-6">
         <div className="sv-fadein w-full max-w-md">
@@ -755,6 +776,17 @@ export const SurvivalGame: React.FC = () => {
               {info.repeat && <span className="text-[11px]" style={{ color: C.mute }}>今天做过这题</span>}
             </div>
           </div>
+
+          {info.diamonds > 0 && (
+            <div
+              className="mt-4 flex items-center justify-center gap-2 rounded-lg px-3 py-2"
+              style={{ background: 'rgba(251,191,36,0.12)', border: '1px solid #78350F' }}
+            >
+              <i className="fa-solid fa-gem" style={{ color: '#FBBF24' }}></i>
+              <span className="text-sm" style={{ color: '#FCD34D' }}>深度奖励 +{info.diamonds} 钻石</span>
+              <span className="text-[11px]" style={{ color: C.mute }}>计入今日钻石产出</span>
+            </div>
+          )}
 
           {notice && (
             <div
@@ -903,6 +935,24 @@ export const SurvivalGame: React.FC = () => {
             一关一题。答对稳住信号并下潜一层，答错会让信号崩解。
             信号耗尽就断线，但会从最近的中继站重新接入 —— 走过的路不必再走。
           </p>
+
+          {diamondStep > 0 && (
+            <p className="mx-auto mt-2 max-w-sm text-xs leading-relaxed" style={{ color: '#FBBF24' }}>
+              <i className="fa-solid fa-gem mr-1"></i>
+              累计通关每 {diamondStep} 层得 1 颗钻石（每档只发一次）。当前累计 {totalDepth} 层
+              {toNextDiamond > 0 ? `，还差 ${toNextDiamond} 层` : '，本档已达成'}。
+              钻石计入每日产出上限，可兑换游戏时间。
+            </p>
+          )}
+
+          {notice && (
+            <div
+              className="mx-auto mt-3 max-w-sm rounded-md px-3 py-2 text-left text-[11px] leading-relaxed"
+              style={{ background: 'rgba(239,68,68,0.14)', border: '1px solid #5A2020', color: '#FCA5A5' }}
+            >
+              {notice}
+            </div>
+          )}
 
           <div className="mt-5 grid grid-cols-3 gap-2 text-center">
             {[
@@ -1214,7 +1264,15 @@ export const SurvivalGame: React.FC = () => {
         </div>
 
         <div className="mt-3 flex items-center justify-between text-[11px]" style={{ color: C.mute }}>
-          <span>本轮已过 {state?.round_levels ?? 0} 层 · 累计 {state?.total_levels ?? 0} 层</span>
+          <span>
+            本轮已过 {state?.round_levels ?? 0} 层 · 累计 {state?.total_levels ?? 0} 层
+            {diamondStep > 0 && (
+              <span className="ml-2" style={{ color: '#FBBF24' }} title={`每累计 ${diamondStep} 层发 1 颗钻石`}>
+                <i className="fa-solid fa-gem mr-1"></i>
+                {toNextDiamond > 0 ? `还差 ${toNextDiamond} 层` : '已达标'}
+              </span>
+            )}
+          </span>
           <span>{state?.config?.require_correction ? '答错须订正' : '答错可直接继续'}</span>
         </div>
       </div>

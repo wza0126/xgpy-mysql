@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { backendClient } from '../../api/backendClient';
+import { MasteredScopePicker, countInScope, type ScopeCounts } from './MasteredScopePicker';
 
 /**
  * 生存游戏 · 教师端（考试管理 → 生存游戏，2026-10-27）
@@ -22,6 +23,17 @@ interface Cfg {
   time_blank: number;
   require_correction: number;
   rank_limit: number;
+  /** 累计通关层数每跨过多少层发 1 颗钻石，0 = 关闭 */
+  diamond_step: number;
+  // 资格验证：与「普通测试 / 对战PK」同口径，0 = 该项不启用
+  qual_correct: number;
+  qual_mastered: number;
+  qual_wps: number;
+  qual_access: number;
+  qual_pyfill: number;
+  qual_composite: number;
+  /** 已掌握题数的统计范围：一级类目名或「章名/小节名」，空数组 = 全部范围 */
+  qual_clusters: string[];
 }
 
 interface ClassRow {
@@ -63,6 +75,18 @@ const FIELD_DEFS: { key: keyof Cfg; label: string; hint: string; min: number; ma
   { key: 'time_choice', label: '选择题限时(秒)', hint: '0 = 不限时', min: 0, max: 600 },
   { key: 'time_blank', label: '填空题限时(秒)', hint: '要打字，一般比选择多给', min: 0, max: 600 },
   { key: 'rank_limit', label: '排行榜条数', hint: '全校榜显示前多少名', min: 10, max: 500 },
+  { key: 'diamond_step', label: '钻石步长(层)', hint: '累计通关每跨过 N 层发 1 颗钻石；0 = 关闭', min: 0, max: 999 },
+];
+
+/** 资格六项：与「普通测试 / 对战PK」同一套口径，0 = 该项不启用 */
+type QualKey = 'qual_correct' | 'qual_mastered' | 'qual_wps' | 'qual_access' | 'qual_pyfill' | 'qual_composite';
+const QUAL_FIELDS: { key: QualKey; label: string; hint: string; max: number }[] = [
+  { key: 'qual_correct', label: '做对题数', hint: '累计答对题数（不限来源）', max: 99999 },
+  { key: 'qual_mastered', label: '已掌握题数', hint: '按下方选定范围统计', max: 99999 },
+  { key: 'qual_wps', label: 'WPS 操作题得分', hint: '每道题取历史最高分再加总', max: 99999 },
+  { key: 'qual_access', label: 'Access 操作题得分', hint: '每道题取历史最高分再加总', max: 99999 },
+  { key: 'qual_pyfill', label: '编程填空得分', hint: '83 道题历史最好分之和，满分 830', max: 99999 },
+  { key: 'qual_composite', label: '综合题得分', hint: '30 道题历史最好分之和，满分 600', max: 99999 },
 ];
 
 export const SurvivalManager: React.FC = () => {
@@ -78,6 +102,8 @@ export const SurvivalManager: React.FC = () => {
   const [orderMode, setOrderMode] = useState<'textbook' | 'shuffled'>('textbook');
   const [editing, setEditing] = useState<LevelRow | null>(null);
   const [extraInput, setExtraInput] = useState('');
+  /** 各一级类目「可练习题量」：给「已掌握题数」资格的范围选择器提供上限参考 */
+  const [counts, setCounts] = useState<ScopeCounts>({ total: 0, by_primary: {} });
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -111,6 +137,17 @@ export const SurvivalManager: React.FC = () => {
   useEffect(() => {
     loadAll();
   }, [loadAll]);
+  // 类目题量：与「普通测试 / 对战PK」的资格设置同一个接口，口径不会分叉
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data } = await backendClient.get('/api/teacher/qualification/counts');
+        if (data) setCounts(data as ScopeCounts);
+      } catch (e) {
+        console.error('拉取类目题量失败:', e);
+      }
+    })();
+  }, []);
   useEffect(() => {
     if (tab === 'levels' && !levels.length) loadLevels();
   }, [tab, levels.length, loadLevels]);
@@ -293,6 +330,74 @@ export const SurvivalManager: React.FC = () => {
               </button>
               <p className="mt-1 text-xs text-gray-400">建议开启，否则「看解析」会变成点一下就走</p>
             </div>
+          </div>
+
+          {/* 钻石奖励：累计通关层数换钻石（2026-11-10） */}
+          <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50/60 p-3">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <i className="fa-solid fa-gem text-amber-500"></i>
+              <span className="text-sm font-medium text-amber-800">钻石奖励</span>
+              <span className="text-xs text-amber-700">累计通关层数（死亡不清零）每跨过</span>
+              <input
+                type="number"
+                min={0}
+                max={999}
+                value={Number(draft.diamond_step) || 0}
+                onChange={(e) => setDraft({ ...draft, diamond_step: Number(e.target.value) || 0 })}
+                className="w-20 rounded border border-amber-300 bg-white px-2 py-1 text-sm"
+              />
+              <span className="text-xs text-amber-700">层发 1 颗钻石</span>
+            </div>
+            <p className="mt-1.5 text-xs leading-relaxed text-amber-700">
+              同一档位一生只发一次：掉层后重打、断线重连、网络重试都不会重复发。
+              钻石计入「每日产出上限」，与测试 / 考试 / 任务共用每天 3 颗（上限在游戏时长池里改）。
+              填 0 = 关闭钻石奖励。
+            </p>
+          </div>
+
+          {/* 资格验证：只在首次进入 / 新一轮开始时校验 */}
+          <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50/50 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <i className="fa-solid fa-user-check text-blue-500"></i>
+                <span className="text-sm font-medium text-blue-800">资格验证（可选）</span>
+              </div>
+              <span className="text-xs text-blue-600">留空或填 0 = 该项不启用；多项需同时满足</span>
+            </div>
+            <p className="mt-1 text-xs leading-relaxed text-gray-600">
+              与「考试管理 → 普通测试 / 对战PK」同一套口径，统计学生历史学习数据。
+              只在<b>首次进入</b>与<b>每次开启新一轮（打穿一轮后）</b>时校验；
+              已经在局中的学生会继续打完，不会被中途踢出。
+            </p>
+            <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
+              {QUAL_FIELDS.map((f) => (
+                <div key={f.key}>
+                  <label className="mb-1 block text-xs font-medium text-gray-700">{f.label}</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={f.max}
+                    value={Number(draft[f.key]) || 0}
+                    onChange={(e) => setDraft({ ...draft, [f.key]: Number(e.target.value) || 0 })}
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                  />
+                  <p className="mt-1 text-[11px] text-gray-400">{f.hint}</p>
+                </div>
+              ))}
+            </div>
+            {Number(draft.qual_mastered) > 0 && (
+              <div className="mt-3 rounded-lg border border-blue-100 bg-white p-2.5">
+                <MasteredScopePicker
+                  value={draft.qual_clusters || []}
+                  onChange={(next) => setDraft({ ...draft, qual_clusters: next })}
+                  counts={counts}
+                />
+                <p className="mt-1 text-[11px] text-blue-700">
+                  当前范围可练习题量：{countInScope(counts, draft.qual_clusters || [])} 道
+                  （「已掌握题数」只能从这个范围里算，阈值不超过这个数才有意义）
+                </p>
+              </div>
+            )}
           </div>
 
           <div className="flex items-center justify-between border-t border-gray-100 pt-3">

@@ -11730,23 +11730,57 @@ const SURVIVAL_DEFAULTS = {
   time_blank: 60,      // 填空题限时（秒）
   require_correction: 1, // 答错必须重新答对才能继续
   rank_limit: 100,     // 排行榜显示条数
+
+  // ---- 钻石（2026-11-10 吴老定）----
+  // 累计通关层数（total_levels，死亡不清零）每跨过 step 层发 1 颗，0 = 关闭。
+  // 幂等键是里程碑层数，见 grantSurvivalDepthDiamonds。
+  diamond_step: 30,
+
+  // ---- 资格验证（2026-11-10 吴老定）----
+  // 六项与「考试管理 → 普通测试 / 对战PK」完全同口径，判定统一走 checkQualification()；
+  // 任一为 0 = 该条件不启用。只在「首次进入 / 即将开新一轮」时拦，续玩与重生不拦。
+  qual_correct: 0,     // 累计做对题数
+  qual_mastered: 0,    // 已掌握题数（范围见 qual_clusters）
+  qual_wps: 0,         // WPS 操作题累计得分
+  qual_access: 0,      // Access 操作题累计得分
+  qual_pyfill: 0,      // 累计编程填空得分
+  qual_composite: 0,   // 累计综合题得分
+  // 已掌握题数的统计范围：一级类目名 或「章名/小节名」；空数组 = 全部范围。
+  // ⛔ 这是 JSON 数组，不能走下面的 Number() 解析（会被算成 0）。
+  qual_clusters: [],
 };
 
 /** 读配置：system_config 里 survival_* 覆盖默认值，缺失的用默认 */
 async function getSurvivalConfig() {
-  const cfg = { ...SURVIVAL_DEFAULTS };
+  const cfg = { ...SURVIVAL_DEFAULTS, qual_clusters: [] };
   try {
     const [rows] = await pool.query(
       "SELECT config_key, value FROM system_config WHERE config_key LIKE 'survival\\_%'"
     );
     for (const r of rows) {
       const key = String(r.config_key || '').slice('survival_'.length);
+      if (key === 'qual_clusters') continue; // 数组，单独解析
       if (!(key in cfg)) continue;
       let v = r.value;
       try { v = JSON.parse(v); } catch { /* 原样 */ }
       if (v && typeof v === 'object' && 'value' in v) v = v.value;
       const num = Number(v);
       if (Number.isFinite(num)) cfg[key] = num;
+    }
+    // ⛔ MariaDB 的 JSON 列经 mysql2 读出来是字符串，这里和 playtime.pickValue 同款解包
+    const [crow] = await pool.query(
+      "SELECT value FROM system_config WHERE config_key = 'survival_qual_clusters' LIMIT 1"
+    );
+    if (crow.length) {
+      let v = crow[0].value;
+      try { v = JSON.parse(v); } catch { /* 原样 */ }
+      if (v && typeof v === 'object' && !Array.isArray(v) && 'value' in v) v = v.value;
+      if (Array.isArray(v)) {
+        cfg.qual_clusters = v
+          .filter((x) => typeof x === 'string' && x.trim())
+          .map((x) => x.trim())
+          .slice(0, 200);
+      }
     }
   } catch (e) {
     console.warn('[survival] 读配置失败，用默认值:', e.message);
@@ -11760,6 +11794,12 @@ async function saveSurvivalConfig(patch) {
     hp_init: [10, 10000], hp_rebirth: [10, 10000], hp_gain: [0, 1000], hp_repeat_gain: [0, 1000],
     hp_penalty: [0, 1000], time_choice: [0, 600], time_blank: [0, 600],
     require_correction: [0, 1], rank_limit: [10, 500],
+    // 钻石步长：0 = 关闭；上限 999 层，防止误填把档位拉飞
+    diamond_step: [0, 999],
+    // 资格六项：0 = 不启用。上限给足（做对题数/得分都可能上万）
+    qual_correct: [0, 999999], qual_mastered: [0, 999999],
+    qual_wps: [0, 999999], qual_access: [0, 999999],
+    qual_pyfill: [0, 999999], qual_composite: [0, 999999],
   };
   const saved = [];
   for (const [key, range] of Object.entries(bounds)) {
@@ -11774,6 +11814,20 @@ async function saveSurvivalConfig(patch) {
       [`config_survival_${key}`, `survival_${key}`, JSON.stringify({ value: num })]
     );
     saved.push(key);
+  }
+  // 已掌握题数的统计范围是 JSON 数组，单独存；不传就不动（避免把老师已选的类目清空）
+  if (Array.isArray(patch.qual_clusters)) {
+    const list = patch.qual_clusters
+      .filter((x) => typeof x === 'string' && x.trim())
+      .map((x) => x.trim())
+      .slice(0, 200);
+    await pool.query(
+      `INSERT INTO system_config (id, config_key, value, updated_at)
+       VALUES (?, ?, ?, NOW())
+       ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = NOW()`,
+      ['config_survival_qual_clusters', 'survival_qual_clusters', JSON.stringify({ value: list })]
+    );
+    saved.push('qual_clusters');
   }
   return saved;
 }
@@ -11897,6 +11951,104 @@ async function refreshSurvivalLevelCounts() {
 }
 
 /** 学生是否被开放了生存游戏（按 profiles 判断，班级开关会同步到这里） */
+/**
+ * 生存游戏资格：六项条件与「考试管理 → 普通测试 / 对战PK」完全同口径。
+ * ⛔ 判定必须复用 checkQualification()，不要在这里另写一套 SQL —— 两边口径一分叉，
+ *    就会出现「测试能进、生存游戏说没达标」这种解释不清的事（2026-10-26 判分分叉事故同理）。
+ * 任一阈值 0 = 该项不启用；六项全 0 = 不校验。
+ */
+async function checkSurvivalQualification(studentId, cfg) {
+  const rule = {
+    qualification_correct_count: cfg.qual_correct,
+    qualification_mastered_count: cfg.qual_mastered,
+    qualification_mastered_clusters: cfg.qual_clusters,
+    qualification_wps_op_score: cfg.qual_wps,
+    qualification_access_op_score: cfg.qual_access,
+    qualification_python_fill_score: cfg.qual_pyfill,
+    qualification_composite_score: cfg.qual_composite,
+  };
+  const enabled = Number(cfg.qual_correct) > 0 || Number(cfg.qual_mastered) > 0
+    || Number(cfg.qual_wps) > 0 || Number(cfg.qual_access) > 0
+    || Number(cfg.qual_pyfill) > 0 || Number(cfg.qual_composite) > 0;
+  if (!enabled) return { enabled: false, passed: true, detail: null, message: '' };
+  const detail = await checkQualification(studentId, rule);
+  return {
+    enabled: true,
+    passed: !!detail.passed,
+    detail,
+    message: detail.passed ? '' : survivalQualificationShortfall(detail),
+  };
+}
+
+/** 把未达标项拼成学生能看懂的一句话（逐项列出「差多少 / 现在多少」） */
+function survivalQualificationShortfall(detail) {
+  const parts = [];
+  const add = (o, label, unit) => {
+    if (o && o.enabled && !o.passed) {
+      parts.push(`${label} ${o.required}${unit}（当前 ${o.current}${unit}）`);
+    }
+  };
+  add(detail.correct, '做对题数', ' 道');
+  add(detail.mastered, '已掌握题数', ' 道');
+  add(detail.wps_op, 'WPS 操作题累计得分', ' 分');
+  add(detail.access_op, 'Access 操作题累计得分', ' 分');
+  add(detail.python_fill, '编程填空累计得分', ' 分');
+  add(detail.composite, '综合题累计得分', ' 分');
+  return parts.length ? `还差：${parts.join('；')}` : '资格未达标';
+}
+
+/**
+ * 这次进入是否需要校验资格。
+ * 吴老 2026-11-10 定：只在「首次进入」与「即将开新一轮」时拦，续玩 / 重生不拦 ——
+ * 否则老师中途加了条件，正在打的学生会被直接卡死。
+ *  - 首次进入：新建的空档案（没通关过、没死过、手上没有题）
+ *  - 新一轮：刚答对最后一关、手上没有题（round_no 即将 +1）
+ */
+async function survivalNeedsQualification(profile) {
+  if (!profile) return false;
+  const [[row]] = await pool.query(
+    'SELECT COALESCE(MAX(seq), 0) AS maxSeq FROM survival_levels WHERE is_active = 1'
+  );
+  const maxSeq = Number(row && row.maxSeq) || 0;
+  if (!maxSeq) return false;
+  const total = Number(profile.total_levels) || 0;
+  const deaths = Number(profile.deaths) || 0;
+  const seq = Number(profile.seq) || 1;
+  const hasQuestion = !!profile.current_question_id;
+  const firstEntry = total === 0 && deaths === 0 && !hasQuestion && (Number(profile.round_no) || 1) <= 1;
+  const roundStart = !hasQuestion && seq >= maxSeq;
+  return firstEntry || roundStart;
+}
+
+/**
+ * 深度钻石：累计通关层数从 fromTotal 涨到 toTotal，跨过 step 的哪些倍数就发几颗。
+ *
+ * ⛔ 幂等靠 grantDiamonds 的 uk_source(source_type, source_id, student_id)：
+ *    source_id = 里程碑层数（'30' / '60' / '90'…），同一档位一生只发一次。
+ *    死亡回退、重打同一段、接口重试都不会重复发钱。
+ * ⛔ 只能在调用方的事务里跑（账本与 profiles.diamond_balance 必须同事务）。
+ * @returns {Promise<Array<{depth:number, amount:number}>>} 本次真正到账的档位
+ */
+async function grantSurvivalDepthDiamonds(conn, studentId, fromTotal, toTotal, step) {
+  const s = Math.round(Number(step) || 0);
+  if (s <= 0) return [];
+  const from = Math.floor((Number(fromTotal) || 0) / s);
+  const to = Math.floor((Number(toTotal) || 0) / s);
+  const gained = [];
+  for (let k = from + 1; k <= to; k += 1) {
+    const depth = k * s;
+    const r = await grantDiamonds(conn, {
+      studentId,
+      amount: 1,
+      reason: `生存游戏累计通关 ${depth} 层`,
+      sourceType: 'survival_depth',
+      sourceId: String(depth),
+    });
+    if (r.granted) gained.push({ depth, amount: r.amount });
+  }
+  return gained;
+}
+
 async function survivalGate(req, res) {
   const [rows] = await pool.query(
     'SELECT id, role, class_id, survival_enabled FROM profiles WHERE id = ? LIMIT 1',
@@ -12174,6 +12326,8 @@ app.get('/api/student/survival/state', authenticate, async (req, res) => {
           time_choice: cfg.time_choice,
           time_blank: cfg.time_blank,
           require_correction: cfg.require_correction,
+          // 深度钻石步长：前端据此算「下一颗还差几层」，0 = 未开启
+          diamond_step: Number(cfg.diamond_step) || 0,
         },
       },
       error: null,
@@ -12192,6 +12346,17 @@ app.post('/api/student/survival/start', authenticate, async (req, res) => {
     const cfg = await getSurvivalConfig();
     const studentId = req.user.userId;
     const profile = await loadSurvivalProfile(studentId);
+
+    // 资格验证（吴老 2026-11-10）：只在首次进入 / 即将开新一轮时拦，续玩与重生不拦
+    if (await survivalNeedsQualification(profile)) {
+      const qual = await checkSurvivalQualification(studentId, cfg);
+      if (!qual.passed) {
+        return res.status(403).json({
+          data: { qualification: qual.detail },
+          error: `生存游戏需要先达到学习要求 —— ${qual.message}`,
+        });
+      }
+    }
 
     // 已在局中且有题：接着打，不重开
     if (Number(profile.alive) === 1 && profile.current_question_id) {
@@ -12364,13 +12529,29 @@ app.post('/api/student/survival/answer', authenticate, async (req, res) => {
     if (judged.isCorrect) {
       const roundLevels = Number(profile.round_levels) + 1;
       const totalLevels = Number(profile.total_levels) + 1;
-      await pool.query(
-        `UPDATE survival_profiles
-            SET hp = ?, round_levels = ?, total_levels = ?, total_correct = total_correct + 1,
-                pending_correction = 0, current_question_id = NULL, current_deadline = NULL
-          WHERE student_id = ?`,
-        [hpAfter, roundLevels, totalLevels, studentId]
-      );
+      // 深度钻石与档案推进必须同事务：流水进了但余额没加（或反之）账就对不上。
+      // ⛔ 发钻点有两处（这里 + /correct 订正通过），漏一处就会少发。
+      let diamondsGained = [];
+      const conn = await pool.getConnection();
+      try {
+        await conn.beginTransaction();
+        await conn.query(
+          `UPDATE survival_profiles
+              SET hp = ?, round_levels = ?, total_levels = ?, total_correct = total_correct + 1,
+                  pending_correction = 0, current_question_id = NULL, current_deadline = NULL
+            WHERE student_id = ?`,
+          [hpAfter, roundLevels, totalLevels, studentId]
+        );
+        diamondsGained = await grantSurvivalDepthDiamonds(
+          conn, studentId, Number(profile.total_levels), totalLevels, cfg.diamond_step
+        );
+        await conn.commit();
+      } catch (e) {
+        await conn.rollback();
+        throw e;
+      } finally {
+        conn.release();
+      }
       // ⛔ 这里只结算，不抽下一题：抽题与开始计时都交给 /next。
       //    否则学生点「下一层」前休息一会儿，计时早就在跑，一进去就超时扣血（2026-10-27）
       return res.json({
@@ -12384,6 +12565,8 @@ app.post('/api/student/survival/answer', authenticate, async (req, res) => {
           dead: false,
           total_levels: totalLevels,
           round_levels: roundLevels,
+          diamonds_gained: diamondsGained,
+          diamond_step: Number(cfg.diamond_step) || 0,
           need_next: true,
           level: null,
           question: null,
@@ -12512,6 +12695,17 @@ app.post('/api/student/survival/next', authenticate, async (req, res) => {
       }
     }
 
+    // 资格验证（吴老 2026-11-10）：答对最后一关后点「下一层」= 即将开新一轮，先校验
+    if (await survivalNeedsQualification(profile)) {
+      const qual = await checkSurvivalQualification(studentId, cfg);
+      if (!qual.passed) {
+        return res.status(403).json({
+          data: { qualification: qual.detail },
+          error: `新一轮需要先达到学习要求 —— ${qual.message}`,
+        });
+      }
+    }
+
     const next = await openNextLevel(studentId, profile, cfg);
     if (!next) return res.status(400).json({ data: null, error: '没有可用的关卡，请联系老师' });
 
@@ -12582,15 +12776,30 @@ app.post('/api/student/survival/correct', authenticate, async (req, res) => {
     }
 
     // 订正通过：不扣血也不加血，本关记为通过；下一题同样等学生点「下一层」
+    // ⛔ total_levels 在这里也会 +1，所以深度钻石必须跟 /answer 一样发（同一个函数）
     const roundLevels = Number(profile.round_levels) + 1;
     const totalLevels = Number(profile.total_levels) + 1;
-    await pool.query(
-      `UPDATE survival_profiles
-          SET pending_correction = 0, round_levels = ?, total_levels = ?,
-              current_question_id = NULL, current_deadline = NULL
-        WHERE student_id = ?`,
-      [roundLevels, totalLevels, studentId]
-    );
+    let diamondsGained = [];
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      await conn.query(
+        `UPDATE survival_profiles
+            SET pending_correction = 0, round_levels = ?, total_levels = ?,
+                current_question_id = NULL, current_deadline = NULL
+          WHERE student_id = ?`,
+        [roundLevels, totalLevels, studentId]
+      );
+      diamondsGained = await grantSurvivalDepthDiamonds(
+        conn, studentId, Number(profile.total_levels), totalLevels, cfg.diamond_step
+      );
+      await conn.commit();
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
+    }
 
     res.json({
       data: {
@@ -12598,6 +12807,8 @@ app.post('/api/student/survival/correct', authenticate, async (req, res) => {
         hp: Number(profile.hp),
         total_levels: totalLevels,
         round_levels: roundLevels,
+        diamonds_gained: diamondsGained,
+        diamond_step: Number(cfg.diamond_step) || 0,
         need_next: true,
         finished_round: false,
         level: null,

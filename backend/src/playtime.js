@@ -33,7 +33,7 @@ const RULE_KEYS = {
 };
 
 /** 计入每日产出上限的钻石来源（老师手动 manual / 后台调整 adjust 不算） */
-const EARN_CAPPED_SOURCES = ['test', 'exam', 'mission'];
+const EARN_CAPPED_SOURCES = ['test', 'exam', 'mission', 'survival_depth'];
 
 /**
  * ⛔ MariaDB 的 JSON 列经 mysql2 读出来是**字符串**（'{"value": 1}'），不是对象。
