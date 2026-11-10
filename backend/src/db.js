@@ -10,6 +10,11 @@ const config = {
   database: process.env.DB_NAME || 'xgpy',
   waitForConnections: true,
   connectionLimit: parseInt(process.env.DB_CONNECTION_LIMIT) || 100,
+  // 空闲连接回收（2026-11-10）：mysql2 默认 maxIdle = connectionLimit，
+  // 高峰建满 100 个后永不释放，等于长期占着 100 个 MariaDB 线程（4 核上线程切换也有成本）。
+  // 50 个足够 3 个班（约 150 人、峰值 100 req/s × 10ms 只需约 1 个并发连接），空闲 60 秒释放。
+  maxIdle: parseInt(process.env.DB_MAX_IDLE) || 50,
+  idleTimeout: parseInt(process.env.DB_IDLE_TIMEOUT_MS) || 60000,
   queueLimit: 0,
   timezone: '+08:00',
   // 归还连接前重置会话（COM_RESET_CONNECTION）：防止"未结束的事务""SET FOREIGN_KEY_CHECKS=0"这类会话状态
@@ -28,6 +33,8 @@ const poolNoDB = mysql.createPool({
   queueLimit: config.queueLimit,
   timezone: config.timezone,
   resetOnRelease: config.resetOnRelease,
+  maxIdle: config.maxIdle,
+  idleTimeout: config.idleTimeout,
 });
 
 // 创建带数据库的连接池（正常使用）

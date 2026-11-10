@@ -2145,12 +2145,60 @@ app.delete('/api/tables/:tableName/:id', authenticate, async (req, res) => {
   }
 });
 
+// ===== /api/query 基础数据缓存 + 日志降噪（2026-11-10）=====
+// 背景：2 个班 100 人时 /api/query 每分钟 1655 次（profiles 848 / pet_config 596 / classes 211），
+//   这些基础数据几乎不变，逐请求查库纯属浪费连接与 CPU。
+// 原则：
+//   1. 只缓存「白名单表 + 读查询」，TTL 短到「老师改完最多等 10 秒」，不影响正常使用。
+//   2. 不缓存 login_sessions / student_answers 这类时效敏感表。
+//   3. 逐请求的 body 打印默认关闭（高峰一分钟 7000 行 stdout，会同步阻塞事件循环），
+//      保留 DEBUG_QUERY=1 全量开关，并新增 >500ms 慢查询摘要 —— 排障不受影响。
+const QUERY_DEBUG = process.env.DEBUG_QUERY === '1';
+const QUERY_CACHE_TTL = {
+  profiles: 10, classes: 60, pet_config: 60, system_config: 30,
+  apps: 30, equipments: 60, achievements: 60, skins: 60,
+};
+const QUERY_CACHE_MAX = 1500;
+const queryCache = new Map();
+
+function queryCacheKey(table, filters, columns, order, limit, offset) {
+  return `${table}|${JSON.stringify(filters || null)}|${JSON.stringify(columns || null)}|${JSON.stringify(order || null)}|${limit ?? ''}|${offset ?? ''}`;
+}
+function queryCacheGet(key) {
+  const hit = queryCache.get(key);
+  if (!hit) return null;
+  if (Date.now() > hit.exp) { queryCache.delete(key); return null; }
+  return hit.value;
+}
+function queryCacheSet(key, value, ttlMs) {
+  // 简单容量控制：满了先丢最早插入的 1/4，避免内存无界增长
+  if (queryCache.size >= QUERY_CACHE_MAX) {
+    const drop = Math.ceil(QUERY_CACHE_MAX / 4);
+    let i = 0;
+    for (const k of queryCache.keys()) {
+      queryCache.delete(k);
+      if (++i >= drop) break;
+    }
+  }
+  queryCache.set(key, { value, exp: Date.now() + ttlMs });
+}
+
 app.post('/api/query', authenticate, async (req, res) => {
+  const queryStartedAt = Date.now();
+  // 慢查询摘要：只记 >500ms 的，带表名与状态码，足够定位；不打印 body（避免再堵 stdout）
+  res.on('finish', () => {
+    const cost = Date.now() - queryStartedAt;
+    if (cost > 500) {
+      console.warn(`[slow /api/query] ${req.body?.table || '?'} ${cost}ms status=${res.statusCode}`);
+    }
+  });
   try {
-    console.log('=== POST /api/query ===');
-    console.log('Request body:', JSON.stringify(req.body, null, 2));
-    console.log('Authenticated user:', req.user?.username);
-    
+    if (QUERY_DEBUG) {
+      console.log('=== POST /api/query ===');
+      console.log('Request body:', JSON.stringify(req.body, null, 2));
+      console.log('Authenticated user:', req.user?.username);
+    }
+
     let { table, filters, columns, order, limit, offset } = req.body;
     
     // 处理 system_config 表的 key 字段转换
@@ -2181,12 +2229,12 @@ app.post('/api/query', authenticate, async (req, res) => {
     if (filters && Object.keys(filters).length > 0) {
       const conditions = [];
       
-      console.log('Processing filters:', JSON.stringify(filters, null, 2));
+      if (QUERY_DEBUG) console.log('Processing filters:', JSON.stringify(filters, null, 2));
       
       for (const key of Object.keys(filters)) {
         const value = filters[key];
         
-        console.log('  Processing filter:', key, '=', JSON.stringify(value));
+        if (QUERY_DEBUG) console.log('  Processing filter:', key, '=', JSON.stringify(value));
         
         // 处理 _in 后缀: id_in -> id IN (...)
         if (key.endsWith('_in')) {
@@ -2196,7 +2244,7 @@ app.post('/api/query', authenticate, async (req, res) => {
           if (Array.isArray(value)) {
             conditions.push(`?? IN (${value.map(() => '?').join(', ')})`);
             params.push(column, ...value);
-            console.log('    Added IN condition for', column, 'with', value.length, 'values');
+            if (QUERY_DEBUG) console.log('    Added IN condition for', column, 'with', value.length, 'values');
           } else {
             conditions.push(`?? = ?`);
             params.push(column, value);
@@ -2245,8 +2293,10 @@ app.post('/api/query', authenticate, async (req, res) => {
       }
       
       query += ` WHERE ${conditions.join(' AND ')}`;
-      console.log('Generated query:', query);
-      console.log('Params:', params);
+      if (QUERY_DEBUG) {
+        console.log('Generated query:', query);
+        console.log('Params:', params);
+      }
     }
     
     if (order) {
@@ -2266,8 +2316,22 @@ app.post('/api/query', authenticate, async (req, res) => {
       }
     }
     
+    // 基础数据短 TTL 缓存：只认白名单表；key 覆盖 filters/columns/order/limit/offset，
+    // 不同学生查各自的行不会串（filters 里带 id）
+    const cacheTtl = QUERY_CACHE_TTL[table];
+    const cacheKey = cacheTtl ? queryCacheKey(table, filters, safeCols, order, limit, offset) : '';
+    if (cacheKey) {
+      const cached = queryCacheGet(cacheKey);
+      if (cached) {
+        res.json({ data: cached, error: null });
+        return;
+      }
+    }
+
     const [rows] = await pool.query(query, params);
-    res.json({ data: formatRows(rows), error: null });
+    const data = formatRows(rows);
+    if (cacheKey) queryCacheSet(cacheKey, data, cacheTtl * 1000);
+    res.json({ data, error: null });
   } catch (error) {
     console.error('Error in POST /api/query:', error);
     res.status(500).json({ data: [], error: error.message });

@@ -131,12 +131,16 @@ function createMetrics({ app, getConnections, logDir }) {
       `cpu=${cpuPct}% rss=${Math.round(mem.rss / 1048576)}MB heap=${Math.round(mem.heapUsed / 1048576)}MB | ` +
       `conns=${conns} | top: ${top || '(无)'}`;
 
-    try {
-      if (fs.existsSync(logFile) && fs.statSync(logFile).size > LOG_MAX_BYTES) {
-        fs.renameSync(logFile, logFile + '.1');
+    // 异步写（2026-11-10）：原来每分钟一次 appendFileSync/statSync/renameSync，
+    // 磁盘一抖动就整块卡住事件循环（当天 14:41 曾阻塞 61 秒）。异步失败也不影响服务。
+    fs.stat(logFile, (statErr, st) => {
+      const write = () => fs.appendFile(logFile, line + '\n', () => { /* 写不了就算了 */ });
+      if (!statErr && st.size > LOG_MAX_BYTES) {
+        fs.rename(logFile, logFile + '.1', () => write());
+      } else {
+        write();
       }
-      fs.appendFileSync(logFile, line + '\n');
-    } catch { /* 日志写不了也不能影响服务 */ }
+    });
 
     // 留一份最近窗口的快照，供教师端仪表台直接读（不必等下一分钟的日志行）
     lastSnapshot = {
