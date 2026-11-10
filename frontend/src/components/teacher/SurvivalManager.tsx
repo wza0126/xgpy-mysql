@@ -75,7 +75,7 @@ const FIELD_DEFS: { key: keyof Cfg; label: string; hint: string; min: number; ma
   { key: 'time_choice', label: '选择题限时(秒)', hint: '0 = 不限时', min: 0, max: 600 },
   { key: 'time_blank', label: '填空题限时(秒)', hint: '要打字，一般比选择多给', min: 0, max: 600 },
   { key: 'rank_limit', label: '排行榜条数', hint: '全校榜显示前多少名', min: 10, max: 500 },
-  { key: 'diamond_step', label: '钻石步长(层)', hint: '累计通关每跨过 N 层发 1 颗钻石；0 = 关闭', min: 0, max: 999 },
+  { key: 'diamond_step', label: '钻石步长(层)', hint: '排行榜深度每跨过 N 层发 1 颗钻石；0 = 关闭', min: 0, max: 999 },
 ];
 
 /** 资格六项：与「普通测试 / 对战PK」同一套口径，0 = 该项不启用 */
@@ -337,7 +337,7 @@ export const SurvivalManager: React.FC = () => {
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <i className="fa-solid fa-gem text-amber-500"></i>
               <span className="text-sm font-medium text-amber-800">钻石奖励</span>
-              <span className="text-xs text-amber-700">累计通关层数（死亡不清零）每跨过</span>
+              <span className="text-xs text-amber-700">排行榜深度每跨过</span>
               <input
                 type="number"
                 min={0}
@@ -349,7 +349,10 @@ export const SurvivalManager: React.FC = () => {
               <span className="text-xs text-amber-700">层发 1 颗钻石</span>
             </div>
             <p className="mt-1.5 text-xs leading-relaxed text-amber-700">
-              同一档位一生只发一次：掉层后重打、断线重连、网络重试都不会重复发。
+              深度 = 排行榜里显示的那个层数（第几轮 × 每轮关卡数 + 本关位置），
+              <b>不是累计通关数</b>。答对只是通过当前层，<b>点「进入下一层」才计深度</b>；
+              死了回中继站会掉层，但已发的钻石不回收。
+              同一档位一生只发一次，掉层重打、断线重连、网络重试都不会重复发。
               钻石计入「每日产出上限」，与测试 / 考试 / 任务共用每天 3 颗（上限在游戏时长池里改）。
               填 0 = 关闭钻石奖励。
             </p>

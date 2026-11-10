@@ -60,6 +60,10 @@ interface SState {
   hp_init: number;
   seq: number;
   round_no: number;
+  /** 关卡深度 = (轮次-1)*每轮关卡数 + seq，与排行榜同一口径 */
+  depth: number;
+  /** 每轮关卡数（后端 survival_levels 总数，当前 70） */
+  per_round: number;
   total_levels: number;
   round_levels: number;
   best_round_levels: number;
@@ -199,6 +203,8 @@ export const SurvivalGame: React.FC = () => {
   }>(null);
   /** 刚解锁的重生点剧情，展示一次可关闭 */
   const [checkpointStory, setCheckpointStory] = useState<SCheckpoint | null>(null);
+  /** 跨层钻石到账提示（进入下一层时才有，3 秒后自动消失） */
+  const [rewardToast, setRewardToast] = useState('');
   const [nextBusy, setNextBusy] = useState(false);
   /** 「下潜」过场：点进下一层时短暂盖住屏幕，0.55s 后自动消失 */
   const [diving, setDiving] = useState<null | { code: string; title: string }>(null);
@@ -501,11 +507,21 @@ export const SurvivalGame: React.FC = () => {
               level: d.level,
               question: d.question,
               round_levels: d.round_levels,
+              depth: Number(d.depth) || prev.depth,
               waiting_next: false,
               pending_correction: false,
             }
           : prev
       );
+      // 深度跨档的钻石在「进入下一层」这一步到账（服务端 /next 发，与排行榜同口径）
+      const gained = sumDiamonds(d);
+      if (gained > 0) {
+        const depths = (d.diamonds_gained || [])
+          .map((x: any) => Number(x?.depth) || 0)
+          .filter(Boolean);
+        setRewardToast(`深度奖励 +${gained} 钻石${depths.length ? `（第 ${depths.join('、')} 层）` : ''}`);
+        window.setTimeout(() => setRewardToast(''), 3200);
+      }
       // 短暂过场：让「进入下一层」有个下落的感觉，而不是硬切屏
       setDiving({ code: d.level?.code || '', title: d.level?.title || '' });
       window.setTimeout(() => {
@@ -552,7 +568,14 @@ export const SurvivalGame: React.FC = () => {
       if (d.checkpoint) setCheckpointStory(d.checkpoint);
       setState((prev) =>
         prev
-          ? { ...prev, hp: d.hp, alive: true, pending_correction: !!d.pending_correction, round_no: d.round_no }
+          ? {
+              ...prev,
+              hp: d.hp,
+              alive: true,
+              pending_correction: !!d.pending_correction,
+              round_no: d.round_no,
+              depth: Number(d.depth) || prev.depth,
+            }
           : prev
       );
       setPhase('playing');
@@ -588,9 +611,9 @@ export const SurvivalGame: React.FC = () => {
   };
 
   const hpInit = state?.hp_init || 100;
-  // 深度钻石进度：累计通关层数每跨过 step 层发 1 颗（服务端按档位幂等发放）
+  // 深度钻石进度：关卡深度（与排行榜同口径）每跨过 step 层发 1 颗
   const diamondStep = Number(state?.config?.diamond_step) || 0;
-  const totalDepth = Number(state?.total_levels) || 0;
+  const totalDepth = Number(state?.depth) || 0;
   const nextDiamondAt = diamondStep > 0 ? (Math.floor(totalDepth / diamondStep) + 1) * diamondStep : 0;
   const toNextDiamond = nextDiamondAt > 0 ? Math.max(0, nextDiamondAt - totalDepth) : 0;
   const ratio = Math.min(1, Math.max(0, hp / hpInit));
@@ -606,7 +629,7 @@ export const SurvivalGame: React.FC = () => {
   }, [remaining]);
 
   const shell = (inner: React.ReactNode) => (
-    <div className="flex h-full flex-col overflow-hidden" style={{ background: C.bg, color: C.text }}>
+    <div className="relative flex h-full flex-col overflow-hidden" style={{ background: C.bg, color: C.text }}>
       <style>{`
         @keyframes sv-shake { 0%,100%{transform:translateX(0)} 20%{transform:translateX(-7px)} 40%{transform:translateX(6px)} 60%{transform:translateX(-4px)} 80%{transform:translateX(3px)} }
         @keyframes sv-pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
@@ -634,6 +657,14 @@ export const SurvivalGame: React.FC = () => {
         className={`relative flex h-full flex-col overflow-hidden ${flash === 'bad' ? 'sv-shake' : ''} ${flash === 'good' ? 'sv-good' : ''}`}
       >
         {inner}
+        {rewardToast && (
+          <div
+            className="pointer-events-none absolute left-1/2 top-4 z-50 -translate-x-1/2 rounded-lg px-4 py-2 text-sm shadow-lg"
+            style={{ background: 'rgba(251,191,36,0.16)', border: '1px solid #78350F', color: '#FCD34D' }}
+          >
+            <i className="fa-solid fa-gem mr-2"></i>{rewardToast}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -776,17 +807,6 @@ export const SurvivalGame: React.FC = () => {
               {info.repeat && <span className="text-[11px]" style={{ color: C.mute }}>今天做过这题</span>}
             </div>
           </div>
-
-          {info.diamonds > 0 && (
-            <div
-              className="mt-4 flex items-center justify-center gap-2 rounded-lg px-3 py-2"
-              style={{ background: 'rgba(251,191,36,0.12)', border: '1px solid #78350F' }}
-            >
-              <i className="fa-solid fa-gem" style={{ color: '#FBBF24' }}></i>
-              <span className="text-sm" style={{ color: '#FCD34D' }}>深度奖励 +{info.diamonds} 钻石</span>
-              <span className="text-[11px]" style={{ color: C.mute }}>计入今日钻石产出</span>
-            </div>
-          )}
 
           {notice && (
             <div
@@ -939,9 +959,9 @@ export const SurvivalGame: React.FC = () => {
           {diamondStep > 0 && (
             <p className="mx-auto mt-2 max-w-sm text-xs leading-relaxed" style={{ color: '#FBBF24' }}>
               <i className="fa-solid fa-gem mr-1"></i>
-              累计通关每 {diamondStep} 层得 1 颗钻石（每档只发一次）。当前累计 {totalDepth} 层
-              {toNextDiamond > 0 ? `，还差 ${toNextDiamond} 层` : '，本档已达成'}。
-              钻石计入每日产出上限，可兑换游戏时间。
+              排行榜深度每 {diamondStep} 层得 1 颗钻石（每档只发一次）。你现在第 {totalDepth} 层
+              {toNextDiamond > 0 ? `，再进 ${toNextDiamond} 层到第 ${nextDiamondAt} 层` : '，本档已达成'}。
+              进入下一层才计深度；钻石计入每日产出上限，可兑换游戏时间。
             </p>
           )}
 
@@ -969,7 +989,7 @@ export const SurvivalGame: React.FC = () => {
 
           {state && state.total_levels > 0 && (
             <p className="mt-4 text-xs" style={{ color: C.mute }}>
-              历史最深 {Math.max(state.best_round_levels, state.round_levels)} 层 · 累计 {state.total_levels} 层 · 断线 {state.deaths} 次
+              当前第 {state.depth} 层 · 累计通关 {state.total_levels} 层 · 断线 {state.deaths} 次
             </p>
           )}
 
@@ -1265,11 +1285,11 @@ export const SurvivalGame: React.FC = () => {
 
         <div className="mt-3 flex items-center justify-between text-[11px]" style={{ color: C.mute }}>
           <span>
-            本轮已过 {state?.round_levels ?? 0} 层 · 累计 {state?.total_levels ?? 0} 层
+            本轮已过 {state?.round_levels ?? 0} 层 · 第 {state?.depth ?? 0} 层 · 累计 {state?.total_levels ?? 0} 层
             {diamondStep > 0 && (
-              <span className="ml-2" style={{ color: '#FBBF24' }} title={`每累计 ${diamondStep} 层发 1 颗钻石`}>
+              <span className="ml-2" style={{ color: '#FBBF24' }} title={`排行榜深度每 ${diamondStep} 层发 1 颗钻石`}>
                 <i className="fa-solid fa-gem mr-1"></i>
-                {toNextDiamond > 0 ? `还差 ${toNextDiamond} 层` : '已达标'}
+                {toNextDiamond > 0 ? `再进 ${toNextDiamond} 层` : '本档已达成'}
               </span>
             )}
           </span>

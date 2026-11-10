@@ -12021,26 +12021,28 @@ async function survivalNeedsQualification(profile) {
 }
 
 /**
- * 深度钻石：累计通关层数从 fromTotal 涨到 toTotal，跨过 step 的哪些倍数就发几颗。
+ * 深度钻石：关卡深度从 fromDepth 涨到 toDepth，跨过 step 的哪些倍数就发几颗。
  *
+ * 深度 = (轮次-1) * 每轮关卡数 + seq，**与排行榜深度榜同一口径**（buildSurvivalRank）。
+ * ⛔ 不要传 total_levels：重打旧关它也会 +1，死了回锚点反复刷就能白拿钻石。
  * ⛔ 幂等靠 grantDiamonds 的 uk_source(source_type, source_id, student_id)：
- *    source_id = 里程碑层数（'30' / '60' / '90'…），同一档位一生只发一次。
- *    死亡回退、重打同一段、接口重试都不会重复发钱。
+ *    source_id = 里程碑深度（'30' / '60' / '90'…），同一档位一生只发一次。
+ *    死亡回退后重新走一遍同一段，也不会重复发。
  * ⛔ 只能在调用方的事务里跑（账本与 profiles.diamond_balance 必须同事务）。
  * @returns {Promise<Array<{depth:number, amount:number}>>} 本次真正到账的档位
  */
-async function grantSurvivalDepthDiamonds(conn, studentId, fromTotal, toTotal, step) {
+async function grantSurvivalDepthDiamonds(conn, studentId, fromDepth, toDepth, step) {
   const s = Math.round(Number(step) || 0);
   if (s <= 0) return [];
-  const from = Math.floor((Number(fromTotal) || 0) / s);
-  const to = Math.floor((Number(toTotal) || 0) / s);
+  const from = Math.floor((Number(fromDepth) || 0) / s);
+  const to = Math.floor((Number(toDepth) || 0) / s);
   const gained = [];
   for (let k = from + 1; k <= to; k += 1) {
     const depth = k * s;
     const r = await grantDiamonds(conn, {
       studentId,
       amount: 1,
-      reason: `生存游戏累计通关 ${depth} 层`,
+      reason: `生存游戏到达第 ${depth} 层`,
       sourceType: 'survival_depth',
       sourceId: String(depth),
     });
@@ -12104,10 +12106,51 @@ async function pickSurvivalQuestion(studentId, level) {
 }
 
 /**
+ * 推进关卡 + 深度钻石（同一个事务）。
+ *
+ * 深度口径必须与排行榜完全一致：depth = (轮次-1) * 每轮关卡数 + seq。
+ * ⛔ 不能用 total_levels：重打旧关也会 +1，死了回锚点反复刷就能白拿钻石
+ *    （2026-11-10 吴老用 a 账号当场发现：排名一直是 19 层，却拿到了 30 层的钻石）。
+ * ⛔ 每轮关卡数用 survival_levels 全表计数，与 buildSurvivalRank 同源，别再写第二个口径。
+ */
+async function advanceProfileWithDepth(studentId, opts) {
+  const { level, roundNo, question, seconds, roundLevels, cfg, fromDepth, perRound } = opts;
+  const newDepth = (Number(roundNo) - 1) * perRound + Number(level.seq);
+  let diamonds = [];
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.query(
+      `UPDATE survival_profiles
+          SET seq = ?, round_no = ?, current_question_id = ?, current_started_at = NOW(),
+              current_deadline = ${seconds > 0 ? 'DATE_ADD(NOW(), INTERVAL ? SECOND)' : 'NULL'},
+              pending_correction = 0, alive = 1, round_levels = ?, last_played_at = NOW()
+        WHERE student_id = ?`,
+      seconds > 0
+        ? [level.seq, roundNo, question.id, seconds, roundLevels, studentId]
+        : [level.seq, roundNo, question.id, roundLevels, studentId]
+    );
+    diamonds = await grantSurvivalDepthDiamonds(conn, studentId, fromDepth, newDepth, cfg.diamond_step);
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+  return { diamonds, newDepth };
+}
+
+/**
  * 推进到下一关并抽题写库。
  * 关卡按 seq 递增，越过最后一关就回到第一关并 round_no + 1。
  */
 async function survivalAdvance(studentId, fromSeq, fromRound, cfg, roundLevels) {
+  // 每轮关卡数与排行榜同源（全表计数，含停用关：停用只影响跳过，不改 seq 编号）
+  const [[lvCnt]] = await pool.query('SELECT COUNT(*) AS n FROM survival_levels');
+  const perRound = Number(lvCnt.n) || 70;
+  const fromDepth = (Number(fromRound) - 1) * perRound + (Number(fromSeq) || 1);
+
   const [nextRows] = await pool.query(
     'SELECT * FROM survival_levels WHERE seq > ? AND is_active = 1 ORDER BY seq ASC LIMIT 1',
     [fromSeq]
@@ -12139,21 +12182,16 @@ async function survivalAdvance(studentId, fromSeq, fromRound, cfg, roundLevels) 
       const q2 = await pickSurvivalQuestion(studentId, level);
       if (q2) {
         const seconds = q2.type === 'fill_blank' ? cfg.time_blank : cfg.time_choice;
-        await pool.query(
-          `UPDATE survival_profiles
-              SET seq = ?, round_no = ?, current_question_id = ?, current_started_at = NOW(),
-                  current_deadline = ${seconds > 0 ? 'DATE_ADD(NOW(), INTERVAL ? SECOND)' : 'NULL'},
-                  pending_correction = 0, alive = 1, round_levels = ?, last_played_at = NOW()
-            WHERE student_id = ?`,
-          seconds > 0
-            ? [level.seq, roundNo, q2.id, seconds, roundLevels, studentId]
-            : [level.seq, roundNo, q2.id, roundLevels, studentId]
-        );
+        const adv = await advanceProfileWithDepth(studentId, {
+          level, roundNo, question: q2, seconds, roundLevels, cfg, fromDepth, perRound,
+        });
         // ⛔ 必须把 deadline 带回去：/answer、/correct 都是拿这里的值给前端起倒计时，
         //    漏了会导致「第 2 关以后全部不限时」（2026-10-27）
         return {
           level, question: q2, roundNo, finishedRound,
           deadline: seconds > 0 ? new Date(Date.now() + seconds * 1000).toISOString() : null,
+          diamonds: adv.diamonds,
+          depth: adv.newDepth,
         };
       }
     }
@@ -12161,20 +12199,15 @@ async function survivalAdvance(studentId, fromSeq, fromRound, cfg, roundLevels) 
   }
 
   const seconds = question.type === 'fill_blank' ? cfg.time_blank : cfg.time_choice;
-  await pool.query(
-    `UPDATE survival_profiles
-        SET seq = ?, round_no = ?, current_question_id = ?, current_started_at = NOW(),
-            current_deadline = ${seconds > 0 ? 'DATE_ADD(NOW(), INTERVAL ? SECOND)' : 'NULL'},
-            pending_correction = 0, alive = 1, round_levels = ?, last_played_at = NOW()
-      WHERE student_id = ?`,
-    seconds > 0
-      ? [level.seq, roundNo, question.id, seconds, roundLevels, studentId]
-      : [level.seq, roundNo, question.id, roundLevels, studentId]
-  );
+  const adv = await advanceProfileWithDepth(studentId, {
+    level, roundNo, question, seconds, roundLevels, cfg, fromDepth, perRound,
+  });
 
   return {
     level, question, roundNo, finishedRound,
     deadline: seconds > 0 ? new Date(Date.now() + seconds * 1000).toISOString() : null,
+    diamonds: adv.diamonds,
+    depth: adv.newDepth,
   };
 }
 
@@ -12269,6 +12302,9 @@ app.get('/api/student/survival/state', authenticate, async (req, res) => {
     const cfg = await getSurvivalConfig();
     const studentId = req.user.userId;
     const profile = await loadSurvivalProfile(studentId);
+    // 深度与排行榜同源：(轮次-1) * 每轮关卡数 + seq；前端据此算「还差几层到下一颗钻石」
+    const [[lvCnt]] = await pool.query('SELECT COUNT(*) AS n FROM survival_levels');
+    const perRound = Number(lvCnt.n) || 70;
 
     let question = null;
     let level = null;
@@ -12307,6 +12343,8 @@ app.get('/api/student/survival/state', authenticate, async (req, res) => {
         hp_init: cfg.hp_init,
         seq: Number(profile.seq),
         round_no: Number(profile.round_no),
+        depth: (Number(profile.round_no) - 1) * perRound + (Number(profile.seq) || 0),
+        per_round: perRound,
         total_levels: Number(profile.total_levels),
         round_levels: Number(profile.round_levels),
         best_round_levels: Number(profile.best_round_levels),
@@ -12346,6 +12384,10 @@ app.post('/api/student/survival/start', authenticate, async (req, res) => {
     const cfg = await getSurvivalConfig();
     const studentId = req.user.userId;
     const profile = await loadSurvivalProfile(studentId);
+    // 深度与排行榜同源（(轮次-1) * 每轮关卡数 + seq），三个分支都要带回去
+    const [[startLvCnt]] = await pool.query('SELECT COUNT(*) AS n FROM survival_levels');
+    const perRound = Number(startLvCnt.n) || 70;
+    const depthOf = (p, seq) => (Number(p.round_no) - 1) * perRound + (Number(seq ?? p.seq) || 0);
 
     // 资格验证（吴老 2026-11-10）：只在首次进入 / 即将开新一轮时拦，续玩与重生不拦
     if (await survivalNeedsQualification(profile)) {
@@ -12376,6 +12418,8 @@ app.post('/api/student/survival/start', authenticate, async (req, res) => {
             hp: Number(profile.hp),
             round_no: Number(profile.round_no),
             pending_correction: Number(profile.pending_correction) === 1,
+            depth: depthOf(profile),
+            per_round: perRound,
           },
           error: null,
         });
@@ -12404,6 +12448,8 @@ app.post('/api/student/survival/start', authenticate, async (req, res) => {
           hp: Number(profile.hp),
           round_no: next.roundNo,
           pending_correction: false,
+          depth: next.depth,
+          diamonds_gained: next.diamonds || [],
         },
         error: null,
       });
@@ -12449,6 +12495,8 @@ app.post('/api/student/survival/start', authenticate, async (req, res) => {
         hp: startHp,
         round_no: Number(profile.round_no) || 1,
         pending_correction: false,
+        depth: depthOf(profile, cp.seq),
+        per_round: perRound,
       },
       error: null,
     });
@@ -12529,29 +12577,15 @@ app.post('/api/student/survival/answer', authenticate, async (req, res) => {
     if (judged.isCorrect) {
       const roundLevels = Number(profile.round_levels) + 1;
       const totalLevels = Number(profile.total_levels) + 1;
-      // 深度钻石与档案推进必须同事务：流水进了但余额没加（或反之）账就对不上。
-      // ⛔ 发钻点有两处（这里 + /correct 订正通过），漏一处就会少发。
-      let diamondsGained = [];
-      const conn = await pool.getConnection();
-      try {
-        await conn.beginTransaction();
-        await conn.query(
-          `UPDATE survival_profiles
-              SET hp = ?, round_levels = ?, total_levels = ?, total_correct = total_correct + 1,
-                  pending_correction = 0, current_question_id = NULL, current_deadline = NULL
-            WHERE student_id = ?`,
-          [hpAfter, roundLevels, totalLevels, studentId]
-        );
-        diamondsGained = await grantSurvivalDepthDiamonds(
-          conn, studentId, Number(profile.total_levels), totalLevels, cfg.diamond_step
-        );
-        await conn.commit();
-      } catch (e) {
-        await conn.rollback();
-        throw e;
-      } finally {
-        conn.release();
-      }
+      // ⛔ 深度钻石不在这里发：答对只是通过当前层，seq 还没推进，排行榜深度也没变。
+      //    真正跨层发生在 /next（survivalAdvance），发钻在那边，与排行榜同源。
+      await pool.query(
+        `UPDATE survival_profiles
+            SET hp = ?, round_levels = ?, total_levels = ?, total_correct = total_correct + 1,
+                pending_correction = 0, current_question_id = NULL, current_deadline = NULL
+          WHERE student_id = ?`,
+        [hpAfter, roundLevels, totalLevels, studentId]
+      );
       // ⛔ 这里只结算，不抽下一题：抽题与开始计时都交给 /next。
       //    否则学生点「下一层」前休息一会儿，计时早就在跑，一进去就超时扣血（2026-10-27）
       return res.json({
@@ -12565,7 +12599,7 @@ app.post('/api/student/survival/answer', authenticate, async (req, res) => {
           dead: false,
           total_levels: totalLevels,
           round_levels: roundLevels,
-          diamonds_gained: diamondsGained,
+          diamonds_gained: [],
           diamond_step: Number(cfg.diamond_step) || 0,
           need_next: true,
           level: null,
@@ -12663,6 +12697,8 @@ app.post('/api/student/survival/next', authenticate, async (req, res) => {
     const studentId = req.user.userId;
     const profile = await loadSurvivalProfile(studentId);
     if (!profile) return res.status(500).json({ data: null, error: '档案读取失败' });
+    const [[nextLvCnt]] = await pool.query('SELECT COUNT(*) AS n FROM survival_levels');
+    const perRound = Number(nextLvCnt.n) || 70;
     if (Number(profile.alive) !== 1) {
       return res.status(400).json({ data: null, error: '已断线，请先重新接入' });
     }
@@ -12689,6 +12725,8 @@ app.post('/api/student/survival/next', authenticate, async (req, res) => {
             total_levels: Number(profile.total_levels),
             round_no: Number(profile.round_no),
             hp: Number(profile.hp),
+            depth: (Number(profile.round_no) - 1) * perRound + (Number(profile.seq) || 0),
+            diamonds_gained: [],
           },
           error: null,
         });
@@ -12720,6 +12758,9 @@ app.post('/api/student/survival/next', authenticate, async (req, res) => {
         total_levels: Number(profile.total_levels),
         round_no: next.roundNo,
         hp: Number(profile.hp),
+        // 深度（与排行榜同口径）与本层跨档到账的钻石
+        depth: next.depth,
+        diamonds_gained: next.diamonds || [],
       },
       error: null,
     });
@@ -12776,30 +12817,16 @@ app.post('/api/student/survival/correct', authenticate, async (req, res) => {
     }
 
     // 订正通过：不扣血也不加血，本关记为通过；下一题同样等学生点「下一层」
-    // ⛔ total_levels 在这里也会 +1，所以深度钻石必须跟 /answer 一样发（同一个函数）
+    // ⛔ 深度钻石同样不在这里发：seq 要等 /next 才推进（与 /answer 保持一致）
     const roundLevels = Number(profile.round_levels) + 1;
     const totalLevels = Number(profile.total_levels) + 1;
-    let diamondsGained = [];
-    const conn = await pool.getConnection();
-    try {
-      await conn.beginTransaction();
-      await conn.query(
-        `UPDATE survival_profiles
-            SET pending_correction = 0, round_levels = ?, total_levels = ?,
-                current_question_id = NULL, current_deadline = NULL
-          WHERE student_id = ?`,
-        [roundLevels, totalLevels, studentId]
-      );
-      diamondsGained = await grantSurvivalDepthDiamonds(
-        conn, studentId, Number(profile.total_levels), totalLevels, cfg.diamond_step
-      );
-      await conn.commit();
-    } catch (e) {
-      await conn.rollback();
-      throw e;
-    } finally {
-      conn.release();
-    }
+    await pool.query(
+      `UPDATE survival_profiles
+          SET pending_correction = 0, round_levels = ?, total_levels = ?,
+              current_question_id = NULL, current_deadline = NULL
+        WHERE student_id = ?`,
+      [roundLevels, totalLevels, studentId]
+    );
 
     res.json({
       data: {
@@ -12807,7 +12834,7 @@ app.post('/api/student/survival/correct', authenticate, async (req, res) => {
         hp: Number(profile.hp),
         total_levels: totalLevels,
         round_levels: roundLevels,
-        diamonds_gained: diamondsGained,
+        diamonds_gained: [],
         diamond_step: Number(cfg.diamond_step) || 0,
         need_next: true,
         finished_round: false,
