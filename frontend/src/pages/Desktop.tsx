@@ -99,6 +99,17 @@ const moduleComponents: Record<string, React.ReactNode> = {
 /** 受班级开关控制的模块：桌面图标 id → profiles 上的开关字段（2026-10-24 新增） */
 type ModuleGuardKey = 'practice_enabled' | 'test_enabled' | 'op_enabled' | 'pet_enabled' | 'composite_enabled';
 
+/** 桌面推荐应用（2026-11-11）：老师按班打星推荐，来自 /api/student/apps/recommended */
+interface RecommendedApp {
+  id: string;
+  name: string;
+  icon: string;
+  type: string;
+  price_type: string;
+  points_price: number;
+  description?: string;
+}
+
 const MODULE_GUARD_MAP: Record<string, ModuleGuardKey> = {
   practice: 'practice_enabled',
   // 综合题有独立开关（见 116_composite_module_switch.sql）
@@ -140,6 +151,8 @@ export const Desktop: React.FC = () => {
     pet_enabled: true,
     composite_enabled: true,
   });
+  // 桌面推荐应用（2026-11-11）：老师按班打星推荐的应用，直接出现在桌面
+  const [recommendedApps, setRecommendedApps] = useState<RecommendedApp[]>([]);
 
   // 考试期间自动关闭学习模块：学生可能先开着学习再进考试，
   // openWindow 的互斥只拦「新打开」，已经开着的要在这里收掉。
@@ -172,6 +185,28 @@ export const Desktop: React.FC = () => {
 
   // 代理模式下 profile 由 useAuth 直接设置为目标学生
   const effectiveProfile = profile;
+
+  /** 拉取本班推荐的桌面应用（最多 8 个，服务端已排序截断） */
+  const loadRecommendedApps = useCallback(async () => {
+    if (!profile?.id) return;
+    try {
+      const res: any = await backendClient.get('/api/student/apps/recommended');
+      const list = res?.data ?? res;
+      setRecommendedApps(Array.isArray(list) ? list : []);
+    } catch (e) {
+      console.error('加载推荐应用失败:', e);
+    }
+  }, [profile?.id]);
+
+  useEffect(() => { loadRecommendedApps(); }, [loadRecommendedApps]);
+  // 切回桌面时顺手刷一次：老师刚推荐完，学生切一下标签页就能看到，不用整页刷新
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') loadRecommendedApps();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [loadRecommendedApps]);
 
   const PAID_STUDENT_FEATURES = ['taskCenter', 'apps', 'pet', 'exchange', 'proxyBrowser', 'studentRollCall', 'creative'];
 
@@ -654,6 +689,45 @@ export const Desktop: React.FC = () => {
     const skinInterval = setInterval(fetchActiveSkin, 30000);
     return () => clearInterval(skinInterval);
   }, [effectiveProfile, setActiveSkin]);
+
+  /**
+   * 打开桌面推荐应用（2026-11-11）
+   * ⛔ 推荐绕过的是「应用中心」的班级开关（app_center_enabled），
+   *    但仍尊重学生级权限 can_use_app —— 被管理员禁用应用访问的学生照样打不开。
+   * 窗口 id 用 recapp_ 前缀，与 apps 模块分开，所以模块守卫不会拦。
+   */
+  const openRecommendedApp = async (app: RecommendedApp) => {
+    // 授权与「应用中心」保持同一口径：系统未授权时推荐应用也不能开
+    if (isPaidFeature('apps') && !canUseFeature('apps')) {
+      alert('应用功能需要系统授权后才能使用，请联系管理员激活授权。');
+      return;
+    }
+    try {
+      if (effectiveProfile?.id) {
+        const { data } = await backendClient
+          .from('profiles')
+          .select('can_use_app')
+          .eq('id', effectiveProfile.id)
+          .maybeSingle();
+        const v = data?.can_use_app;
+        if (v === 0 || v === false || v === '0') {
+          alert('您的应用访问权限已被管理员禁用');
+          return;
+        }
+      }
+    } catch { /* 权限查不到就不拦 */ }
+
+    const wid = `recapp_${app.id}`;
+    openWindow({
+      id: wid,
+      title: app.name,
+      icon: 'fa-star',
+      isMinimized: false,
+      isMaximized: false,
+      component: <AppCenter forceAppId={app.id} shellWindowId={wid} />,
+    });
+    activateWindow(wid);
+  };
 
   const handleIconDoubleClick = async (icon: typeof desktopIcons[0]) => {
     if (isPaidFeature(icon.id) && !canUseFeature(icon.id)) {
@@ -1229,6 +1303,34 @@ export const Desktop: React.FC = () => {
             />
           ))}
         </div>
+
+        {/* 推荐应用（2026-11-11）：老师按班打星的应用，双击直接打开。
+            ⛔ 不走「应用中心」入口，所以应用中心被关掉也照样能用。 */}
+        {recommendedApps.length > 0 && (
+          <div className="mt-3">
+            <div className="mb-1.5 flex items-center gap-1.5 px-1 text-[11px] font-medium text-amber-300">
+              <i className="fa-solid fa-star"></i>
+              <span>推荐应用</span>
+            </div>
+            <div className="grid gap-3 grid-cols-4">
+              {recommendedApps.slice(0, 8).map((app) => (
+                <div
+                  key={app.id}
+                  onDoubleClick={() => openRecommendedApp(app)}
+                  title={`双击打开 ${app.name}`}
+                  className="flex cursor-pointer flex-col items-center gap-1.5 rounded-lg p-2 transition-colors hover:bg-white/10"
+                >
+                  <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-white/15 text-2xl shadow-lg">
+                    {app.icon || '📦'}
+                  </div>
+                  <span className="max-w-[76px] truncate text-center text-[11px] font-medium text-white/90">
+                    {app.name}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       <div>

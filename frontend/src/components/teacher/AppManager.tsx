@@ -128,6 +128,14 @@ export function AppManager() {
   const [batchClassMode, setBatchClassMode] = useState<'add' | 'replace'>('add');
   const [batchBusy, setBatchBusy] = useState(false);
 
+  // ===== 五角星推荐（2026-11-11）：按班推荐，学生桌面直接出现图标 =====
+  const [appRecommendations, setAppRecommendations] = useState<{ app_id: string; class_id: string }[]>([]);
+  const [showRecommendModal, setShowRecommendModal] = useState(false);
+  const [recommendAppIds, setRecommendAppIds] = useState<string[]>([]);
+  const [recommendMode, setRecommendMode] = useState<'set' | 'unset'>('set');
+  const [recommendClassIds, setRecommendClassIds] = useState<string[]>([]);
+  const [recommendBusy, setRecommendBusy] = useState(false);
+
   // 常用 emoji 图标选项
   const iconOptions = [
     '📚', '📖', '🎓', '✏️', '🖊️', '📝', '📐', '📊',
@@ -178,12 +186,22 @@ export function AppManager() {
     }
   }, []);
 
+  const fetchRecommendations = useCallback(async () => {
+    try {
+      const { data } = await backendClient.from('app_recommendations').select('*');
+      setAppRecommendations((data as { app_id: string; class_id: string }[]) || []);
+    } catch (error) {
+      console.error('Failed to fetch app recommendations:', error);
+    }
+  }, []);
+
   useEffect(() => {
     fetchApps();
     fetchClasses();
     fetchVisibility();
     fetchEquipments();
-  }, [fetchApps, fetchClasses, fetchVisibility, fetchEquipments]);
+    fetchRecommendations();
+  }, [fetchApps, fetchClasses, fetchVisibility, fetchEquipments, fetchRecommendations]);
 
   const handleSubmit = async (data: Partial<App>) => {
     const timestamp = Date.now().toString(36);
@@ -284,6 +302,40 @@ export function AppManager() {
       alert('批量删除失败，部分应用可能已删除，请刷新页面确认');
     } finally {
       setBatchBusy(false);
+    }
+  };
+
+  /** 某应用已推荐到多少个班 */
+  const recommendCountOf = (appId: string) => appRecommendations.filter(r => r.app_id === appId).length;
+
+  /** 打开推荐弹窗：appIds = 要操作的应用，mode = 推荐 / 取消推荐 */
+  const openRecommendModal = (appIds: string[], mode: 'set' | 'unset') => {
+    if (!appIds.length) { alert('请先选择应用'); return; }
+    setRecommendAppIds([...appIds]);
+    setRecommendMode(mode);
+    // 预勾选：这些应用已推荐过的班级（取消推荐时同样是这一批，改完直接确认即可）
+    setRecommendClassIds([...new Set(appRecommendations.filter(r => appIds.includes(r.app_id)).map(r => r.class_id))]);
+    setShowRecommendModal(true);
+  };
+
+  const submitRecommend = async () => {
+    if (!recommendAppIds.length) return;
+    if (!recommendClassIds.length) { alert('请至少勾选一个班级'); return; }
+    setRecommendBusy(true);
+    try {
+      const res: any = await backendClient.post('/api/teacher/apps/recommend', {
+        app_ids: recommendAppIds,
+        class_ids: recommendClassIds,
+        recommended: recommendMode === 'set',
+      });
+      if (res?.error) { alert('设置失败：' + res.error); return; }
+      await fetchRecommendations();
+      setShowRecommendModal(false);
+      setRecommendClassIds([]);
+    } catch (error: any) {
+      alert('设置失败：' + (error?.message || '请重试'));
+    } finally {
+      setRecommendBusy(false);
     }
   };
 
@@ -652,6 +704,21 @@ export function AppManager() {
           </button>
           <button
             disabled={batchBusy}
+            onClick={() => openRecommendModal(selectedApps, 'set')}
+            className="px-4 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 disabled:opacity-50 transition-colors"
+            title="推荐到指定班级：学生桌面会直接出现图标，双击即可打开（应用中心关掉也能用）"
+          >
+            ★ 设为推荐
+          </button>
+          <button
+            disabled={batchBusy}
+            onClick={() => openRecommendModal(selectedApps, 'unset')}
+            className="px-4 py-2 border border-amber-400 bg-white text-amber-700 rounded-lg hover:bg-amber-50 disabled:opacity-50 transition-colors"
+          >
+            取消推荐
+          </button>
+          <button
+            disabled={batchBusy}
             onClick={() => setSelectedApps([])}
             className="px-4 py-2 border border-gray-300 bg-white text-gray-700 rounded-lg hover:bg-gray-100 disabled:opacity-50 transition-colors"
           >
@@ -688,6 +755,21 @@ export function AppManager() {
                 <div className="flex items-center gap-2 mb-2">
                   <span className="text-2xl">{app.icon || '📦'}</span>
                   <h3 className="text-lg font-semibold text-gray-800">{app.name}</h3>
+                  <button
+                    type="button"
+                    onClick={() => openRecommendModal([app.id], recommendCountOf(app.id) > 0 ? 'unset' : 'set')}
+                    className={`ml-auto flex items-center gap-1 rounded-full px-2 py-1 text-xs transition-colors ${
+                      recommendCountOf(app.id) > 0
+                        ? 'bg-amber-100 text-amber-700 hover:bg-amber-200'
+                        : 'text-gray-300 hover:text-amber-500'
+                    }`}
+                    title={recommendCountOf(app.id) > 0
+                      ? `已推荐给 ${recommendCountOf(app.id)} 个班，点击管理`
+                      : '设为推荐：学生桌面直接出现图标，双击即可打开'}
+                  >
+                    <i className={`fa-${recommendCountOf(app.id) > 0 ? 'solid' : 'regular'} fa-star`}></i>
+                    {recommendCountOf(app.id) > 0 && <span>{recommendCountOf(app.id)}</span>}
+                  </button>
                 </div>
                 
                 <p className="text-gray-600 text-sm mb-3">{app.description}</p>
@@ -1652,6 +1734,92 @@ export function AppManager() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {showRecommendModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl p-6 w-full max-w-lg max-h-[85vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xl font-semibold">
+                {recommendMode === 'set' ? '设为推荐' : '取消推荐'}
+              </h3>
+              <button
+                onClick={() => { if (!recommendBusy) setShowRecommendModal(false); }}
+                className="text-gray-500 hover:text-gray-700"
+              >
+                ✕
+              </button>
+            </div>
+            <p className="text-sm text-gray-600 mb-3">
+              应用：<b>{recommendAppIds.length}</b> 个
+              {recommendAppIds.length <= 3 && (
+                <span className="text-gray-500">
+                  （{apps.filter(a => recommendAppIds.includes(a.id)).map(a => a.name).join('、')}）
+                </span>
+              )}
+            </p>
+            <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 mb-4 text-xs text-amber-800 leading-relaxed">
+              推荐给哪个班，那个班的学生桌面就会直接出现这些应用图标，<b>双击即可打开</b>；
+              即使「应用中心」模块被关掉，这些应用仍然能用。按时长的应用打开时会照常检查时长，
+              不够可以就地用钻石换时间。
+            </div>
+
+            <div className="mb-2 flex items-center justify-between">
+              <label className="block text-sm font-medium text-gray-700">选择班级</label>
+              <div className="flex gap-3 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setRecommendClassIds(classes.map(c => c.id))}
+                  className="text-blue-600 hover:underline"
+                >
+                  全选
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRecommendClassIds([])}
+                  className="text-blue-600 hover:underline"
+                >
+                  清空
+                </button>
+              </div>
+            </div>
+            <div className="max-h-60 overflow-y-auto border border-gray-200 rounded-lg p-2">
+              {classes.map(c => {
+                const on = recommendClassIds.includes(c.id);
+                return (
+                  <label key={c.id} className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-50 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      onChange={() => setRecommendClassIds(prev => (on ? prev.filter(x => x !== c.id) : [...prev, c.id]))}
+                    />
+                    <span className="text-sm text-gray-700">{c.name}</span>
+                  </label>
+                );
+              })}
+              {classes.length === 0 && <p className="p-2 text-sm text-gray-400">还没有班级</p>}
+            </div>
+
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                onClick={() => setShowRecommendModal(false)}
+                disabled={recommendBusy}
+                className="px-4 py-2 border border-gray-300 rounded-lg text-gray-700"
+              >
+                取消
+              </button>
+              <button
+                onClick={submitRecommend}
+                disabled={recommendBusy}
+                className={`px-4 py-2 rounded-lg text-white disabled:opacity-50 ${
+                  recommendMode === 'set' ? 'bg-amber-500 hover:bg-amber-600' : 'bg-gray-600 hover:bg-gray-700'
+                }`}
+              >
+                {recommendBusy ? '处理中…' : (recommendMode === 'set' ? '设为推荐' : '取消推荐')}
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -17833,6 +17833,81 @@ app.post('/api/teacher/students/reset-password', authenticate, requireTeachingRo
  * price_type 为 points（一次性购买）或 per_use（按次使用）时扣费，其余免费。
  * 扣费不足返回 400，绝不会扣成负数。
  */
+/**
+ * 学生端：桌面推荐应用（2026-11-11 吴老需求）
+ * 按班取 app_recommendations，**不看 app_visibility**（推荐优先，老师隐藏了也能推荐出来）。
+ * 最多 8 个，与桌面推荐区「4×2」的布局一致；排序按推荐时间，老师先推的排前面。
+ */
+app.get('/api/student/apps/recommended', authenticate, async (req, res) => {
+  try {
+    let classId = req.user.classId;
+    if (!classId) {
+      const [[p]] = await pool.query('SELECT class_id FROM profiles WHERE id = ? LIMIT 1', [req.user.userId]);
+      classId = (p && p.class_id) || null;
+    }
+    if (!classId) return res.json({ data: [], error: null });
+
+    const [rows] = await pool.query(
+      `SELECT a.id, a.name, a.description, a.icon, a.type, a.price_type, a.points_price,
+              a.category, a.external_url, a.iframe_enabled, a.config,
+              r.created_at AS recommended_at
+         FROM app_recommendations r
+         JOIN apps a ON a.id = r.app_id
+        WHERE r.class_id = ? AND a.is_active = 1
+        ORDER BY r.created_at ASC, a.name ASC
+        LIMIT 8`,
+      [classId]
+    );
+    res.json({ data: rows, error: null });
+  } catch (error) {
+    console.error('[apps] 读取推荐应用失败:', error);
+    res.status(500).json({ data: [], error: error.message });
+  }
+});
+
+/**
+ * 教师端：批量设置 / 取消应用推荐（2026-11-11）
+ * body: { app_ids: string[], class_ids: string[], recommended: boolean }
+ * recommended=true 插入（INSERT IGNORE 天然幂等），false 删除对应组合。
+ * 班级归属沿用「批量启用班级」的既有口径（前端直连 app_visibility，不额外校验），保持一致。
+ */
+app.post('/api/teacher/apps/recommend', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const appIds = Array.isArray(body.app_ids) ? body.app_ids.map((x) => String(x || '').trim()).filter(Boolean) : [];
+    const classIds = Array.isArray(body.class_ids) ? body.class_ids.map((x) => String(x || '').trim()).filter(Boolean) : [];
+    const recommended = body.recommended !== false;
+
+    if (!appIds.length) return res.status(400).json({ data: null, error: '请先选择应用' });
+    if (!classIds.length) return res.status(400).json({ data: null, error: '请先选择班级' });
+
+    // 只认真实存在的应用与班级，避免脏 id 把推荐表写脏
+    const [appRows] = await pool.query('SELECT id FROM apps WHERE id IN (?)', [appIds]);
+    const validApps = appRows.map((r) => String(r.id));
+    const [classRows] = await pool.query('SELECT id FROM classes WHERE id IN (?)', [classIds]);
+    const validClasses = classRows.map((r) => String(r.id));
+    if (!validApps.length) return res.status(400).json({ data: null, error: '选中的应用都不存在' });
+    if (!validClasses.length) return res.status(400).json({ data: null, error: '选中的班级都不存在' });
+
+    if (recommended) {
+      const values = [];
+      for (const appId of validApps) for (const classId of validClasses) values.push([appId, classId]);
+      // 同一组合重复点不会报错，也不会重复插入
+      const [r] = await pool.query('INSERT IGNORE INTO app_recommendations (app_id, class_id) VALUES ?', [values]);
+      return res.json({ data: { recommended: true, apps: validApps.length, classes: validClasses.length, inserted: r.affectedRows }, error: null });
+    }
+
+    const [r] = await pool.query(
+      'DELETE FROM app_recommendations WHERE app_id IN (?) AND class_id IN (?)',
+      [validApps, validClasses]
+    );
+    return res.json({ data: { recommended: false, apps: validApps.length, classes: validClasses.length, removed: r.affectedRows }, error: null });
+  } catch (error) {
+    console.error('[apps] 设置推荐失败:', error);
+    res.status(500).json({ data: null, error: error.message });
+  }
+});
+
 app.post('/api/student/apps/charge', authenticate, async (req, res) => {
   const connection = await pool.getConnection();
   try {

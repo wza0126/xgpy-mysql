@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../../hooks/useAuth';
 import { useDesktopStore } from '../../store/desktopStore';
 import { backendClient } from '../../api/backendClient';
+import { TimeExchangeModal } from './TimeExchangeModal';
 import { WordApp } from './WordApp';
 import { AiQaApp } from './AiQaApp';
 import { ExternalLinkApp } from './ExternalLinkApp';
@@ -48,7 +49,14 @@ interface AppVisibility {
   is_visible: boolean;
 }
 
-export const AppCenter: React.FC = () => {
+interface AppCenterProps {
+  /** 桌面推荐图标专用：挂载后自动启动这个应用（2026-11-11） */
+  forceAppId?: string;
+  /** 外壳窗口 id：启动成功后自动关闭它，学生只看到应用本身 */
+  shellWindowId?: string;
+}
+
+export const AppCenter: React.FC<AppCenterProps> = ({ forceAppId, shellWindowId }) => {
   const { user, profile, refreshProfile } = useAuth();
   const { openWindow, closeWindow, activateWindow } = useDesktopStore();
   const [activeTab, setActiveTab] = useState<'myApps' | 'marketplace'>('myApps');
@@ -541,6 +549,88 @@ export const AppCenter: React.FC = () => {
     }
   };
 
+  // ===== 桌面推荐图标：自动启动指定应用（2026-11-11）=====
+  // 不打开完整应用中心，所以「应用中心」被老师关掉也不影响推荐应用。
+  // ⛔ 只复用 handleLaunchApp，绝不再写一套打开逻辑 —— 购买/时长/iframe 分支太多，两套迟早分叉。
+  const forcedRef = useRef(false);
+  const [forceFailed, setForceFailed] = useState(false);
+  useEffect(() => {
+    if (!forceAppId || loading || forcedRef.current) return;
+    const app = apps.find(a => a.id === forceAppId);
+    if (!app) { setForceFailed(true); return; }
+    forcedRef.current = true;
+    (async () => {
+      await handleLaunchApp(app);
+      const opened = useDesktopStore.getState().windows.some(w => w.id === `app_${app.id}` && w.isOpen);
+      if (opened) {
+        if (shellWindowId) closeWindow(shellWindowId);
+      } else {
+        setForceFailed(true);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [forceAppId, loading, apps]);
+
+  if (forceAppId) {
+    const app = apps.find(a => a.id === forceAppId);
+    return (
+      <div className="h-full flex flex-col bg-white">
+        <div className="flex-1 overflow-y-auto p-6">
+          {loading && <div className="text-center text-gray-500 py-10">正在加载…</div>}
+          {!loading && !app && (
+            <div className="text-center text-gray-500 py-10">这个应用已经下架了，请联系老师。</div>
+          )}
+          {!loading && app && !forceFailed && (
+            <div className="text-center text-gray-500 py-10">
+              <div className="text-4xl mb-2">{app.icon || '📦'}</div>
+              正在打开 {app.name}…
+            </div>
+          )}
+          {!loading && app && forceFailed && (
+            <div className="max-w-sm mx-auto">
+              <div className="flex items-center gap-3 mb-3">
+                <span className="text-4xl">{app.icon || '📦'}</span>
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-800">{app.name}</h3>
+                  <p className="text-xs text-gray-500">{app.description}</p>
+                </div>
+              </div>
+              <p className="text-sm text-gray-600 mb-4">
+                还没能打开：可能是还没获取、积分不够，或者游戏时长不足。
+              </p>
+              <div className="flex flex-col gap-2">
+                <button
+                  onClick={() => { setForceFailed(false); handleLaunchApp(app); }}
+                  className="w-full py-2.5 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium"
+                >
+                  再试一次
+                </button>
+                {app.price_type === 'time' && (
+                  <button
+                    onClick={() => setShowTimeModal(true)}
+                    className="w-full py-2.5 bg-sky-500 hover:bg-sky-600 text-white rounded-lg font-medium"
+                  >
+                    用钻石换游戏时间
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+        <TimeExchangeModal
+          open={showTimeModal}
+          onClose={() => setShowTimeModal(false)}
+          playtime={playtime}
+          profile={profile}
+          diamonds={timeDiamonds}
+          setDiamonds={setTimeDiamonds}
+          onExchange={doExchangeTime}
+          exchanging={exchangingTime}
+        />
+      </div>
+    );
+  }
+
   const visibleApps = apps.filter(app => isVisibleToStudent(app.id));
   const myAppsData = visibleApps.filter(app => isAppOwned(app.id));
   const filteredMarketplaceApps = visibleApps.filter(app => {
@@ -716,79 +806,16 @@ export const AppCenter: React.FC = () => {
         )}
       </div>
 
-      {showTimeModal && (
-        <div className="fixed inset-0 z-[9999] bg-black/60 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl p-6 max-w-md w-full">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-bold text-gray-800">
-                <i className="fa-solid fa-hourglass-half text-sky-500 mr-2"></i>
-                游戏时间
-              </h3>
-              <button onClick={() => setShowTimeModal(false)} className="text-gray-400 hover:text-gray-600">
-                <i className="fa-solid fa-xmark"></i>
-              </button>
-            </div>
-
-            <div className="bg-sky-50 rounded-xl p-4 mb-4">
-              <div className="flex items-baseline justify-between mb-2">
-                <span className="text-sm text-gray-600">当前剩余</span>
-                <span className="text-2xl font-bold text-sky-600">{playtime?.balance_minutes ?? 0} 分钟</span>
-              </div>
-              <div className="text-xs text-gray-500 space-y-1">
-                <p>今日已赚钻石 {playtime?.today?.earned_diamonds ?? 0}/{playtime?.today?.earn_cap ?? '-'} 颗</p>
-                <p>今日已玩 {playtime?.today?.used_minutes ?? 0}/{playtime?.today?.cap_minutes ?? '-'} 分钟</p>
-              </div>
-            </div>
-
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-700 mb-2">用钻石兑换</label>
-              <div className="flex items-center gap-3">
-                <input
-                  type="number"
-                  min={1}
-                  value={timeDiamonds}
-                  onChange={(e) => setTimeDiamonds(Math.max(1, parseInt(e.target.value) || 1))}
-                  className="w-24 p-2 border border-gray-300 rounded-lg text-center"
-                />
-                <span className="text-sm text-gray-600">颗钻石</span>
-                <span className="text-sm text-gray-400">→</span>
-                <span className="text-lg font-bold text-sky-600">
-                  {(timeDiamonds * (playtime?.rules?.diamond_to_minutes ?? 5))} 分钟
-                </span>
-              </div>
-              <p className="text-xs text-gray-400 mt-2">
-                1 颗钻石 = {playtime?.rules?.diamond_to_minutes ?? 5} 分钟 · 单次最多 {playtime?.rules?.max_exchange_minutes ?? 30} 分钟 ·
-                当前有 <i className="fa-solid fa-gem text-sky-500"></i> {profile?.diamond_balance ?? 0} 颗
-              </p>
-            </div>
-
-            <div className="bg-gray-50 rounded-lg p-3 mb-4 text-xs text-gray-500 space-y-1">
-              <p className="font-medium text-gray-600 mb-1">怎么用</p>
-              <p>· 兑换到的时间存在「时长池」里，所有按时长的应用共用。</p>
-              <p>· 打开应用就开始计时，每 30 秒扣一次（点进去看一眼也算半分钟）。</p>
-              <p>· 关掉窗口、最小化，或者点一下别的窗口，立刻停止扣时。</p>
-              <p>· 每天最多玩 {playtime?.today?.cap_minutes ?? '-'} 分钟，超出后即使有时长也要等明天。</p>
-              <p>· 钻石只能通过测试、考试、任务和老师发放获得，积分换不了。</p>
-            </div>
-
-            <div className="flex gap-3">
-              <button
-                onClick={() => setShowTimeModal(false)}
-                className="flex-1 py-2.5 border border-gray-300 text-gray-600 rounded-lg font-medium hover:bg-gray-50"
-              >
-                取消
-              </button>
-              <button
-                onClick={doExchangeTime}
-                disabled={exchangingTime}
-                className="flex-1 py-2.5 bg-sky-500 hover:bg-sky-600 text-white rounded-lg font-medium disabled:opacity-50"
-              >
-                {exchangingTime ? '兑换中...' : '确认兑换'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <TimeExchangeModal
+        open={showTimeModal}
+        onClose={() => setShowTimeModal(false)}
+        playtime={playtime}
+        profile={profile}
+        diamonds={timeDiamonds}
+        setDiamonds={setTimeDiamonds}
+        onExchange={doExchangeTime}
+        exchanging={exchangingTime}
+      />
     </div>
   );
 };
