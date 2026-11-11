@@ -19,6 +19,8 @@ type ExamTest = {
   time_limit: number;
   passing_score: number;
   points_reward: number;
+  /** 及格奖励钻石（2026-11-11 补）：与普通测试同口径，计入每日钻石产出上限 */
+  diamond_reward?: number;
   class_ids: string[];
   allow_view_paper: boolean;
   allow_internet_code: boolean;
@@ -171,6 +173,7 @@ export const ExamManager: React.FC = () => {
     time_limit: 60,
     passing_score: 60,
     points_reward: 50,
+    diamond_reward: 0,
     class_ids: [] as string[],
     allow_view_paper: false,
     allow_internet_code: false,
@@ -289,6 +292,7 @@ export const ExamManager: React.FC = () => {
       time_limit: formData.time_limit,
       passing_score: formData.passing_score,
       points_reward: formData.points_reward,
+      diamond_reward: formData.diamond_reward,
       class_ids: formData.class_ids,
       allow_view_paper: formData.allow_view_paper,
       allow_internet_code: formData.allow_internet_code,
@@ -373,6 +377,7 @@ export const ExamManager: React.FC = () => {
       time_limit: 60,
       passing_score: 60,
       points_reward: 50,
+      diamond_reward: 0,
       class_ids: [],
       allow_view_paper: false,
       allow_internet_code: false,
@@ -402,6 +407,7 @@ export const ExamManager: React.FC = () => {
         time_limit: test.time_limit || 60,
         passing_score: test.passing_score || 60,
         points_reward: test.points_reward || 50,
+        diamond_reward: test.diamond_reward || 0,
         class_ids: parsedClassIds,
         allow_view_paper: test.allow_view_paper || false,
         allow_internet_code: test.allow_internet_code || false,
@@ -890,6 +896,12 @@ export const ExamManager: React.FC = () => {
                     <i className="fa-solid fa-gift mr-1"></i>
                     奖励 {examTest.points_reward || 50} 积分
                   </span>
+                  {(examTest.diamond_reward || 0) > 0 && (
+                    <span>
+                      <i className="fa-solid fa-gem mr-1"></i>
+                      奖励 {examTest.diamond_reward} 钻石
+                    </span>
+                  )}
                   {examTest.allow_internet_code && examTest.internet_code_reward > 0 && (
                     <span>
                       <i className="fa-solid fa-wifi mr-1"></i>
@@ -1082,6 +1094,22 @@ export const ExamManager: React.FC = () => {
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
                       min="0"
                     />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      及格奖励钻石
+                      <span className="ml-1.5 text-xs font-normal text-gray-400">计入每日上限</span>
+                    </label>
+                    <input
+                      type="number"
+                      value={formData.diamond_reward}
+                      onChange={(e) => setFormData({ ...formData, diamond_reward: Math.max(0, parseInt(e.target.value) || 0) })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
+                      min="0"
+                    />
+                    <p className="mt-1 text-[11px] text-gray-400">
+                      及格才发，与测试 / 任务共用「每日钻石产出上限」；填 0 = 不发
+                    </p>
                   </div>
                 </div>
 
