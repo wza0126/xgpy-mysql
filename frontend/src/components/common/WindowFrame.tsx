@@ -23,7 +23,7 @@ const DEFAULT_WINDOW_SIZE = { width: 850, height: 720 };
  * 这类窗口里多是 iframe / HTML 页面，850×720 接近正方形，左右内容会被挤掉一截；
  * 默认给宽一点（2026-11-11 吴老反馈）。
  */
-const APP_WINDOW_SIZE = { width: 1120, height: 780 };
+const APP_WINDOW_SIZE = { width: 1320, height: 780 };
 
 /**
  * 各窗口的默认初始尺寸（只写与默认值不同的项）。

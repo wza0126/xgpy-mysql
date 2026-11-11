@@ -1,6 +1,6 @@
 {
   "name": "xgpy-backend",
-  "version": "3.6.28",
+  "version": "3.6.29",
   "description": "XGPY Learning Platform Backend",
   "main": "src/index.js",
   "scripts": {
