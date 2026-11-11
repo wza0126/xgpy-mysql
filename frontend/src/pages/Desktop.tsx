@@ -472,10 +472,7 @@ export const Desktop: React.FC = () => {
         closeWindow('apps');
         alert('您的应用访问权限已被管理员禁用');
       }
-      if (!isOn(perm.can_exchange_internet_code) && windows.some((w) => w.id === 'exchange' && w.isOpen)) {
-        closeWindow('exchange');
-        alert('您的积分兑换权限已被管理员禁用');
-      }
+      // 兑换模块不再做个人权限校验（2026-11-11 吴老：学生管理里的「兑换」开关已换成「应用」）
       // AI 答疑是班级级开关：没有班级时不判断（与原逻辑一致）
       if (perm.class_id && !perm.ai_enabled) {
         if (windows.some((w) => (w.id === 'app_ai_qa' || w.id === 'app_app_ai_qa') && w.isOpen)) {
@@ -692,31 +689,13 @@ export const Desktop: React.FC = () => {
 
   /**
    * 打开桌面推荐应用（2026-11-11）
-   * ⛔ 推荐绕过的是「应用中心」的班级开关（app_center_enabled），
-   *    但仍尊重学生级权限 can_use_app —— 被管理员禁用应用访问的学生照样打不开。
-   * 窗口 id 用 recapp_ 前缀，与 apps 模块分开，所以模块守卫不会拦。
+   * ⛔ 推荐应用是完全放行的（吴老 2026-11-11 定）：
+   *    ① 不看学生级「应用访问」开关 —— 老师特意推荐，就是允许这个学生用；
+   *    ② 不看系统授权 —— 不能因为没激活把学生挡在门外。
+   *    其它入口（应用中心、桌面宠物里的应用）仍按原规则校验，这里只放宽推荐这一条路。
+   * 窗口 id 用 recapp_ 前缀，与 apps 模块分开，所以模块守卫也不会拦。
    */
   const openRecommendedApp = async (app: RecommendedApp) => {
-    // 授权与「应用中心」保持同一口径：系统未授权时推荐应用也不能开
-    if (isPaidFeature('apps') && !canUseFeature('apps')) {
-      alert('应用功能需要系统授权后才能使用，请联系管理员激活授权。');
-      return;
-    }
-    try {
-      if (effectiveProfile?.id) {
-        const { data } = await backendClient
-          .from('profiles')
-          .select('can_use_app')
-          .eq('id', effectiveProfile.id)
-          .maybeSingle();
-        const v = data?.can_use_app;
-        if (v === 0 || v === false || v === '0') {
-          alert('您的应用访问权限已被管理员禁用');
-          return;
-        }
-      }
-    } catch { /* 权限查不到就不拦 */ }
-
     const wid = `recapp_${app.id}`;
     openWindow({
       id: wid,
@@ -792,37 +771,8 @@ export const Desktop: React.FC = () => {
       }
     }
 
-    if (icon.id === 'exchange') {
-      if (!effectiveProfile) {
-        alert('请先登录');
-        return;
-      }
-
-      try {
-        const result = await backendClient.from('profiles').select('can_open_exchange_module').eq('id', effectiveProfile.id).maybeSingle();
-
-        if (result.error || !result.data) {
-          alert('检查权限失败');
-          return;
-        }
-
-        const canExchangeValue = result.data.can_open_exchange_module;
-        let canExchange: boolean;
-        if (canExchangeValue === 0 || canExchangeValue === false) {
-          canExchange = false;
-        } else {
-          canExchange = true;
-        }
-
-        if (!canExchange) {
-          alert('您当前无法使用积分兑换功能');
-          return;
-        }
-      } catch (error) {
-        alert('检查权限失败');
-        return;
-      }
-    }
+    // 兑换模块不再做个人开关校验（2026-11-11 吴老：学生管理里的「兑换」开关已换成「应用」）。
+    // can_open_exchange_module / can_exchange_internet_code 字段保留，但不再拦截任何入口。
 
     if (icon.id === 'python') {
       if (!effectiveProfile) {
@@ -1094,12 +1044,7 @@ export const Desktop: React.FC = () => {
           if (!data) return false;
           return data.can_use_app !== 0 && data.can_use_app !== false;
         }}
-        onCheckExchangePermission={async () => {
-          if (!effectiveProfile) return false;
-          const { data } = await backendClient.from('profiles').select('can_open_exchange_module').eq('id', effectiveProfile.id).maybeSingle();
-          if (!data) return false;
-          return data.can_open_exchange_module === 1 || data.can_open_exchange_module === true || data.can_open_exchange_module === '1';
-        }}
+        onCheckExchangePermission={async () => true}
       />
 
       <PlayTimeWatcher />

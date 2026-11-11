@@ -12,6 +12,8 @@ interface StudentWithStats extends Profile {
   has_pet?: boolean;
   pet_level?: number;
   can_exchange_internet_code?: boolean;
+  /** 应用访问开关（can_use_app）：关掉后学生打不开应用中心；老师推荐到桌面的应用不受它限制 */
+  can_use_app?: boolean;
   hidden_features?: string[];
   /** 已掌握题数（同一道题答对达到阈值次数，与学情分析同口径） */
   total_mastered?: number;
@@ -181,6 +183,7 @@ export const StudentManager: React.FC = () => {
           total_mastered: Number(s.total_mastered) || 0,
           focus_force_enabled: Number(s.focus_force_enabled) === 1,
           can_exchange_internet_code: student.can_exchange_internet_code ?? true,
+          can_use_app: student.can_use_app ?? true,
           hidden_features: student.hidden_features ? (typeof student.hidden_features === 'string' ? JSON.parse(student.hidden_features) : student.hidden_features) : ['paint_board', 'roll_call', 'ai_explain'],
           is_online: !!s.is_online,
         };
@@ -647,10 +650,10 @@ export const StudentManager: React.FC = () => {
     setShowBatchEditModal(true);
   };
 
-  const handleToggleExchange = async (studentId: string, canExchange: boolean) => {
+  const handleToggleApp = async (studentId: string, canUse: boolean) => {
     await backendClient
       .from('profiles')
-      .update({ can_exchange_internet_code: canExchange })
+      .update({ can_use_app: canUse })
       .eq('id', studentId);
     fetchStudents();
   };
@@ -672,20 +675,21 @@ export const StudentManager: React.FC = () => {
     }
   };
 
-  const handleBatchToggleExchange = async (canExchange: boolean) => {
+  const handleBatchToggleApp = async (canUse: boolean) => {
     if (selectedStudents.size === 0) {
       alert('请先选择学生');
       return;
     }
-    for (const studentId of selectedStudents) {
+    const ids = [...selectedStudents];
+    for (const studentId of ids) {
       await backendClient
         .from('profiles')
-        .update({ can_exchange_internet_code: canExchange })
+        .update({ can_use_app: canUse })
         .eq('id', studentId);
     }
     setSelectedStudents(new Set());
     fetchStudents();
-    alert(`已批量设置 ${selectedStudents.size} 个学生的兑换权限`);
+    alert(`已批量设置 ${ids.length} 个学生的应用访问权限`);
   };
 
   const handleToggleHiddenFeature = async (studentId: string, feature: string, hidden: boolean) => {
@@ -880,18 +884,18 @@ export const StudentManager: React.FC = () => {
                 批量设置 ({selectedStudents.size})
               </button>
               <button
-                onClick={() => handleBatchToggleExchange(true)}
+                onClick={() => handleBatchToggleApp(true)}
                 className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors"
               >
                 <i className="fa-solid fa-check mr-2"></i>
-                批量允许兑换 ({selectedStudents.size})
+                批量开启应用 ({selectedStudents.size})
               </button>
               <button
-                onClick={() => handleBatchToggleExchange(false)}
+                onClick={() => handleBatchToggleApp(false)}
                 className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition-colors"
               >
                 <i className="fa-solid fa-ban mr-2"></i>
-                批量禁止兑换 ({selectedStudents.size})
+                批量禁止应用 ({selectedStudents.size})
               </button>
               <button
                 onClick={() => handleBatchToggleHiddenFeature('paint_board', true)}
@@ -991,7 +995,12 @@ export const StudentManager: React.FC = () => {
               <SortHeader field="total_mastered">掌握</SortHeader>
               <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">萌宠</th>
               <SortHeader field="is_online">在线</SortHeader>
-              <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">兑换</th>
+              <th
+                className="px-4 py-3 text-center text-sm font-medium text-gray-600"
+                title="关掉后该学生打不开「应用中心」；老师推荐到桌面的应用不受这个开关影响"
+              >
+                应用
+              </th>
               <th
                 className="px-4 py-3 text-center text-sm font-medium text-gray-600"
                 title="单独把某个学生强制切进专注模式（班级没开也生效），用于惩罚练习不认真的学生"
@@ -1061,15 +1070,16 @@ export const StudentManager: React.FC = () => {
                 </td>
                 <td className="px-4 py-3 text-center">
                   <button
-                    onClick={() => handleToggleExchange(student.id, !student.can_exchange_internet_code)}
+                    onClick={() => handleToggleApp(student.id, !(student.can_use_app ?? true))}
+                    title="应用中心访问开关；老师推荐到桌面的应用不受这个开关影响"
                     className={`px-2 py-1 rounded-full text-xs transition-colors ${
-                      student.can_exchange_internet_code
+                      Boolean(student.can_use_app ?? true)
                         ? 'bg-green-100 text-green-600 hover:bg-green-200'
                         : 'bg-gray-100 text-gray-400 hover:bg-gray-200'
                     }`}
                   >
-                    <i className={`fa-solid ${student.can_exchange_internet_code ? 'fa-check' : 'fa-ban'} mr-1`}></i>
-                    {student.can_exchange_internet_code ? '允许' : '禁止'}
+                    <i className={`fa-solid ${Boolean(student.can_use_app ?? true) ? 'fa-check' : 'fa-ban'} mr-1`}></i>
+                    {Boolean(student.can_use_app ?? true) ? '开启' : '禁止'}
                   </button>
                 </td>
                 <td className="px-4 py-3 text-center">

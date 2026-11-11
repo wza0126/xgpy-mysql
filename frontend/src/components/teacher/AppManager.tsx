@@ -758,17 +758,17 @@ export function AppManager() {
                   <button
                     type="button"
                     onClick={() => openRecommendModal([app.id], recommendCountOf(app.id) > 0 ? 'unset' : 'set')}
-                    className={`ml-auto flex items-center gap-1 rounded-full px-2 py-1 text-xs transition-colors ${
+                    className={`ml-auto flex items-center gap-1.5 rounded-full border px-3 py-1.5 transition-colors ${
                       recommendCountOf(app.id) > 0
-                        ? 'bg-amber-100 text-amber-700 hover:bg-amber-200'
-                        : 'text-gray-300 hover:text-amber-500'
+                        ? 'border-amber-500 bg-amber-100 text-amber-700 hover:bg-amber-200'
+                        : 'border-amber-400 bg-white text-amber-500 hover:bg-amber-50'
                     }`}
                     title={recommendCountOf(app.id) > 0
                       ? `已推荐给 ${recommendCountOf(app.id)} 个班，点击管理`
                       : '设为推荐：学生桌面直接出现图标，双击即可打开'}
                   >
-                    <i className={`fa-${recommendCountOf(app.id) > 0 ? 'solid' : 'regular'} fa-star`}></i>
-                    {recommendCountOf(app.id) > 0 && <span>{recommendCountOf(app.id)}</span>}
+                    <i className={`fa-${recommendCountOf(app.id) > 0 ? 'solid' : 'regular'} fa-star text-lg`}></i>
+                    {recommendCountOf(app.id) > 0 && <span className="text-xs font-medium">{recommendCountOf(app.id)}</span>}
                   </button>
                 </div>
                 
