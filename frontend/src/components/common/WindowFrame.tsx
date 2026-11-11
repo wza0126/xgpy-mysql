@@ -51,6 +51,25 @@ function resolveInitialSize(id: string) {
   };
 }
 
+/**
+ * 初始位置（2026-11-11 吴老反馈：所有窗口都偏左，把桌面图标遮住一大半）。
+ *
+ * 桌面图标区在左上角（left 16 / top 76 / 宽约 340），原来窗口一律从 (80,80) 开出，
+ * 正好压在图标上。现在从图标区右侧（480）开始，再按视口宽度收敛，保证不顶出屏幕。
+ * 小屏（如 1366）放不下时只能贴左，但窗口很宽时本来也只能最大化用。
+ */
+function resolveInitialPosition(size: { width: number; height: number }) {
+  const vw = typeof window !== 'undefined' ? window.innerWidth : 1440;
+  const vh = typeof window !== 'undefined' ? window.innerHeight : 900;
+  const PREFERRED_X = 480;
+  const maxX = Math.max(24, vw - size.width - 24);
+  const maxY = Math.max(24, vh - size.height - 24);
+  return {
+    x: Math.max(24, Math.min(PREFERRED_X, maxX)),
+    y: Math.max(24, Math.min(80, maxY)),
+  };
+}
+
 // 生成星点（星河璀璨皮肤用）
 function generateStars(count: number) {
   return Array.from({ length: count }, (_, i) => ({
@@ -82,7 +101,7 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({
 }) => {
   const { closeWindow, minimizeWindow, maximizeWindow, restoreWindow, activateWindow } = useDesktopStore();
   const skin = useSkinStore((s) => s.activeSkin);
-  const [position, setPosition] = useState({ x: 80, y: 80 });
+  const [position, setPosition] = useState(() => resolveInitialPosition(resolveInitialSize(id)));
   const [size, setSize] = useState(() => resolveInitialSize(id));
   const [isDragging, setIsDragging] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
