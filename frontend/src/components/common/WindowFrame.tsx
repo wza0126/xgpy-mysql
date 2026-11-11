@@ -19,6 +19,13 @@ const MIN_HEIGHT = 200;
 const DEFAULT_WINDOW_SIZE = { width: 850, height: 720 };
 
 /**
+ * 应用类窗口（app_xxx / recapp_xxx）的初始尺寸。
+ * 这类窗口里多是 iframe / HTML 页面，850×720 接近正方形，左右内容会被挤掉一截；
+ * 默认给宽一点（2026-11-11 吴老反馈）。
+ */
+const APP_WINDOW_SIZE = { width: 1120, height: 780 };
+
+/**
  * 各窗口的默认初始尺寸（只写与默认值不同的项）。
  * practice：练习设置页筛选区较长，加高后不滚动就能看到底部「开始练习」按钮。
  */
@@ -26,14 +33,21 @@ const WINDOW_SIZE_PRESET: Record<string, { width?: number; height?: number }> = 
   practice: { height: 880 },
 };
 
-/** 按窗口 id 与当前视口算出初始尺寸（小屏上按视口高度收敛，避免窗口超出视野） */
+/** 按窗口 id 与当前视口算出初始尺寸（小屏上按视口收敛，避免窗口超出视野） */
 function resolveInitialSize(id: string) {
   const preset = WINDOW_SIZE_PRESET[id] || {};
+  const vw = typeof window !== 'undefined' ? window.innerWidth : 1440;
   const vh = typeof window !== 'undefined' ? window.innerHeight : 900;
+  const maxWidth = Math.max(MIN_WIDTH, vw - 80);
   const maxHeight = Math.max(MIN_HEIGHT, vh - 96);
+
+  const isAppWindow = id.startsWith('app_') || id.startsWith('recapp_');
+  const base = isAppWindow ? APP_WINDOW_SIZE : DEFAULT_WINDOW_SIZE;
+
   return {
-    width: preset.width ?? DEFAULT_WINDOW_SIZE.width,
-    height: Math.min(preset.height ?? DEFAULT_WINDOW_SIZE.height, maxHeight),
+    // ⛔ 宽度也要收敛：原来只收敛高度，小屏（1366）上 1120 会顶出右边
+    width: Math.min(preset.width ?? base.width, maxWidth),
+    height: Math.min(preset.height ?? base.height, maxHeight),
   };
 }
 
