@@ -23,7 +23,7 @@ interface StudentWithStats extends Profile {
   diamond_balance?: number;
 }
 
-type SortField = 'real_name' | 'username' | 'current_points' | 'max_points' | 'total_answers' | 'accuracy' | 'total_mastered' | 'is_online';
+type SortField = 'real_name' | 'username' | 'current_points' | 'diamond_balance' | 'max_points' | 'total_answers' | 'accuracy' | 'total_mastered' | 'is_online';
 type SortOrder = 'asc' | 'desc';
 
 // 删除学生时需清理的关联表（按 student_id 字段关联）
@@ -220,6 +220,11 @@ export const StudentManager: React.FC = () => {
     if (sortField === 'is_online') {
       aVal = a.is_online ? 1 : 0;
       bVal = b.is_online ? 1 : 0;
+    }
+
+    if (sortField === 'diamond_balance') {
+      aVal = Number(a.diamond_balance) || 0;
+      bVal = Number(b.diamond_balance) || 0;
     }
     
     if (aVal === null || aVal === undefined) aVal = '';
@@ -993,7 +998,7 @@ export const StudentManager: React.FC = () => {
               <SortHeader field="total_answers">做题量</SortHeader>
               <SortHeader field="accuracy">正确率</SortHeader>
               <SortHeader field="total_mastered">掌握</SortHeader>
-              <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">萌宠</th>
+              <SortHeader field="diamond_balance">钻石</SortHeader>
               <SortHeader field="is_online">在线</SortHeader>
               <th
                 className="px-4 py-3 text-center text-sm font-medium text-gray-600"
@@ -1047,13 +1052,18 @@ export const StudentManager: React.FC = () => {
                 <td className="px-4 py-3 text-center text-gray-600">{student.accuracy || 0}%</td>
                 <td className="px-4 py-3 text-center font-semibold text-indigo-600">{student.total_mastered || 0}</td>
                 <td className="px-4 py-3 text-center">
-                  {student.has_pet ? (
-                    <span className="px-2 py-1 bg-pink-100 text-pink-600 rounded-full text-xs">
-                      Lv.{student.pet_level}
-                    </span>
-                  ) : (
-                    <span className="text-gray-400">-</span>
-                  )}
+                  {/* 钻石列（2026-11-11 替换原「萌宠」列）：显示当前余额，可点表头排序 */}
+                  <span
+                    className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
+                      Number(student.diamond_balance) > 0
+                        ? 'bg-sky-100 text-sky-600'
+                        : 'bg-gray-100 text-gray-400'
+                    }`}
+                    title="钻石余额。学生可用钻石兑换游戏时长，测试 / 考试 / 任务 / 生存游戏可赚取"
+                  >
+                    <i className="fa-solid fa-gem"></i>
+                    {Number(student.diamond_balance) || 0}
+                  </span>
                 </td>
                 <td className="px-4 py-3 text-center">
                   {student.is_online ? (

@@ -18,11 +18,19 @@ interface LeaderboardItem {
   max_points: number;
   total_points_earned: number;
   perfect_10_times: number;
+  diamond_balance: number;
   pet_level: number;
   pet_growth: number;
 }
 
-type SortField = 'total_answers' | 'correct_answers' | 'accuracy' | 'total_points_earned' | 'pet_growth' | 'perfect_10_times';
+type SortField =
+  | 'total_answers'
+  | 'correct_answers'
+  | 'accuracy'
+  | 'total_points_earned'
+  | 'diamond_balance'
+  | 'pet_growth'
+  | 'perfect_10_times';
 
 export const Leaderboard: React.FC = () => {
   const { profile } = useAuth();
@@ -117,6 +125,18 @@ export const Leaderboard: React.FC = () => {
     }
   };
 
+  /**
+   * 积分榜 / 钻石榜 切换（2026-11-11）
+   * 不另存状态：榜单 = 当前排序字段，点表头排序时按钮高亮会自动跟着走，不会出现
+   * 「按钮写着钻石榜、实际按做对排序」这种不一致。
+   */
+  const isPointsBoard = sortField === 'total_points_earned';
+  const isDiamondBoard = sortField === 'diamond_balance';
+  const switchBoard = (board: 'points' | 'diamond') => {
+    setSortField(board === 'diamond' ? 'diamond_balance' : 'total_points_earned');
+    setSortDesc(true);
+  };
+
   const getRankStyle = (rank: number) => {
     if (rank === 1) return 'bg-yellow-100 text-yellow-700 border-yellow-300';
     if (rank === 2) return 'bg-gray-100 text-gray-600 border-gray-300';
@@ -147,23 +167,55 @@ export const Leaderboard: React.FC = () => {
   return (
     <div className="h-full flex flex-col bg-gray-50">
       <div className="bg-white border-b border-gray-200 p-4">
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center justify-between mb-3">
           <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
             <span className="text-2xl">🏆</span>
             本班排行榜
           </h2>
-          <button
-            onClick={handleRefresh}
-            className="px-3 py-1.5 bg-blue-50 text-blue-600 rounded-lg text-sm hover:bg-blue-100 transition-colors flex items-center gap-1"
-            title="刷新数据"
-          >
-            <i className="fa-solid fa-rotate"></i>
-            刷新
-          </button>
+          <div className="flex items-center gap-3">
+            <div className="flex rounded-lg bg-gray-100 p-0.5">
+              <button
+                type="button"
+                onClick={() => switchBoard('points')}
+                className={`px-3 py-1.5 rounded-md text-sm transition-colors flex items-center gap-1 ${
+                  isPointsBoard ? 'bg-white text-purple-600 shadow-sm font-medium' : 'text-gray-500 hover:text-gray-700'
+                }`}
+                title="按累计获得积分排名"
+              >
+                <i className="fa-solid fa-star"></i>
+                积分榜
+              </button>
+              <button
+                type="button"
+                onClick={() => switchBoard('diamond')}
+                className={`px-3 py-1.5 rounded-md text-sm transition-colors flex items-center gap-1 ${
+                  isDiamondBoard ? 'bg-white text-sky-600 shadow-sm font-medium' : 'text-gray-500 hover:text-gray-700'
+                }`}
+                title="按当前钻石余额排名（兑换游戏时长花掉的会减少）"
+              >
+                <i className="fa-solid fa-gem"></i>
+                钻石榜
+              </button>
+            </div>
+            <button
+              onClick={handleRefresh}
+              className="px-3 py-1.5 bg-blue-50 text-blue-600 rounded-lg text-sm hover:bg-blue-100 transition-colors flex items-center gap-1"
+              title="刷新数据"
+            >
+              <i className="fa-solid fa-rotate"></i>
+              刷新
+            </button>
+          </div>
         </div>
         <p className="text-xs text-gray-400 flex items-center gap-1">
           <i className="fa-solid fa-sync"></i>
           实时更新中: {lastUpdateTime}
+          {isDiamondBoard && (
+            <span className="ml-2 text-sky-600">
+              <i className="fa-solid fa-gem mr-1"></i>
+              钻石可通过测试 / 考试 / 任务 / 生存游戏获得，兑换游戏时长会消耗
+            </span>
+          )}
         </p>
       </div>
 
@@ -198,7 +250,7 @@ export const Leaderboard: React.FC = () => {
             </button>
             <button
               onClick={() => handleSort('accuracy')}
-              className={`col-span-2 text-center flex items-center justify-center gap-1 hover:text-green-600 ${
+              className={`col-span-1 text-center flex items-center justify-center gap-1 hover:text-green-600 ${
                 sortField === 'accuracy' ? 'text-green-600' : ''
               }`}
             >
@@ -221,6 +273,19 @@ export const Leaderboard: React.FC = () => {
               )}
             </button>
             <button
+              onClick={() => handleSort('diamond_balance')}
+              className={`col-span-2 text-center flex items-center justify-center gap-1 hover:text-sky-600 ${
+                isDiamondBoard ? 'text-sky-600' : ''
+              }`}
+              title="按当前钻石余额排名（点一下切换正序 / 倒序）"
+            >
+              <i className="fa-solid fa-gem"></i>
+              钻石
+              {isDiamondBoard && (
+                <i className={`fa-solid fa-sort-${sortDesc ? 'down' : 'up'}`}></i>
+              )}
+            </button>
+            <button
               onClick={() => handleSort('perfect_10_times')}
               className={`col-span-1 text-center flex items-center justify-center gap-1 hover:text-green-600 ${
                 sortField === 'perfect_10_times' ? 'text-green-600' : ''
@@ -234,12 +299,12 @@ export const Leaderboard: React.FC = () => {
             </button>
             <button
               onClick={() => handleSort('pet_growth')}
-              className={`col-span-2 text-center flex items-center justify-center gap-1 hover:text-orange-600 ${
+              className={`col-span-1 text-center flex items-center justify-center gap-1 hover:text-orange-600 ${
                 sortField === 'pet_growth' ? 'text-orange-600' : ''
               }`}
             >
               <i className="fa-solid fa-paw"></i>
-              萌宠成长
+              萌宠
               {sortField === 'pet_growth' && (
                 <i className={`fa-solid fa-sort-${sortDesc ? 'down' : 'up'}`}></i>
               )}
@@ -283,17 +348,21 @@ export const Leaderboard: React.FC = () => {
                   <div className="col-span-1 text-center text-teal-600 font-medium">
                     {item.correct_answers}
                   </div>
-                  <div className="col-span-2 text-center text-green-600 font-medium">
+                  <div className="col-span-1 text-center text-green-600 font-medium">
                     {item.accuracy}%
                   </div>
                   <div className="col-span-2 text-center text-purple-600 font-medium">
                     {item.total_points_earned}
                   </div>
+                  <div className="col-span-2 text-center text-sky-600 font-medium">
+                    <i className="fa-solid fa-gem mr-1 text-xs"></i>
+                    {item.diamond_balance || 0}
+                  </div>
                   <div className="col-span-1 text-center text-green-600 font-medium">
                     {item.perfect_10_times || 0}
                   </div>
-                  <div className="col-span-2 text-center text-orange-600 font-medium text-xs">
-                    {item.pet_growth}成长值
+                  <div className="col-span-1 text-center text-orange-600 font-medium text-xs">
+                    {item.pet_growth}
                   </div>
                 </motion.div>
               );
@@ -308,6 +377,9 @@ export const Leaderboard: React.FC = () => {
             <div className="flex items-center gap-3">
               <span className="text-2xl font-bold text-blue-600">#{myRank}</span>
               <span className="font-medium text-gray-800">我的排名</span>
+              <span className="text-xs text-gray-400">
+                （{isDiamondBoard ? '钻石榜' : isPointsBoard ? '积分榜' : '当前排序'}）
+              </span>
             </div>
             <div className="flex gap-6 text-sm">
               <div className="text-center">
@@ -325,6 +397,10 @@ export const Leaderboard: React.FC = () => {
               <div className="text-center">
                 <span className="text-purple-600 font-bold">{myData.total_points_earned}</span>
                 <span className="text-gray-400 text-xs ml-1">总积分</span>
+              </div>
+              <div className="text-center">
+                <span className="text-sky-600 font-bold">{myData.diamond_balance || 0}</span>
+                <span className="text-gray-400 text-xs ml-1">钻石</span>
               </div>
               <div className="text-center">
                 <span className="text-green-600 font-bold">{myData.perfect_10_times || 0}</span>
@@ -384,6 +460,10 @@ export const Leaderboard: React.FC = () => {
                   <div className="bg-purple-50 p-3 rounded-lg text-center">
                     <p className="text-xs text-gray-500">总积分</p>
                     <p className="text-xl font-bold text-purple-600">{selectedStudent.total_points_earned}</p>
+                  </div>
+                  <div className="bg-sky-50 p-3 rounded-lg text-center">
+                    <p className="text-xs text-gray-500">💎 钻石余额</p>
+                    <p className="text-xl font-bold text-sky-600">{selectedStudent.diamond_balance || 0}</p>
                   </div>
                   <div className="bg-green-50 p-3 rounded-lg text-center">
                     <p className="text-xs text-gray-500">🏆 十全十美</p>

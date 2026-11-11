@@ -6318,6 +6318,7 @@ app.post('/api/leaderboard', async (req, res) => {
         p.max_points,
         p.total_points_earned,
         p.perfect_10_times,
+        COALESCE(p.diamond_balance, 0) as diamond_balance,
         c.name as class_name,
         COALESCE(pet_stats.growth_level, 1) as pet_level,
         COALESCE(pet_stats.growth_value, 0) as pet_growth,
@@ -6360,11 +6361,14 @@ app.post('/api/leaderboard', async (req, res) => {
     }
     
     // 不再需要对 student_pets 字段 GROUP BY，因为每个学生只有一行
-    query += ' GROUP BY p.id, p.username, p.real_name, p.class_id, p.current_points, p.max_points, p.total_points_earned, p.perfect_10_times, c.name, pet_stats.growth_level, pet_stats.growth_value, answer_stats.total_answers, answer_stats.correct_answers, answer_stats.accuracy';
+    query += ' GROUP BY p.id, p.username, p.real_name, p.class_id, p.current_points, p.max_points, p.total_points_earned, p.perfect_10_times, p.diamond_balance, c.name, pet_stats.growth_level, pet_stats.growth_value, answer_stats.total_answers, answer_stats.correct_answers, answer_stats.accuracy';
     
     // 无论哪种排序方式，都添加稳定的次要排序键（学生ID）
     if (filterType === 'points') {
       query += ' ORDER BY p.current_points DESC, p.id ASC';
+    } else if (filterType === 'diamond') {
+      // 钻石榜：按当前钻石余额排（学生消费掉就到手减少，属正常）
+      query += ' ORDER BY COALESCE(p.diamond_balance, 0) DESC, p.id ASC';
     } else if (filterType === 'accuracy') {
       query += ' ORDER BY accuracy DESC, p.id ASC';
     } else if (filterType === 'answers') {
