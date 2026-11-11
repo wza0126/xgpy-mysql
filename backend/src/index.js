@@ -12088,10 +12088,11 @@ function survivalQualificationShortfall(detail) {
 
 /**
  * 这次进入是否需要校验资格。
- * 吴老 2026-11-10 定：只在「首次进入」与「即将开新一轮」时拦，续玩 / 重生不拦 ——
- * 否则老师中途加了条件，正在打的学生会被直接卡死。
- *  - 首次进入：新建的空档案（没通关过、没死过、手上没有题）
- *  - 新一轮：刚答对最后一关、手上没有题（round_no 即将 +1）
+ * 吴老 2026-11-11 定：首次进入 / 即将开新一轮 / **重生** 都要验；
+ * 只有「手里已经有题、接着答」这种续玩不验（否则同一个学生每答一题都查一次库）。
+ *
+ * 为什么加重生：原来只验首次和一轮结束，老学生死后从进度点续着玩，
+ * 资格等于形同虚设（2026-11-11 上午 5 班就是这样）。
  */
 async function survivalNeedsQualification(profile) {
   if (!profile) return false;
@@ -12104,9 +12105,13 @@ async function survivalNeedsQualification(profile) {
   const deaths = Number(profile.deaths) || 0;
   const seq = Number(profile.seq) || 1;
   const hasQuestion = !!profile.current_question_id;
+  // 首次进入：全新档案
   const firstEntry = total === 0 && deaths === 0 && !hasQuestion && (Number(profile.round_no) || 1) <= 1;
+  // 即将开新一轮：刚打穿一轮、手上没题
   const roundStart = !hasQuestion && seq >= maxSeq;
-  return firstEntry || roundStart;
+  // 重生：已经断线（alive=0），从重生点重新接入
+  const rebirth = Number(profile.alive) !== 1;
+  return firstEntry || roundStart || rebirth;
 }
 
 /**
@@ -12484,7 +12489,7 @@ app.post('/api/student/survival/start', authenticate, async (req, res) => {
       if (!qual.passed) {
         return res.status(403).json({
           data: { qualification: qual.detail },
-          error: `生存游戏需要先达到学习要求 —— ${qual.message}`,
+          error: `生存游戏需要先达到学习要求（首次进入 / 新的一轮 / 断线重生时都会校验）—— ${qual.message}`,
         });
       }
     }
