@@ -17,6 +17,8 @@
  */
 
 const { CHAPTER_NAMES, sectionCode } = require('./chapter-taxonomy');
+// 练习池口径（掌握数必须只算当前可练的题，见 practice-pool.js）
+const { PRACTICE_POOL_ON_Q } = require('./practice-pool');
 
 // ============ 主题定义 ============
 // 每个主题 = 一批固定 SQL + 一份指标包，老师选一个就出对应的分析。
@@ -129,7 +131,7 @@ async function loadMasteredMap(pool, studentIds, threshold) {
        HAVING COUNT(*) >= ?
      ) m
      JOIN questions q ON q.id = m.question_id
-     WHERE q.practice_enabled = 1 AND q.cluster_id IS NOT NULL AND q.cluster_id <> ''
+     WHERE ${PRACTICE_POOL_ON_Q}
      GROUP BY m.student_id`,
     [studentIds, threshold]
   );
@@ -282,7 +284,7 @@ async function buildMastery(pool, base, threshold) {
        HAVING COUNT(*) >= ?
      ) m
      JOIN questions q ON q.id = m.question_id
-     WHERE q.cluster_id IS NOT NULL AND q.cluster_id <> ''
+     WHERE ${PRACTICE_POOL_ON_Q}
      GROUP BY m.student_id, q.cluster_id`,
     [ids, threshold]
   );

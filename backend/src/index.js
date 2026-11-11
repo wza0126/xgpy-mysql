@@ -19,6 +19,8 @@ const { registerFarm } = require('./farm');
 const { registerStudyGalaxy } = require('./study-galaxy');
 // 操作题累计得分（资格验证第三/四项）与成就殿堂共用同一个口径函数
 const { getOpScore, getPythonFillScore, getCompositeScore } = require('./game-task-metrics');
+// 练习池口径的唯一来源（掌握数、分母、抽题都用它）
+const { SQL_PRACTICE_SCOPE, PRACTICE_POOL_ON_Q } = require('./practice-pool');
 // 钻石钱包：所有入账/扣减必须走这里（唯一索引保证同一来源只发一次）
 const { grantDiamonds, spendDiamonds, adjustDiamonds, getDiamondWallet } = require('./diamond');
 // 游戏时长池：钻石换分钟，按时长的应用按秒消耗（全局共用，不按应用分池）
@@ -747,8 +749,7 @@ app.get('/api/teacher/analytics/at-risk/:classId', authenticate, requireTeacher,
          HAVING COUNT(*) >= ?
        ) m
        JOIN questions q ON q.id = m.question_id
-       WHERE q.practice_enabled = 1 AND q.cluster_id IS NOT NULL AND q.cluster_id <> ''
-         AND q.type NOT IN ('wps_op', 'access_op', 'composite')
+       WHERE ${PRACTICE_POOL_ON_Q}
        GROUP BY m.student_id`,
       [studentIds, masterThreshold]
     );
@@ -1087,7 +1088,7 @@ app.get('/api/teacher/analytics/chapter-mastery/:classId', authenticate, require
          HAVING COUNT(*) >= ?
        ) m
        JOIN questions q ON q.id = m.question_id
-       WHERE q.cluster_id IS NOT NULL AND q.cluster_id <> ''
+       WHERE ${PRACTICE_POOL_ON_Q}
        GROUP BY m.student_id, q.cluster_id`,
       [studentIds, masterThreshold]
     );
@@ -1198,7 +1199,7 @@ app.get('/api/teacher/students/overview', authenticate, requireTeacher, async (r
          HAVING COUNT(*) >= ?
        ) m
        JOIN questions q ON q.id = m.question_id
-       WHERE q.cluster_id IS NOT NULL AND q.cluster_id <> ''
+       WHERE ${PRACTICE_POOL_ON_Q}
        GROUP BY m.student_id`,
       [ids, masterThreshold]
     );
@@ -1365,7 +1366,7 @@ app.get('/api/teacher/mobile/analytics', authenticate, requireTeacher, requireLi
            HAVING COUNT(*) >= ?
          ) m
          JOIN questions q ON q.id = m.question_id
-         WHERE q.cluster_id IS NOT NULL AND q.cluster_id <> ''
+         WHERE ${PRACTICE_POOL_ON_Q}
          GROUP BY m.student_id`,
         [ids, masterThreshold]
       );
@@ -1517,7 +1518,10 @@ const SQL_NOT_WPS_OP = " AND type NOT IN ('wps_op','access_op')";
 // 综合题不是「一道题」，而是一道带 4~6 个小题的大题，混进单题练习流会打断节奏，
 // 也不能按整题算掌握（要 6 小题一次全对才算对，等于永远掌握不了）。
 // 它走「综合题练习」独立模块，考试端照旧可以组卷 —— 所以考试池仍用 SQL_NOT_WPS_OP。
-const SQL_PRACTICE_SCOPE = " AND type NOT IN ('wps_op','access_op','composite')";
+/**
+ * 「已掌握」统计必须在**当前练习池**里数（2026-11-11 吴老反馈）。
+ * 口径与常量见 ./practice-pool.js（PRACTICE_POOL_ON_Q），此处不再单独定义。
+ */
 
 function stripQuestionForStudent(row) {
   if (!row || typeof row !== 'object') return row;
@@ -14389,10 +14393,14 @@ async function getBoolConfig(configKey, defaultValue = true) {
  */
 async function getMasteredQuestionIds(conn, studentId, threshold) {
   const [rows] = await conn.query(
-    `SELECT question_id FROM student_answers
-     WHERE student_id = ? AND source = 'practice' AND is_correct = 1
-     GROUP BY question_id
-     HAVING COUNT(*) >= ?`,
+    `SELECT m.question_id FROM (
+       SELECT question_id FROM student_answers
+        WHERE student_id = ? AND source = 'practice' AND is_correct = 1
+        GROUP BY question_id
+       HAVING COUNT(*) >= ?
+     ) m
+     JOIN questions q ON q.id = m.question_id
+     WHERE ${PRACTICE_POOL_ON_Q}`,
     [studentId, threshold]
   );
   return new Set(rows.map(r => r.question_id));
@@ -14441,7 +14449,9 @@ async function getMasteredCountInClusters(conn, studentId, threshold, primaryNam
          WHERE student_id = ? AND source = 'practice' AND is_correct = 1
          GROUP BY question_id
          HAVING COUNT(*) >= ?
-       ) m`,
+       ) m
+       JOIN questions q ON q.id = m.question_id
+       WHERE ${PRACTICE_POOL_ON_Q}`,
       [studentId, threshold]
     );
     return Number(rows[0]?.n) || 0;
@@ -14455,7 +14465,7 @@ async function getMasteredCountInClusters(conn, studentId, threshold, primaryNam
        HAVING COUNT(*) >= ?
      ) m
      JOIN questions q ON q.id = m.question_id
-     WHERE q.cluster_id IS NOT NULL AND q.cluster_id <> ''`,
+     WHERE ${PRACTICE_POOL_ON_Q}`,
     [studentId, threshold]
   );
   // 类目匹配在 JS 侧做（与 getMasteredByChapter 的取前缀逻辑同源，避免 SQL 里处理 '/'
@@ -14532,7 +14542,7 @@ async function getMasteredByChapter(conn, studentId, threshold) {
        HAVING COUNT(*) >= ?
      ) m
      JOIN questions q ON q.id = m.question_id
-     WHERE q.cluster_id IS NOT NULL AND q.cluster_id <> ''
+     WHERE ${PRACTICE_POOL_ON_Q}
      GROUP BY q.cluster_id`,
     [studentId, threshold]
   );
@@ -14561,7 +14571,7 @@ async function getMasteredBySection(conn, studentId, threshold) {
        HAVING COUNT(*) >= ?
      ) m
      JOIN questions q ON q.id = m.question_id
-     WHERE q.cluster_id IS NOT NULL AND q.cluster_id <> ''
+     WHERE ${PRACTICE_POOL_ON_Q}
      GROUP BY q.cluster_id`,
     [studentId, threshold]
   );
@@ -15191,10 +15201,14 @@ app.get('/api/student/practice-stats', authenticate, async (req, res) => {
     );
     const masterThreshold = await getMasterThreshold();
     const [rows] = await pool.query(
-      `SELECT question_id FROM student_answers
-        WHERE student_id = ? AND source = 'practice' AND is_correct = 1
-        GROUP BY question_id
-        HAVING COUNT(*) >= ?`,
+      `SELECT m.question_id FROM (
+         SELECT question_id FROM student_answers
+          WHERE student_id = ? AND source = 'practice' AND is_correct = 1
+          GROUP BY question_id
+         HAVING COUNT(*) >= ?
+       ) m
+       JOIN questions q ON q.id = m.question_id
+       WHERE ${PRACTICE_POOL_ON_Q}`,
       [userId, masterThreshold]
     );
     const total = Number(agg && agg.total) || 0;

@@ -1,5 +1,8 @@
 'use strict';
 
+// 练习池口径（掌握数只算当前可练的题，见 practice-pool.js）
+const { PRACTICE_POOL_ON_Q } = require('./practice-pool');
+
 /**
  * 游戏化任务 · 指标统计引擎
  * ============================================================
@@ -220,7 +223,8 @@ const METRIC_DEFS = {
         '  FROM student_answers' +
         "  WHERE student_id = ? AND source = 'practice' AND is_correct = 1" +
         '  GROUP BY question_id' +
-        ') t WHERE t.today_cnt >= 1 AND t.before_cnt < ? AND t.total_cnt >= ?',
+        ') t JOIN questions q ON q.id = t.question_id WHERE ' + PRACTICE_POOL_ON_Q +
+        ' AND t.today_cnt >= 1 AND t.before_cnt < ? AND t.total_cnt >= ?',
         [studentId, threshold, threshold], 'c');
       return { value: c, text: `掌握阈值 ${threshold} 次` };
     },
@@ -358,7 +362,7 @@ const METRIC_DEFS = {
   total_mastered: {
     label: '累计掌握题数',
     unit: '题',
-    hint: '历史累计达到「掌握」的题目数（练习同题答对次数达到掌握阈值即永久计入）',
+    hint: '当前允许练习的题目中，同题练习答对次数达到掌握阈值的题数（题池缩小会同步减少）',
     scope: 'total',
     series: 'master',
     params: [],
@@ -370,7 +374,8 @@ const METRIC_DEFS = {
         '  FROM student_answers' +
         "  WHERE student_id = ? AND source = 'practice' AND is_correct = 1" +
         '  GROUP BY question_id' +
-        ') t WHERE t.total_cnt >= ?',
+        ') t JOIN questions q ON q.id = t.question_id WHERE ' + PRACTICE_POOL_ON_Q +
+        ' AND t.total_cnt >= ?',
         [studentId, threshold], 'c');
       return { value: c, text: `掌握阈值 ${threshold} 次` };
     },
