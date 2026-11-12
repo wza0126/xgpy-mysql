@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { useAuth } from '../../hooks/useAuth';
 import { backendClient } from '../../api/backendClient';
 import { LatexRenderer } from '../common/LatexRenderer';
+import { CodeTextarea } from '../common/CodeTextarea';
 import FillBlankExplainPlayer from './FillBlankExplainPlayer';
 import { authHeaders } from '../../utils/authToken';
 
@@ -165,7 +166,6 @@ export const PythonProgramming: React.FC = () => {
   const [explainEnabled, setExplainEnabled] = useState(false);
   /** 全屏讲解器开关 */
   const [fillExplainOpen, setFillExplainOpen] = useState(false);
-  const codeEditorRef = useRef<HTMLTextAreaElement>(null);
 
   // 讲解开关：与「AI 讲堂」同一个 ai_explain 开关，由老师按班级/学生控制。
   // ⛔ 只探测一次，失败就当没开通（按钮不出现，不影响写作业）。
@@ -200,6 +200,15 @@ export const PythonProgramming: React.FC = () => {
     }
     return count;
   })();
+
+  /**
+   * 「代码里有 input()、但右边输入区还没填够」时，鼠标移到运行按钮上给提示。
+   * ⛔ 不拦着不让运行：学生有时就是想看看报什么错，硬拦反而挡路。
+   */
+  const filledInputLines = inputData.trim()
+    ? inputData.trim().split('\n').filter((l) => l.trim()).length
+    : 0;
+  const needInputHint = inputCount > 0 && filledInputLines < inputCount;
 
   useEffect(() => {
     loadData();
@@ -949,14 +958,28 @@ export const PythonProgramming: React.FC = () => {
                   >
                     <i className="fa fa-save mr-1"></i>保存草稿
                   </button>
-                  <button
-                    className="px-3 py-1 bg-green-600 text-white rounded hover:bg-green-700 text-sm disabled:opacity-50"
-                    onClick={runCode}
-                    disabled={isRunning}
-                  >
-                    <i className="fa fa-play mr-1"></i>
-                    {isRunning ? '运行中...' : '运行'}
-                  </button>
+                  {/* 运行按钮：代码里有 input() 且输入区没填够时，悬停给出提醒（2026-11-12） */}
+                  <div className="relative group">
+                    <button
+                      className="px-3 py-1 bg-green-600 text-white rounded hover:bg-green-700 text-sm disabled:opacity-50"
+                      onClick={runCode}
+                      disabled={isRunning}
+                    >
+                      <i className="fa fa-play mr-1"></i>
+                      {isRunning ? '运行中...' : '运行'}
+                    </button>
+                    {needInputHint && (
+                      <div
+                        className="pointer-events-none absolute right-0 top-full z-50 mt-1 w-60 rounded-md bg-amber-500 px-2.5 py-1.5 text-left text-xs leading-snug text-white opacity-0 shadow-lg transition-opacity duration-100 group-hover:opacity-100"
+                        role="tooltip"
+                      >
+                        <i className="fa-solid fa-triangle-exclamation mr-1"></i>
+                        代码里有 {inputCount} 处 input()
+                        {filledInputLines > 0 ? `，目前只填了 ${filledInputLines} 行` : ''}
+                        ，请先在右边的「输入」区按顺序填好数据（一行一个），再点运行。
+                      </div>
+                    )}
+                  </div>
                   {selectedTask?.task_type === 'fill_blank' && (
                     <button
                       className="px-3 py-1 bg-purple-500 text-white rounded hover:bg-purple-600 text-sm"
@@ -1007,13 +1030,14 @@ export const PythonProgramming: React.FC = () => {
                   {renderFillBlankEditor(selectedTask.blank_template, blankAnswers)}
                 </div>
               ) : (
-                <textarea
-                  ref={codeEditorRef}
+                /* 代码编辑器：语法高亮 + 关键字补全（2026-11-12）。
+                   「作业任务」和「自由练习」共用这一个输入框，所以两边自动都有。
+                   ⛔ blockPaste 要保留：学生端禁止粘贴，防抄作业。 */
+                <CodeTextarea
                   value={code}
-                  onChange={(e) => setCode(e.target.value)}
-                  onPaste={(e) => e.preventDefault()}
-                  className="flex-1 w-full p-4 font-mono text-sm bg-gray-900 text-gray-100 resize-none"
-                  spellCheck={false}
+                  onChange={setCode}
+                  blockPaste
+                  className="flex-1 w-full min-h-0"
                   placeholder="在这里编写你的Python代码..."
                 />
               )}

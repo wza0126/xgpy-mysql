@@ -335,3 +335,42 @@ body {
   animation: skin-border-glow 2s ease-in-out infinite;
 }
 
+
+/* ============================================================
+   学生端代码编辑器（CodeTextarea）：高亮层 + 透明输入层
+   ⛔ 两层必须共用同一套字体度量，否则光标与彩色文字会错位。
+   ============================================================ */
+.py-code-layer,
+.py-code-input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  tab-size: 4;
+  /* 两边都预留滚动条宽度：否则内容超出一屏后 textarea 变窄、换行位置和高亮层对不上 */
+  scrollbar-gutter: stable;
+}
+
+/* 输入层文字透明，只保留光标与选区 */
+.py-code-input {
+  caret-color: #7dd3fc;
+  word-break: normal;
+  overflow-wrap: break-word;
+}
+.py-code-input::placeholder {
+  color: #64748b;
+}
+.py-code-input::selection {
+  background: rgba(56, 139, 253, 0.45);
+}
+
+/* 高亮层换行规则要和 textarea 一致 */
+.py-code-layer {
+  word-break: normal;
+  overflow-wrap: break-word;
+}
+
+/* VSCode Dark+ 配色 */
+.py-code-layer .py-kw      { color: #569cd6; }
+.py-code-layer .py-builtin { color: #dcdcaa; }
+.py-code-layer .py-string  { color: #ce9178; }
+.py-code-layer .py-comment { color: #6a9955; font-style: italic; }
+.py-code-layer .py-number  { color: #b5cea8; }
+.py-code-layer .py-self    { color: #c586c0; }
