@@ -228,6 +228,9 @@ function parseRef(ref) {
 }
 
 /** 'A1:D1' → ['A1','B1','C1','D1']；单格返回自身 */
+/** 单次展开的单元格上限：再大就是整列/整表选区，逐格枚举会直接把进程卡死 */
+const RANGE_CELL_MAX = 500000;
+
 function rangeCells(range) {
   const parts = String(range || '').split(':');
   const a = parseRef(parts[0]);
@@ -235,13 +238,63 @@ function rangeCells(range) {
   if (parts.length < 2) return [normRef(parts[0])];
   const b = parseRef(parts[1]);
   if (!b) return [normRef(parts[0])];
+  const r1 = Math.min(a.row, b.row);
+  const r2 = Math.max(a.row, b.row);
+  const c1 = Math.min(a.col, b.col);
+  const c2 = Math.max(a.col, b.col);
+  // ⛔ 上限保护（2026-11-12）：合并区/条件格式/排序区都来自学生上传的文件，
+  //    「选中整列」「全选」会产生 A1:XFD1048576 这种区域，展开是 170 亿个格子，
+  //    一进循环就把事件循环彻底占死（服务器整站假死）。超过上限直接报错，
+  //    由 runCheck 兜成「该评分点判分异常」，绝不能让它把进程拖住。
+  const n = (r2 - r1 + 1) * (c2 - c1 + 1);
+  if (n > RANGE_CELL_MAX) {
+    throw new Error(`区域 ${range} 过大（${n.toLocaleString()} 格），无法逐格判分`);
+  }
   const out = [];
-  for (let r = Math.min(a.row, b.row); r <= Math.max(a.row, b.row); r++) {
-    for (let c = Math.min(a.col, b.col); c <= Math.max(a.col, b.col); c++) {
+  for (let r = r1; r <= r2; r++) {
+    for (let c = c1; c <= c2; c++) {
       out.push(numToCol(c) + r);
     }
   }
   return out;
+}
+
+/** 取区域边界（归一化后解析）；解析不了返回 null */
+function rangeBounds(ref) {
+  const parts = normRange(ref).split(':');
+  const a = parseRef(parts[0]);
+  if (!a) return null;
+  const b = parts.length > 1 ? parseRef(parts[1]) : a;
+  if (!b) return null;
+  return {
+    r1: Math.min(a.row, b.row),
+    r2: Math.max(a.row, b.row),
+    c1: Math.min(a.col, b.col),
+    c2: Math.max(a.col, b.col),
+  };
+}
+
+/**
+ * sqref 是否完整覆盖 want 区域 —— **只比边界，绝不枚举单元格**。
+ *
+ * ⛔ 2026-11-12 事故：条件格式检查原来用
+ *      wantCells.every((c) => cfCells.includes(c))
+ *    做成员判断。题目要求 D1357:F64781（19 万格），学生文件里是 D1356:F64780
+ *    （19 万格），两者几乎完全重叠 → every 走满全程、每次 includes 扫 19 万条
+ *    → 180 亿次字符串比较 → **每次提交把整站卡死 60 秒**，一个下午卡了 7 次。
+ *
+ * sqref 允许是空格分隔的多个区域（WPS 多选区），任一区域完整覆盖即算通过。
+ */
+function sqrefCovers(sqref, want) {
+  const w = rangeBounds(want);
+  if (!w) return false;
+  const refs = String(sqref || '').trim().split(/\s+/).filter(Boolean);
+  for (const ref of refs) {
+    const b = rangeBounds(ref);
+    if (!b) continue;
+    if (b.r1 <= w.r1 && b.c1 <= w.c1 && b.r2 >= w.r2 && b.c2 >= w.c2) return true;
+  }
+  return false;
 }
 
 /** 归一化区域字符串：Sheet1!$A$2:$A$13 → A2:A13 */
@@ -818,7 +871,9 @@ function locateCell(sheet, ref) {
   let cell = sheet.cells.get(r) || null;
   if (cell) return { cell, anchor: r };
   for (const m of sheet.merges) {
-    const cells = rangeCells(m);
+    // ⛔ 超大合并区（整列/整表）直接跳过：枚举它会卡死进程，也不能让它把每个评分点都带崩
+    let cells;
+    try { cells = rangeCells(m); } catch { continue; }
     if (cells.length > 1 && cells.includes(r)) {
       const anchor = cells[0];
       return { cell: sheet.cells.get(anchor) || null, anchor };
@@ -1493,11 +1548,11 @@ const CHECKERS = {
     const list = sheet.condFormats || [];
     if (!list.length) return { pass: false, got: '未设置条件格式', want: '设置条件格式' };
     const wantRange = check.range ? normRange(check.range) : null;
-    const wantCells = wantRange ? rangeCells(wantRange) : null;
     const cands = [];
     for (const cf of list) {
-      const cfCells = rangeCells(cf.sqref);
-      const covered = wantCells ? wantCells.every((c) => cfCells.includes(c)) : true;
+      // ⛔ 用范围覆盖判断，**不要枚举单元格做 includes**（2026-11-12 卡死 60 秒的根因，
+      //    详见 sqrefCovers 注释）
+      const covered = wantRange ? sqrefCovers(cf.sqref, wantRange) : true;
       if (!covered) continue;
       for (const r of cf.rules) cands.push({ sqref: cf.sqref, rule: r });
     }
@@ -1867,7 +1922,10 @@ async function inspectFile(input) {
  */
 function suggestStepsForSheet(model, sheet, opts = {}) {
   const steps = [];
-  const mergesMulti = sheet.merges.filter((m) => rangeCells(m).length > 1);
+  const mergesMulti = sheet.merges.filter((m) => {
+    // 超大合并区跳过（整列/整表选区），枚举会卡死进程
+    try { return rangeCells(m).length > 1; } catch { return false; }
+  });
 
   // 步骤一：合并与标题排版
   if (mergesMulti.length) {
@@ -2032,7 +2090,11 @@ function suggestStepsForSheet(model, sheet, opts = {}) {
       const col = p0.col;
       let colRange = condRange || null;
       if (refRange) {
-        const cs = rangeCells(refRange).filter((r) => { const q = parseRef(r); return q && q.col === col; });
+        let cs = [];
+        // 排序区也可能来自学生文件（整列排序），超大时跳过列裁剪，避免枚举卡死
+        try {
+          cs = rangeCells(refRange).filter((r) => { const q = parseRef(r); return q && q.col === col; });
+        } catch { cs = []; }
         if (cs.length > 1) colRange = `${cs[0]}:${cs[cs.length - 1]}`;
       }
       if (!colRange) continue;
@@ -2277,6 +2339,8 @@ module.exports = {
   parseStyles,
   decimalsFromFormat,
   rangeCells,
+  rangeBounds,
+  sqrefCovers,
   normRange,
   normFormula,
   CHECKERS,
