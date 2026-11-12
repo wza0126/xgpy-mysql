@@ -50,10 +50,11 @@ export const Seat: React.FC<SeatProps> = ({
     textClass = 'text-red-200';
   }
 
-  // IP 异常：红色警示描边 + 脉冲
+  // IP 异常：红色警示描边（⚠️ 不要给座位本体加 animate-pulse：
+  // 整块呼吸会让「悬停/点击」看起来一直在抖，红点角标已经有脉冲提示了）
   if (isIpMismatch) {
     bgClass = 'bg-gradient-to-br from-red-500/25 to-red-700/25 border-2 border-red-500';
-    ringClass = 'ring-2 ring-red-500/60 animate-pulse';
+    ringClass = 'ring-2 ring-red-500/60';
   }
 
   if (isSelected) {
@@ -71,14 +72,21 @@ export const Seat: React.FC<SeatProps> = ({
       onDragStart={onDragStart}
       onDragOver={onDragOver}
       onDrop={onDrop}
-      onClick={onClick}
+      onClick={(e) => {
+        // ⛔ 双击的第二下（detail=2）不处理：否则「选中后再点一次 = 切换单座锁定」
+        //    会先被双击触发，出现锁图标闪一下、还可能误存一次布局（2026-11-12 吴老反馈点错学生）
+        if (e.detail > 1) return;
+        onClick();
+      }}
       onDoubleClick={onDoubleClick}
       className={`
         relative w-full h-full rounded-lg cursor-pointer
         flex flex-col items-center justify-center
-        transition-all duration-200 select-none
+        transition-[background-color,border-color,box-shadow,filter,opacity] duration-150
+        select-none
         ${bgClass} ${textClass} ${ringClass}
-        hover:scale-105 hover:z-10
+        hover:brightness-110 hover:z-10
+        active:brightness-95
       `}
       style={{ minHeight: '70px' }}
     >

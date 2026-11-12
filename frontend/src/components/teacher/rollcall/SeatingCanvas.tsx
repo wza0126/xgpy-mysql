@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { RollCallSeat, RollCallStudent } from '../../../hooks/useRollCall';
 import { Seat } from './Seat';
 
@@ -35,6 +35,33 @@ export const SeatingCanvas: React.FC<SeatingCanvasProps> = ({
   const COLS = 8;
   const ROWS = 8;
   const canvasRef = useRef<HTMLDivElement>(null);
+
+  /**
+   * 「已选中的座位再点一次 = 切换单座锁定」的延迟判定。
+   *
+   * ⛔ 为什么必须延迟：老师在已选中的座位上双击想开远程控制时，双击的**第一击**就会命中
+   *    这条规则 → 座位无故被锁定（锁图标闪一下、还触发一次布局保存）。延迟 260ms，
+   *    期间若收到双击就取消，单击切锁定的手感基本无变化（2026-11-12 吴老反馈「点座位会抖、双击点错学生」）。
+   */
+  const lockTimerRef = useRef<number | null>(null);
+  const clearLockTimer = () => {
+    if (lockTimerRef.current) {
+      window.clearTimeout(lockTimerRef.current);
+      lockTimerRef.current = null;
+    }
+  };
+  useEffect(() => clearLockTimer, []);
+
+  const handleSeatClick = (seat: RollCallSeat, hasStudent: boolean) => {
+    const alreadySelected = selectedSeatNumber === seat.seat_number;
+    onSelectSeat(seat.seat_number);
+    if (!alreadySelected || !hasStudent || isLayoutLocked) return;
+    clearLockTimer();
+    lockTimerRef.current = window.setTimeout(() => {
+      lockTimerRef.current = null;
+      onToggleSeatLock(seat.seat_number);
+    }, 260);
+  };
 
   // 拖动时：座位 → 座位
   const handleSeatDragStart = (e: React.DragEvent, seat: RollCallSeat) => {
@@ -167,15 +194,10 @@ export const SeatingCanvas: React.FC<SeatingCanvasProps> = ({
               isSelected={selectedSeatNumber === seat.seat_number}
               isLayoutLocked={isLayoutLocked}
               isSeatLocked={!!seat.is_locked}
-              onClick={() => {
-                onSelectSeat(seat.seat_number);
-                if (selectedSeatNumber === seat.seat_number && !isLayoutLocked) {
-                  if (student) {
-                    onToggleSeatLock(seat.seat_number);
-                  }
-                }
-              }}
+              onClick={() => handleSeatClick(seat, !!student)}
               onDoubleClick={() => {
+                // 双击优先：把「再点一次切锁定」的延迟任务取消掉
+                clearLockTimer();
                 if (student) onDoubleClickSeat(seat.seat_number);
               }}
               onDragStart={(e) => handleSeatDragStart(e, seat)}
