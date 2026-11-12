@@ -8981,52 +8981,71 @@ app.get('/api/python/teacher/tasks', authenticate, requireTeachingRole, async (r
  */
 app.post('/api/python/teacher/tasks/class-status', authenticate, requireTeachingRole, async (req, res) => {
   try {
-    const classId = String((req.body && req.body.class_id) || '').trim();
+    // 支持两种入参（2026-11-12 吴老要求批量操作能一次选多个班）：
+    //   class_ids: ['a','b']  多选（前端弹窗用）
+    //   class_id:  'a'        单选（列表里的单题开关、学情矩阵仍在用，必须兼容）
+    const rawIds = Array.isArray(req.body && req.body.class_ids)
+      ? req.body.class_ids
+      : (req.body && req.body.class_id ? [req.body.class_id] : []);
+    const classIds = [...new Set(rawIds.map((v) => String(v || '').trim()).filter(Boolean))];
     const isActive = !!(req.body && req.body.is_active);
     const taskIds = Array.isArray(req.body && req.body.task_ids)
       ? req.body.task_ids.map((v) => String(v)).filter(Boolean)
       : [];
 
-    if (!classId) return res.status(400).json({ data: null, error: '请先选择班级' });
+    if (!classIds.length) return res.status(400).json({ data: null, error: '请先选择班级' });
     if (!taskIds.length) return res.status(400).json({ data: null, error: '请先勾选题目' });
 
     const teacherId = (req.user && (req.user.userId || req.user.id)) || null;
     const flag = isActive ? 1 : 0;
-    let attached = 0;
+    let attached = 0; // 计数单位是「题 × 班」：一道题补进两个班算 2
 
     for (const taskId of taskIds) {
-      await pool.query(
-        `INSERT INTO python_task_class_status (task_id, class_id, is_active, updated_by)
-         VALUES (?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE is_active = VALUES(is_active),
-                                 updated_by = VALUES(updated_by),
-                                 updated_at = NOW()`,
-        [taskId, classId, flag, teacherId]
-      );
-
+      // 一道题的 class_ids 只读一次，多个班在内存里一起补，避免重复查库
+      let ids = [];
       if (isActive) {
-        // 启用时把班级补进 class_ids（只处理数组里还没有该班的题）
         const [taskRows] = await pool.query('SELECT class_ids FROM python_tasks WHERE id = ?', [taskId]);
-        if (taskRows.length) {
-          let ids = [];
-          const raw = taskRows[0].class_ids;
-          if (Array.isArray(raw)) ids = raw.map(String);
-          else if (typeof raw === 'string' && raw) {
-            try { const parsed = JSON.parse(raw); if (Array.isArray(parsed)) ids = parsed.map(String); } catch { ids = []; }
-          }
-          if (!ids.includes(classId)) {
-            await pool.query('UPDATE python_tasks SET class_ids = ?, updated_at = NOW() WHERE id = ?', [
-              JSON.stringify([...ids, classId]),
-              taskId,
-            ]);
-            attached += 1;
-          }
+        const raw = taskRows.length ? taskRows[0].class_ids : null;
+        if (Array.isArray(raw)) ids = raw.map(String);
+        else if (typeof raw === 'string' && raw) {
+          try { const parsed = JSON.parse(raw); if (Array.isArray(parsed)) ids = parsed.map(String); } catch { ids = []; }
         }
+      }
+
+      let changed = false;
+      for (const classId of classIds) {
+        await pool.query(
+          `INSERT INTO python_task_class_status (task_id, class_id, is_active, updated_by)
+           VALUES (?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE is_active = VALUES(is_active),
+                                   updated_by = VALUES(updated_by),
+                                   updated_at = NOW()`,
+          [taskId, classId, flag, teacherId]
+        );
+
+        // 启用时把班级补进 class_ids（否则题根本没布置给它，「启用了却看不见」）
+        if (isActive && !ids.includes(classId)) {
+          ids.push(classId);
+          changed = true;
+          attached += 1;
+        }
+      }
+
+      if (changed) {
+        await pool.query('UPDATE python_tasks SET class_ids = ?, updated_at = NOW() WHERE id = ?', [
+          JSON.stringify(ids),
+          taskId,
+        ]);
       }
     }
 
     res.json({
-      data: { updated: taskIds.length, attached, class_id: classId, is_active: flag },
+      data: {
+        updated: taskIds.length,
+        class_ids: classIds,
+        attached,
+        is_active: flag,
+      },
       error: null,
     });
   } catch (error) {

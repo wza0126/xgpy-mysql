@@ -135,6 +135,16 @@ export const PythonManager: React.FC = () => {
   });
   const [deleteAck, setDeleteAck] = useState(false);
   const [batchBusy, setBatchBusy] = useState(false);
+  /**
+   * 批量启用/禁用的「班级多选」弹窗（2026-11-12 吴老要求）。
+   * 原来只能对「按班级查看」里选中的那一个班生效，要改三个班就得点三次；
+   * 现在点批量启用/禁用先弹窗勾班级，可勾多个，一次提交。
+   */
+  const [batchClassDialog, setBatchClassDialog] = useState<{ open: boolean; isActive: boolean; picked: string[] }>({
+    open: false,
+    isActive: true,
+    picked: [],
+  });
   /** 教师端编程填空 AI 语音讲解 */
   const [explainTask, setExplainTask] = useState<PythonTask | null>(null);
 
@@ -349,29 +359,44 @@ export const PythonManager: React.FC = () => {
   };
 
   /**
-   * 批量启用/禁用：作用域 = 选中的题目 × 当前班级筛选。
-   * 启用时后端会把这些题补进该班的 class_ids（否则「启用了却看不见」）；
+   * 批量启用/禁用的入口：先弹班级多选框。
+   * 默认勾选当前「按班级查看」选中的那个班（如果有），避免多一步操作。
+   */
+  const openBatchClassDialog = (isActive: boolean) => {
+    if (!selectedTasks.length) return;
+    setBatchClassDialog({
+      open: true,
+      isActive,
+      picked: taskClassId ? [taskClassId] : [],
+    });
+  };
+
+  /**
+   * 批量启用/禁用：作用域 = 选中的题目 × 弹窗里勾选的每一个班。
+   * 启用时后端会把这些题补进这些班的 class_ids（否则「启用了却看不见」）；
    * 禁用只写班级状态，不解除布置关系。
    */
-  const batchSetActive = async (isActive: boolean) => {
+  const runBatchSetActive = async (isActive: boolean, classIds: string[]) => {
     if (!selectedTasks.length) return;
-    if (!taskClassId) {
-      alert('请先在左侧「按班级查看」里选一个班。\n批量启用/禁用是按班级生效的，不选班级就不知道该改哪个班。');
+    if (!classIds.length) {
+      alert('请至少勾选一个班级。');
       return;
     }
     setBatchBusy(true);
     try {
       const res: any = await backendClient.post('/api/python/teacher/tasks/class-status', {
         task_ids: selectedTasks,
-        class_id: taskClassId,
+        class_ids: classIds,
         is_active: isActive,
       });
       await loadData();
       const attached = Number(res?.data?.attached) || 0;
+      const names = classIds.map((id) => classLabel(id)).join('、');
       alert(
-        `已对【${classLabel(taskClassId)}】${isActive ? '启用' : '禁用'} ${selectedTasks.length} 道题。` +
-        (attached ? `\n其中 ${attached} 道原本没布置给这个班，已一并加入。` : '')
+        `已对 ${classIds.length} 个班【${names}】${isActive ? '启用' : '禁用'} ${selectedTasks.length} 道题。` +
+        (attached ? `\n其中 ${attached} 处（题 × 班）原本没布置，已一并加入。` : '')
       );
+      setBatchClassDialog({ open: false, isActive: true, picked: [] });
     } catch (error: any) {
       alert(`操作失败: ${error.message}`);
     } finally {
@@ -698,11 +723,11 @@ export const PythonManager: React.FC = () => {
                   </label>
                 )}
               </div>
-              {/* 按班级查看：既是筛选条件，也是下面批量启用/禁用的作用班级 */}
+              {/* 按班级查看：只做列表筛选（一次看一个班）。批量启用/禁用走弹窗选班，可多选 */}
               <div className="mb-3">
                 <label className="mb-1 flex items-center justify-between text-xs text-gray-500">
                   <span>按班级查看</span>
-                  {taskClassId && <span className="text-purple-600">批量操作作用于该班</span>}
+                  {taskClassId && <span className="text-purple-600">列表显示该班状态</span>}
                 </label>
                 <select
                   value={taskClassId}
@@ -714,11 +739,14 @@ export const PythonManager: React.FC = () => {
                   }}
                   className="w-full rounded-lg border border-gray-300 px-2 py-1.5 text-sm focus:ring-2 focus:ring-purple-500"
                 >
-                  <option value="">全部班级（启用/禁用为全局）</option>
+                  <option value="">全部班级</option>
                   {classes.map((cls) => (
                     <option key={cls.id} value={cls.id}>{cls.name}</option>
                   ))}
                 </select>
+                <p className="mt-1 text-[11px] leading-relaxed text-gray-400">
+                  这里只是「看哪个班」，一次一个班。批量启用/禁用会在弹窗里让你勾班级，可以多选。
+                </p>
               </div>
 
               <div className="flex gap-1 mb-3 bg-gray-100 p-1 rounded-lg">
@@ -769,7 +797,9 @@ export const PythonManager: React.FC = () => {
                   <div className="mb-2 flex items-center justify-between">
                     <span className="text-sm text-purple-700">
                       已选 {selectedTasks.length} 道题
-                      {taskClassId ? <span className="text-purple-500">（{classLabel(taskClassId)}）</span> : null}
+                      <span className="ml-1 text-[11px] font-normal text-purple-500">
+                        （点启用/禁用后勾班级，可多选）
+                      </span>
                     </span>
                     <button className="text-xs text-gray-500 hover:text-gray-700" onClick={() => setSelectedTasks([])}>
                       取消选择
@@ -779,14 +809,16 @@ export const PythonManager: React.FC = () => {
                     <button
                       disabled={batchBusy}
                       className="rounded bg-green-600 px-2 py-1 text-xs text-white hover:bg-green-700 disabled:opacity-50"
-                      onClick={() => batchSetActive(true)}
+                      onClick={() => openBatchClassDialog(true)}
+                      title="选择一个或多个班级，只改这些班的启用状态"
                     >
                       <i className="fa fa-toggle-on mr-1"></i>批量启用
                     </button>
                     <button
                       disabled={batchBusy}
                       className="rounded bg-gray-500 px-2 py-1 text-xs text-white hover:bg-gray-600 disabled:opacity-50"
-                      onClick={() => batchSetActive(false)}
+                      onClick={() => openBatchClassDialog(false)}
+                      title="选择一个或多个班级，只改这些班的启用状态"
                     >
                       <i className="fa fa-toggle-off mr-1"></i>批量禁用
                     </button>
@@ -1505,6 +1537,110 @@ export const PythonManager: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* 批量启用/禁用：班级多选（2026-11-12） */}
+      {batchClassDialog.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-md rounded-xl bg-white p-5 shadow-xl">
+            <div className="mb-3 flex items-start gap-3">
+              <div
+                className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full ${
+                  batchClassDialog.isActive ? 'bg-green-100' : 'bg-gray-200'
+                }`}
+              >
+                <i
+                  className={`fa fa-toggle-${batchClassDialog.isActive ? 'on text-green-600' : 'off text-gray-600'}`}
+                ></i>
+              </div>
+              <div>
+                <h3 className="font-bold text-gray-800">
+                  批量{batchClassDialog.isActive ? '启用' : '禁用'} {selectedTasks.length} 道题
+                </h3>
+                <p className="mt-1 text-sm text-gray-500">
+                  勾选要生效的班级，可以多选。只改这些班，其他班不受影响。
+                </p>
+              </div>
+            </div>
+
+            <div className="mb-2 flex items-center justify-between text-xs text-gray-500">
+              <span>选择班级（已选 {batchClassDialog.picked.length} 个）</span>
+              <div className="flex gap-2">
+                <button
+                  className="text-purple-600 hover:text-purple-800"
+                  onClick={() =>
+                    setBatchClassDialog((d) => ({ ...d, picked: classes.map((c) => c.id) }))
+                  }
+                >
+                  全选
+                </button>
+                <button
+                  className="text-gray-500 hover:text-gray-700"
+                  onClick={() => setBatchClassDialog((d) => ({ ...d, picked: [] }))}
+                >
+                  清空
+                </button>
+              </div>
+            </div>
+
+            <div className="mb-3 max-h-64 overflow-y-auto rounded-lg border border-gray-200 bg-gray-50 p-2">
+              {classes.length === 0 && <div className="p-2 text-sm text-gray-400">还没有班级</div>}
+              {classes.map((cls) => {
+                const checked = batchClassDialog.picked.includes(cls.id);
+                return (
+                  <label
+                    key={cls.id}
+                    className={`mb-1 flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm last:mb-0 ${
+                      checked ? 'bg-purple-50 text-purple-800' : 'hover:bg-white'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) =>
+                        setBatchClassDialog((d) => ({
+                          ...d,
+                          picked: e.target.checked
+                            ? [...d.picked, cls.id]
+                            : d.picked.filter((x) => x !== cls.id),
+                        }))
+                      }
+                      className="rounded"
+                    />
+                    <span>{cls.name}</span>
+                  </label>
+                );
+              })}
+            </div>
+
+            {batchClassDialog.isActive && (
+              <p className="mb-3 text-[11px] leading-relaxed text-amber-700">
+                <i className="fa fa-circle-info mr-1"></i>
+                启用时，若这些题原本没布置给某个班，会自动把它补进该班的题目列表——否则学生看不见。
+              </p>
+            )}
+
+            <div className="flex justify-end gap-2">
+              <button
+                className="rounded-lg bg-gray-200 px-4 py-2 text-gray-700 hover:bg-gray-300"
+                onClick={() => setBatchClassDialog({ open: false, isActive: true, picked: [] })}
+              >
+                取消
+              </button>
+              <button
+                disabled={batchBusy || batchClassDialog.picked.length === 0}
+                className={`rounded-lg px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-40 ${
+                  batchClassDialog.isActive ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-600 hover:bg-gray-700'
+                }`}
+                onClick={() => runBatchSetActive(batchClassDialog.isActive, batchClassDialog.picked)}
+              >
+                {batchBusy
+                  ? '处理中…'
+                  : `确认${batchClassDialog.isActive ? '启用' : '禁用'}（${batchClassDialog.picked.length} 个班）`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 删除二次确认：题目删除不可恢复，必须勾选确认才能点 */}
       {deleteDialog.open && (
