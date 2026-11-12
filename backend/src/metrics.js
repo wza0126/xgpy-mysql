@@ -39,6 +39,22 @@ function createMetrics({ app, getConnections, logDir }) {
   const h = monitorEventLoopDelay({ resolution: 20 });
   h.enable();
 
+  // ---------------- 卡顿探针（2026-11-12） ----------------
+  // 为什么需要它：事件循环被占住时，请求连「进入处理」都轮不到，接口耗时统计里
+  // 只能看到「大家都在慢」，看不到是谁把循环占住的。这里维护一份「正在执行」的
+  // 请求清单，自检发现卡顿后，反查「卡顿开始之前就已经进来、卡顿结束还没走完」
+  // 的请求 —— 那才是真正把循环占住的那个人（Node 单线程，只可能是它）。
+  const STALL_THRESHOLD_MS = 2000;  // 超过 2 秒才算卡
+  const STALL_DEBOUNCE_MS = 5000;   // 同一次卡顿只记一条
+  const INFLIGHT_MAX = 800;         // 清单上限，防止极端情况下撑内存
+  const inflight = new Map();       // seq -> { req, startMs, key }
+  let seqNo = 0;
+  let lastBeat = Date.now();
+  let lastBeatCpu = process.cpuUsage();
+  let lastStallAt = 0;
+  const stallFile = path.join(dir, 'stall.log');
+  let stallReqsDuringGap = 0;       // 卡顿期间新进来的请求数（衡量影响面）
+
   // ⛔ lastCpu 必须每窗口往前走：写成 const 就永远拿开机至今的累计值，
   //    算出来的 cpu% 会变成「累计 CPU ÷ 60 秒」（几百上千 %），完全不能用。
   let lastCpu = process.cpuUsage();
@@ -67,7 +83,13 @@ function createMetrics({ app, getConnections, logDir }) {
 
   const middleware = (req, res, next) => {
     const started = performance.now();
+    // 记入「正在执行」清单。key 留到上报时再算：/api/query 的表名要等 body 解析完。
+    const seq = ++seqNo;
+    if (inflight.size < INFLIGHT_MAX) inflight.set(seq, { req, startMs: Date.now() });
+    const release = () => { inflight.delete(seq); };
+    res.on('close', release);
     res.on('finish', () => {
+      release();
       const ms = performance.now() - started;
       const key = normalize(req);
       const cur = bucket.get(key) || { n: 0, sumMs: 0, maxMs: 0 };
@@ -170,6 +192,61 @@ function createMetrics({ app, getConnections, logDir }) {
     windowStart = now;
   }
 
+  /**
+   * 上报一次卡顿。gap 是事件循环停摆的时长。
+   * 反查「卡顿开始前就已进入、到现在还没结束」的请求 —— Node 是单线程，
+   * 能把循环占住 2 秒以上的，只可能是其中之一（或定时任务/内部循环）。
+   */
+  function reportStall(gapMs, now) {
+    const startedBefore = now - gapMs + 50;
+    const candidates = [];
+    for (const { req, startMs } of inflight.values()) {
+      if (startMs > startedBefore) continue;
+      let key = '';
+      try { key = normalize(req); } catch { key = req.originalUrl || '?'; }
+      candidates.push({ key, waitedMs: now - startMs });
+    }
+    // 进来的越早、到现在还没走完，越可疑
+    candidates.sort((a, b) => b.waitedMs - a.waitedMs);
+
+    const cpu = process.cpuUsage(lastBeatCpu);
+    const wall = Math.max(1, now - lastBeat);
+    const cpuPct = Math.round(((cpu.user + cpu.system) / 1000) / wall * 100);
+    const mem = process.memoryUsage();
+
+    const uniq = [];
+    const seen = new Set();
+    for (const c of candidates) {
+      if (seen.has(c.key)) continue;
+      seen.add(c.key);
+      uniq.push(`${c.key}(已跑${Math.round(c.waitedMs)}ms)`);
+      if (uniq.length >= 8) break;
+    }
+
+    const line =
+      `${new Date(now).toLocaleString('zh-CN', { hour12: false })} | 卡顿 ${(gapMs / 1000).toFixed(1)}s | ` +
+      `cpu=${cpuPct}% heap=${Math.round(mem.heapUsed / 1048576)}MB rss=${Math.round(mem.rss / 1048576)}MB | ` +
+      `卡顿前仍在跑 ${candidates.length} 个${uniq.length ? ': ' + uniq.join(' | ') : '（无在跑请求 → 卡在定时任务或内部循环）'} | ` +
+      `恢复瞬间在途 ${inflight.size} 个`;
+
+    fs.appendFile(stallFile, line + '\n', () => { /* 写不了就算了 */ });
+  }
+
+  // 200ms 自检：卡住时这个定时器也停摆，恢复后第一次触发就能量到 gap
+  const beat = setInterval(() => {
+    const now = Date.now();
+    const gap = now - lastBeat;
+    if (gap >= STALL_THRESHOLD_MS) {
+      if (now - lastStallAt >= STALL_DEBOUNCE_MS) {
+        lastStallAt = now;
+        reportStall(gap, now);
+      }
+    }
+    lastBeat = now;
+    lastBeatCpu = process.cpuUsage();
+  }, 200);
+  if (beat.unref) beat.unref();
+
   const timer = setInterval(writeLine, 60 * 1000);
   if (timer.unref) timer.unref();
 
@@ -206,7 +283,7 @@ function createMetrics({ app, getConnections, logDir }) {
           .map(([k, v]) => ({ key: k, n: v.n, avgMs: Math.round(v.sumMs / v.n), maxMs: Math.round(v.maxMs) })),
       };
     },
-    stop: () => { clearInterval(timer); try { h.disable(); } catch { /* ignore */ } },
+    stop: () => { clearInterval(timer); clearInterval(beat); try { h.disable(); } catch { /* ignore */ } },
   };
 }
 

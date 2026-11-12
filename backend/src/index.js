@@ -1751,6 +1751,41 @@ app.put('/api/classes/:id/toggles', authenticate, async (req, res) => {
   }
 });
 
+/**
+ * 通用读表接口的兜底行数上限（2026-11-12）。
+ *
+ * 原来前端不传 limit 就是**整表返回**：student_answers 36 万行 / 197MB、
+ * point_transactions 63 万行 / 146MB。一次这样的查询就能让进程堆冲到 GB 级、
+ * JSON.stringify 把事件循环冻住几十秒（今天 11:36 那次 rss 冲到 397MB）。
+ * 5000 行足够覆盖任何正常页面（最大的是 questions 1115 行）；
+ * 真要全量请走 /api/admin/data-io/export，那条路不受这里影响。
+ */
+const QUERY_ROW_HARD_CAP = 5000;
+let lastRowCapWarnAt = 0;
+function noteRowCap(table, rawLimit) {
+  const now = Date.now();
+  if (now - lastRowCapWarnAt < 60000) return; // 每分钟最多提一次，别把日志刷爆
+  lastRowCapWarnAt = now;
+  console.warn(`[query] ${table} 未指定 limit 或超过 ${QUERY_ROW_HARD_CAP}，已截断（请求值=${rawLimit ?? '(空)'}）`);
+}
+
+/**
+ * 算出实际生效的 LIMIT。
+ * @returns {number} 一定有值，保证 SQL 里永远带 LIMIT
+ */
+function resolveRowLimit(table, limit) {
+  const n = parseInt(limit, 10);
+  if (!Number.isFinite(n) || n <= 0) {
+    noteRowCap(table, limit);
+    return QUERY_ROW_HARD_CAP;
+  }
+  if (n > QUERY_ROW_HARD_CAP) {
+    noteRowCap(table, limit);
+    return QUERY_ROW_HARD_CAP;
+  }
+  return n;
+}
+
 app.get('/api/tables/:tableName', authenticate, async (req, res) => {
   try {
     const { tableName } = req.params;
@@ -1846,14 +1881,9 @@ app.get('/api/tables/:tableName', authenticate, async (req, res) => {
       }
     }
     
-    if (limit) {
-      query += ` LIMIT ?`;
-      params.push(parseInt(limit));
-      if (offset) {
-        query += ` OFFSET ?`;
-        params.push(parseInt(offset));
-      }
-    }
+    // 行数兜底：这里只算不拼 —— LIMIT 必须拼在下面「questions 学生范围」之后，
+    // 否则那条 AND 会被接在 LIMIT 后面，SQL 直接语法错误。
+    const rowLimit = resolveRowLimit(tableName, limit);
     
     // ⛔ 服务端兜底：操作题（wps_op / access_op）走各自独立入口，绝不从通用表接口下发给学生。
     //    即使某个页面忘了在前端加过滤，学生也拿不到操作题（它们没有 options/answers，渲染必崩）。
@@ -1861,6 +1891,14 @@ app.get('/api/tables/:tableName', authenticate, async (req, res) => {
     if (tableName === 'questions' && !isTeachingRole(req.user && req.user.role)) {
       query += query.includes(' WHERE ') ? ' AND ' : ' WHERE ';
       query += SQL_PRACTICE_SCOPE.trim().replace(/^AND\s+/i, '');
+    }
+
+    // 顺序必须是 WHERE → ORDER BY → LIMIT
+    query += ' LIMIT ?';
+    params.push(rowLimit);
+    if (offset) {
+      query += ' OFFSET ?';
+      params.push(parseInt(offset, 10) || 0);
     }
 
     const [rows] = await pool.query(query, params);
@@ -2332,19 +2370,19 @@ app.post('/api/query', authenticate, async (req, res) => {
       }
     }
     
-    if (limit) {
-      query += ` LIMIT ?`;
-      params.push(parseInt(limit));
-      if (offset) {
-        query += ` OFFSET ?`;
-        params.push(parseInt(offset));
-      }
+    // 行数兜底：不传 limit 一律截到 QUERY_ROW_HARD_CAP，防止整表拉取把堆打爆
+    const rowLimit = resolveRowLimit(table, limit);
+    query += ` LIMIT ?`;
+    params.push(rowLimit);
+    if (offset) {
+      query += ` OFFSET ?`;
+      params.push(parseInt(offset, 10) || 0);
     }
     
     // 基础数据短 TTL 缓存：只认白名单表；key 覆盖 filters/columns/order/limit/offset，
     // 不同学生查各自的行不会串（filters 里带 id）
     const cacheTtl = QUERY_CACHE_TTL[table];
-    const cacheKey = cacheTtl ? queryCacheKey(table, filters, safeCols, order, limit, offset) : '';
+    const cacheKey = cacheTtl ? queryCacheKey(table, filters, safeCols, order, rowLimit, offset) : '';
     if (cacheKey) {
       const cached = queryCacheGet(cacheKey);
       if (cached) {
