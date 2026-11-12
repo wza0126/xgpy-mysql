@@ -1157,7 +1157,11 @@ export const WpsOpManager: React.FC = () => {
   };
 
   // ---------- 校验与保存 ----------
-  const validate = async () => {
+  /**
+   * 调后端校验，返回结果（不弹提示）。save() 要用它做「保存前闸门」，
+   * 所以不能像 validate() 那样只 setMsg。
+   */
+  const runValidate = async () => {
     try {
       const token = getAuthToken();
       const res = await fetch(`${API_CONFIG.apiUrl}${conf.base}/validate-spec`, {
@@ -1168,10 +1172,16 @@ export const WpsOpManager: React.FC = () => {
       const json = await res.json();
       const d = json?.data || { errors: ['校验失败'], warnings: [], total: 0 };
       setValidation(d);
-      if (!d.errors?.length) setMsg({ type: 'ok', text: `校验通过，评分点合计 ${d.total} 分` });
+      return d;
     } catch (e: any) {
       setMsg({ type: 'err', text: e?.message || '校验请求失败' });
+      return null;
     }
+  };
+
+  const validate = async () => {
+    const d = await runValidate();
+    if (d && !d.errors?.length) setMsg({ type: 'ok', text: `校验通过，评分点合计 ${d.total} 分` });
   };
 
   const save = async () => {
@@ -1181,6 +1191,16 @@ export const WpsOpManager: React.FC = () => {
     if (!spec.steps.length) { setMsg({ type: 'err', text: '至少要有一个步骤' }); return; }
     const unlabeled = spec.steps.filter((s) => !s.title.trim());
     if (unlabeled.length) { setMsg({ type: 'err', text: '每个步骤都要填标题（学生端会显示）' }); return; }
+
+    // ⛔ 保存前必须过一遍校验（2026-11-12）：
+    //    之前 save() 完全不校验，评分点范围填成 19 万格也能直接入库，
+    //    结果每次判分卡死整站 60 秒。区域过大这类错误现在在这里拦住。
+    const v = await runValidate();
+    if (!v) return; // 校验请求本身失败，runValidate 已提示
+    if (v.errors && v.errors.length) {
+      setMsg({ type: 'err', text: `不能保存：${v.errors[0]}` });
+      return;
+    }
 
     setSaving(true);
     setMsg(null);

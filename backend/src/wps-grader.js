@@ -231,6 +231,13 @@ function parseRef(ref) {
 /** 单次展开的单元格上限：再大就是整列/整表选区，逐格枚举会直接把进程卡死 */
 const RANGE_CELL_MAX = 500000;
 
+/**
+ * 评分点区域的两条红线（模板按「200 行 × 20 列」设计，2026-11-12 吴老确认）。
+ * 4000 格 = 模板满版；超过就大概率是误操作（如条件格式拖到第 6 万行）。
+ */
+const RANGE_WARN_CELLS = 4000;
+const RANGE_ERROR_CELLS = 20000;
+
 function rangeCells(range) {
   const parts = String(range || '').split(':');
   const a = parseRef(parts[0]);
@@ -272,6 +279,88 @@ function rangeBounds(ref) {
     c1: Math.min(a.col, b.col),
     c2: Math.max(a.col, b.col),
   };
+}
+
+/**
+ * 工作表「真实数据边界」：只看真正有内容的单元格（值或公式），**不看 dimension**。
+ *
+ * ⛔ dimension 是文件自己声明的"使用区域"，学生把格式刷到第 6 万行它就被撑大，
+ *    但真实数据常常只到第几十行（实例：某份作业 dimension=A1:O1360，
+ *    实际数据只到第 26 行）。生成评分点必须按真实数据区裁，不能信 dimension。
+ */
+function dataBounds(sheet) {
+  let maxR = 0;
+  let maxC = 0;
+  for (const [ref, cell] of sheet.cells) {
+    if (!cell) continue;
+    const v = cell.value;
+    const hasVal = (v !== null && v !== undefined && String(v).trim() !== '') || !!cell.formula;
+    if (!hasVal) continue;
+    const b = rangeBounds(ref);
+    if (!b) continue;
+    if (b.r2 > maxR) maxR = b.r2;
+    if (b.c2 > maxC) maxC = b.c2;
+  }
+  if (!maxR || !maxC) return null;
+  return { r1: 1, c1: 1, r2: maxR, c2: maxC };
+}
+
+/** 边界 → 区域字符串（单格写 A1，多格写 A1:B2） */
+function refFromBounds(b) {
+  const a = numToCol(b.c1) + b.r1;
+  const z = numToCol(b.c2) + b.r2;
+  return a === z ? a : `${a}:${z}`;
+}
+
+/**
+ * 把区域裁到数据边界内（支持空格分隔的多选区，逐个裁）。
+ *
+ * 用途：生成评分点时，凡是**从学生文件里读出来的区域**（条件格式 sqref、
+ * 合并区、SUM 参数、自动筛选 ref）都先过一遍这里。
+ * 实例：某学生把条件格式设成 D1356:F64780（6.3 万行），而数据只到第 26 行
+ *       → 裁完为空 → 这条建议评分点直接不生成，而不是把 19 万格抄进题库。
+ *
+ * @returns {{ref:string, cells:number, clipped:boolean}|null} 完全落在数据区外返回 null
+ */
+function clipRangeTo(ref, bounds) {
+  const refs = String(ref || '').trim().split(/\s+/).filter(Boolean);
+  if (!refs.length) return null;
+  const out = [];
+  let cells = 0;
+  let clipped = false;
+  for (const one of refs) {
+    const b = rangeBounds(one);
+    if (!b) continue;
+    let r1 = b.r1;
+    let c1 = b.c1;
+    let r2 = b.r2;
+    let c2 = b.c2;
+    if (bounds) {
+      r1 = Math.max(r1, bounds.r1);
+      r2 = Math.min(r2, bounds.r2);
+      c1 = Math.max(c1, bounds.c1);
+      c2 = Math.min(c2, bounds.c2);
+      if (r2 < r1 || c2 < c1) continue; // 整条落在数据区外
+      if (r1 !== b.r1 || r2 !== b.r2 || c1 !== b.c1 || c2 !== b.c2) clipped = true;
+    }
+    cells += (r2 - r1 + 1) * (c2 - c1 + 1);
+    out.push(refFromBounds({ r1, c1, r2, c2 }));
+  }
+  if (!out.length) return null;
+  return { ref: out.join(' '), cells, clipped };
+}
+
+/** 区域覆盖多少格（支持多选区）；超大区域返回 Infinity 而不是抛错 */
+function rangeCellCount(ref) {
+  const refs = String(ref || '').trim().split(/\s+/).filter(Boolean);
+  let n = 0;
+  for (const one of refs) {
+    const b = rangeBounds(one);
+    if (!b) continue;
+    n += (b.r2 - b.r1 + 1) * (b.c2 - b.c1 + 1);
+    if (!Number.isFinite(n)) return Infinity;
+  }
+  return n;
 }
 
 /**
@@ -1922,10 +2011,16 @@ async function inspectFile(input) {
  */
 function suggestStepsForSheet(model, sheet, opts = {}) {
   const steps = [];
-  const mergesMulti = sheet.merges.filter((m) => {
-    // 超大合并区跳过（整列/整表选区），枚举会卡死进程
-    try { return rangeCells(m).length > 1; } catch { return false; }
-  });
+  // 真实数据边界：后面凡是"从文件里读出来的区域"都裁到它里面
+  const bounds = dataBounds(sheet);
+
+  // 合并区：裁到数据区，完全在数据区外的丢弃（学生误拖选区留下的垃圾）
+  const mergesMulti = [];
+  for (const m of sheet.merges) {
+    const c = clipRangeTo(m, bounds);
+    if (!c || c.cells <= 1) continue;
+    mergesMulti.push(c.ref);
+  }
 
   // 步骤一：合并与标题排版
   if (mergesMulti.length) {
@@ -1977,7 +2072,9 @@ function suggestStepsForSheet(model, sheet, opts = {}) {
       const isSum = /^SUM\s*\(/i.test(c.formula);
       if (isSum) {
         const rng = /SUM\s*\(\s*([^)]+)\)/i.exec(c.formula);
-        checks.push({ kind: 'sum_range', ref: c.ref, range: rng ? normRange(rng[1]) : '', score: 1, label: `${c.ref} 求和` });
+        // 求和区域同样裁到数据区（学生可能写 =SUM(D:D)，那是 104 万格）
+        const sr = rng ? clipRangeTo(normRange(rng[1]), bounds) : null;
+        checks.push({ kind: 'sum_range', ref: c.ref, range: sr ? sr.ref : '', score: 1, label: `${c.ref} 求和` });
       } else {
         checks.push({ kind: 'cell_has_formula', ref: c.ref, score: 1, label: `${c.ref} 使用公式` });
         checks.push({ kind: 'formula_tokens', ref: c.ref, tokens: (c.formula.match(/[A-Z]+\d+/g) || []), score: 1, label: `${c.ref} 公式引用正确` });
@@ -2079,12 +2176,16 @@ function suggestStepsForSheet(model, sheet, opts = {}) {
   // 步骤四：排序（优先信 sortState；没有就启发式找"严格有序的数值列"）
   const sortChecks = [];
   if (sheet.sortState && sheet.sortState.conditions.length) {
-    const refRange = sheet.sortState.ref ? normRange(sheet.sortState.ref) : null;
+    // 排序区同样来自学生文件，先裁到真实数据区（实例：26 行数据的表，sortState 写到 A2:A1355）
+    const refClip = sheet.sortState.ref ? clipRangeTo(normRange(sheet.sortState.ref), bounds) : null;
+    const refRange = refClip ? refClip.ref : null;
     for (const c0 of sheet.sortState.conditions) {
       // ⛔ sortCondition 的 ref 在 OOXML 里是「区域」（如 A3:A58），不是单格；
       //    老代码直接 parseRef(ref).col → parseRef 只认单格会返回 null → TypeError 整个
       //    suggestSpec 崩掉（症状：教师端"自动生成评分点"整份失败，只剩默认 1 个占位评分点）。
-      const condRange = normRange(c0.ref);
+      const condClip = clipRangeTo(normRange(c0.ref), bounds);
+      if (!condClip) continue; // 整条落在数据区外 → 这条排序建议不生成
+      const condRange = condClip.ref;
       const p0 = parseRef(String(condRange).split(':')[0]); // 取区域左上角定列
       if (!p0) continue;
       const col = p0.col;
@@ -2112,7 +2213,17 @@ function suggestStepsForSheet(model, sheet, opts = {}) {
       const p = parseRef(c.ref);
       if (p.col === 1 || used.has(p.col)) continue;
       const colCells = Array.from(sheet.cells.values())
-        .filter((x) => parseRef(x.ref).col === p.col && x.type === 'n')
+        .filter((x) => {
+          if (x.type !== 'n' || x.formula) return false;
+          if (parseRef(x.ref).col !== p.col) return false;
+          // ⛔ 只认**真有数值**的格子：学生把数字格式刷到第 1360 行会产生一堆
+          //    空值数值格，拿它们去判"是否有序"会凭空生成一个覆盖上千行的假排序建议。
+          if (x.value === null || x.value === undefined || String(x.value).trim() === '') return false;
+          const b = rangeBounds(x.ref);
+          if (!b) return false;
+          if (bounds && (b.r1 < bounds.r1 || b.r1 > bounds.r2)) return false; // 超出真实数据区
+          return true;
+        })
         .sort((a, b) => parseRef(a.ref).r - parseRef(b.ref).r);
       if (colCells.length < 4) continue;
       const vs = colCells.map((x) => Number(x.value));
@@ -2149,6 +2260,8 @@ function suggestStepsForSheet(model, sheet, opts = {}) {
       return o;
     });
     const hasCond = cols.length > 0;
+    // 筛选区域也裁到数据区（整列筛选会写成 A1:XFD1048576）
+    const afRange = af.ref ? clipRangeTo(af.ref, bounds) : null;
     steps.push({
       id: 's' + (steps.length + 1),
       title: '自动筛选',
@@ -2159,7 +2272,7 @@ function suggestStepsForSheet(model, sheet, opts = {}) {
         kind: 'auto_filter',
         score: hasCond ? 10 : 5,
         label: hasCond ? '按条件筛选' : '开启自动筛选',
-        range: af.ref || undefined,
+        range: afRange ? afRange.ref : undefined,
         columns: hasCond ? cols : undefined,
       }],
     });
@@ -2191,12 +2304,17 @@ function suggestStepsForSheet(model, sheet, opts = {}) {
 
   // 步骤七：条件格式（每条规则一个评分点）
   for (const cf of (sheet.condFormats || [])) {
+    // ⛔ 条件格式的 sqref 是学生文件里写的，必须裁到真实数据区：
+    //    实例 D1356:F64780（6.3 万行），而数据只到第 26 行 → 裁完为空 → 整条丢弃，
+    //    绝不能把 19 万格抄进题库（那会让每次判分耗时 60 秒，见 sqrefCovers 注释）。
+    const cfRange = clipRangeTo(cf.sqref, bounds);
+    if (!cfRange) continue;
     for (const r of cf.rules) {
       const dxf = (r.dxfId !== null && r.dxfId !== undefined) ? (model.styles.dxfs || [])[r.dxfId] : null;
       const chk = {
         kind: 'cond_format', score: 10,
-        label: `条件格式 ${cf.sqref}${r.operator ? ' ' + r.operator : ''}`,
-        range: cf.sqref,
+        label: `条件格式 ${cfRange.ref}${r.operator ? ' ' + r.operator : ''}`,
+        range: cfRange.ref,
       };
       if (r.type) chk.type = r.type;
       if (r.operator) chk.operator = r.operator;
@@ -2303,6 +2421,23 @@ function validateSpec(spec, expectFull) {
     checks.forEach((c, j) => {
       if (!CHECKERS[c.kind]) errors.push(`步骤 ${i + 1} 第 ${j + 1} 个评分点的类型「${c.kind}」不受支持`);
       inner += num(c.score) || 0;
+      // 区域大小红线（2026-11-12）：模板一版最多 200 行 × 20 列，
+      // 超大区域基本都是「选区拖过头」的误操作，必须在保存前拦住。
+      for (const f of ['range', 'colRange', 'ref']) {
+        if (!c[f]) continue;
+        const n = rangeCellCount(c[f]);
+        if (n > RANGE_ERROR_CELLS) {
+          errors.push(
+            `步骤 ${i + 1} 第 ${j + 1} 个评分点（${c.kind}）的范围 ${c[f]} 覆盖 ${n.toLocaleString()} 格，`
+            + `超过上限 ${RANGE_ERROR_CELLS.toLocaleString()} 格，几乎肯定是选区拖过头了，请改成实际数据区域`
+          );
+        } else if (n > RANGE_WARN_CELLS) {
+          warnings.push(
+            `步骤 ${i + 1} 第 ${j + 1} 个评分点（${c.kind}）的范围 ${c[f]} 覆盖 ${n.toLocaleString()} 格，`
+            + `明显大于模板常规尺寸（200 行 × 20 列 = 4000 格），请确认不是误操作`
+          );
+        }
+      }
     });
     const stepScore = num(st.score);
     if (stepScore !== null && checks.length && Math.abs(inner - stepScore) > 1e-9) {
@@ -2340,6 +2475,9 @@ module.exports = {
   decimalsFromFormat,
   rangeCells,
   rangeBounds,
+  rangeCellCount,
+  dataBounds,
+  clipRangeTo,
   sqrefCovers,
   normRange,
   normFormula,
