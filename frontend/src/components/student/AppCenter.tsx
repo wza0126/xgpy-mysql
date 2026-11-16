@@ -364,7 +364,6 @@ export const AppCenter: React.FC<AppCenterProps> = ({ forceAppId, shellWindowId 
       }
     }
 
-    console.log('Python魔法学院调试 - app:', { id: app.id, type: app.type, name: app.name });
 
     // 按时长计费：先向服务端确认「有没有时间玩」，有就进，没有就引导去赚钻石
     if (app.price_type === 'time') {

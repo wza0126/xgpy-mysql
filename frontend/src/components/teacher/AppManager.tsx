@@ -9,7 +9,7 @@ interface App {
   name: string;
   description: string;
   icon: string;
-  type: 'learning_tool' | 'coding_practice' | 'game' | 'simulation' | 'external_link' | 'html_page' | 'ai_qa' | 'mental_health' | 'python_magic_academy' | 'code_realm' | 'typing_trainer';
+  type: 'learning_tool' | 'coding_practice' | 'game' | 'simulation' | 'external_link' | 'html_page' | 'ai_qa' | 'mental_health' | 'python_magic_academy' | 'academy' | 'code_realm' | 'typing_trainer';
   // time = 按时长（消耗学生的游戏时长池，不扣积分）
   price_type: 'free' | 'points' | 'per_use' | 'time';
   points_price: number;
@@ -44,7 +44,7 @@ const appTypes: AppTypeOption[] = [
   { value: 'simulation', label: '模拟' },
   { value: 'external_link', label: '外部链接' },
   { value: 'html_page', label: 'HTML 网页' },
-  { value: 'python_magic_academy', label: 'Python魔法学院' },
+  { value: 'academy', label: '星卡学院' },
   { value: 'code_realm', label: '代码秘境' },
   { value: 'typing_trainer', label: '键盘星域' }
 ];
@@ -838,7 +838,7 @@ export function AppManager() {
                   >
                     删除
                   </button>
-                  {(app.type === 'code_realm' || app.type === 'python_magic_academy') && (
+                  {app.type === 'code_realm' && (
                     <button
                       onClick={() => openProgressModal(app)}
                       className="px-3 py-1 text-sm bg-purple-100 text-purple-700 rounded-lg hover:bg-purple-200"
