@@ -7,6 +7,7 @@ const { LicenseManager, FEATURES } = require('./license-manager');
 const { runMigrations } = require('./migrate');
 const { registerWebProxy, invalidateProxyPerm } = require('./web-proxy');
 const { registerWpsOp } = require('./wps-op');
+const attachAcademy = require('./academy');
 // 判分函数统一放在 composite-score.js（任务指标 / 资格校验 / 判分共用同一口径）
 const {
   taskNormalizeAnswer, taskGetAnswersArray, taskGetOptionsArray, taskNormalizeCorrectAnswers,
@@ -20000,6 +20001,11 @@ function requireTeachingRole(req, res, next) {
 // 模板上传 / 标准答案解析 / 学生作答判分 / 历史查询，全部在 wps-op.js 内注册。
 // ⚠️ 必须放在 requireTeacher / requireStudent 定义之后（const 无提升，靠前会 TDZ 报错）。
 registerWpsOp(app, { pool, authenticate, requireTeacher, requireStudent, uploadsDir });
+
+// ===== 星卡学院（原 Python魔法学院重构，2026-11-16）=====
+// 16 章 = 16 座建筑，70 个知识点 = 70 张星卡，35 节课走完。
+// 判分独立：不写 student_answers、不发积分，只动学院自己的表 + 钻石（走每日上限）。
+attachAcademy(app, { authenticate, requireTeachingRole });
 
 // ===== Access 操作题（与 WPS 同构，判的是 .accdb）=====
 // 全部路由在 access-op.js 内注册；同样必须在中间件定义之后。

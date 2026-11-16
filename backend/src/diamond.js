@@ -30,6 +30,7 @@ const SOURCE_LABELS = {
   adjust: '余额调整',
   exchange: '兑换消耗',
   play_time: '兑换游戏时长',
+  academy: '学院首通',
   survival_depth: '生存游戏深度',
 };
 

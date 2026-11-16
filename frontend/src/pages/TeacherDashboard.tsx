@@ -14,6 +14,7 @@ import { PetConfig } from '../components/teacher/PetConfig';
 import { SystemSettings } from '../components/teacher/SystemSettings';
 import { Analytics } from '../components/teacher/Analytics';
 import { AppManager } from '../components/teacher/AppManager';
+import { AcademyManager } from '../components/teacher/AcademyManager';
 import { GameSettings } from '../components/teacher/GameSettings';
 import { FarmConfig } from '../components/teacher/FarmConfig';
 import { LayerBackground } from '../components/teacher/LayerBackground';
@@ -83,6 +84,7 @@ const MENU_GROUPS: { title: string; items: { id: string; title: string; icon: st
       { id: 'prizes', title: '积分兑换管理', icon: 'fa-gift' },
       { id: 'pets', title: '萌宠配置', icon: 'fa-paw' },
       { id: 'game', title: '刷题打怪系统', icon: 'fa-gamepad' },
+      { id: 'academy', title: '星卡学院', icon: 'fa-wand-magic-sparkles' },
     ],
   },
   {
@@ -164,6 +166,7 @@ const components: Record<string, React.ReactNode> = {
   prizes: <PrizeManager />,
   pets: <PetConfig />,
   game: <GameSettings />,
+  academy: <AcademyManager />,
   farm: <FarmConfig />,
   // 「图层背景」把代码农场与学习星域收到同一个入口；farm 保留映射，兼容旧链接/收藏
   layers: <LayerBackground />,

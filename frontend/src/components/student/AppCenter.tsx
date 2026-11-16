@@ -8,7 +8,7 @@ import { AiQaApp } from './AiQaApp';
 import { ExternalLinkApp } from './ExternalLinkApp';
 import { HtmlPageApp } from './HtmlPageApp';
 import { MentalHealthApp } from './MentalHealthApp';
-import { PythonMagicAcademy } from './PythonMagicAcademy';
+import { Academy } from './Academy';
 import { CodeRealm } from './CodeRealm';
 import { TypingTrainer } from './TypingTrainer';
 import { toDatabaseDateTime } from '../../utils/dateUtils';
@@ -386,8 +386,9 @@ export const AppCenter: React.FC<AppCenterProps> = ({ forceAppId, shellWindowId 
       }
     }
 
-    // Python魔法学院：免费应用，直接同步打开窗口，不触发后台状态更新
-    if (app.type === 'python_magic_academy' || app.id === 'app_python_magic_academy') {
+    // 星卡学院（原 Python魔法学院重构 2026-11-16）：免费应用，直接同步打开窗口
+    // ⛔ 兼容旧 type：改库前的老缓存里可能还是 python_magic_academy
+    if (app.type === 'academy' || app.type === 'python_magic_academy' || app.id === 'app_python_magic_academy') {
       const windowId = `app_${app.id}`;
       openWindow({
         id: windowId,
@@ -395,7 +396,7 @@ export const AppCenter: React.FC<AppCenterProps> = ({ forceAppId, shellWindowId 
         icon: 'fa-hat-wizard',
         isMinimized: false,
         isMaximized: false,
-        component: <PythonMagicAcademy onClose={() => closeWindow(windowId)} />
+        component: <Academy onClose={() => closeWindow(windowId)} />
       });
       activateWindow(windowId);
       return;
