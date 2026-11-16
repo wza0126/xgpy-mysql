@@ -16,6 +16,12 @@ import { PetCompanion } from './game/PetCompanion';
 import { useGameEventStore } from '../../store/gameEventStore';
 import { sanitizeHtml, htmlToPlainText } from '../../utils/htmlUtils';
 import { isOperationType } from '../../utils/questionType';
+import {
+  PracticeCheer,
+  pickCheer,
+  pickAllClearLead,
+  cheerComment,
+} from '../../data/practiceEncouragement';
 
 type QuestionOrder = 'random' | 'sequential';
 
@@ -154,6 +160,25 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
   const [sessionStats, setSessionStats] = useState({ correct: 0, total: 0 });
   const [loading, setLoading] = useState(true);
   const [showConfig, setShowConfig] = useState(true);
+  /**
+   * 一节练完时的「通关面板」（2026-11-16）：
+   * 以前队列一空就静默退回设置页、再点开始只弹一句"没有可练习的题目"，学生以为自己被踢出来了。
+   * 现在弹一段剧情 + 战绩 + 下一个知识点入口。
+   */
+  const [cheerPanel, setCheerPanel] = useState<null | {
+    cheer: PracticeCheer;
+    /** null = 正常练完；有值 = 学生点的范围本来就全掌握了 */
+    allClearLead: string | null;
+    scopeLabel: string;
+    correct: number;
+    total: number;
+    newMastered: number;
+    next: { key: string; label: string; remaining: number } | null;
+  }>(null);
+  /** 本次练习里新跨过掌握线的题数（通关面板要用） */
+  const newMasteredRef = useRef(0);
+  /** 本轮练习用的知识点范围（队列练完时算"下一个知识点"要用） */
+  const lastClusterPathsRef = useRef<string[]>([]);
   // 从学习模块「去练习这一章」进入时，首屏就套用该章筛选
   const [config, setConfig] = useState<PracticeConfig>(() => {
     const sel = clusterToSelection(initialCluster);
@@ -399,15 +424,74 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
     return filtered;
   };
 
-  const applyFiltersAndStart = async () => {
+  /** 当前练习范围的显示名（通关面板上用） */
+  const scopeLabelOf = (paths: string[]): string => {
+    if (!paths.length) return '全部题目';
+    const first = splitCluster(paths[0]);
+    const firstLabel = first ? (first[1] || first[0]) : paths[0];
+    return paths.length > 1 ? `${firstLabel} 等 ${paths.length} 个知识点` : firstLabel;
+  };
+
+  /**
+   * 推荐「下一个知识点」：在本节之外找还剩题没掌握的。
+   * ① 优先同一一级类目里的下一个（教学上连贯）
+   * ② 没有再跨大类，按目录顺序取第一个还有剩余的
+   * ⛔ 只用前端已有的 questionMeta + masteredQuestionIds 算，不额外打接口。
+   */
+  const computeNextCluster = (exclude: string[]): { key: string; label: string; remaining: number } | null => {
+    const remain = new Map<string, number>();
+    for (const q of questionMeta) {
+      const parts = splitCluster(q.cluster_id);
+      if (!parts || !parts[1]) continue;          // 只看二级知识点，一级太粗
+      if (masteredQuestionIds.has(q.id)) continue;
+      const key = `${parts[0]}/${parts[1]}`;
+      remain.set(key, (remain.get(key) || 0) + 1);
+    }
+    const ordered: string[] = [];
+    Object.keys(clusterTree).forEach((p) => {
+      Array.from(clusterTree[p]).forEach((sec) => ordered.push(`${p}/${sec}`));
+    });
+    const isExcluded = (k: string) => exclude.includes(k) || exclude.some((p) => k.startsWith(`${p}/`));
+    const mk = (key: string) => {
+      const parts = splitCluster(key);
+      return { key, label: parts ? (parts[1] || parts[0]) : key, remaining: remain.get(key) || 0 };
+    };
+    // ⛔ 优先推还剩 ≥3 题的节：有些节只剩 1~2 题，推过去一题就通关，学生刚进去又被弹回来
+    const best = (list: string[]) => list.find((k) => (remain.get(k) || 0) >= 3) || list[0] || '';
+    const candidates = (prefix: string) =>
+      ordered.filter((k) => (!prefix || k.startsWith(`${prefix}/`)) && !isExcluded(k) && (remain.get(k) || 0) > 0);
+
+    const curPrimary = exclude.length ? (splitCluster(exclude[0])?.[0] || '') : '';
+    if (curPrimary) {
+      const same = best(candidates(curPrimary));
+      if (same) return mk(same);
+    }
+    const any = best(candidates(''));
+    return any ? mk(any) : null;
+  };
+
+  const openCheerPanel = (clusterPaths: string[], allClear: boolean) => {
+    setCheerPanel({
+      cheer: pickCheer(),
+      allClearLead: allClear ? pickAllClearLead() : null,
+      scopeLabel: scopeLabelOf(clusterPaths),
+      correct: sessionStats.correct,
+      total: sessionStats.total,
+      newMastered: newMasteredRef.current,
+      next: computeNextCluster(clusterPaths),
+    });
+  };
+
+  /**
+   * 按给定知识点范围开练。
+   * ⛔ 必须收参数而不是读 config：通关面板点「下一个知识点」时 config 还没更新完，
+   *    直接读 state 会抽到上一个知识点的题。
+   */
+  const startPractice = async (clusterPaths: string[]) => {
     // 出题走服务端：过滤 / 排除已掌握 / 随机排序 / 脱敏 / 限量全在一处完成。
     // 前端不再持有整包题库（原来 1004 行 ≈ 1.4MB，练一次要全下完）。
     setLoading(true);
     try {
-      const clusterPaths = config.selectedClusterSecondary.length > 0
-        ? config.selectedClusterSecondary
-        : config.selectedClusterPrimary;
-
       const r: any = await backendClient.post('/api/student/practice/questions', {
         tags: config.selectedTags,
         clusters: clusterPaths,
@@ -424,12 +508,16 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
       const data = r?.data || {};
       const list: Question[] = Array.isArray(data.items) ? data.items : [];
       if (list.length === 0) {
-        alert('当前筛选条件下没有可练习的题目（可能都已掌握），换个范围试试');
+        // 这一节已经全掌握：不再弹"没有可练习的题目"，改成通关面板
+        openCheerPanel(clusterPaths, true);
         return;
       }
       // 同步界面上的「已掌握」数字（出题接口不重复下发题号集合）
       fetchPracticeStats();
 
+      newMasteredRef.current = 0;
+      lastClusterPathsRef.current = clusterPaths;
+      setCheerPanel(null);
       setFilteredQuestions(list);
       setCurrentIndex(0);
       setSessionStats({ correct: 0, total: 0 });
@@ -449,6 +537,28 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
     } finally {
       setLoading(false);
     }
+  };
+
+  /** 设置页「开始练习」：用当前筛选到的范围开练 */
+  const applyFiltersAndStart = () => {
+    const clusterPaths = config.selectedClusterSecondary.length > 0
+      ? config.selectedClusterSecondary
+      : config.selectedClusterPrimary;
+    return startPractice(clusterPaths);
+  };
+
+  /** 通关面板「去下一个知识点」：切筛选 + 直接开练，不用学生自己回设置页再选一遍 */
+  const goNextCluster = () => {
+    const next = cheerPanel?.next;
+    if (!next) return;
+    const parts = splitCluster(next.key);
+    setConfig((prev) => ({
+      ...prev,
+      selectedClusterPrimary: parts ? [parts[0]] : [],
+      selectedClusterSecondary: parts && parts[1] ? [next.key] : [],
+    }));
+    setCheerPanel(null);
+    void startPractice([next.key]);
   };
 
   const baseQuestion = filteredQuestions[currentIndex];
@@ -605,6 +715,8 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
         // 掌握门禁回执：该题答对次数已达阈值 → 立即移出练习队列并提示
         const gateData = result.data as any;
         if (gateData?.mastered) {
+          // 只有"从没掌握到掌握"才算本次新掌握（重复提交同一题不重复计数）
+          if (!masteredQuestionIds.has(currentQuestion.id)) newMasteredRef.current += 1;
           setMasteredQuestionIds((prev) => {
             if (prev.has(currentQuestion.id)) return prev;
             const next = new Set(prev);
@@ -830,7 +942,8 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
 
     const remainingQuestions = filteredQuestions.filter((q) => !masteredQuestionIds.has(q.id));
     if (remainingQuestions.length === 0) {
-      setShowConfig(true);
+      // 这一节练完了 —— 弹通关面板，别把人静默丢回设置页
+      openCheerPanel(lastClusterPathsRef.current, false);
       return;
     }
 
@@ -843,7 +956,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
     }
 
     if (attempts >= filteredQuestions.length) {
-      setShowConfig(true);
+      openCheerPanel(lastClusterPathsRef.current, false);
     } else {
       setCurrentIndex(newIndex);
     }
@@ -907,6 +1020,105 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
     });
   };
 
+  /**
+   * 通关面板（2026-11-16）：一节练完 / 这一节已全掌握时显示。
+   * 两种入口共用同一块 UI：① 队列里没有未掌握的题了 ② 点开始练习时就没题可出。
+   */
+  const cheerOverlay = cheerPanel ? (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/55 p-4">
+      <div className="w-full max-w-lg overflow-hidden rounded-2xl bg-white shadow-2xl">
+        <div className="relative bg-gradient-to-br from-indigo-500 via-blue-500 to-cyan-500 px-6 pb-7 pt-6 text-white">
+          <button
+            type="button"
+            onClick={() => {
+              // ⛔ 练完时队列已空，关面板必须回设置页，否则学生停在一道已答完的题上、点「下一题」又弹回来
+              setCheerPanel(null);
+              setShowConfig(true);
+            }}
+            className="absolute right-4 top-4 text-white/70 transition-colors hover:text-white"
+            title="关闭"
+          >
+            <i className="fa-solid fa-xmark text-lg"></i>
+          </button>
+          <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
+            <span className="rounded-full bg-white/20 px-2 py-0.5">
+              {cheerPanel.cheer.emoji} {cheerPanel.cheer.theme}
+            </span>
+            <span className="text-white/85">「{cheerPanel.scopeLabel}」</span>
+          </div>
+          <h3 className="text-2xl font-bold leading-snug">{cheerPanel.cheer.title}</h3>
+          <p className="mt-2 text-sm leading-relaxed text-white/90">
+            {cheerPanel.allClearLead || cheerPanel.cheer.lead}
+          </p>
+        </div>
+
+        <div className="px-6 pt-4">
+          <p className="text-sm leading-relaxed text-gray-600">{cheerPanel.cheer.body}</p>
+          <p className="mt-2 text-sm font-medium text-indigo-600">{cheerPanel.cheer.call}</p>
+        </div>
+
+        <div className="mt-4 grid grid-cols-3 gap-2 px-6">
+          <div className="rounded-lg bg-gray-50 px-2 py-2 text-center">
+            <p className="text-[11px] text-gray-500">本次答对</p>
+            <p className="text-lg font-bold text-emerald-600">
+              {cheerPanel.total > 0 ? `${cheerPanel.correct}/${cheerPanel.total}` : '—'}
+            </p>
+          </div>
+          <div className="rounded-lg bg-gray-50 px-2 py-2 text-center">
+            <p className="text-[11px] text-gray-500">本次新掌握</p>
+            <p className="text-lg font-bold text-amber-600">
+              {cheerPanel.newMastered > 0 ? `+${cheerPanel.newMastered}` : '—'}
+            </p>
+          </div>
+          <div className="rounded-lg bg-gray-50 px-2 py-2 text-center">
+            <p className="text-[11px] text-gray-500">下一节剩余</p>
+            <p className="text-lg font-bold text-indigo-600">
+              {cheerPanel.next ? `${cheerPanel.next.remaining} 题` : '—'}
+            </p>
+          </div>
+        </div>
+
+        <p className="mt-3 px-6 text-xs italic text-gray-400">
+          {cheerComment(cheerPanel.correct, cheerPanel.total)}
+        </p>
+
+        <div className="mt-4 flex gap-2 border-t border-gray-100 bg-gray-50/60 px-6 py-4">
+          <button
+            type="button"
+            onClick={() => {
+              setCheerPanel(null);
+              setShowConfig(true);
+            }}
+            className="rounded-lg bg-white px-4 py-2 text-sm text-gray-600 ring-1 ring-gray-200 transition-colors hover:bg-gray-100"
+          >
+            换个知识点
+          </button>
+          {cheerPanel.next ? (
+            <button
+              type="button"
+              onClick={goNextCluster}
+              className="flex-1 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-700"
+            >
+              继续 · {cheerPanel.next.label}
+              <span className="ml-1 text-xs text-indigo-200">（{cheerPanel.next.remaining} 题）</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                setCheerPanel(null);
+                (window as any).openWindow?.('learn');
+              }}
+              className="flex-1 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-700"
+            >
+              全部练完了 · 去学习目录看看
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  ) : null;
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -918,6 +1130,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
   if (showConfig) {
     return (
       <div className="p-6 max-w-4xl mx-auto">
+        {cheerOverlay}
         <div className="grid grid-cols-5 gap-4 mb-4">
           <div className="bg-blue-50 rounded-lg p-4 text-center">
             <p className="text-sm text-gray-600">总做题数</p>
@@ -1133,6 +1346,7 @@ export const PracticeModule: React.FC<{ initialCluster?: string }> = ({ initialC
 
   return (
     <div className="p-6 max-w-4xl mx-auto">
+      {cheerOverlay}
       {/* 做题统计条（2026-10-25 改）：原来是 5 个 p-4 卡片、每个两行（标签 + 2xl 数字），
           竖向吃掉约 100px，题干被挤到下面很多。改成一行紧凑条，高度降到约 36px，
           信息一个不少，颜色区分保留。 */}
