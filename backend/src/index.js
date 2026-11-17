@@ -5802,6 +5802,10 @@ async function settleExpiredExam(conn, rec, test, paperById) {
 app.get('/api/business/exam-paper/:testId', authenticate, requireStudent, async (req, res) => {
   const testId = String(req.params.testId || '').trim();
   const studentId = req.user.userId || req.user.id;
+  // 老师要靠这个判断「同桌两台机器答案雷同」（2026-11-17 吴老要求）
+  const clientIp = normalizeIp(
+    req.headers['x-forwarded-for'] || req.ip || req.connection.remoteAddress || ''
+  );
   const conn = await pool.getConnection();
   try {
     const [[test]] = await conn.query(
@@ -5847,16 +5851,23 @@ app.get('/api/business/exam-paper/:testId', authenticate, requireStudent, async 
       //    不写就会被当成「已交卷」，学生一进来就被告知考过了。
       const newId = `er_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       await conn.query(
-        `INSERT INTO exam_records (id, test_id, student_id, selected_question_ids, score, is_passed, started_at, completed_at)
-         VALUES (?, ?, ?, ?, NULL, 0, NOW(), NULL)`,
-        [newId, testId, studentId, JSON.stringify(selectedIds)]
+        `INSERT INTO exam_records (id, test_id, student_id, selected_question_ids, score, is_passed, started_at, completed_at, client_ip)
+         VALUES (?, ?, ?, ?, NULL, 0, NOW(), NULL, ?)`,
+        [newId, testId, studentId, JSON.stringify(selectedIds), clientIp]
       );
       [[rec]] = await conn.query('SELECT * FROM exam_records WHERE id = ?', [newId]);
-    } else if (needPick) {
-      await conn.query(
-        'UPDATE exam_records SET selected_question_ids = ? WHERE id = ?',
-        [JSON.stringify(selectedIds), rec.id]
-      );
+    } else {
+      if (needPick) {
+        await conn.query(
+          'UPDATE exam_records SET selected_question_ids = ? WHERE id = ?',
+          [JSON.stringify(selectedIds), rec.id]
+        );
+      }
+      // 每次取卷都记下当前机器 IP：学生换电脑继续考时，老师看到的是最新那一台
+      // （同一台电脑反复刷新不会产生噪音，只是覆盖同一个值）
+      if (clientIp) {
+        await conn.query('UPDATE exam_records SET client_ip = ? WHERE id = ?', [clientIp, rec.id]);
+      }
     }
 
     const byId = new Map(paper.items.map((it) => [it.item_id, it]));

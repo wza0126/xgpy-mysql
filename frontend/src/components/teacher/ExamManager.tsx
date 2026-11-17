@@ -1095,9 +1095,6 @@ export const ExamManager: React.FC = () => {
                     <div>
                       <div className="flex items-center gap-2">
                         <h4 className="font-bold text-gray-800">{test.title}</h4>
-                        {!test.is_active && (
-                          <span className="px-2 py-0.5 bg-gray-200 text-gray-500 text-xs rounded">已禁用</span>
-                        )}
                       </div>
                       {test.description && (
                         <p className="text-sm text-gray-500 mt-1">{test.description}</p>
@@ -1105,6 +1102,21 @@ export const ExamManager: React.FC = () => {
                     </div>
                   </div>
                   <div className="flex gap-2">
+                    {/* 启用/禁用：放在按钮区最左边、和「可看试卷」同一号字（2026-11-17 吴老反馈原来太小） */}
+                    <button
+                      onClick={() => handleToggleActive(test)}
+                      className={`text-xs px-2 py-1 rounded border ${
+                        test.is_active
+                          ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+                          : 'border-gray-300 bg-gray-100 text-gray-500 hover:border-emerald-300 hover:text-emerald-600'
+                      }`}
+                      title={test.is_active
+                        ? '已启用：学生可以看到并参加这场考试（点此禁用）'
+                        : '已禁用：学生看不到这场考试（点此启用）'}
+                    >
+                      <i className={`fa-solid ${test.is_active ? 'fa-toggle-on' : 'fa-toggle-off'} mr-1`}></i>
+                      {test.is_active ? '已启用' : '已禁用'}
+                    </button>
                     {/* 强制开始 / 强制结束（2026-11-17）：靠学生端心跳下发指令。
                         不是同一件事：强制开始是把学生"抓进"考试窗口，强制结束是让他们 1 分钟后交卷。 */}
                     <button
@@ -1172,13 +1184,6 @@ export const ExamManager: React.FC = () => {
                         <i className="fa-solid fa-stop-circle"></i>
                       </button>
                     )}
-                    <button
-                      onClick={() => handleToggleActive(test)}
-                      className={`text-sm ${test.is_active ? 'text-yellow-600 hover:text-yellow-800' : 'text-green-600 hover:text-green-800'}`}
-                      title={test.is_active ? '禁用考试' : '启用考试'}
-                    >
-                      <i className={`fa-solid ${test.is_active ? 'fa-ban' : 'fa-check'}`}></i>
-                    </button>
                     <button
                       onClick={() => handleDelete(test.id)}
                       className="text-red-600 hover:text-red-800 text-sm"
@@ -2204,7 +2209,7 @@ export const ExamManager: React.FC = () => {
                                     )}
                                   </td>
                                   <td className="px-4 py-3">
-                                    <div className={`font-medium ${record.is_absent ? 'text-gray-500' : 'text-gray-800'}`}>
+                                    <div className={`flex flex-wrap items-center gap-2 font-medium ${record.is_absent ? 'text-gray-500' : 'text-gray-800'}`}>
                                       <button
                                         type="button"
                                         onClick={() => setDetailStudent({ id: record.student_id, name: record.student?.real_name || record.student?.username || '未知学生' })}
@@ -2213,6 +2218,15 @@ export const ExamManager: React.FC = () => {
                                       >
                                         {record.student?.real_name || record.student?.username || '未知学生'}
                                       </button>
+                                      {/* 取卷电脑的 IP（2026-11-17）：按 IP 找同桌机器，比对答案是否雷同 */}
+                                      {(record as any).client_ip && (
+                                        <span
+                                          className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] font-normal text-slate-600"
+                                          title="这场考试取卷时用的电脑 IP，同一台机器 IP 相同"
+                                        >
+                                          {(record as any).client_ip}
+                                        </span>
+                                      )}
                                     </div>
                                     <div className="text-xs text-gray-500">
                                       {record.student?.username}
