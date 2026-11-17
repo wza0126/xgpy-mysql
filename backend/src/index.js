@@ -6292,7 +6292,7 @@ app.get('/api/teacher/exams/:testId/analysis', authenticate, requireTeachingRole
           const n = counter.get(letter) || 0;
           return {
             letter,
-            text: String(opt || '').replace(/<[^>]+>/g, '').slice(0, 60),
+            text: optionTextOf(opt),
             count: n,
             ratio: total ? Math.round((n / total) * 1000) / 10 : 0,
             is_correct: letter === parsedCorrect,
@@ -6303,7 +6303,11 @@ app.get('/api/teacher/exams/:testId/analysis', authenticate, requireTeachingRole
 
       if (it.kind === 'composite') {
         // 每个小题的对错分布
+        // ⛔ it.sub_questions 是**脱敏后**的小题（publicSubQuestions 已经把 answers 剥掉了），
+        //    要拿正确答案必须回到 it.answer 原始 JSON 里按 idx 取（2026-11-17 踩过：
+        //    用脱敏的取答案，is_correct 永远 false）。
         const subs = it.sub_questions || [];
+        const rawSubs = taskGetAnswersArray(it.answer);
         base.subs_stats = subs.map((sq, idx) => {
           let subTotal = 0;
           let subCorrect = 0;
@@ -6320,7 +6324,13 @@ app.get('/api/teacher/exams/:testId/analysis', authenticate, requireTeachingRole
             subTotal += 1;
             if (sq.type === 'choice') {
               const v = String((parsed.choice_answers || {})[idx] || '').trim().toUpperCase();
-              if (v) choiceCounter.set(v, (choiceCounter.get(v) || 0) + 1);
+              if (v) {
+                // 多选小题的作答是 "A,C,E" 这种逗号串，必须拆开逐个计票；
+                // 整串当一个 key 存进去，统计就永远全是 0（2026-11-17 发现）
+                v.split(/[,，、;；\s]+/).filter(Boolean).forEach((letter) => {
+                  choiceCounter.set(letter, (choiceCounter.get(letter) || 0) + 1);
+                });
+              }
             } else {
               const arr = (parsed.blank_answers || {})[idx];
               const text = Array.isArray(arr) ? arr.join(' | ') : String(arr == null ? '' : arr);
@@ -6342,10 +6352,22 @@ app.get('/api/teacher/exams/:testId/analysis', authenticate, requireTeachingRole
             correct: subCorrect,
           };
           if (sq.type === 'choice') {
+            const rawSub = rawSubs[idx];
+            const subCorrectLetters = taskGetAnswersArray(rawSub && rawSub.answers)
+              .map((x) => String(x).trim().toUpperCase())
+              .filter(Boolean);
             stat.options_stats = (sq.options || []).map((opt, oIdx) => {
               const letter = String.fromCharCode(65 + oIdx);
               const n = choiceCounter.get(letter) || 0;
-              return { letter, count: n, ratio: subTotal ? Math.round((n / subTotal) * 1000) / 10 : 0 };
+              // 带上选项正文 + 是否正确答案：只给 A/B/C/D 的话老师没法边投屏边讲
+              //（2026-11-17 吴老反馈）
+              return {
+                letter,
+                text: optionTextOf(opt),
+                is_correct: subCorrectLetters.includes(letter),
+                count: n,
+                ratio: subTotal ? Math.round((n / subTotal) * 1000) / 10 : 0,
+              };
             });
           } else {
             stat.answers = summarizeTexts(blankSamples);
@@ -11537,10 +11559,26 @@ async function resolveExplainStyle(styleKey, allowDisabled) {
 
 /** 选项文本归一：题库三种存法（字符串数组 / {options:[]} / {text:}）都要吃得下 */
 function optionTextOf(o) {
-  if (typeof o === 'string') return clip(o, 80);
-  if (Array.isArray(o)) return clip(o.filter((x) => x != null && x !== '').join(' '), 80);
-  if (o && typeof o === 'object') return clip(o.text ?? o.content ?? o.label ?? o.value ?? '', 80);
-  return clip(o, 80);
+  let raw = '';
+  if (typeof o === 'string') raw = o;
+  else if (Array.isArray(o)) raw = o.filter((x) => x != null && x !== '').join(' ');
+  else if (o && typeof o === 'object') raw = String(o.text ?? o.content ?? o.label ?? o.value ?? '');
+  else raw = String(o == null ? '' : o);
+
+  // 题库里选项大量是 <img src="/uploads/...">（纯图片选项）。剥完标签会变空串，
+  // 界面上就成了「A. 」，老师根本不知道这个选项画的是什么 → 用占位文字顶上。
+  const hasImg = /<img\b/i.test(raw);
+  const plain = raw
+    .replace(/<img\b[^>]*>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&amp;/gi, '&')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!plain && hasImg) return '（图片选项）';
+  return clip(plain || raw, 120);
 }
 
 /**

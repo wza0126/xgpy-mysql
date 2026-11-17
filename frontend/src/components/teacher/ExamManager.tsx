@@ -2383,10 +2383,10 @@ export const ExamManager: React.FC = () => {
                                       <span className={`w-4 flex-none text-sm font-bold ${o.is_correct ? 'text-green-600' : 'text-gray-500'}`}>
                                         {o.letter}
                                       </span>
-                                      <span className={`w-32 flex-none truncate text-xs ${o.is_correct ? 'text-green-700' : 'text-gray-500'}`} title={o.text}>
+                                      <span className={`min-w-0 flex-1 break-words text-xs leading-4 ${o.is_correct ? 'text-green-700' : 'text-gray-600'}`} title={o.text}>
                                         {o.text || '（图片选项）'}
                                       </span>
-                                      <div className="h-3 flex-1 overflow-hidden rounded bg-gray-100">
+                                      <div className="h-3 w-24 flex-none overflow-hidden rounded bg-gray-100">
                                         <div
                                           className={`h-full rounded ${o.is_correct ? 'bg-green-400' : 'bg-gray-400'}`}
                                           style={{ width: `${Math.min(100, o.ratio)}%` }}
@@ -2432,12 +2432,26 @@ export const ExamManager: React.FC = () => {
                                       {s.type === 'choice' && (s.options_stats || []).length > 0 && (
                                         <div className="space-y-1">
                                           {(s.options_stats || []).map((o: any) => (
-                                            <div key={o.letter} className="flex items-center gap-2">
-                                              <span className="w-4 flex-none text-xs font-bold text-gray-500">{o.letter}</span>
-                                              <div className="h-2 flex-1 overflow-hidden rounded bg-gray-200">
-                                                <div className="h-full rounded bg-indigo-400" style={{ width: `${Math.min(100, o.ratio)}%` }}></div>
+                                            <div key={o.letter} className="rounded border border-gray-100 bg-white p-1.5">
+                                              <div className="flex items-start gap-1.5">
+                                                <span className={`w-4 flex-none text-xs font-bold ${o.is_correct ? 'text-green-600' : 'text-gray-500'}`}>
+                                                  {o.letter}
+                                                </span>
+                                                {/* 选项正文：只给 A/B/C/D 没法边投屏边讲（2026-11-17 吴老反馈） */}
+                                                <span className={`flex-1 text-[11px] leading-4 question-rich-content ${o.is_correct ? 'text-green-700' : 'text-gray-700'}`}>
+                                                  {o.text || '（图片选项）'}
+                                                </span>
+                                                <span className="w-20 flex-none text-right text-[11px] text-gray-500">
+                                                  {o.count} 人 · {o.ratio}%
+                                                </span>
+                                                {o.is_correct && <i className="fa-solid fa-check flex-none text-[10px] text-green-500"></i>}
                                               </div>
-                                              <span className="w-20 flex-none text-right text-[11px] text-gray-500">{o.count} 人 {o.ratio}%</span>
+                                              <div className="ml-5 mt-1 h-1.5 overflow-hidden rounded bg-gray-100">
+                                                <div
+                                                  className={`h-full rounded ${o.is_correct ? 'bg-green-400' : 'bg-indigo-400'}`}
+                                                  style={{ width: `${Math.min(100, o.ratio)}%` }}
+                                                ></div>
+                                              </div>
                                             </div>
                                           ))}
                                         </div>

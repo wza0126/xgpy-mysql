@@ -3027,6 +3027,10 @@ export const TestModule: React.FC = () => {
                                 const myBlank = my && my.blank_answers ? my.blank_answers[si] : null;
                                 const shown = myChoice || (Array.isArray(myBlank) ? myBlank.filter(Boolean).join(' ｜ ') : (myBlank || '')) || '（空）';
                                 const subDetail = ((it.detail && it.detail.subs) || [])[si];
+                                const corSub = cor && cor.subs ? cor.subs[si] : null;
+                                const corLetters = (corSub && corSub.answers ? corSub.answers : [])
+                                  .map((x: any) => String(x).trim().toUpperCase());
+                                const myLetters = String(myChoice || '').toUpperCase().split(/[,，、\s]+/).filter(Boolean);
                                 return (
                                   <div key={si} className="rounded border border-gray-100 bg-white/70 p-2">
                                     <div className="flex flex-wrap items-center gap-2 text-xs mb-1">
@@ -3041,12 +3045,39 @@ export const TestModule: React.FC = () => {
                                     <div className="text-xs text-gray-600 mb-1 line-clamp-2 question-rich-content">
                                       <div dangerouslySetInnerHTML={{ __html: sanitizeHtml(sq.content || '') }} />
                                     </div>
+                                    {/* 选项正文（2026-11-17）：只显示「你的答案 B」学生根本不知道自己选的是哪句话 */}
+                                    {sq.type !== 'fill_blank' && (sq.options || []).length > 0 && (
+                                      <div className="mb-1 space-y-0.5">
+                                        {(sq.options as string[]).map((opt, oi) => {
+                                          const letter = String.fromCharCode(65 + oi);
+                                          const isCor = corLetters.includes(letter);
+                                          const isMy = myLetters.includes(letter);
+                                          return (
+                                            <div
+                                              key={oi}
+                                              className={`flex items-start gap-1.5 text-xs ${isCor ? 'text-green-700' : 'text-gray-600'}`}
+                                            >
+                                              <span className={`flex-shrink-0 font-medium ${isCor ? 'text-green-600' : 'text-gray-500'}`}>
+                                                {letter}.
+                                              </span>
+                                              <span className="question-rich-content" dangerouslySetInnerHTML={{ __html: sanitizeHtml(opt) }} />
+                                              {isMy && (
+                                                <span className="flex-shrink-0 rounded bg-purple-100 px-1 text-[10px] leading-4 text-purple-700">我选</span>
+                                              )}
+                                              {isCor && (
+                                                <span className="flex-shrink-0 text-[10px] leading-4 text-green-600">✓</span>
+                                              )}
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    )}
                                     <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-xs">
                                       <span className="text-gray-700">
                                         你的答案：<span className="font-mono">{shown}</span>
                                       </span>
                                       <span className="text-green-700">
-                                        正确答案：<span className="font-mono">{fmtSubCorrect(cor && cor.subs ? cor.subs[si] : null)}</span>
+                                        正确答案：<span className="font-mono">{fmtSubCorrect(corSub)}</span>
                                       </span>
                                     </div>
                                   </div>
