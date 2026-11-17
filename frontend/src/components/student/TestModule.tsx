@@ -569,10 +569,17 @@ export const TestModule: React.FC = () => {
 
     examTimeUpRef.current = false;
     setExamTimeUp(false);
-    setCurrentExamTest({ ...(exam as any), paper_total: payload.paper_total });
+    // 试卷信息以服务端为准：强制开考 / 刷新恢复时手里只有一个 id，
+    // exam.title 是空串，直接用它顶部就不显示试卷名（2026-11-17 吴老反馈）
+    const mergedTest = {
+      ...(exam as any),
+      ...((payload && payload.test) || {}),
+      paper_total: payload.paper_total,
+    };
+    setCurrentExamTest(mergedTest);
     setCurrentExamRecordId(payload.exam_record_id);
     setActiveExam({
-      test: { ...(exam as any), paper_total: payload.paper_total } as any,
+      test: mergedTest as any,
       questions,
       answers: savedAnswers,
       currentIndex: Math.min(

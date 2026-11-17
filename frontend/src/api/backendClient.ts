@@ -292,8 +292,10 @@ class MariaDBClient {
   }
 
   // 教师端：整场考试的逐题明细（选项分布 / 小题 / 每空答案分布）
-  async getExamAnalysis(testId: string) {
-    return fetchApi(`/api/teacher/exams/${testId}/analysis`);
+  // classId 传了就只统计这个班（2026-11-17）
+  async getExamAnalysis(testId: string, classId?: string) {
+    const q = classId ? `?class_id=${encodeURIComponent(classId)}` : '';
+    return fetchApi(`/api/teacher/exams/${testId}/analysis${q}`);
   }
 
   async rpc(functionName, params = {}) {
@@ -819,7 +821,7 @@ export interface BackendClient {
   getExamForce(testId: string): Promise<any>;
   getAllExamForce(): Promise<any>;
   setExamForce(testId: string, action: 'start' | 'cancel_start' | 'end' | 'cancel_end'): Promise<any>;
-  getExamAnalysis(testId: string): Promise<any>;
+  getExamAnalysis(testId: string, classId?: string): Promise<any>;
   closeExam(data: { test_id: string }): Promise<any>;
 }
 

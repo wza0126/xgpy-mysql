@@ -561,10 +561,10 @@ export const ExamManager: React.FC = () => {
   };
 
   /** 只刷新逐题明细（不动筛选、不动视图模式） */
-  const loadAnalysis = async (test: ExamTest) => {
+  const loadAnalysis = async (test: ExamTest, classId = '') => {
     setAnalysisLoading(true);
     try {
-      const r: any = await backendClient.getExamAnalysis(test.id);
+      const r: any = await backendClient.getExamAnalysis(test.id, classId);
       if (r?.error) console.warn('[考试情况] 统计失败:', r.error);
       else setExamAnalysis(r?.data || null);
     } catch (e) {
@@ -584,9 +584,21 @@ export const ExamManager: React.FC = () => {
     setRefreshing(true);
     try {
       await fetchData();
-      await loadAnalysis(selectedExam);
+      await loadAnalysis(selectedExam, filterClassId);
     } finally {
       setRefreshing(false);
+    }
+  };
+
+  /**
+   * 切换班级筛选（2026-11-17）
+   * 「按学生查看」是本地过滤名单；「按题目查看」的统计在服务端算，
+   * 换班级必须重新拉一次 analysis，否则永远显示整体数据。
+   */
+  const handleFilterClassChange = (cid: string) => {
+    setFilterClassId(cid);
+    if (selectedExam && recordViewMode === 'question') {
+      loadAnalysis(selectedExam, cid);
     }
   };
 
@@ -1994,7 +2006,7 @@ export const ExamManager: React.FC = () => {
                             <button
                               key={cid || 'no-class'}
                               type="button"
-                              onClick={() => setFilterClassId(active ? '' : cid)}
+                              onClick={() => handleFilterClassChange(active ? '' : cid)}
                               title={`${e.name}：应考 ${e.total} 人，已交 ${e.n} 人，缺考 ${e.absent} 人${
                                 classAvg == null ? '，尚无人交卷' : `，平均 ${classAvg} 分`
                               }`}
@@ -2108,7 +2120,7 @@ export const ExamManager: React.FC = () => {
                         <span className="text-sm text-gray-600">班级筛选：</span>
                         <select
                           value={filterClassId}
-                          onChange={(e) => setFilterClassId(e.target.value)}
+                          onChange={(e) => handleFilterClassChange(e.target.value)}
                           className="px-3 py-1 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
                         >
                           <option value="">全部班级</option>
@@ -2310,6 +2322,30 @@ export const ExamManager: React.FC = () => {
                         <i className="fa-solid fa-volume-high"></i>
                         AI 讲评高频错题（10 题）
                       </button>
+                    </div>
+
+                    {/* 明确告诉老师：下面的统计是按哪个班算的（2026-11-17 加班级筛选后必须写清） */}
+                    <div className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs text-gray-600">
+                      <i className="fa-solid fa-filter text-gray-400"></i>
+                      <span>
+                        下面的作答分布统计：
+                        <b className="text-gray-800">
+                          {filterClassId
+                            ? (classes.find((c) => c.id === filterClassId)?.name || '所选班级')
+                            : '全部班级'}
+                        </b>
+                      </span>
+                      {filterClassId ? (
+                        <button
+                          type="button"
+                          onClick={() => handleFilterClassChange('')}
+                          className="rounded border border-gray-200 bg-white px-1.5 py-0.5 text-[11px] text-gray-600 hover:border-purple-300 hover:text-purple-600"
+                        >
+                          看全部班级
+                        </button>
+                      ) : (
+                        <span className="text-gray-400">（点上面的班级可只看该班）</span>
+                      )}
                     </div>
 
                     {analysisLoading && (

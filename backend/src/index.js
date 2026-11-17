@@ -5908,6 +5908,16 @@ app.get('/api/business/exam-paper/:testId', authenticate, requireStudent, async 
       data: {
         completed: false,
         exam_record_id: rec.id,
+        // 试卷标题等基本信息：强制开考 / 刷新恢复时前端手里只有一个 id，
+        // 不带这段的话顶部标题是空的（2026-11-17 吴老反馈）
+        test: {
+          id: test.id,
+          title: test.title,
+          type: test.type,
+          time_limit: test.time_limit,
+          passing_score: test.passing_score,
+          allow_view_paper: test.allow_view_paper,
+        },
         paper_total: paperTotal,
         remaining_seconds: remaining,
         limit_seconds: limitSec,
@@ -6207,6 +6217,9 @@ app.post('/api/teacher/exams/:testId/force', authenticate, requireTeachingRole, 
  */
 app.get('/api/teacher/exams/:testId/analysis', authenticate, requireTeachingRole, async (req, res) => {
   const testId = String(req.params.testId || '').trim();
+  // 按班级统计（2026-11-17 吴老要求）：一张卷可能发给多个班，
+  // 老师选某个班时只看这个班的作答分布，不选才是整体。
+  const classId = String(req.query.class_id || '').trim();
   const conn = await pool.getConnection();
   try {
     const paper = await loadPaper(conn, testId);
@@ -6214,8 +6227,10 @@ app.get('/api/teacher/exams/:testId/analysis', authenticate, requireTeachingRole
     const byId = new Map(paper.items.map((it) => [it.item_id, it]));
 
     const [rawAnswers] = await conn.query(
-      `SELECT student_id, question_id, answer, is_correct
-         FROM student_answers WHERE source = 'exam' AND test_id = ?`,
+      `SELECT sa.student_id, sa.question_id, sa.answer, sa.is_correct, p.class_id
+         FROM student_answers sa
+         JOIN profiles p ON p.id = sa.student_id
+        WHERE sa.source = 'exam' AND sa.test_id = ?`,
       [testId]
     );
 
@@ -6228,6 +6243,7 @@ app.get('/api/teacher/exams/:testId/analysis', authenticate, requireTeachingRole
         : { credit: 0, max: 0, isCorrect: false, detail: {} };
       return {
         student_id: a.student_id,
+        class_id: a.class_id || '',
         question_id: a.question_id,
         answer: a.answer,
         is_correct: judged.isCorrect ? 1 : 0,
@@ -6237,13 +6253,17 @@ app.get('/api/teacher/exams/:testId/analysis', authenticate, requireTeachingRole
       };
     });
 
+    // 选了班级就只用这个班的作答做统计；但 answers 仍然回全量 ——
+    // 「按学生查看」的答卷详情要靠它（切了班级还能点开所有人）
+    const statAnswers = classId ? answers.filter((a) => a.class_id === classId) : answers;
+
     // 按题聚合
     const perItem = new Map();
     for (const it of paper.items) {
       perItem.set(it.item_id, { item: it, rows: [] });
     }
     const orphan = [];
-    for (const a of answers) {
+    for (const a of statAnswers) {
       const hit = perItem.get(a.question_id);
       if (hit) hit.rows.push(a);
       else orphan.push(a);
@@ -6413,6 +6433,8 @@ app.get('/api/teacher/exams/:testId/analysis', authenticate, requireTeachingRole
     res.json({
       data: {
         test: { id: paper.test.id, title: paper.test.title, paper_total: paper.test.paper_total },
+        // 回给前端：这份统计是按哪个班算的（空 = 全部班级）
+        class_id: classId || '',
         paper_total: paper.items.reduce((s, it) => s + (it.score || 0), 0),
         counts: {
           choice: paper.items.filter((i) => i.kind === 'choice').length,
