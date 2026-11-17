@@ -8,6 +8,7 @@ import { toDatabaseDateTime } from '../../utils/dateUtils';
 import { sanitizeHtml, htmlToPlainText } from '../../utils/htmlUtils';
 import { parseDbClusterFilters, matchDbClusterFilters } from '../../utils/clusterFilters';
 import { clusterLabel } from '../../data/chapterTaxonomy';
+import { RichDescription } from '../../utils/richDescription';
 import { isOperationType } from '../../utils/questionType';
 import { API_CONFIG } from '../../api/config';
 import { getAuthToken } from '../../utils/authToken';
@@ -215,7 +216,8 @@ export const TestModule: React.FC = () => {
   
   // 考试相关状态（需要在 useEffect 之前定义）
   const [currentExamRecordId, setCurrentExamRecordId] = useState<string | null>(null);
-  const [showExamNavigator, setShowExamNavigator] = useState(false);
+  // 题目导航默认展开（2026-11-17 吴老要求）：学生一进考试就能看到整卷题号与作答情况
+  const [showExamNavigator, setShowExamNavigator] = useState(true);
 
   // 综合题答案状态
   const [testCompositeChoiceAnswers, setTestCompositeChoiceAnswers] = useState<Record<string, Record<number, string>>>({});
@@ -2047,11 +2049,12 @@ export const TestModule: React.FC = () => {
                     <span>按 ①②③ 的顺序，把空缺处的代码填进去</span>
                   </div>
                   {(currentQuestion as any).description && (
-                    // 编程题的「题目要求」是纯文本（可能带 markdown 图片标记），
-                    // 不走 HTML 注入，避免 markdown 符号被当成正文
-                    <div className="mb-3 whitespace-pre-wrap rounded-lg border border-amber-200 bg-amber-50/70 p-3 text-sm leading-relaxed text-gray-700">
-                      {(currentQuestion as any).description}
-                    </div>
+                    // 编程题的「题目要求」是纯文本 + markdown 图片（图多是 base64 内嵌），
+                    // 必须走 RichDescription 才能把图片渲染出来
+                    <RichDescription
+                      text={(currentQuestion as any).description}
+                      className="mb-3 rounded-lg border border-amber-200 bg-amber-50/70 p-3 text-sm text-gray-700"
+                    />
                   )}
                   <div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50 p-4 font-mono text-[13px] leading-7 text-slate-800">
                     {renderExamPythonTemplate(
@@ -3054,6 +3057,13 @@ export const TestModule: React.FC = () => {
 
                           {it.kind === 'python' && (
                             <div className="space-y-2">
+                              {/* 题目要求（含图片）：不显示的话学生复盘时只看到一行标题 */}
+                              {it.description && (
+                                <RichDescription
+                                  text={it.description}
+                                  className="rounded-lg border border-amber-200 bg-amber-50/70 p-2 text-xs text-gray-700"
+                                />
+                              )}
                               {it.blank_template && (
                                 <pre className="overflow-x-auto rounded bg-slate-50 p-2 font-mono text-[11px] leading-5 text-slate-700">
                                   {it.blank_template}

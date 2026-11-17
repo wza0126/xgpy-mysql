@@ -6250,6 +6250,8 @@ app.get('/api/teacher/exams/:testId/analysis', authenticate, requireTeachingRole
         options: it.options || [],
         sub_questions: it.sub_questions || null,
         blank_template: it.blank_template || '',
+        // 教师端「按题目查看」也要看到题目要求（含图片），否则只显示作业标题
+        description: it.description || '',
         blank_count: it.blank_count || 0,
         score: it.score,
         answered: total,
@@ -6507,6 +6509,8 @@ app.get('/api/business/exam-review/:examRecordId', authenticate, async (req, res
         options: item.options || [],
         sub_questions: item.sub_questions || null,
         blank_template: item.blank_template || '',
+        // 编程题的题目要求（含 markdown 图片）：不带这段，学生看回顾就只有一行标题
+        description: item.description || '',
         blank_count: item.blank_count || 0,
         explanation: item.explanation || '',
         score: item.score,
@@ -11572,7 +11576,9 @@ async function getExplainScriptFor({ questionId, style, force }) {
       .join('\n');
     const plainDesc = String(t.description || '')
       .replace(/<[^>]+>/g, ' ')
-      .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+      // 图片（多为 base64 内嵌截图）不能直接喂给模型，但也不能悄悄删掉 ——
+      // 留个「此处是图片」的占位，模型才知道题目里还有一张图要看
+      .replace(/!\[([^\]]*)\]\(([^)]*)\)/g, (_m, alt) => `（此处是图片${alt ? `：${alt}` : ''}）`)
       .replace(/[ \t]+/g, ' ')
       .trim();
     q = {

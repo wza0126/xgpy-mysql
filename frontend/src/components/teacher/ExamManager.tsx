@@ -5,6 +5,7 @@ import { Question } from '../../types';
 import { formatDateTime } from '../../utils/dateUtils';
 import * as XLSX from 'xlsx';
 import { sanitizeHtml, htmlToPlainText } from '../../utils/htmlUtils';
+import { RichDescription, richTextToPlain } from '../../utils/richDescription';
 import { isOperationType } from '../../utils/questionType';
 import { AiExplainPlayer, ExplainQuestion } from './AiExplainPlayer';
 import { PKBattleConfigTab } from './PKBattleConfigTab';
@@ -443,6 +444,26 @@ export const ExamManager: React.FC = () => {
   const handleToggleActive = async (test: ExamTest) => {
     await backendClient.from('tests').update({ is_active: !test.is_active }).eq('id', test.id);
     fetchData();
+  };
+
+  /** 列表里直接开关「允许学生查看试卷」（2026-11-17） */
+  const handleToggleViewPaper = async (test: ExamTest) => {
+    const next = !(test as any).allow_view_paper;
+    if (next) {
+      const ok = window.confirm(
+        `允许学生查看「${test.title}」的试卷？\n\n` +
+        `· 学生交卷后（或考试结束后）可以在「我的考试记录」里双击这条记录，` +
+        `回看题目、正确答案和自己的作答\n` +
+        `· 不想让学生看到答案的，考试期间请不要打开这个开关`
+      );
+      if (!ok) return;
+    }
+    try {
+      await backendClient.from('tests').update({ allow_view_paper: next }).eq('id', test.id);
+      await fetchData();
+    } catch (e: any) {
+      alert(`操作失败：${e?.message || e}`);
+    }
   };
 
   /**
@@ -1113,6 +1134,21 @@ export const ExamManager: React.FC = () => {
                     >
                       <i className={`fa-solid ${forceStates[test.id]?.force_end ? 'fa-toggle-on' : 'fa-toggle-off'} mr-1`}></i>
                       强制结束
+                    </button>
+                    {/* 允许学生查看试卷：原来只能进编辑弹窗改，列表里直接给个开关（2026-11-17） */}
+                    <button
+                      onClick={() => handleToggleViewPaper(test)}
+                      className={`text-xs px-2 py-1 rounded border ${
+                        (test as any).allow_view_paper
+                          ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+                          : 'border-gray-200 bg-white text-gray-500 hover:border-emerald-300 hover:text-emerald-600'
+                      }`}
+                      title={(test as any).allow_view_paper
+                        ? '学生可以看到这场考试的试卷（点此关闭）'
+                        : '学生看不到试卷（点此打开：允许学生交卷后回看题目与答案）'}
+                    >
+                      <i className={`fa-solid ${(test as any).allow_view_paper ? 'fa-eye' : 'fa-eye-slash'} mr-1`}></i>
+                      可看试卷
                     </button>
                     <button
                       onClick={() => openRecordsModal(test)}
@@ -2420,7 +2456,7 @@ export const ExamManager: React.FC = () => {
                                       onClick={() => startExamExplain({
                                         id: it.item_id,
                                         type: 'python_fill',
-                                        content: `${it.content}\n\n【代码模板】\n${it.blank_template}\n\n【每空标准答案】\n${(it.blanks_stats || [])
+                                        content: `${it.content}${it.description ? `\n\n【题目要求】\n${richTextToPlain(it.description, '（此处是图片）')}` : ''}\n\n【代码模板】\n${it.blank_template}\n\n【每空标准答案】\n${(it.blanks_stats || [])
                                           .map((b: any) => `第${b.index}空：${(b.accept || []).join('  或  ') || '（未配置）'}`)
                                           .join('\n')}`,
                                         options: '[]',
@@ -2435,6 +2471,13 @@ export const ExamManager: React.FC = () => {
                                   <pre className="overflow-x-auto rounded bg-slate-50 p-3 font-mono text-xs leading-6 text-slate-700">
                                     {it.blank_template || '（无模板）'}
                                   </pre>
+                                  {/* 题目要求（含图片）：老师按题目查看时也要能看到题干，不只是模板 */}
+                                  {it.description && (
+                                    <RichDescription
+                                      text={it.description}
+                                      className="rounded-lg border border-amber-200 bg-amber-50/70 p-3 text-xs text-gray-700"
+                                    />
+                                  )}
                                   {(it.blanks_stats || []).map((b: any) => (
                                     <div key={b.index} className="rounded border border-gray-100 bg-white p-3">
                                       <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
