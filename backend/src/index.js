@@ -1978,6 +1978,11 @@ app.post('/api/tables/:tableName', authenticate, async (req, res) => {
         console.warn('[tests] 计算卷面满分失败，按 0 存:', e.message);
       }
     }
+    // 出卷人：前端老版本没传 created_by，试卷会变成「无主」，按老师筛选时
+    // 谁都看不到（2026-11-17 吴老的 teacher 账号就遇上了）。这里兜底写当前登录人。
+    if (tableName === 'tests' && !data.created_by) {
+      data.created_by = req.user?.userId || req.user?.id || null;
+    }
 
     if (!data.id) {
       data.id = `local_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -2095,6 +2100,7 @@ app.put('/api/tables/:tableName/:id', authenticate, async (req, res) => {
         console.warn('[tests] 计算卷面满分失败，保持原值:', e.message);
       }
     }
+    // ⛔ PUT 不补 created_by：老师改别人的卷子不该把「出卷人」改成自己。
 
     // ---- profiles 表写保护 ----
     // /api/tables 是通用表写接口，默认任何已登录用户都能改任意表任意字段。
@@ -5330,7 +5336,10 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
         if (startSrc) {
           const limitMin = Number(testEarly.time_limit) || 15;
           const limitSec = limitMin * 60;
-          const GRACE_SEC = 120;
+          // 宽限从 2 分钟放宽到 10 分钟（2026-11-17）：学生刷新、断网重连、教室网络卡顿
+          // 都可能让自动交卷晚上几十秒到几分钟。真正的超时记录已由 exam-paper /
+          // exam-active 在进考试前结算掉，这里只兜「答题过程中断线」这一种。
+          const GRACE_SEC = 600;
           const elapsed = Math.floor((Date.now() - new Date(startSrc).getTime()) / 1000);
           if (elapsed > limitSec + GRACE_SEC) {
             await connection.rollback();
@@ -5718,6 +5727,78 @@ function examTargetsStudent(testRow, classId) {
   return !!classId && ids.includes(String(classId));
 }
 
+/**
+ * 把一条「超时未交卷」的考试记录结算掉（2026-11-17）
+ * ============================================================
+ * 学生中途关页面/断网/换设备，会留下 completed_at 为空的僵尸记录。
+ * 老逻辑下这条记录被 /api/student/exam-active 一直捞出来，学生一登录就
+ * 「时间到 → 自动交卷 → 服务端超时拒收 → 卡死在提交中」（a 账号 2026-11-17 就是这样）。
+ *
+ * ⛔ 不发积分/钻石/装备：这是补交，不是正常通过，别让「关窗口」变成刷奖励的手段。
+ */
+async function settleExpiredExam(conn, rec, test, paperById) {
+  let answers = {};
+  try {
+    const [[pg]] = await conn.query(
+      'SELECT answers FROM exam_progress WHERE exam_record_id = ? LIMIT 1',
+      [rec.id]
+    );
+    if (pg && pg.answers) {
+      answers = typeof pg.answers === 'string' ? JSON.parse(pg.answers) : pg.answers;
+    }
+  } catch { answers = {}; }
+
+  let ids = parseItemIds(rec.selected_question_ids);
+  if (!ids.length) ids = [...paperById.keys()];
+
+  let creditPoints = 0;
+  let paperTotalPoints = 0;
+  let correct = 0;
+  const results = [];
+  for (const id of ids) {
+    const item = paperById.get(id);
+    if (!item) continue;
+    const raw = answers[id];
+    const judged = judgeItem(item, raw);
+    creditPoints += judged.credit;
+    paperTotalPoints += judged.max;
+    if (judged.isCorrect) correct += 1;
+    results.push({ item, raw, judged, answered: hasAnswer(item, raw) });
+  }
+  const score = Math.round(creditPoints);
+  const passing = test.passing_score == null ? 60 : Number(test.passing_score);
+  const isPassed = score >= passing && paperTotalPoints > 0;
+
+  await conn.query(
+    `UPDATE exam_records
+        SET score = ?, paper_total = ?, correct_count = ?, total_count = ?,
+            is_passed = ?, completed_at = NOW()
+      WHERE id = ?`,
+    [score, paperTotalPoints, correct, results.length, isPassed ? 1 : 0, rec.id]
+  );
+
+  // 重新写一遍作答明细（先删后写，避免重复结算时越积越多）
+  await conn.query(
+    "DELETE FROM student_answers WHERE source = 'exam' AND test_id = ? AND student_id = ?",
+    [rec.test_id, rec.student_id]
+  );
+  for (const r of results) {
+    if (!r.answered) continue;
+    const stored = typeof r.raw === 'string' ? r.raw : JSON.stringify(r.raw == null ? '' : r.raw);
+    await conn.query(
+      `INSERT INTO student_answers
+         (id, student_id, question_id, answer, is_correct, points_change, source, test_id, test_record_id, created_at)
+       VALUES (?, ?, ?, ?, ?, 0, 'exam', ?, ?, NOW())`,
+      [`sa_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        rec.student_id, r.item.item_id, stored.slice(0, 5000), r.judged.isCorrect ? 1 : 0,
+        rec.test_id, rec.id]
+    );
+  }
+
+  await conn.query('DELETE FROM exam_progress WHERE exam_record_id = ?', [rec.id]);
+  return { score, paper_total: paperTotalPoints, is_passed: isPassed };
+}
+
 app.get('/api/business/exam-paper/:testId', authenticate, requireStudent, async (req, res) => {
   const testId = String(req.params.testId || '').trim();
   const studentId = req.user.userId || req.user.id;
@@ -5788,6 +5869,15 @@ app.get('/api/business/exam-paper/:testId', authenticate, requireStudent, async 
       ? Math.floor((Date.now() - new Date(rec.started_at).getTime()) / 1000)
       : 0;
     const remaining = Math.max(0, limitSec - elapsed);
+
+    // 已超时的记录：当场结算。绝不能让前端进到「时间到 → 自动交卷 → 被拒」的死局
+    if (remaining <= 0) {
+      const settled = await settleExpiredExam(conn, rec, test, byId);
+      return res.json({
+        data: { completed: true, expired: true, score: settled.score, paper_total: settled.paper_total },
+        error: null,
+      });
+    }
 
     // 断点续答：优先用 exam_progress 里存的答案
     let savedAnswers = {};
@@ -5937,27 +6027,63 @@ app.get('/api/student/exam-active', authenticate, requireStudent, async (req, re
     const studentId = req.user.userId || req.user.id;
     const [rows] = await pool.query(
       `SELECT r.id AS exam_record_id, r.test_id, r.started_at, r.selected_question_ids,
-              t.title, t.time_limit, t.paper_total
+              t.title, t.time_limit, t.paper_total, t.passing_score
          FROM exam_records r
          JOIN tests t ON t.id = r.test_id
         WHERE r.student_id = ? AND r.completed_at IS NULL AND t.is_active = 1 AND t.type = 'exam'
         ORDER BY r.started_at ASC`,
       [studentId]
     );
-    const list = rows.map((r) => {
+    const list = [];
+    for (const r of rows) {
       const limitSec = (Number(r.time_limit) || 60) * 60;
       const elapsed = r.started_at
         ? Math.floor((Date.now() - new Date(r.started_at).getTime()) / 1000)
         : 0;
-      return {
+      const remaining = Math.max(0, limitSec - elapsed);
+
+      // ⛔ 超时的僵尸记录必须在这里结算掉：以前直接返回给前端，学生一登录就被拉进
+      //    「时间到 → 自动交卷 → 服务端拒收」，页面永远卡在提交中（2026-11-17 a 账号）。
+      if (remaining <= 0) {
+        let settled = false;
+        try {
+          const paper = await loadPaper(pool, r.test_id);
+          if (paper && paper.items.length) {
+            const byId = new Map(paper.items.map((it) => [it.item_id, it]));
+            const [[full]] = await pool.query('SELECT * FROM exam_records WHERE id = ?', [r.exam_record_id]);
+            if (full) await settleExpiredExam(pool, full, r, byId);
+            settled = true;
+          }
+        } catch (e) {
+          console.warn('[exam-active] 超时记录结算失败:', r.exam_record_id, e.message);
+        }
+        if (!settled) {
+          // 试卷题目全是不可判分的类型（题库填空/操作题），或者结算中途出错：
+          // 直接按 0 分关掉，别让这条记录永远挂在「未交卷」里反复骚扰学生。
+          try {
+            await pool.query(
+              `UPDATE exam_records
+                  SET score = COALESCE(score, 0),
+                      paper_total = CASE WHEN paper_total > 0 THEN paper_total ELSE 100 END,
+                      completed_at = NOW()
+                WHERE id = ?`,
+              [r.exam_record_id]
+            );
+          } catch (e) {
+            console.warn('[exam-active] 兜底关闭失败:', r.exam_record_id, e.message);
+          }
+        }
+        continue;
+      }
+
+      list.push({
         exam_record_id: r.exam_record_id,
         test_id: r.test_id,
         title: r.title,
-        remaining_seconds: Math.max(0, limitSec - elapsed),
-        // 超时但没交的，也让学生进去交卷（服务端有 120 秒宽限）
-        over_time: elapsed > limitSec,
-      };
-    });
+        remaining_seconds: remaining,
+        over_time: false,
+      });
+    }
     res.json({ data: { exams: list }, error: null });
   } catch (e) {
     console.error('[exam-active] 失败:', e);
@@ -6282,6 +6408,140 @@ app.get('/api/teacher/exams/:testId/analysis', authenticate, requireTeachingRole
 });
 
 /** 把一堆学生答案汇总成「答案 → 人数」，按人数降序，最多 12 条（防止一屏塞满） */
+/**
+ * 学生端：单次考试的答卷回顾（2026-11-17）
+ * ============================================================
+ * 为什么不让前端自己拼：老逻辑在浏览器里查 questions、再查 student_answers，自己判对错。
+ * 三题型之后这套逻辑必然崩 —— 编程题不在 questions 表；综合题/编程题根本没有
+ * 「一个字符串答案」可以比对（getAnswers 会把小题对象拼成 "[object Object]"），
+ * 于是学生一点考试记录，弹窗就是空白。
+ *
+ * 现在一律服务端把「题目 + 我的作答 + 正确答案 + 得分」算好发下来，前端只渲染。
+ * 权限：学生只能看自己的；老师可以看任何人的（和考试情况页共用同一口径）。
+ */
+app.get('/api/business/exam-review/:examRecordId', authenticate, async (req, res) => {
+  const recordId = String(req.params.examRecordId || '').trim();
+  const requesterId = req.user?.userId || req.user?.id;
+  const requesterRole = req.user?.role;
+  try {
+    const [[rec]] = await pool.query('SELECT * FROM exam_records WHERE id = ?', [recordId]);
+    if (!rec) return res.status(404).json({ data: null, error: '找不到这条考试记录' });
+    if (requesterRole === 'student' && rec.student_id !== requesterId) {
+      return res.status(403).json({ data: null, error: '只能查看自己的答卷' });
+    }
+
+    const paper = await loadPaper(pool, rec.test_id);
+    if (!paper) return res.status(404).json({ data: null, error: '试卷已不存在' });
+    const byId = new Map(paper.items.map((it) => [it.item_id, it]));
+
+    let ids = parseItemIds(rec.selected_question_ids);
+    if (!ids.length) ids = paper.items.map((it) => it.item_id);
+
+    const [answerRows] = await pool.query(
+      `SELECT question_id, answer FROM student_answers
+        WHERE source = 'exam' AND test_id = ? AND student_id = ?`,
+      [rec.test_id, rec.student_id]
+    );
+    const answerMap = new Map(answerRows.map((a) => [a.question_id, a.answer]));
+
+    const items = ids.map((id) => {
+      const item = byId.get(id);
+      if (!item) return null;
+      const raw = answerMap.has(id) ? answerMap.get(id) : undefined;
+      const judged = judgeItem(item, raw);
+
+      // 「我的作答」按题型归一化成结构化数据，前端不用再 parse 来 parse 去
+      let myAnswer = null;
+      if (raw !== undefined && raw !== null && String(raw).trim() !== '') {
+        if (item.kind === 'choice') {
+          myAnswer = { kind: 'choice', letter: String(raw).trim() };
+        } else if (item.kind === 'composite') {
+          let p = {};
+          try { p = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch { p = {}; }
+          myAnswer = {
+            kind: 'composite',
+            choice_answers: (p && p.choice_answers) || {},
+            blank_answers: (p && p.blank_answers) || {},
+          };
+        } else {
+          const blanks = [];
+          try {
+            const p = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            if (Array.isArray(p)) blanks.push(...p);
+            else if (p && Array.isArray(p.blanks)) blanks.push(...p.blanks);
+          } catch { /* 脏数据按空作答 */ }
+          myAnswer = { kind: 'python', blanks };
+        }
+      }
+
+      // 正确答案：选择给字母；综合题给每个小题答案；编程题给每空的可接受答案
+      let correct = null;
+      if (item.kind === 'choice') {
+        const arr = taskGetAnswersArray(item.answer);
+        correct = { kind: 'choice', letter: String(arr[0] == null ? '' : arr[0]).trim().toUpperCase() };
+      } else if (item.kind === 'composite') {
+        const subs = taskGetAnswersArray(item.answer);
+        correct = {
+          kind: 'composite',
+          subs: subs.map((sq) => ({
+            type: sq && sq.type === 'fill_blank' ? 'fill_blank' : 'choice',
+            answers: sq ? taskGetAnswersArray(sq.answers) : [],
+            score: Number(sq && sq.score) || 0,
+            multiple: !!(sq && sq.multiple),
+          })),
+        };
+      } else {
+        let blanks = [];
+        try {
+          const ba = item.answer && item.answer.blank_answers;
+          blanks = typeof ba === 'string' ? JSON.parse(ba) : (ba || []);
+        } catch { blanks = []; }
+        correct = { kind: 'python', blank_answers: blanks };
+      }
+
+      return {
+        item_id: id,
+        kind: item.kind,
+        type: item.type,
+        content: item.content,
+        options: item.options || [],
+        sub_questions: item.sub_questions || null,
+        blank_template: item.blank_template || '',
+        blank_count: item.blank_count || 0,
+        explanation: item.explanation || '',
+        score: item.score,
+        answered: hasAnswer(item, raw),
+        credit: judged.credit,
+        max: judged.max,
+        is_correct: judged.isCorrect,
+        detail: judged.detail,
+        my_answer: myAnswer,
+        correct,
+      };
+    }).filter(Boolean);
+
+    res.json({
+      data: {
+        record_id: rec.id,
+        test_id: rec.test_id,
+        title: paper.test.title,
+        score: Number(rec.score) || 0,
+        // 老记录的 paper_total 是 100（百分制遗留），直接用库里的值
+        paper_total: Number(rec.paper_total) || 100,
+        passing_score: paper.test.passing_score == null ? 60 : Number(paper.test.passing_score),
+        is_passed: !!rec.is_passed,
+        completed_at: rec.completed_at,
+        inactive_count: Number(rec.inactive_count) || 0,
+        items,
+      },
+      error: null,
+    });
+  } catch (e) {
+    console.error('[exam-review] 失败:', e);
+    res.status(500).json({ data: null, error: e.message });
+  }
+});
+
 function summarizeTexts(list) {
   const counter = new Map();
   for (const raw of list) {
@@ -11291,14 +11551,53 @@ async function getExplainScriptFor({ questionId, style, force }) {
     }
   }
 
-  const [rows] = await pool.query(
-    'SELECT id, type, content, options, answers, explanation, cluster_id FROM questions WHERE id = ? LIMIT 1',
-    [questionId],
-  );
-  if (!rows.length) { const e = new Error('题目不存在'); e.status = 404; throw e; }
-  const q = rows[0];
+  // 编程填空题不在 questions 表里（id 形如 py:xxx）：从作业表取出，拼成
+  // 「题干 + 题目要求 + 程序模板 + 每空答案」再喂给 AI。
+  // ⛔ 2026-11-17 之前这里直接 404「题目不存在」，老师点编程题的 AI 讲解就报错。
+  let q = null;
+  if (isPythonItem(questionId)) {
+    const taskId = pythonTaskIdOf(questionId);
+    const [[t]] = await pool.query(
+      `SELECT id, title, description, blank_template, blank_answers
+         FROM python_tasks WHERE id = ? AND task_type = 'fill_blank' LIMIT 1`,
+      [taskId]
+    );
+    if (!t) { const e = new Error('题目不存在'); e.status = 404; throw e; }
+    let blanks = [];
+    try {
+      blanks = typeof t.blank_answers === 'string' ? JSON.parse(t.blank_answers) : (t.blank_answers || []);
+    } catch { blanks = []; }
+    const blankText = blanks
+      .map((a, i) => `第 ${i + 1} 空：${Array.isArray(a) ? a.join('  或  ') : a}`)
+      .join('\n');
+    const plainDesc = String(t.description || '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+      .replace(/[ \t]+/g, ' ')
+      .trim();
+    q = {
+      id: questionId,
+      type: 'python_fill',
+      content: [
+        t.title || '编程填空',
+        plainDesc ? `\n\n【题目要求】\n${plainDesc}` : '',
+        t.blank_template ? `\n\n【程序模板（①②③ 是待填空位）】\n${t.blank_template}` : '',
+      ].join(''),
+      options: '[]',
+      answers: blankText || '（未配置答案）',
+      explanation: '',
+      cluster_id: '编程填空',
+    };
+  } else {
+    const [rows] = await pool.query(
+      'SELECT id, type, content, options, answers, explanation, cluster_id FROM questions WHERE id = ? LIMIT 1',
+      [questionId],
+    );
+    if (!rows.length) { const e = new Error('题目不存在'); e.status = 404; throw e; }
+    q = rows[0];
+  }
 
-  const typeLabel = { choice: '单选题', fill: '填空题', fill_blank: '填空题', composite: '复合题', judge: '判断题' }[q.type] || q.type;
+  const typeLabel = { choice: '单选题', fill: '填空题', fill_blank: '填空题', composite: '复合题', judge: '判断题', python_fill: '编程填空题' }[q.type] || q.type;
   let optionsText = '';
   try {
     const rawOpts = typeof q.options === 'string' ? JSON.parse(q.options || '[]') : (q.options || []);
@@ -11308,12 +11607,15 @@ async function getExplainScriptFor({ questionId, style, force }) {
     }
   } catch { /* 选项解析失败就只讲题干与解析 */ }
 
+  // 编程填空的「题干」里带着整段程序模板、答案按空逐条列，截断到 500/120 会把
+  // 模板和后面的空切掉，AI 只能瞎猜。这类题单独放大上限。
+  const isPyFill = q.type === 'python_fill';
   const userPrompt = [
     `【题型】${typeLabel}`,
     `【知识点】${q.cluster_id || '（未标注）'}`,
-    `【题干】${clip(q.content, 500)}`,
+    `【题干】${clip(q.content, isPyFill ? 2000 : 500)}`,
     optionsText ? `【选项】\n${optionsText}` : '【注意】本题没有选项，不要生成 compare 场景，也不要自己编造 A/B/C/D 选项。',
-    `【正确答案】${clip(q.answers, 120)}`,
+    `【正确答案】${clip(q.answers, isPyFill ? 800 : 120)}`,
     `【题库解析】${clip(q.explanation, 600) || '（这道题没有现成解析，请依据学科知识谨慎讲解，不要编造具体数据）'}`,
     '',
     '请按系统要求输出 JSON。',

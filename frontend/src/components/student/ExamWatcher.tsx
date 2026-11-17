@@ -84,6 +84,12 @@ export const ExamWatcher: React.FC<{ testComponent: React.ReactNode }> = ({ test
             { force: true }
           );
           store.lockWindow('test');
+          // 兜底：8 秒后还没真正进考试（考试已结束 / 取卷失败 / profile 还没就绪），
+          // 就把锁解开，否则学生会被一个「进不去又关不掉」的窗口困住。
+          setTimeout(() => {
+            const st = useDesktopStore.getState();
+            if (!st.examContext) st.unlockWindow('test');
+          }, 8000);
           // 给 TestModule 一点时间取卷，避免每 5 秒重复开窗
           setTimeout(() => { starting = false; }, 15000);
         }

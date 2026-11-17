@@ -190,7 +190,8 @@ export const TestModule: React.FC = () => {
   const [testDetailData, setTestDetailData] = useState<{ questions: Question[]; answers: Record<string, string> } | null>(null);
   const [showExamDetail, setShowExamDetail] = useState(false);
   const [selectedExamRecord, setSelectedExamRecord] = useState<ExamRecord | null>(null);
-  const [examDetailData, setExamDetailData] = useState<{ questions: Question[]; answers: Record<string, string> } | null>(null);
+  // 答卷回顾：服务端算好的整份结果（item 结构见 /api/business/exam-review）
+  const [examDetailData, setExamDetailData] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   // 默认落在「考试列表」：考试成绩才是学生最关心的，而且普通测试和考试长得像，
   // 先看到测试列表容易误以为是考试（2026-10-24 吴老反馈学生几次搞混）。
@@ -476,15 +477,16 @@ export const TestModule: React.FC = () => {
     const type = item.kind === 'python' ? 'python_fill' : (item.type || 'choice');
     let answers = '';
     if (item.kind === 'composite') {
-      // 服务端只给小题骨架（正确答案已剥离）。渲染要按「空数」画输入框，
-      // 所以给每空塞一个空占位数组，长度 = blank_count。
+      // ⛔ 必须是**数组**：getCompositeSubQuestions() 只认 JSON 数组，
+      //    套一层 {answers:[...]} 会被判成空数组 → 综合题就只剩题干、没有小题
+      //    （2026-11-17 吴老反馈的「综合题只有题干」就是这个）。
       const subs = (item.sub_questions || []).map((sq: any) => ({
         ...sq,
         answers: sq.type === 'fill_blank'
           ? Array.from({ length: Math.max(1, Number(sq.blank_count) || 1) }, () => [])
           : [],
       }));
-      answers = JSON.stringify({ answers: subs });
+      answers = JSON.stringify(subs);
     } else if (item.kind === 'choice') {
       answers = JSON.stringify({ answers: [] });
     }
@@ -500,6 +502,8 @@ export const TestModule: React.FC = () => {
       sub_questions: item.sub_questions || undefined,
       blank_template: item.blank_template || undefined,
       blank_count: item.blank_count || undefined,
+      // 编程题的题目要求（python_tasks.description）要带到界面上，否则学生只看到代码模板
+      description: item.description || undefined,
     } as unknown as Question;
   };
 
@@ -531,7 +535,9 @@ export const TestModule: React.FC = () => {
     }
     if (payload.completed) {
       if (!opts?.silent) {
-        alert(`你已完成这场考试：${payload.score} 分（满分 ${payload.paper_total}）`);
+        alert(payload.expired
+          ? `这场考试的时间已经用完，系统已按你当时的答题进度自动交卷：${payload.score} 分（满分 ${payload.paper_total}）。`
+          : `你已完成这场考试：${payload.score} 分（满分 ${payload.paper_total}）`);
       }
       fetchExams();
       return;
@@ -896,11 +902,21 @@ export const TestModule: React.FC = () => {
       fetchExams();
     } catch (error) {
       console.error('考试提交失败:', error);
+      // ⛔ 交卷失败绝不能把学生锁死在考试窗口里（2026-11-17 a 账号就是这样卡了一节课）：
+      //    遮罩一直盖着、窗口又锁着，学生既答不了也退不出。
+      //    这里一律解除锁定并退出考试界面 —— exam_records 仍是「未交卷」，
+      //    老师端「结束考试」会按 exam_progress 的进度补交，成绩不会丢。
+      setExamTimeUp(false);
+      examTimeUpRef.current = false;
+      setActiveExam(null);
+      setShowExamList(true);
+      unlockWindow('test');
+      fetchExams();
       // 会话失效（被同一账号新登录顶掉 / 登录超时）需引导重新登录，勿说成网络问题
       if ((error as any)?.isAuthError || (error as any)?.status === 401) {
-        alert('登录状态已失效，请退出后重新登录再提交');
+        alert('登录状态已失效，交卷没有成功。已退出考试界面，请退出后重新登录，再联系老师处理这次考试。');
       } else {
-        alert('提交失败，请重试');
+        alert('交卷没有成功（网络或服务器暂时不可用）。已为你退出考试界面，答题进度已保存在服务器上，请联系老师用「结束考试」补交。');
       }
     } finally {
       setIsSubmitting(false);
@@ -923,15 +939,18 @@ export const TestModule: React.FC = () => {
    * Desktop 查到未交卷的考试后会写 pendingExamTestId，这里等考试列表拉回来就进。
    */
   useEffect(() => {
-    if (!pendingExamTestId) return;
-    // ⛔ 不要「找不到就等」：强制开考时考试列表可能还没拉回来，
-    //    等下去学生就永远停在空列表上。只带 id 也能取卷（服务端按 id 装卷）。
+    // ⛔ 必须等 profile 就绪再进：后登录的学生挂载时 profile 还是空的，
+    //    startExam 第一行 `if (!profile) return` 会直接返回；而 pendingExamTestId
+    //    此时已经清空，就再也不会重试 —— 窗口还被锁着，学生卡在列表页关不掉。
+    if (!pendingExamTestId || !profile?.id) return;
+    // 不要「找不到就等」：强制开考时考试列表可能还没拉回来，
+    // 只带 id 也能取卷（服务端按 id 装卷）。
     const target = exams.find((e) => e.id === pendingExamTestId)
       || ({ id: pendingExamTestId, title: '' } as any);
     setPendingExam(null);
     startExam(target, { silent: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingExamTestId]);
+  }, [pendingExamTestId, profile?.id]);
 
   /** 考试进行中：锁死窗口（进入即最大化，不能关闭/最小化），并登记给 ExamWatcher 做离屏统计 */
   const examRunning = !!activeExam;
@@ -970,11 +989,15 @@ export const TestModule: React.FC = () => {
   }, [forceEndAt, setForceEndAt]);
   const [examInternetCodes, setExamInternetCodes] = useState<string[]>([]);
 
+  /**
+   * 打开某次考试的答卷回顾（2026-11-17 重写）
+   *
+   * ⛔ 老逻辑在浏览器里查 questions、再查 student_answers、自己判对错：
+   *    编程题不在 questions 表、综合题的「答案」是一堆小题对象，前端比对不了，
+   *    最后弹窗一片空白。现在题目、作答、正确答案、得分全部由服务端算好。
+   */
   const fetchExamDetail = async (record: ExamRecord) => {
-    console.log('fetchExamDetail 开始...');
-    console.log('record:', record);
-    
-    // 查询上网码
+    // 上网码：只在这条记录发过码时才查
     let codes: string[] = [];
     try {
       if (record.internet_codes_earned > 0) {
@@ -985,163 +1008,31 @@ export const TestModule: React.FC = () => {
           .eq('is_used', true)
           .order('used_at', { ascending: false })
           .limit(record.internet_codes_earned);
-        
         if (codesData && codesData.length > 0) {
           codes = codesData.map((c: any) => c.code);
         }
       }
     } catch (e) {
-      console.error('查询上网码失败:', e);
+      console.warn('查询上网码失败:', e);
     }
-    
     setExamInternetCodes(codes);
-    
-    // 先获取所有需要的 question_ids
-    let questionIds: string[] = [];
-    
-    // 优先从 selected_question_ids 获取
-    if (record.selected_question_ids) {
-      if (typeof record.selected_question_ids === 'string') {
-        try {
-          questionIds = JSON.parse(record.selected_question_ids);
-        } catch {
-          questionIds = [];
-        }
-      } else if (Array.isArray(record.selected_question_ids)) {
-        questionIds = record.selected_question_ids;
-      }
-    }
-    
-    // 如果没有，再从 student_answers 表获取
-    if (!questionIds || questionIds.length === 0) {
-      try {
-        console.log('从 student_answers 表获取 question_ids');
-        // 先尝试带 source 条件查询
-        let saData;
-        try {
-          const result = await backendClient
-            .from('student_answers')
-            .select('question_id, answer')
-            .eq('student_id', profile?.id)
-            .eq('test_id', record.test_id)
-            .eq('source', 'exam');
-          saData = result.data;
-        } catch (e) {
-          console.warn('带 source 查询失败，尝试无 source 查询:', e);
-          // 如果失败，尝试不限制 source
-          const result = await backendClient
-            .from('student_answers')
-            .select('question_id, answer')
-            .eq('student_id', profile?.id)
-            .eq('test_id', record.test_id);
-          saData = result.data;
-        }
-        
-        if (saData && saData.length > 0) {
-          questionIds = saData.map((item: any) => item.question_id);
-        }
-      } catch (e) {
-        console.error('获取 student_answers 失败:', e);
-      }
-    }
-    
-    console.log('questionIds:', questionIds);
-    
-    // 如果有 question_ids，直接查询 questions 表
-    if (questionIds && questionIds.length > 0) {
-      const { data: questionsData } = await backendClient
-        .from('questions')
-        .select('*')
-        .in('id', questionIds);
-      
-      // 编程填空题不在 questions 表，按 py: 前缀单独取（2026-11-17 三题型试卷）
-      const pyIds = questionIds
-        .filter((id: any) => String(id).startsWith('py:'))
-        .map((id: any) => String(id).slice(3));
-      let extraPython: any[] = [];
-      if (pyIds.length) {
-        try {
-          const r: any = await backendClient
-            .from('python_tasks')
-            .selectExact('id, title, blank_template, blank_answers, blank_weights')
-            .in('id', pyIds);
-          extraPython = ((r && r.data) || []).map((t: any) => ({
-            id: `py:${t.id}`,
-            type: 'python_fill',
-            content: t.title || '编程填空',
-            options: '[]',
-            answers: JSON.stringify({ blank_answers: t.blank_answers, blank_weights: t.blank_weights }),
-            blank_template: t.blank_template || '',
-            explanation: '',
-          }));
-        } catch (e) {
-          console.warn('编程填空题详情加载失败:', e);
-        }
-      }
-      const allQuestions: any[] = [...((questionsData as any[]) || []), ...extraPython];
-      console.log('questionsData:', questionsData);
-      
-      if (allQuestions.length > 0) {
-        // 同时获取答案数据
-        const answers: Record<string, string> = {};
-        try {
-          let answerRecords;
-          try {
-            const result = await backendClient
-              .from('student_answers')
-              .select('question_id, answer')
-              .eq('student_id', profile?.id)
-              .eq('test_id', record.test_id)
-              .eq('source', 'exam');
-            answerRecords = result.data;
-          } catch (e) {
-            console.warn('带 source 查询答案失败，尝试无 source 查询:', e);
-            // 如果失败，尝试不限制 source
-            const result = await backendClient
-              .from('student_answers')
-              .select('question_id, answer')
-              .eq('student_id', profile?.id)
-              .eq('test_id', record.test_id);
-            answerRecords = result.data;
-          }
-          
-          if (answerRecords && answerRecords.length > 0) {
-            answerRecords.forEach((item: any) => {
-              answers[item.question_id] = item.answer || '';
-            });
-          }
-        } catch (e) {
-          console.error('获取答案记录失败:', e);
-        }
-        
-        // 构建最终数据；题目已脱敏，答案与解析走「答过才给答案」的接口换回来
-        let revealedList: any[] = [];
-        try {
-          const reveal = await backendClient.post('/api/practice/reveal-answers', {
-            question_ids: allQuestions.map((q: any) => q.id),
-          });
-          revealedList = (reveal as any)?.data?.questions || [];
-        } catch (e) {
-          console.warn('获取历史试卷答案失败:', e);
-        }
-        const questions: Question[] = mergeRevealIntoQuestions(allQuestions as Question[], revealedList);
-        allQuestions.forEach((q: any) => {
-          if (!answers[q.id]) {
-            answers[q.id] = '';
-          }
-        });
-        
-        console.log('最终 questions:', questions);
-        console.log('最终 answers:', answers);
-        
-        setExamDetailData({ questions, answers });
-        setSelectedExamRecord(record);
-        setShowExamDetail(true);
+
+    try {
+      const r: any = await backendClient.getExamReview(record.id);
+      if (r?.error) {
+        alert(r.error);
         return;
       }
+      if (!r?.data || !Array.isArray(r.data.items)) {
+        alert('这份答卷暂时打不开（可能是题目已被删除），请联系老师');
+        return;
+      }
+      setExamDetailData(r.data);
+      setSelectedExamRecord(record);
+      setShowExamDetail(true);
+    } catch (e: any) {
+      alert(e?.message || '打开答卷失败，请重试');
     }
-    
-    alert('暂无试卷详情');
   };
 
   const getExamStatus = (exam: Test): { status: string; color: string; record?: ExamRecord } => {
@@ -2156,8 +2047,10 @@ export const TestModule: React.FC = () => {
                     <span>按 ①②③ 的顺序，把空缺处的代码填进去</span>
                   </div>
                   {(currentQuestion as any).description && (
-                    <div className="mb-3 text-sm text-gray-600 question-rich-content">
-                      <div dangerouslySetInnerHTML={{ __html: sanitizeHtml((currentQuestion as any).description) }} />
+                    // 编程题的「题目要求」是纯文本（可能带 markdown 图片标记），
+                    // 不走 HTML 注入，避免 markdown 符号被当成正文
+                    <div className="mb-3 whitespace-pre-wrap rounded-lg border border-amber-200 bg-amber-50/70 p-3 text-sm leading-relaxed text-gray-700">
+                      {(currentQuestion as any).description}
                     </div>
                   )}
                   <div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50 p-4 font-mono text-[13px] leading-7 text-slate-800">
@@ -2988,16 +2881,19 @@ export const TestModule: React.FC = () => {
               <div className="flex items-start justify-between mb-4">
                 <div className="flex-1">
                   <h3 className="text-lg font-bold text-gray-800">
-                    {exams.find(e => e.id === selectedExamRecord.test_id)?.title || '考试'}
+                    {examDetailData.title || '考试'}
                   </h3>
                   <p className="text-sm text-gray-500 mb-2">
-                    得分: <span className="font-bold text-purple-600">{selectedExamRecord.score}</span> |
-                    正确: <span className="font-bold text-green-600">{selectedExamRecord.correct_count}/{selectedExamRecord.total_count}</span> |
-                    获得积分: <span className="font-bold text-yellow-600">+{selectedExamRecord.points_earned}</span> |
-                    {selectedExamRecord.is_passed ? (
+                    得分: <span className="font-bold text-purple-600">{examDetailData.score}</span>
+                    <span className="text-gray-400"> / {examDetailData.paper_total}</span> |
+                    及格线: <span className="font-bold text-gray-700">{examDetailData.passing_score}</span> |
+                    {examDetailData.is_passed ? (
                       <span className="text-green-600"> 通过</span>
                     ) : (
                       <span className="text-red-600"> 未通过</span>
+                    )}
+                    {examDetailData.inactive_count > 0 && (
+                      <span className="text-amber-600"> | 切屏 {examDetailData.inactive_count} 次</span>
                     )}
                   </p>
                   {/* 显示上网码 */}
@@ -3012,18 +2908,6 @@ export const TestModule: React.FC = () => {
                             <span className="font-mono font-bold text-purple-600 text-sm">{code}</span>
                             <button
                               onClick={() => {
-                                const copyToClipboard = (text: string) => {
-                                  if (navigator.clipboard && window.isSecureContext) {
-                                    navigator.clipboard.writeText(text).then(() => {
-                                      alert('复制成功！');
-                                    }).catch(() => {
-                                      fallbackCopy(text);
-                                    });
-                                  } else {
-                                    fallbackCopy(text);
-                                  }
-                                };
-                                
                                 const fallbackCopy = (text: string) => {
                                   const textArea = document.createElement('textarea');
                                   textArea.value = text;
@@ -3033,15 +2917,17 @@ export const TestModule: React.FC = () => {
                                   textArea.focus();
                                   textArea.select();
                                   try {
-                                    const successful = document.execCommand('copy');
-                                    alert(successful ? '复制成功！' : '复制失败，请手动复制');
-                                  } catch (err) {
+                                    alert(document.execCommand('copy') ? '复制成功！' : '复制失败，请手动复制');
+                                  } catch {
                                     alert('复制失败，请手动复制');
                                   }
                                   document.body.removeChild(textArea);
                                 };
-                                
-                                copyToClipboard(code);
+                                if (navigator.clipboard && window.isSecureContext) {
+                                  navigator.clipboard.writeText(code).then(() => alert('复制成功！')).catch(() => fallbackCopy(code));
+                                } else {
+                                  fallbackCopy(code);
+                                }
                               }}
                               className="text-purple-400 hover:text-purple-600 transition-colors"
                               title="复制上网码"
@@ -3063,106 +2949,147 @@ export const TestModule: React.FC = () => {
               </div>
 
               <div className="space-y-3 max-h-[70vh] overflow-y-auto pr-2">
-                {examDetailData.questions.map((q, index) => {
-                  const userAnswer = examDetailData.answers[q.id] || '';
-                  const correctAnswers = getAnswers(q.answers);
-                  const normalizeAnswer = (ans: string) => {
-                    return ans.toLowerCase().trim();
-                  };
-                  // 综合题/编程题前端拿不到标准答案（服务端判分），这里只回顾作答，不打对错
-                  const isStructured = q.type === 'composite' || q.type === 'python_fill';
-                  const isAnswered = !!userAnswer && userAnswer.trim() !== '';
-                  const isCorrect = !isStructured && isAnswered && correctAnswers.some((ans) => normalizeAnswer(ans) === normalizeAnswer(userAnswer));
-                  const badgeClass = isStructured
-                    ? 'bg-gray-400 text-white'
-                    : isAnswered
-                      ? (isCorrect ? 'bg-green-500 text-white' : 'bg-red-500 text-white')
-                      : 'bg-gray-400 text-white';
+                {(examDetailData.items as any[]).map((it, index) => {
+                  const my = it.my_answer;
+                  const cor = it.correct;
+                  const answered = !!it.answered;
+                  const ok = !!it.is_correct;
+                  const kindLabel = it.kind === 'composite' ? '综合题' : it.kind === 'python' ? '编程填空' : '选择题';
+                  const badgeClass = !answered ? 'bg-gray-400 text-white' : ok ? 'bg-green-500 text-white' : 'bg-red-500 text-white';
 
-                  // 结构化作答展开：综合题按小题、编程题按空
-                  let structuredRows: { label: string; value: string; extra?: string }[] = [];
-                  if (q.type === 'composite') {
-                    let p: any = {};
-                    try { p = JSON.parse(userAnswer || '{}'); } catch { p = {}; }
-                    const subs = getCompositeSubQuestions(q.answers);
-                    structuredRows = subs.map((sq: any, i: number) => {
-                      const c = (p.choice_answers || {})[i];
-                      const b = (p.blank_answers || {})[i];
-                      const shown = c != null && c !== ''
-                        ? String(c)
-                        : Array.isArray(b) ? b.filter(Boolean).join(' | ') : String(b == null ? '' : b);
-                      return { label: `第${i + 1}小题`, value: shown || '（空）', extra: sq.score ? `${sq.score} 分` : '' };
-                    });
-                  } else if (q.type === 'python_fill') {
-                    let arr: string[] = [];
-                    try {
-                      const p = JSON.parse(userAnswer || '{}');
-                      arr = Array.isArray(p.blanks) ? p.blanks : [];
-                    } catch { arr = []; }
-                    let weights: number[] = [];
-                    try {
-                      const a = JSON.parse(q.answers || '{}');
-                      weights = Array.isArray(a.blank_weights) ? a.blank_weights : [];
-                    } catch { weights = []; }
-                    structuredRows = arr.length
-                      ? arr.map((v, i) => ({ label: `第${i + 1}空`, value: v || '（空）', extra: weights[i] ? `${weights[i]} 分` : '' }))
-                      : [{ label: '', value: '这一题没有作答记录' }];
-                  }
+                  // 综合题：小题正确答案（选择是字母数组，填空是「每空一个可接受答案数组」）
+                  const fmtSubCorrect = (sub: any) => {
+                    if (!sub) return '';
+                    const arr: any[] = sub.answers || [];
+                    if (sub.type === 'choice') return arr.map((x) => String(x)).join('、') || '—';
+                    return arr.map((x) => (Array.isArray(x) ? x.join(' 或 ') : String(x))).join(' ｜ ') || '—';
+                  };
 
                   return (
-                    <div key={q.id} className={`p-4 rounded-lg border ${isStructured ? 'bg-gray-50 border-gray-200' : isAnswered ? (isCorrect ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200') : 'bg-gray-50 border-gray-200'}`}>
+                    <div
+                      key={it.item_id}
+                      className={`p-4 rounded-lg border ${
+                        !answered ? 'bg-gray-50 border-gray-200' : ok ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'
+                      }`}
+                    >
                       <div className="flex items-start gap-3">
                         <span className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-lg ${badgeClass}`}>
-                          {isStructured
-                            ? <i className="fa-solid fa-list-check"></i>
-                            : isAnswered ? (isCorrect ? <i className="fa-solid fa-check"></i> : <i className="fa-solid fa-xmark"></i>) : <i className="fa-solid fa-minus"></i>}
+                          {!answered
+                            ? <i className="fa-solid fa-minus"></i>
+                            : ok ? <i className="fa-solid fa-check"></i> : <i className="fa-solid fa-xmark"></i>}
                         </span>
                         <div className="flex-1 min-w-0">
                           <div className="mb-1 flex flex-wrap items-center gap-2 text-xs">
                             <span className="rounded bg-white px-1.5 py-0.5 font-medium text-purple-600">第 {index + 1} 题</span>
-                            <span className="text-gray-500">
-                              {q.type === 'composite' ? '综合题' : q.type === 'python_fill' ? '编程填空' : '选择题'}
+                            <span className="text-gray-500">{kindLabel}</span>
+                            <span className={`font-medium ${!answered ? 'text-gray-400' : ok ? 'text-green-600' : 'text-red-500'}`}>
+                              {answered ? `${it.credit} / ${it.max} 分` : '未作答'}
                             </span>
+                            {answered && !ok && it.credit > 0 && (
+                              <span className="text-amber-600">（部分得分）</span>
+                            )}
                           </div>
-                          <div className={`font-medium mb-2 question-rich-content ${!isStructured && isAnswered && !isCorrect ? 'text-red-600' : 'text-gray-800'}`}>
-                            <div dangerouslySetInnerHTML={{ __html: sanitizeHtml(q.content) }} />
+
+                          <div className="font-medium mb-2 question-rich-content text-gray-800">
+                            <div dangerouslySetInnerHTML={{ __html: sanitizeHtml(it.content) }} />
                           </div>
-                          {q.type === 'choice' && q.options && (
-                            <div className="text-sm space-y-1 mb-3">
-                              {getOptions(q.options).map((opt: string, idx: number) => (
-                                <div key={idx} className="flex items-start gap-2">
-                                  <span className="font-medium text-gray-600 flex-shrink-0">{String.fromCharCode(65 + idx)}.</span>
-                                  <span className="question-rich-content" dangerouslySetInnerHTML={{ __html: sanitizeHtml(opt) }} />
+
+                          {it.kind === 'choice' && (
+                            <>
+                              {(it.options || []).length > 0 && (
+                                <div className="text-sm space-y-1 mb-3">
+                                  {(it.options as string[]).map((opt, oi) => (
+                                    <div key={oi} className="flex items-start gap-2">
+                                      <span className="font-medium text-gray-600 flex-shrink-0">{String.fromCharCode(65 + oi)}.</span>
+                                      <span className="question-rich-content" dangerouslySetInnerHTML={{ __html: sanitizeHtml(opt) }} />
+                                    </div>
+                                  ))}
                                 </div>
-                              ))}
+                              )}
+                              <div className="text-sm space-y-1">
+                                <p className={ok ? 'text-green-700' : answered ? 'text-red-700' : 'text-gray-500'}>
+                                  <span className="font-medium">你的答案:</span> {my?.letter || '未作答'}
+                                </p>
+                                <p className="text-green-700">
+                                  <span className="font-medium">正确答案:</span> {cor?.letter || '—'}
+                                </p>
+                              </div>
+                            </>
+                          )}
+
+                          {it.kind === 'composite' && (
+                            <div className="space-y-2">
+                              {(it.sub_questions || []).map((sq: any, si: number) => {
+                                const myChoice = (my && my.choice_answers ? my.choice_answers[si] : '') || '';
+                                const myBlank = my && my.blank_answers ? my.blank_answers[si] : null;
+                                const shown = myChoice || (Array.isArray(myBlank) ? myBlank.filter(Boolean).join(' ｜ ') : (myBlank || '')) || '（空）';
+                                const subDetail = ((it.detail && it.detail.subs) || [])[si];
+                                return (
+                                  <div key={si} className="rounded border border-gray-100 bg-white/70 p-2">
+                                    <div className="flex flex-wrap items-center gap-2 text-xs mb-1">
+                                      <span className="text-gray-500">第 {sq.index ?? si + 1} 小题</span>
+                                      <span className="text-gray-400">{sq.type === 'fill_blank' ? '填空' : '选择'} · {sq.score} 分</span>
+                                      {subDetail && (
+                                        <span className={subDetail.correct ? 'text-green-600' : 'text-red-500'}>
+                                          {subDetail.correct ? '✓ 对' : '✗ 错'}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="text-xs text-gray-600 mb-1 line-clamp-2 question-rich-content">
+                                      <div dangerouslySetInnerHTML={{ __html: sanitizeHtml(sq.content || '') }} />
+                                    </div>
+                                    <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-xs">
+                                      <span className="text-gray-700">
+                                        你的答案：<span className="font-mono">{shown}</span>
+                                      </span>
+                                      <span className="text-green-700">
+                                        正确答案：<span className="font-mono">{fmtSubCorrect(cor && cor.subs ? cor.subs[si] : null)}</span>
+                                      </span>
+                                    </div>
+                                  </div>
+                                );
+                              })}
                             </div>
                           )}
-                          {isStructured ? (
-                            <div className="text-sm space-y-1">
-                              {structuredRows.map((r, ri) => (
-                                <div key={ri} className="flex items-baseline gap-2">
-                                  {r.label && <span className="flex-shrink-0 text-gray-500">{r.label}</span>}
-                                  <span className="flex-1 break-all font-mono text-gray-800">{r.value}</span>
-                                  {r.extra && <span className="flex-shrink-0 text-xs text-gray-400">{r.extra}</span>}
-                                </div>
-                              ))}
+
+                          {it.kind === 'python' && (
+                            <div className="space-y-2">
+                              {it.blank_template && (
+                                <pre className="overflow-x-auto rounded bg-slate-50 p-2 font-mono text-[11px] leading-5 text-slate-700">
+                                  {it.blank_template}
+                                </pre>
+                              )}
+                              <div className="space-y-1">
+                                {(((it.detail && it.detail.blanks) || []) as any[]).map((bl: any, bi: number) => {
+                                  const accepted = (cor && cor.blank_answers ? cor.blank_answers[bi] : null) || [];
+                                  return (
+                                    <div key={bi} className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-xs">
+                                      <span className="text-gray-500">第 {bl.blank ?? bi + 1} 空</span>
+                                      <span className={`font-mono ${bl.correct ? 'text-green-700' : 'text-red-600'}`}>
+                                        {bl.answer || '（空）'}
+                                      </span>
+                                      <span className={bl.correct ? 'text-green-600' : 'text-red-500'}>
+                                        {bl.correct ? '✓' : '✗'}
+                                      </span>
+                                      <span className="text-green-700">
+                                        应为：<span className="font-mono">
+                                          {Array.isArray(accepted) ? accepted.join(' 或 ') : String(accepted || '—')}
+                                        </span>
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                                {(!it.detail || !it.detail.blanks || it.detail.blanks.length === 0) && (
+                                  <p className="text-xs text-gray-400">这一题没有作答记录</p>
+                                )}
+                              </div>
                             </div>
-                          ) : (
-                            <div className="text-sm space-y-1">
-                              <p className={isAnswered ? (isCorrect ? 'text-green-700' : 'text-red-700') : 'text-gray-500'}>
-                                <span className="font-medium">你的答案:</span> {userAnswer || '未作答'}
-                              </p>
-                              {!isCorrect && (
-                                <p className="text-green-700">
-                                  <span className="font-medium">正确答案:</span> {correctAnswers.join(' / ')}
-                                </p>
-                              )}
-                              {q.explanation && (
-                                <div className="text-gray-600 mt-2 pt-2 border-t border-gray-200 question-rich-content">
-                                  <span className="font-medium">解析:</span>
-                                  <span dangerouslySetInnerHTML={{ __html: sanitizeHtml(q.explanation) }} />
-                                </div>
-                              )}
+                          )}
+
+                          {it.explanation && (
+                            <div className="text-gray-600 text-xs mt-2 pt-2 border-t border-gray-200 question-rich-content">
+                              <span className="font-medium">解析:</span>
+                              <span dangerouslySetInnerHTML={{ __html: sanitizeHtml(it.explanation) }} />
                             </div>
                           )}
                         </div>

@@ -272,6 +272,11 @@ class MariaDBClient {
     return fetchApi('/api/student/exam-active');
   }
 
+  // 单次考试的答卷回顾（题目 + 我的作答 + 正确答案 + 得分，服务端算好）
+  async getExamReview(examRecordId: string) {
+    return fetchApi(`/api/business/exam-review/${examRecordId}`);
+  }
+
   // 教师端：读/写强制开考、强制结束
   async getAllExamForce() {
     return fetchApi('/api/teacher/exams-force');
@@ -810,6 +815,7 @@ export interface BackendClient {
   getExamPaper(testId: string): Promise<any>;
   examHeartbeat(data: { test_id?: string; inactive_count?: number; inactive_seconds?: number }): Promise<any>;
   getActiveExams(): Promise<any>;
+  getExamReview(examRecordId: string): Promise<any>;
   getExamForce(testId: string): Promise<any>;
   getAllExamForce(): Promise<any>;
   setExamForce(testId: string, action: 'start' | 'cancel_start' | 'end' | 'cancel_end'): Promise<any>;

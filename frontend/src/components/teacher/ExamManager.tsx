@@ -201,6 +201,9 @@ export const ExamManager: React.FC = () => {
   const [analysisLoading, setAnalysisLoading] = useState(false);
   /** 按题目查看里当前展开的题（一次只展开一张，避免一屏全是明细） */
   const [expandedItem, setExpandedItem] = useState<string | null>(null);
+  /** 按学生查看里勾选的人（批量重考用） */
+  const [selectedRetakeIds, setSelectedRetakeIds] = useState<string[]>([]);
+  const [refreshing, setRefreshing] = useState(false);
   /** 学生的答卷详情弹窗 */
   const [detailStudent, setDetailStudent] = useState<{ id: string; name: string } | null>(null);
 
@@ -289,7 +292,16 @@ export const ExamManager: React.FC = () => {
       const py = await backendClient.from('python_tasks')
         .selectExact('id, title, description, task_type, category, blank_template, blank_answers, total_score, is_active')
         .eq('task_type', 'fill_blank');
-      const list = ((py as any)?.data || []).filter((t: any) => t.is_active !== 0);
+      const raw = ((py as any)?.data || []).filter((t: any) => t.is_active !== 0);
+      // 按题号排序（第01题、第05题…第65题）：作业表的自然顺序是按创建时间，
+      // 组卷时看起来是乱的（2026-11-17 吴老反馈）。没有题号的排到最后。
+      const numOf = (t: any) => {
+        const m = String(t.title || '').match(/第\s*0*(\d+)\s*题/);
+        return m ? parseInt(m[1], 10) : 99999;
+      };
+      const list = raw.slice().sort((a: any, b: any) =>
+        numOf(a) - numOf(b) || String(a.title || '').localeCompare(String(b.title || ''), 'zh')
+      );
       setPythonTasks(list);
       // 同时并进 questionMap：已选题目列表、题目预览都靠它按 id 取内容
       setQuestionMap((prev) => {
@@ -527,17 +539,8 @@ export const ExamManager: React.FC = () => {
     setShowModal(true);
   };
 
-  const openRecordsModal = async (test: ExamTest) => {
-    setSelectedExam(test);
-    setRecordViewMode('student');
-    setFilterClassId('');
-    setExpandedItem(null);
-    setExamAnalysis(null);
-    setShowRecordsModal(true);
-
-    // 逐题作答与结构一律由服务端 analysis 接口给（抽题考试里每人做的题不同，
-    // 前端再单独拉 student_answers 会得到两份对不上的数据）
-    // 逐题明细（选项分布 / 小题作答 / 每空答案分布）由服务端一次算好
+  /** 只刷新逐题明细（不动筛选、不动视图模式） */
+  const loadAnalysis = async (test: ExamTest) => {
     setAnalysisLoading(true);
     try {
       const r: any = await backendClient.getExamAnalysis(test.id);
@@ -548,6 +551,33 @@ export const ExamManager: React.FC = () => {
     } finally {
       setAnalysisLoading(false);
     }
+  };
+
+  /**
+   * 考试情况页的「刷新」（2026-11-17 吴老要求）：
+   * 边考试边看的时候，老师不可能每看一次就去刷新整个浏览器。
+   * 这里同时刷新两样东西：交卷名单（exam_records）+ 逐题明细（analysis）。
+   */
+  const refreshRecords = async () => {
+    if (!selectedExam || refreshing) return;
+    setRefreshing(true);
+    try {
+      await fetchData();
+      await loadAnalysis(selectedExam);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const openRecordsModal = async (test: ExamTest) => {
+    setSelectedExam(test);
+    setRecordViewMode('student');
+    setFilterClassId('');
+    setExpandedItem(null);
+    setExamAnalysis(null);
+    setSelectedRetakeIds([]);
+    setShowRecordsModal(true);
+    await loadAnalysis(test);
   };
 
   /**
@@ -623,6 +653,34 @@ export const ExamManager: React.FC = () => {
    * AI 语音讲评。
    * 传了 question → 只讲这一题；不传 → 讲本卷「正确率最低」的前 10 题（只算有人作答的题）。
    */
+  /**
+   * 批量重考（2026-11-17）：按学生查看里勾几个人一起作废重考。
+   * 后端 /retake 本来就收 student_ids 数组，这里只是补上批量入口。
+   * ⛔ 已发的积分/上网码不退回（和单人重考口径一致）。
+   */
+  const retakeMany = async (ids: string[]) => {
+    if (!selectedExam || ids.length === 0) return;
+    const ok = window.confirm(
+      `让这 ${ids.length} 名学生重考「${selectedExam.title}」？\n\n` +
+      `· 他们的本次成绩将作废，可以立刻重新作答\n` +
+      `· 已经拿到的积分、上网码不会退回\n` +
+      `· 只影响勾选的这些人`
+    );
+    if (!ok) return;
+    try {
+      const res: any = await backendClient.post(`/api/teacher/exams/${selectedExam.id}/retake`, {
+        student_ids: ids,
+      });
+      const removed = Number(res?.data?.removed) || 0;
+      setSelectedRetakeIds([]);
+      await fetchData();
+      await loadAnalysis(selectedExam);
+      alert(`已作废 ${removed} 人的成绩（其余人原本就没有交卷记录），他们现在可以重考了`);
+    } catch (e: any) {
+      alert(`操作失败：${e?.message || e}`);
+    }
+  };
+
   /**
    * AI 语音讲评（2026-11-17 改口径）
    * 传了 question → 只讲这一题；不传 → 讲本卷「错误率最高」的前 10 道**选择题**。
@@ -858,9 +916,13 @@ export const ExamManager: React.FC = () => {
   };
 
   // 按出卷老师筛选后的试卷列表（2026-11-17）
+  // ⛔ 「我出的试卷」必须把 created_by 为空的也算进来：v3.6.43 之前创建的试卷
+  //    根本没记出卷人（2026-11-17 吴老的 teacher 账号建的卷子只能在全部分类里找到）。
   const mineId = me?.id || '';
   const visibleTests = filterTeacherId === '__mine'
-    ? (mineId ? tests.filter((t) => (t as any).created_by === mineId) : tests)
+    ? (mineId
+        ? tests.filter((t) => (t as any).created_by === mineId || !(t as any).created_by)
+        : tests)
     : filterTeacherId === ''
       ? tests
       : tests.filter((t) => (t as any).created_by === filterTeacherId);
@@ -1912,26 +1974,59 @@ export const ExamManager: React.FC = () => {
                       })()}
                     </div>
                   </div>
-                  <button
-                    onClick={() => setShowRecordsModal(false)}
-                    className="text-gray-400 hover:text-gray-600"
-                  >
-                    <i className="fa-solid fa-times text-xl"></i>
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {/* 刷新：边考边看时不用再刷浏览器（2026-11-17 吴老要求） */}
+                    <button
+                      onClick={refreshRecords}
+                      disabled={refreshing}
+                      className="flex items-center gap-1 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-sm text-gray-600 hover:border-purple-300 hover:text-purple-600 disabled:opacity-60"
+                      title="重新拉取交卷名单与逐题统计（不用刷新浏览器）"
+                    >
+                      <i className={`fa-solid fa-rotate ${refreshing ? 'fa-spin' : ''}`}></i>
+                      {refreshing ? '刷新中' : '刷新'}
+                    </button>
+                    <button
+                      onClick={() => setShowRecordsModal(false)}
+                      className="text-gray-400 hover:text-gray-600"
+                    >
+                      <i className="fa-solid fa-times text-xl"></i>
+                    </button>
+                  </div>
                 </div>
-                <div className="flex gap-2 mt-4">
-                  <button
-                    onClick={() => setRecordViewMode('student')}
-                    className={`px-4 py-2 rounded-lg transition-colors ${recordViewMode === 'student' ? 'bg-purple-500 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
-                  >
-                    <i className="fa-solid fa-user mr-2"></i>按学生查看
-                  </button>
-                  <button
-                    onClick={() => setRecordViewMode('question')}
-                    className={`px-4 py-2 rounded-lg transition-colors ${recordViewMode === 'question' ? 'bg-purple-500 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
-                  >
-                    <i className="fa-solid fa-question mr-2"></i>按题目查看
-                  </button>
+                <div className="flex flex-wrap items-center justify-between gap-2 mt-4">
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setRecordViewMode('student')}
+                      className={`px-4 py-2 rounded-lg transition-colors ${recordViewMode === 'student' ? 'bg-purple-500 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+                    >
+                      <i className="fa-solid fa-user mr-2"></i>按学生查看
+                    </button>
+                    <button
+                      onClick={() => setRecordViewMode('question')}
+                      className={`px-4 py-2 rounded-lg transition-colors ${recordViewMode === 'question' ? 'bg-purple-500 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+                    >
+                      <i className="fa-solid fa-question mr-2"></i>按题目查看
+                    </button>
+                  </div>
+                  {recordViewMode === 'student' && selectedRetakeIds.length > 0 && (
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-gray-600">已选 {selectedRetakeIds.length} 人</span>
+                      <button
+                        onClick={() => setSelectedRetakeIds([])}
+                        className="rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-sm text-gray-600 hover:bg-gray-50"
+                      >
+                        清空
+                      </button>
+                      <button
+                        onClick={() => retakeMany(selectedRetakeIds)}
+                        className="rounded-lg bg-amber-500 px-3 py-1.5 text-sm text-white hover:bg-amber-600"
+                        title="作废这些人的本次成绩，让他们重新做一遍"
+                      >
+                        <i className="fa-solid fa-rotate-left mr-1"></i>
+                        批量重考
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -2022,6 +2117,26 @@ export const ExamManager: React.FC = () => {
                           <table className="w-full">
                             <thead className="bg-gray-100">
                               <tr>
+                                <th className="px-4 py-3 text-center text-sm font-medium text-gray-600 w-10">
+                                  {/* 全选：只勾「能重考的人」（缺考的本来就能直接参加，不用作废成绩） */}
+                                  <input
+                                    type="checkbox"
+                                    className="h-4 w-4 rounded cursor-pointer"
+                                    title="全选（只选已交卷的人）"
+                                    checked={
+                                      examStudentRecords.filter((r) => !r.is_absent).length > 0 &&
+                                      examStudentRecords.filter((r) => !r.is_absent)
+                                        .every((r) => selectedRetakeIds.includes(r.student_id))
+                                    }
+                                    onChange={(e) => {
+                                      if (e.target.checked) {
+                                        setSelectedRetakeIds(examStudentRecords.filter((r) => !r.is_absent).map((r) => r.student_id));
+                                      } else {
+                                        setSelectedRetakeIds([]);
+                                      }
+                                    }}
+                                  />
+                                </th>
                                 <th className="px-4 py-3 text-left text-sm font-medium text-gray-600">学生</th>
                                 <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">得分</th>
                                 <th className="px-4 py-3 text-center text-sm font-medium text-gray-600">正确率</th>
@@ -2038,6 +2153,20 @@ export const ExamManager: React.FC = () => {
                                   key={record.id}
                                   className={record.is_absent ? 'bg-gray-50/60' : 'hover:bg-gray-100'}
                                 >
+                                  <td className="px-4 py-3 text-center">
+                                    {!record.is_absent && (
+                                      <input
+                                        type="checkbox"
+                                        className="h-4 w-4 rounded cursor-pointer"
+                                        checked={selectedRetakeIds.includes(record.student_id)}
+                                        onChange={(e) => {
+                                          setSelectedRetakeIds((prev) => e.target.checked
+                                            ? [...prev, record.student_id]
+                                            : prev.filter((x) => x !== record.student_id));
+                                        }}
+                                      />
+                                    )}
+                                  </td>
                                   <td className="px-4 py-3">
                                     <div className={`font-medium ${record.is_absent ? 'text-gray-500' : 'text-gray-800'}`}>
                                       <button
