@@ -14,6 +14,7 @@ interface DesktopState {
   maximizeWindow: (id: string) => void;
   restoreWindow: (id: string) => void;
   activateWindow: (id: string) => void;
+  closeOtherWindows: (keepId: string) => void;
   /** 锁定窗口：考试期间强制最大化，且不能关闭/最小化（2026-11-17） */
   lockWindow: (id: string) => void;
   /** 解锁：交卷后调用，之后才能正常关闭 */
@@ -34,6 +35,9 @@ interface DesktopState {
   /** 老师点了「强制结束」后的截止时间戳（ms）；ExamWatcher 写，TestModule 倒计时并交卷 */
   forceEndAt: number | null;
   setForceEndAt: (at: number | null) => void;
+  /** 考试中试图打开别的窗口时的提示条文案（Desktop 渲染，2 秒自动消失） */
+  examBlockNotice: string | null;
+  examBlockNoticeAt: number;
 }
 
 export const desktopIcons: DesktopIcon[] = [
@@ -88,6 +92,30 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         return;
       }
     }
+
+    // ===== 考试期间只允许考试窗口（2026-11-17 补漏洞）=====
+    // 原来锁窗口只锁了「关闭/最小化」，学生照样点宠物、桌面图标、快捷入口
+    // 打开「编程题」等模块去抄答案。所有入口最终都走 openWindow，所以在这里一刀切。
+    // ⛔ 不弹 alert：学生正在答题，弹窗会打断他，还给了一个「被拦了」的明确信号去试探。
+    //    改成把考试窗口顶回最前 + 顶部提示条。
+    const { examContext } = get();
+    if (examContext && window.id !== 'test' && !opts?.force) {
+      const state = get();
+      const bump = state.zIndexCounter + 1;
+      set({
+        windows: state.windows.map((w) =>
+          w.id === 'test'
+            ? { ...w, isOpen: true, isMinimized: false, isMaximized: true, zIndex: bump }
+            : w
+        ),
+        activeWindowId: 'test',
+        zIndexCounter: bump,
+        examBlockNotice: '考试进行中，请先完成并提交考试',
+        examBlockNoticeAt: Date.now(),
+      });
+      return;
+    }
+
     const { windows, zIndexCounter } = get();
 
     // 考试期间互斥（2026-10-24）：测试窗口开着时不允许再打开「学习」模块，
@@ -217,14 +245,28 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   forceEndAt: null,
   setForceEndAt: (at) => set({ forceEndAt: at }),
 
+  examBlockNotice: null,
+  examBlockNoticeAt: 0,
+
   activateWindow: (id) => {
-    const { windows, zIndexCounter } = get();
+    const { windows, zIndexCounter, examContext } = get();
+    // 考试进行中：除了考试窗口，其他窗口不许切到前台（2026-11-17 补漏洞）
+    if (examContext && id !== 'test') return;
     set({
       windows: windows.map((w) =>
         w.id === id ? { ...w, zIndex: zIndexCounter + 1 } : w
       ),
       activeWindowId: id,
       zIndexCounter: zIndexCounter + 1,
+    });
+  },
+
+  /** 关掉除 keepId 以外的所有窗口（考试开始时清场用，2026-11-17） */
+  closeOtherWindows: (keepId) => {
+    const { windows } = get();
+    set({
+      windows: windows.filter((w) => w.id === keepId),
+      activeWindowId: keepId,
     });
   },
 }));

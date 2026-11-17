@@ -188,6 +188,17 @@ body {
   margin-bottom: 0;
 }
 
+/* ===== 考试防偷看：填空题未聚焦时用圆点遮住内容（2026-11-17）=====
+   同一场考试大家题目一样，同桌斜眼就能抄。这里只在「考试界面」用到：
+   不聚焦时 -webkit-text-security 把字符显示成 ●，鼠标点进去（:focus）才显示真内容。
+   ⛔ 不要用 type="password" 替代：切 type 会丢光标位置、还会触发浏览器的密码管理器。 */
+.exam-blank-masked {
+  -webkit-text-security: disc;
+}
+.exam-blank-masked:focus {
+  -webkit-text-security: none;
+}
+
 .question-rich-content img {
   max-width: 100%;
   height: auto;

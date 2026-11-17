@@ -123,6 +123,10 @@ const MODULE_GUARD_MAP: Record<string, ModuleGuardKey> = {
 export const Desktop: React.FC = () => {
   const { profile, signOut, checkAndEnforceLoginRestriction, isProxyMode, loading, proxyError } = useAuth();
   const { windows, background, openWindow, activateWindow, setBackground, lockWindow, setPendingExam } = useDesktopStore();
+  // 考试进行中的全屏遮挡（2026-11-17 补漏洞）
+  const examContext = useDesktopStore((s) => s.examContext);
+  const examBlockNotice = useDesktopStore((s) => s.examBlockNotice);
+  const examBlockNoticeAt = useDesktopStore((s) => s.examBlockNoticeAt);
   const { setActiveSkin } = useSkinStore();
   const { checkForNewNotifications } = useNotificationStore();
   const siteConfig = useSiteConfig();
@@ -160,6 +164,14 @@ export const Desktop: React.FC = () => {
   }, [profile?.id, openWindow, lockWindow, setPendingExam]);
   const [focusModeConfig, setFocusModeConfig] = useState<FocusModeConfig | null>(null);
   const [quickAccessOpen, setQuickAccessOpen] = useState(false);
+  /** 考试中试图打开别的模块时的提示条（2 秒后自动消失） */
+  const [examNoticeVisible, setExamNoticeVisible] = useState(false);
+  useEffect(() => {
+    if (!examBlockNoticeAt) return;
+    setExamNoticeVisible(true);
+    const timer = setTimeout(() => setExamNoticeVisible(false), 2200);
+    return () => clearTimeout(timer);
+  }, [examBlockNoticeAt]);
   const [isFocusModeActive, setIsFocusModeActive] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(
     !!(document.fullscreenElement || (document as any).webkitFullscreenElement)
@@ -1313,6 +1325,14 @@ export const Desktop: React.FC = () => {
         )}
       </div>
 
+      {/* ===== 考试遮挡层（2026-11-17 补漏洞）=====
+          学生把考试窗口锁住以后，还能点宠物、桌面图标、快捷入口开「编程题」去看答案。
+          入口本身已经由 openWindow / activateWindow 拦死，这里再加一层视觉+点击遮挡：
+          z-95 低于所有窗口（窗口 z 从 100 起），所以只盖桌面，不盖考试窗口。 */}
+      {examContext && (
+        <div className="fixed inset-0 z-[95] bg-slate-900/25" aria-hidden="true" />
+      )}
+
       <div>
         {windows
           .filter((w) => w.isOpen)
@@ -1333,6 +1353,14 @@ export const Desktop: React.FC = () => {
 
       <Taskbar />
       <NotificationCenter />
+
+      {/* 考试中点了别的模块：顶部轻提示，不弹框、不打断答题 */}
+      {examNoticeVisible && examBlockNotice && (
+        <div className="pointer-events-none fixed left-1/2 top-6 z-[9999] -translate-x-1/2 rounded-lg bg-gray-900/90 px-4 py-2 text-sm text-white shadow-lg">
+          <i className="fa-solid fa-lock mr-1.5 text-amber-300"></i>
+          {examBlockNotice}
+        </div>
+      )}
       <PaintBoard
         isOpen={isPaintBoardOpen}
         onClose={() => setIsPaintBoardOpen(false)}

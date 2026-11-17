@@ -208,7 +208,7 @@ export const TestModule: React.FC = () => {
   const examTimeUpRef = useRef(false);
   const { profile, refreshProfile } = useAuth();
   // 考试期间的窗口锁定与「刷新后恢复考试」（2026-11-17）
-  const { pendingExamTestId, setPendingExam, lockWindow, unlockWindow, setExamContext, setForceEndAt } = useDesktopStore();
+  const { pendingExamTestId, setPendingExam, lockWindow, unlockWindow, setExamContext, setForceEndAt, closeOtherWindows } = useDesktopStore();
   const { updatePoints } = usePoints();
   /** 测试资格明细：test_id -> { passed, correct:{...}, mastered:{...} }（服务端裁定，口径唯一） */
   const [qualificationMap, setQualificationMap] = useState<Record<string, any>>({});
@@ -766,7 +766,7 @@ export const TestModule: React.FC = () => {
             key={`b-${lineIdx}-${match.index}`}
             value={values[cur] || ''}
             onChange={(e) => onChange(cur, e.target.value)}
-            className="mx-0.5 inline-block rounded border border-slate-300 bg-white px-1 py-0 text-center font-mono text-[13px] text-slate-800 focus:border-purple-400 focus:outline-none focus:ring-1 focus:ring-purple-300"
+            className="exam-blank-masked mx-0.5 inline-block rounded border border-slate-300 bg-white px-1 py-0 text-center font-mono text-[13px] text-slate-800 focus:border-purple-400 focus:outline-none focus:ring-1 focus:ring-purple-300"
             style={{ width: `${Math.min(22, Math.max(5, (values[cur]?.length || 3) + 2))}ch` }}
             spellCheck={false}
           />
@@ -961,6 +961,9 @@ export const TestModule: React.FC = () => {
   useEffect(() => {
     if (examRunning) {
       lockWindow('test');
+      // 清场：考试前学生可能开着「编程题」「知识点」等窗口，留着就能翻过去看答案
+      //（2026-11-17 补漏洞）。只保留考试窗口。
+      closeOtherWindows('test');
       setExamContext({ testId: examIdForContext, title: examTitleForContext });
     } else {
       unlockWindow('test');
@@ -968,7 +971,7 @@ export const TestModule: React.FC = () => {
       // 交卷后把强制结束标记清掉，否则下一场一进去就被倒计时
       setForceEndAt(null);
     }
-  }, [examRunning, examIdForContext, examTitleForContext, lockWindow, unlockWindow, setExamContext, setForceEndAt]);
+  }, [examRunning, examIdForContext, examTitleForContext, lockWindow, unlockWindow, setExamContext, setForceEndAt, closeOtherWindows]);
 
   /** 「老师强制结束」倒计时归零 → 自动交卷 */
   useEffect(() => {
@@ -2127,7 +2130,7 @@ export const TestModule: React.FC = () => {
                                     value={currentBlankAnswers[bIdx] || ''}
                                     onChange={(e) => handleExamCompositeBlank(currentQuestion.id, sqIdx, bIdx, e.target.value)}
                                     placeholder="请输入答案"
-                                    className="flex-1 p-2 border-2 border-gray-200 rounded-lg focus:border-purple-500 focus:outline-none"
+                                    className="exam-blank-masked flex-1 p-2 border-2 border-gray-200 rounded-lg focus:border-purple-500 focus:outline-none"
                                   />
                                 </div>
                               ));
