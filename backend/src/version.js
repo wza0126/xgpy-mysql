@@ -1,6 +1,6 @@
 // 本文件由 scripts/gen-version.js 自动生成，请勿手工修改
 module.exports = {
-  version: "3.6.44",
-  commit: "7eb5bd1",
-  buildTime: "2026-11-17T05:51:21.529Z",
+  version: "3.6.45",
+  commit: "999000c",
+  buildTime: "2026-11-17T05:53:49.364Z",
 };
