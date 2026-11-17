@@ -9,6 +9,7 @@ import { isOperationType } from '../../utils/questionType';
 import { AiExplainPlayer, ExplainQuestion } from './AiExplainPlayer';
 import { PKBattleConfigTab } from './PKBattleConfigTab';
 import { PKStatsTab } from './PKStatsTab';
+import { useAuth } from '../../hooks/useAuth';
 
 type ExamTest = {
   id: string;
@@ -163,8 +164,6 @@ export const ExamManager: React.FC = () => {
   const [recordSortField, setRecordSortField] = useState<'username' | 'score'>('username');
   const [recordSortOrder, setRecordSortOrder] = useState<'asc' | 'desc'>('asc');
   const [filterClassId, setFilterClassId] = useState<string>('');
-  const [selectedQuestion, setSelectedQuestion] = useState<{ question: Question; stats: { correct: number; total: number; rate: number } } | null>(null);
-  const [studentAnswersForExam, setStudentAnswersForExam] = useState<any[]>([]);
   const [formData, setFormData] = useState({
     title: '',
     description: '',
@@ -189,6 +188,21 @@ export const ExamManager: React.FC = () => {
   const [filterType, setFilterType] = useState('');
   const [filterTags, setFilterTags] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState<'exams' | 'pk_configs' | 'pk_stats'>('exams');
+  // ---- 2026-11-17 三题型试卷 + 按老师筛选 + 强制开考/结束 ----
+  /** 出卷老师筛选：'__mine' = 只看自己出的（默认），'' = 全部 */
+  const [filterTeacherId, setFilterTeacherId] = useState<string>('__mine');
+  const [teachers, setTeachers] = useState<{ id: string; username: string; real_name: string }[]>([]);
+  const me = useAuth().profile;
+  /** 编程填空题（python_tasks）当作可选题型，id 统一写成 py: 前缀 */
+  const [pythonTasks, setPythonTasks] = useState<any[]>([]);
+  const [forceStates, setForceStates] = useState<Record<string, { force_start: boolean; force_end: boolean }>>({});
+  /** 整场考试的逐题明细（服务端算好，含选项分布/小题/每空答案分布） */
+  const [examAnalysis, setExamAnalysis] = useState<any | null>(null);
+  const [analysisLoading, setAnalysisLoading] = useState(false);
+  /** 按题目查看里当前展开的题（一次只展开一张，避免一屏全是明细） */
+  const [expandedItem, setExpandedItem] = useState<string | null>(null);
+  /** 学生的答卷详情弹窗 */
+  const [detailStudent, setDetailStudent] = useState<{ id: string; name: string } | null>(null);
 
   useEffect(() => {
     fetchData();
@@ -268,6 +282,57 @@ export const ExamManager: React.FC = () => {
     const { data: recordsData } = await backendClient.from('exam_records').select('*').order('completed_at', { ascending: false });
     if (recordsData) {
       setExamRecords(recordsData as ExamRecord[]);
+    }
+
+    // 2026-11-17：试卷可混三种题 → 编程填空题要从作业表取（不在 questions 里）
+    try {
+      const py = await backendClient.from('python_tasks')
+        .selectExact('id, title, description, task_type, category, blank_template, blank_answers, total_score, is_active')
+        .eq('task_type', 'fill_blank');
+      const list = ((py as any)?.data || []).filter((t: any) => t.is_active !== 0);
+      setPythonTasks(list);
+      // 同时并进 questionMap：已选题目列表、题目预览都靠它按 id 取内容
+      setQuestionMap((prev) => {
+        const next: QuestionMap = { ...prev };
+        list.forEach((t: any) => {
+          next[`py:${t.id}`] = {
+            id: `py:${t.id}`,
+            type: 'python_fill',
+            content: t.title || '编程填空',
+            options: '[]',
+            answers: '{}',
+            explanation: '',
+            blank_template: t.blank_template || '',
+          } as any;
+        });
+        return next;
+      });
+    } catch (e) {
+      console.warn('[ExamManager] 编程填空题加载失败:', e);
+    }
+
+    // 出卷老师清单（按老师筛选用）
+    try {
+      const t = await backendClient.from('profiles')
+        .selectExact('id, username, real_name, role')
+        .in('role', ['teacher', 'admin']);
+      setTeachers(((t as any)?.data || []).map((x: any) => ({
+        id: x.id, username: x.username || '', real_name: x.real_name || '',
+      })));
+    } catch (e) {
+      console.warn('[ExamManager] 老师列表加载失败:', e);
+    }
+
+    // 强制开考/强制结束的当前状态
+    try {
+      const f = await backendClient.getAllExamForce();
+      const map: Record<string, { force_start: boolean; force_end: boolean }> = {};
+      ((f as any)?.data || []).forEach((x: any) => {
+        map[x.test_id] = { force_start: !!x.force_start, force_end: !!x.force_end };
+      });
+      setForceStates(map);
+    } catch (e) {
+      console.warn('[ExamManager] 强制状态加载失败:', e);
     }
 
     setLoading(false);
@@ -368,6 +433,43 @@ export const ExamManager: React.FC = () => {
     fetchData();
   };
 
+  /**
+   * 强制开始 / 强制结束（2026-11-17）
+   * 只是往 exam_force_controls 写一个指令，真正的执行在学生端心跳里：
+   *   force_start → 学生端 5 秒内弹全屏考试窗口（不可关闭/最小化）
+   *   force_end   → 学生端显示 60 秒倒计时，到点自动交卷
+   * ⛔ 不要在这里直接改 exam_records / student_answers：学生可能还没登录，
+   *    由服务端在交卷时统一结算才不会有半截数据。
+   */
+  const handleForce = async (test: ExamTest, kind: 'start' | 'end') => {
+    const cur = forceStates[test.id] || { force_start: false, force_end: false };
+    const isOn = kind === 'start' ? cur.force_start : cur.force_end;
+    const action: 'start' | 'cancel_start' | 'end' | 'cancel_end' = kind === 'start'
+      ? (isOn ? 'cancel_start' : 'start')
+      : (isOn ? 'cancel_end' : 'end');
+    const msg = kind === 'start'
+      ? (isOn
+          ? '取消「强制开始」？学生端不再自动弹出这场考试。'
+          : `强制全班立即开始「${test.title}」？\n\n学生端会在 5 秒内全屏弹出这场考试，交卷前不能关闭或最小化。`)
+      : (isOn
+          ? '取消「强制结束」？正在倒计时的学生端会停止倒计时。'
+          : `强制结束「${test.title}」？\n\n正在考试的学生端会出现 60 秒倒计时，到点自动交卷。`);
+    if (!window.confirm(msg)) return;
+    try {
+      const r: any = await backendClient.setExamForce(test.id, action);
+      if (r?.error) {
+        alert(r.error);
+        return;
+      }
+      setForceStates((prev) => ({
+        ...prev,
+        [test.id]: { force_start: !!r.data.force_start, force_end: !!r.data.force_end },
+      }));
+    } catch (e: any) {
+      alert(e?.message || '操作失败，请重试');
+    }
+  };
+
   const resetForm = () => {
     setFormData({
       title: '',
@@ -429,15 +531,23 @@ export const ExamManager: React.FC = () => {
     setSelectedExam(test);
     setRecordViewMode('student');
     setFilterClassId('');
+    setExpandedItem(null);
+    setExamAnalysis(null);
     setShowRecordsModal(true);
-    
-    const { data } = await backendClient
-      .from('student_answers')
-      .select('*')
-      .eq('source', 'exam')
-      .eq('test_id', test.id);
-    
-    setStudentAnswersForExam(data || []);
+
+    // 逐题作答与结构一律由服务端 analysis 接口给（抽题考试里每人做的题不同，
+    // 前端再单独拉 student_answers 会得到两份对不上的数据）
+    // 逐题明细（选项分布 / 小题作答 / 每空答案分布）由服务端一次算好
+    setAnalysisLoading(true);
+    try {
+      const r: any = await backendClient.getExamAnalysis(test.id);
+      if (r?.error) console.warn('[考试情况] 统计失败:', r.error);
+      else setExamAnalysis(r?.data || null);
+    } catch (e) {
+      console.warn('[考试情况] 统计失败:', e);
+    } finally {
+      setAnalysisLoading(false);
+    }
   };
 
   /**
@@ -513,34 +623,45 @@ export const ExamManager: React.FC = () => {
    * AI 语音讲评。
    * 传了 question → 只讲这一题；不传 → 讲本卷「正确率最低」的前 10 题（只算有人作答的题）。
    */
+  /**
+   * AI 语音讲评（2026-11-17 改口径）
+   * 传了 question → 只讲这一题；不传 → 讲本卷「错误率最高」的前 10 道**选择题**。
+   *
+   * ⛔ 三条规矩：
+   *   1. 只讲选择题。综合题没有单一大题答案、编程题是逐空判的，硬塞进选择题讲评器
+   *      会把「选项 A/B/C/D」讲成一段错乱的话，吴老明确不要综合题的 AI 讲解。
+   *   2. 排序必须是**错误率降序**（正确率升序），第 1 题就是最差的题。
+   *      以前列表和讲评各算各的，老师看到「第 10 题才是最差的」，这里统一到一处。
+   *   3. 排序依据换成服务端 analysis（不再用前端过滤 student_answers），
+   *      抽题考试里每人做的题不同，前端那份列表会漏题。
+   */
   const startExamExplain = (only?: Question) => {
     if (only) {
       setExplainQueue([only as unknown as ExplainQuestion]);
       return;
     }
     if (!selectedExam) return;
-    const rows = selectedExam.question_ids
-      .map((qId) => {
-        const q = questionMap[qId];
-        if (!q) return null;
-        const answers = studentAnswersForExam.filter((a: any) => a.question_id === qId);
-        const total = answers.length;
-        const correct = answers.filter((a: any) => a.is_correct).length;
-        return { q, total, correct, rate: total > 0 ? correct / total : 1 };
-      })
-      .filter((x): x is { q: Question; total: number; correct: number; rate: number } => !!x && x.total > 0)
+    const items: any[] = (examAnalysis && examAnalysis.items) || [];
+    const rows = items
+      .filter((it) => it.kind === 'choice' && Number(it.answered) > 0)
+      .slice()
       .sort((a, b) => a.rate - b.rate)
       .slice(0, 10)
-      .map((x) => ({
-        ...(x.q as unknown as ExplainQuestion),
-        wrong_count: x.total - x.correct,
-        total_attempts: x.total,
-      }));
+      .map((it) => ({
+        ...(questionMap[it.item_id] as any),
+        id: it.item_id,
+        type: 'choice',
+        content: it.content,
+        options: JSON.stringify(it.options || []),
+        wrong_count: Number(it.answered) - Number(it.correct),
+        total_attempts: Number(it.answered),
+      }))
+      .filter((x) => !!x.content);
     if (!rows.length) {
-      alert('本卷还没有作答数据，暂时无法讲评');
+      alert('这场考试没有可讲评的选择题作答数据（AI 讲评只针对选择题）');
       return;
     }
-    setExplainQueue(rows);
+    setExplainQueue(rows as unknown as ExplainQuestion[]);
   };
 
   const exportExamRecordsToXlsx = () => {
@@ -644,18 +765,51 @@ export const ExamManager: React.FC = () => {
     );
   };
 
-  const filteredQuestions = questions.filter((q) => {
-    // ⛔ 操作题（WPS / Access）不能进试卷：走独立入口、没有 options/answers，
-    //    学生端渲染不了。这里直接挡掉，避免教师误选进卷子。
+  /**
+   * 编程填空题伪装成 Question（2026-11-17）
+   * 它们来自 python_tasks（不在 questions 表），id 一律加 `py:` 前缀，
+   * 与后端 exam-paper.js 的前缀约定必须一致 —— 改前缀就是改协议。
+   */
+  const pythonAsQuestions: Question[] = pythonTasks.map((t: any) => ({
+    id: `py:${t.id}`,
+    type: 'python_fill',
+    content: t.title || '编程填空',
+    options: '[]',
+    answers: '{}',
+    explanation: '',
+    blank_template: t.blank_template || '',
+    _python_task: true,
+  } as any));
+
+  /**
+   * 组卷可选题目 = 选择题 + 综合题 + 编程填空题。
+   * ⛔ 题库里还有 fill_blank / wps_op / access_op，它们**不能**进试卷：
+   *    操作题要判文件、题库填空题没启用，混进来交卷时必然判 0 分。
+   */
+  const paperSelectable = [
+    ...questions.filter((q) => q.type === 'choice' || q.type === 'composite'),
+    ...pythonAsQuestions,
+  ];
+
+  /**
+   * 当前组卷的卷面满分（绝对分制，2026-11-17）
+   * 与后端 exam-paper.js 的常量必须一致：选择 2 / 综合 20 / 编程填空 10。
+   * 后端保存时也会算一遍落库（tests.paper_total），这里是给老师当场看的。
+   */
+  const formPaperTotal = formData.question_ids.reduce((sum, id) => {
+    const q = questionMap[id];
+    if (!q) return sum;
+    if (q.type === 'composite') return sum + 20;
+    if (q.type === 'python_fill') return sum + 10;
+    return sum + 2;
+  }, 0);
+
+  const filteredQuestions = paperSelectable.filter((q) => {
     if (isOperationType(q.type)) return false;
-    const matchesSearch = q.content.toLowerCase().includes(searchText.toLowerCase());
+    const matchesSearch = String(q.content || '').toLowerCase().includes(searchText.toLowerCase());
     let matchesType = true;
     if (filterType) {
-      if (filterType === 'fill' || filterType === 'fill_blank') {
-        matchesType = q.type === 'fill' || q.type === 'fill_blank';
-      } else {
-        matchesType = q.type === filterType;
-      }
+      matchesType = q.type === filterType;
     }
     const tags = parseTags(q.tags);
     const matchesTags = filterTags.length === 0 || filterTags.some(tag => tags.includes(tag));
@@ -684,6 +838,8 @@ export const ExamManager: React.FC = () => {
   const getQuestionTypeName = (type: string) => {
     const typeMap: Record<string, string> = {
       choice: '选择题',
+      composite: '综合题',
+      python_fill: '编程填空',
       fill: '填空题',
       fill_blank: '填空题',
       judge: '判断题',
@@ -700,6 +856,14 @@ export const ExamManager: React.FC = () => {
     };
     return map[difficulty] || difficulty;
   };
+
+  // 按出卷老师筛选后的试卷列表（2026-11-17）
+  const mineId = me?.id || '';
+  const visibleTests = filterTeacherId === '__mine'
+    ? (mineId ? tests.filter((t) => (t as any).created_by === mineId) : tests)
+    : filterTeacherId === ''
+      ? tests
+      : tests.filter((t) => (t as any).created_by === filterTeacherId);
 
   if (loading) {
     return (
@@ -721,7 +885,7 @@ export const ExamManager: React.FC = () => {
               : 'border-transparent text-gray-500 hover:text-gray-700'
           }`}
         >
-          <i className="fa-solid fa-file-pen mr-2"></i>考试管理
+          <i className="fa-solid fa-file-pen mr-2"></i>试卷管理
         </button>
         <button
           onClick={() => setActiveTab('pk_configs')}
@@ -748,7 +912,28 @@ export const ExamManager: React.FC = () => {
       {activeTab === 'exams' && (
       <>
       <div className="flex justify-between items-center">
-        <h3 className="text-lg font-bold text-gray-800">考试管理</h3>
+        <div className="flex items-center gap-3">
+          <h3 className="text-lg font-bold text-gray-800">试卷管理</h3>
+          {/* 按出卷老师筛选（2026-11-17）：默认只看自己出的卷，同科老师共用平台时列表不至于混成一锅 */}
+          <select
+            value={filterTeacherId}
+            onChange={(e) => setFilterTeacherId(e.target.value)}
+            className="rounded-lg border border-gray-300 px-2.5 py-1.5 text-sm text-gray-700 focus:border-purple-400 focus:outline-none"
+          >
+            <option value="__mine">我出的试卷</option>
+            <option value="">全部老师</option>
+            {teachers
+              .filter((t) => t.id !== (me?.id || ''))
+              .map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.real_name || t.username || t.id}
+                </option>
+              ))}
+          </select>
+          <span className="text-xs text-gray-400">
+            共 {visibleTests.length} 份
+          </span>
+        </div>
         <button
           onClick={() => openEditModal()}
           className="px-4 py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 transition-colors"
@@ -757,7 +942,7 @@ export const ExamManager: React.FC = () => {
         </button>
       </div>
 
-      {tests.length === 0 ? (
+      {visibleTests.length === 0 ? (
         <div className="text-center py-12 text-gray-500">
           <i className="fa-solid fa-file-alt text-6xl mb-4"></i>
           <p>暂无考试</p>
@@ -772,10 +957,10 @@ export const ExamManager: React.FC = () => {
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
                     type="checkbox"
-                    checked={selectedIds.length === tests.length && tests.length > 0}
+                    checked={selectedIds.length === visibleTests.length && visibleTests.length > 0}
                     onChange={(e) => {
                       if (e.target.checked) {
-                        setSelectedIds(tests.map(t => t.id));
+                        setSelectedIds(visibleTests.map(t => t.id));
                       } else {
                         setSelectedIds([]);
                       }
@@ -800,7 +985,7 @@ export const ExamManager: React.FC = () => {
 
           {/* 试卷列表 */}
           <div className="grid gap-4">
-            {tests.map((test) => {
+            {visibleTests.map((test) => {
             const examRecordsCount = examRecords.filter(r => r.test_id === test.id).length;
             const examTest = test as ExamTest;
             const examClassIds = Array.isArray(examTest.class_ids) ? examTest.class_ids : [];
@@ -837,6 +1022,36 @@ export const ExamManager: React.FC = () => {
                     </div>
                   </div>
                   <div className="flex gap-2">
+                    {/* 强制开始 / 强制结束（2026-11-17）：靠学生端心跳下发指令。
+                        不是同一件事：强制开始是把学生"抓进"考试窗口，强制结束是让他们 1 分钟后交卷。 */}
+                    <button
+                      onClick={() => handleForce(test, 'start')}
+                      className={`text-xs px-2 py-1 rounded border ${
+                        forceStates[test.id]?.force_start
+                          ? 'border-rose-300 bg-rose-50 text-rose-600'
+                          : 'border-gray-200 bg-white text-gray-500 hover:border-rose-300 hover:text-rose-600'
+                      }`}
+                      title={forceStates[test.id]?.force_start
+                        ? '取消强制开始（学生端不再自动弹出这场考试）'
+                        : '强制开始：学生端全屏弹出这场考试，不能关闭或最小化'}
+                    >
+                      <i className={`fa-solid ${forceStates[test.id]?.force_start ? 'fa-toggle-on' : 'fa-toggle-off'} mr-1`}></i>
+                      强制开始
+                    </button>
+                    <button
+                      onClick={() => handleForce(test, 'end')}
+                      className={`text-xs px-2 py-1 rounded border ${
+                        forceStates[test.id]?.force_end
+                          ? 'border-red-300 bg-red-50 text-red-600'
+                          : 'border-gray-200 bg-white text-gray-500 hover:border-red-300 hover:text-red-600'
+                      }`}
+                      title={forceStates[test.id]?.force_end
+                        ? '取消强制结束（倒计时停止）'
+                        : '强制结束：学生端 1 分钟倒计时后自动交卷'}
+                    >
+                      <i className={`fa-solid ${forceStates[test.id]?.force_end ? 'fa-toggle-on' : 'fa-toggle-off'} mr-1`}></i>
+                      强制结束
+                    </button>
                     <button
                       onClick={() => openRecordsModal(test)}
                       className="text-purple-600 hover:text-purple-800 text-sm px-2 py-1 bg-purple-50 rounded"
@@ -920,39 +1135,16 @@ export const ExamManager: React.FC = () => {
                   </span>
                 </div>
 
-                {(() => {
-                  const questionIds = Array.isArray(test.question_ids) ? test.question_ids : [];
-                  if (questionIds.length > 0) {
-                    return (
-                      <div className="mt-3 pt-3 border-t border-gray-100">
-                        <p className="text-xs text-gray-500 mb-2">题目预览：</p>
-                        <div className="space-y-2">
-                          {questionIds.slice(0, 3).map((qId, index) => {
-                            const question = questionMap[qId];
-                            const questionType = question ? question.type : 'choice';
-                            return (
-                              <div key={qId} className="text-sm text-gray-700 flex gap-2">
-                                <span className="text-gray-400">{index + 1}.</span>
-                                <span className="flex-1 truncate">
-                                  {question ? htmlToPlainText(question.content) : '题目已删除'}
-                                </span>
-                                <span className="text-xs text-gray-400">
-                                  [{getQuestionTypeName(questionType)}]
-                                </span>
-                              </div>
-                            );
-                          })}
-                          {questionIds.length > 3 && (
-                            <p className="text-xs text-gray-400">
-                              ... 还有 {questionIds.length - 3} 道题
-                            </p>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  }
-                  return null;
-                })()}
+                {/* 卷面满分（绝对分制）：老师排完题就能看到这张卷值多少分、怎么算的 */}
+                {(test as any).paper_total > 0 && (
+                  <p className="mt-2 text-xs text-gray-400">
+                    卷面满分 <b className="text-gray-600">{(test as any).paper_total}</b> 分
+                    <span className="ml-1">
+                      （选择 2 分 / 综合 20 分 / 编程 10 分，共{' '}
+                      {Array.isArray(test.question_ids) ? test.question_ids.length : 0} 题）
+                    </span>
+                  </p>
+                )}
               </div>
             );
           })}
@@ -1075,15 +1267,48 @@ export const ExamManager: React.FC = () => {
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">及格分数</label>
-                    <input
-                      type="number"
-                      value={formData.passing_score}
-                      onChange={(e) => setFormData({ ...formData, passing_score: parseInt(e.target.value) || 60 })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
-                      min="0"
-                      max="100"
-                    />
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      及格分数
+                      {formPaperTotal > 0 && (
+                        <span className="ml-1.5 rounded bg-purple-50 px-1.5 py-0.5 text-xs font-normal text-purple-700">
+                          卷面满分 {formPaperTotal} 分
+                        </span>
+                      )}
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        value={formData.passing_score}
+                        onChange={(e) => setFormData({ ...formData, passing_score: parseInt(e.target.value) || 0 })}
+                        className={`w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-purple-500 ${
+                          formPaperTotal > 0 && formData.passing_score > formPaperTotal
+                            ? 'border-red-400 bg-red-50'
+                            : 'border-gray-300'
+                        }`}
+                        min="0"
+                        max={formPaperTotal || 100}
+                      />
+                      {formPaperTotal > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setFormData({ ...formData, passing_score: Math.round(formPaperTotal * 0.6) })}
+                          className="flex-shrink-0 rounded-lg border border-purple-200 bg-purple-50 px-2 py-2 text-xs text-purple-700 hover:bg-purple-100"
+                          title={`按卷面满分的 60% 填入：${Math.round(formPaperTotal * 0.6)} 分`}
+                        >
+                          按 60%
+                        </button>
+                      )}
+                    </div>
+                    {formPaperTotal > 0 && formData.passing_score > formPaperTotal && (
+                      <p className="mt-1 text-xs font-medium text-red-500">
+                        及格线比卷面满分（{formPaperTotal} 分）还高，全班都会不及格
+                      </p>
+                    )}
+                    {formPaperTotal > 0 && formData.passing_score <= formPaperTotal && (
+                      <p className="mt-1 text-xs text-gray-400">
+                        这张卷满分 {formPaperTotal} 分（选择 2 分 / 综合 20 分 / 编程填空 10 分）
+                      </p>
+                    )}
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">及格奖励积分</label>
@@ -1208,7 +1433,8 @@ export const ExamManager: React.FC = () => {
                 <div>
                   <div className="flex justify-between items-center mb-3">
                     <label className="block text-sm font-medium text-gray-700">
-                      选择题目（已选 {formData.question_ids.length} 道）
+                      选择题目（已选 {formData.question_ids.length} 道
+                      {formPaperTotal > 0 && <span className="ml-1 text-purple-600">· 卷面 {formPaperTotal} 分</span>}）
                     </label>
                     <button
                       onClick={() => setShowQuestionSelector(true)}
@@ -1326,12 +1552,10 @@ export const ExamManager: React.FC = () => {
                       onChange={(e) => setFilterType(e.target.value)}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                     >
-                      <option value="">全部类型</option>
-                      <option value="choice">选择题</option>
-                      <option value="fill">填空题</option>
-                      <option value="fill_blank">填空题</option>
-                      <option value="judge">判断题</option>
-                      <option value="code">编程题</option>
+                      <option value="">全部题型</option>
+                      <option value="choice">选择题（2 分/题）</option>
+                      <option value="composite">综合题（20 分/题）</option>
+                      <option value="python_fill">编程填空（10 分/题）</option>
                     </select>
 
                     {allTags.length > 0 && (
@@ -1816,14 +2040,26 @@ export const ExamManager: React.FC = () => {
                                 >
                                   <td className="px-4 py-3">
                                     <div className={`font-medium ${record.is_absent ? 'text-gray-500' : 'text-gray-800'}`}>
-                                      {record.student?.real_name || record.student?.username || '未知学生'}
+                                      <button
+                                        type="button"
+                                        onClick={() => setDetailStudent({ id: record.student_id, name: record.student?.real_name || record.student?.username || '未知学生' })}
+                                        className="text-left text-purple-700 underline decoration-dotted underline-offset-2 hover:text-purple-900"
+                                        title="查看这名学生的逐题作答"
+                                      >
+                                        {record.student?.real_name || record.student?.username || '未知学生'}
+                                      </button>
                                     </div>
                                     <div className="text-xs text-gray-500">
                                       {record.student?.username}
+                                      {(record as any).inactive_count > 0 && (
+                                        <span className="ml-1 text-amber-600" title="考试期间切出平台的次数">
+                                          · 切屏 {(record as any).inactive_count} 次
+                                        </span>
+                                      )}
                                     </div>
                                   </td>
                                   <td className={`px-4 py-3 text-center font-bold ${record.is_absent ? 'text-gray-300' : 'text-purple-600'}`}>
-                                    {record.is_absent ? '—' : (record.score || 0)}
+                                    {record.is_absent ? '—' : `${record.score || 0} / ${(record as any).paper_total || 100}`}
                                   </td>
                                   <td className="px-4 py-3 text-center text-gray-600">
                                     {record.is_absent
@@ -1880,9 +2116,14 @@ export const ExamManager: React.FC = () => {
                     })()}
                   </div>
                 ) : (
-                  <div className="space-y-4">
-                    <div className="flex items-center justify-between rounded-lg bg-indigo-50 px-4 py-2.5">
-                      <span className="text-sm text-indigo-800">按正确率从低到高排列，可一键让 AI 讲评高频错题</span>
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-indigo-50 px-4 py-2.5">
+                      <div className="text-sm text-indigo-800">
+                        按正确率从低到高排列，<b>第 1 张就是错得最多的题</b>。
+                        <span className="ml-1 text-indigo-500">
+                          （选择 2 分 / 综合 20 分 / 编程填空 10 分，综合题按小题、编程题按空结分；AI 讲评只针对选择题）
+                        </span>
+                      </div>
                       <button
                         onClick={() => startExamExplain()}
                         className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-sm text-white hover:bg-indigo-700"
@@ -1891,118 +2132,223 @@ export const ExamManager: React.FC = () => {
                         AI 讲评高频错题（10 题）
                       </button>
                     </div>
-                    {selectedExam.question_ids.map((qId, index) => {
-                      const question = questionMap[qId];
-                      if (!question) return null;
 
-                      const answersForQuestion = studentAnswersForExam.filter(
-                        (a: any) => a.question_id === qId
-                      );
-                      
-                      const correctCount = answersForQuestion.filter(
-                        (a: any) => a.is_correct
-                      ).length;
-                      
-                      const totalCount = answersForQuestion.length;
-                      const rate = totalCount > 0 ? Math.round(correctCount / totalCount * 100) : 0;
+                    {analysisLoading && (
+                      <div className="py-10 text-center text-gray-400">
+                        <i className="fa-solid fa-circle-notch fa-spin mr-2"></i>正在统计作答明细…
+                      </div>
+                    )}
 
-                      return (
-                        <div
-                          key={qId}
-                          onClick={() => setSelectedQuestion({ 
-                            question, 
-                            stats: { correct: correctCount, total: totalCount, rate } 
-                          })}
-                          className="bg-white border border-gray-200 rounded-lg p-4 hover:border-purple-300 cursor-pointer transition-colors"
-                        >
-                          <div className="flex items-start justify-between">
-                            <div className="flex-1">
-                              <div className="flex items-center gap-2 mb-2">
-                                <span className="px-2 py-1 bg-purple-100 text-purple-600 rounded text-xs font-medium">
-                                  第 {index + 1} 题
+                    {!analysisLoading && !examAnalysis && (
+                      <div className="rounded-lg border border-dashed border-gray-200 py-10 text-center text-gray-400">
+                        暂无作答数据
+                      </div>
+                    )}
+
+                    {!analysisLoading && examAnalysis && examAnalysis.items.length === 0 && (
+                      <div className="rounded-lg border border-dashed border-gray-200 py-10 text-center text-gray-400">
+                        这场考试还没有可统计的题目（题目可能已被删除）
+                      </div>
+                    )}
+
+                    {!analysisLoading && examAnalysis && (examAnalysis.items as any[])
+                      .slice()
+                      .sort((a, b) => a.rate - b.rate)
+                      .map((it, idx) => (
+                        <div key={it.item_id} className="rounded-lg border border-gray-200 bg-white">
+                          <button
+                            type="button"
+                            onClick={() => setExpandedItem(expandedItem === it.item_id ? null : it.item_id)}
+                            className="flex w-full items-start justify-between gap-4 p-4 text-left hover:bg-gray-50"
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="mb-1 flex flex-wrap items-center gap-2">
+                                <span className="rounded bg-purple-100 px-2 py-0.5 text-xs font-medium text-purple-600">
+                                  第 {idx + 1} 题
                                 </span>
-                                <span className="text-xs text-gray-500">
-                                  [{getQuestionTypeName(question.type)}]
+                                <span className={`rounded px-2 py-0.5 text-xs ${
+                                  it.kind === 'composite'
+                                    ? 'bg-indigo-100 text-indigo-600'
+                                    : it.kind === 'python'
+                                      ? 'bg-emerald-100 text-emerald-700'
+                                      : 'bg-blue-100 text-blue-600'
+                                }`}>
+                                  {it.kind === 'composite' ? '综合题' : it.kind === 'python' ? '编程填空' : '选择题'}
                                 </span>
+                                <span className="text-xs text-gray-500">{it.score} 分</span>
+                                <span className="text-xs text-gray-400">作答 {it.answered} 人</span>
                               </div>
-                              <p className="text-gray-800 line-clamp-2">{htmlToPlainText(question.content)}</p>
-                              <button
-                                onClick={(e) => { e.stopPropagation(); startExamExplain(question); }}
-                                className="mt-2 inline-flex items-center gap-1 rounded bg-indigo-50 px-2 py-1 text-xs text-indigo-700 hover:bg-indigo-100"
-                              >
-                                <i className="fa-solid fa-volume-high"></i>
-                                AI 讲解
-                              </button>
+                              <p className="line-clamp-2 text-gray-800">{htmlToPlainText(it.content)}</p>
                             </div>
-                            <div className="text-right ml-4">
-                              <div className="text-2xl font-bold text-purple-600">{rate}%</div>
+                            <div className="flex-none text-right">
+                              <div className={`text-2xl font-bold ${it.rate < 50 ? 'text-red-500' : 'text-purple-600'}`}>
+                                {it.rate}%
+                              </div>
                               <div className="text-xs text-gray-500">
-                                {correctCount}/{totalCount} 人答对
+                                {it.correct}/{it.answered} 全对
                               </div>
+                              <div className="text-xs text-gray-400">均 {it.avg_score} 分</div>
+                              <i className={`fa-solid fa-chevron-${expandedItem === it.item_id ? 'up' : 'down'} mt-1 text-xs text-gray-300`}></i>
                             </div>
-                          </div>
+                          </button>
+
+                          {expandedItem === it.item_id && (
+                            <div className="space-y-4 border-t border-gray-100 p-4">
+                              {it.kind === 'choice' && (
+                                <div className="space-y-2">
+                                  <p className="text-xs text-gray-500">
+                                    各选项被选比例（正确答案 <b className="text-green-600">{it.correct_answer || '—'}</b>）
+                                  </p>
+                                  {(it.options_stats || []).map((o: any) => (
+                                    <div key={o.letter} className="flex items-center gap-2">
+                                      <span className={`w-4 flex-none text-sm font-bold ${o.is_correct ? 'text-green-600' : 'text-gray-500'}`}>
+                                        {o.letter}
+                                      </span>
+                                      <span className={`w-32 flex-none truncate text-xs ${o.is_correct ? 'text-green-700' : 'text-gray-500'}`} title={o.text}>
+                                        {o.text || '（图片选项）'}
+                                      </span>
+                                      <div className="h-3 flex-1 overflow-hidden rounded bg-gray-100">
+                                        <div
+                                          className={`h-full rounded ${o.is_correct ? 'bg-green-400' : 'bg-gray-400'}`}
+                                          style={{ width: `${Math.min(100, o.ratio)}%` }}
+                                        ></div>
+                                      </div>
+                                      <span className="w-24 flex-none text-right text-xs text-gray-500">
+                                        {o.count} 人 · {o.ratio}%
+                                      </span>
+                                      {o.is_correct && <i className="fa-solid fa-check flex-none text-xs text-green-500"></i>}
+                                    </div>
+                                  ))}
+                                  {it.answered === 0 && (
+                                    <p className="text-xs text-gray-400">还没有人作答这道题</p>
+                                  )}
+                                  <div className="flex justify-end pt-1">
+                                    <button
+                                      onClick={() => {
+                                        const q = questionMap[it.item_id];
+                                        if (q) startExamExplain(q);
+                                      }}
+                                      className="flex items-center gap-1 rounded bg-indigo-50 px-2 py-1 text-xs text-indigo-700 hover:bg-indigo-100"
+                                    >
+                                      <i className="fa-solid fa-volume-high"></i>
+                                      AI 讲解这一题
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+
+                              {it.kind === 'composite' && (
+                                <div className="space-y-3">
+                                  <p className="text-xs text-gray-500">
+                                    综合题按小题给分：答对几个小题就拿几个小题的分（整题 {it.score} 分）
+                                  </p>
+                                  {(it.subs_stats || []).map((s: any, si: number) => (
+                                    <div key={si} className="rounded border border-gray-100 bg-gray-50 p-3">
+                                      <div className="mb-1 flex flex-wrap items-center gap-2 text-xs">
+                                        <span className="rounded bg-white px-1.5 py-0.5 font-medium text-purple-600">第 {s.index ?? si + 1} 小题</span>
+                                        <span className="text-gray-500">{s.type === 'choice' ? '选择' : '填空'} · {s.score} 分</span>
+                                        <span className="text-gray-400">作答 {s.answered} 人</span>
+                                      </div>
+                                      <div className="mb-2 line-clamp-2 text-sm text-gray-700">{htmlToPlainText(s.content)}</div>
+                                      {s.type === 'choice' && (s.options_stats || []).length > 0 && (
+                                        <div className="space-y-1">
+                                          {(s.options_stats || []).map((o: any) => (
+                                            <div key={o.letter} className="flex items-center gap-2">
+                                              <span className="w-4 flex-none text-xs font-bold text-gray-500">{o.letter}</span>
+                                              <div className="h-2 flex-1 overflow-hidden rounded bg-gray-200">
+                                                <div className="h-full rounded bg-indigo-400" style={{ width: `${Math.min(100, o.ratio)}%` }}></div>
+                                              </div>
+                                              <span className="w-20 flex-none text-right text-[11px] text-gray-500">{o.count} 人 {o.ratio}%</span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                      {s.type === 'fill_blank' && (
+                                        <div className="space-y-1">
+                                          {(s.answers || []).length === 0 && (
+                                            <p className="text-xs text-gray-400">还没有人填这一小题</p>
+                                          )}
+                                          {(s.answers || []).map((a: any, ai: number) => (
+                                            <div key={ai} className="flex items-center gap-2 text-xs">
+                                              <span className="flex-1 truncate font-mono text-gray-700" title={a.text}>{a.text}</span>
+                                              <span className="flex-none text-gray-500">{a.count} 人</span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+
+                              {it.kind === 'python' && (
+                                <div className="space-y-3">
+                                  <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <p className="text-xs text-gray-500">
+                                      每一空的实际填充（不论对错，按人数排序）—— 老师一眼能看出全班卡在哪一空
+                                    </p>
+                                    <button
+                                      onClick={() => startExamExplain({
+                                        id: it.item_id,
+                                        type: 'python_fill',
+                                        content: `${it.content}\n\n【代码模板】\n${it.blank_template}\n\n【每空标准答案】\n${(it.blanks_stats || [])
+                                          .map((b: any) => `第${b.index}空：${(b.accept || []).join('  或  ') || '（未配置）'}`)
+                                          .join('\n')}`,
+                                        options: '[]',
+                                        answers: '{}',
+                                      } as any)}
+                                      className="flex items-center gap-1 rounded bg-indigo-50 px-2 py-1 text-xs text-indigo-700 hover:bg-indigo-100"
+                                    >
+                                      <i className="fa-solid fa-volume-high"></i>
+                                      AI 讲解
+                                    </button>
+                                  </div>
+                                  <pre className="overflow-x-auto rounded bg-slate-50 p-3 font-mono text-xs leading-6 text-slate-700">
+                                    {it.blank_template || '（无模板）'}
+                                  </pre>
+                                  {(it.blanks_stats || []).map((b: any) => (
+                                    <div key={b.index} className="rounded border border-gray-100 bg-white p-3">
+                                      <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
+                                        <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-medium text-emerald-700">第 {b.index} 空</span>
+                                        <span className="text-gray-500">{b.answered} 人作答</span>
+                                        <span className="text-amber-600">{b.distinct} 种不同答案</span>
+                                      </div>
+                                      {(b.answers || []).length === 0 && (
+                                        <p className="text-xs text-gray-400">这一空没有人填</p>
+                                      )}
+                                      <div className="space-y-1">
+                                        {(b.answers || []).map((a: any, ai: number) => {
+                                          const isStd = (b.accept || []).some(
+                                            (x: string) => String(x).replace(/\s+/g, '').toLowerCase() === String(a.text).replace(/\s+/g, '').toLowerCase()
+                                          );
+                                          return (
+                                            <div key={ai} className="flex items-center gap-2 text-xs">
+                                              <span className={`flex-1 truncate font-mono ${isStd ? 'text-green-700' : 'text-gray-700'}`} title={a.text}>
+                                                {a.text}
+                                              </span>
+                                              {isStd && <span className="flex-none rounded bg-green-50 px-1 text-[10px] text-green-600">标准答案</span>}
+                                              <span className="w-14 flex-none text-right text-gray-500">{a.count} 人</span>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                      {(b.accept || []).length > 0 && (
+                                        <p className="mt-2 text-[11px] text-gray-400">
+                                          可接受答案：<span className="font-mono text-gray-600">{(b.accept || []).join('  或  ')}</span>
+                                        </p>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </div>
-                      );
-                    })}
+                      ))}
                   </div>
                 )}
               </div>
 
-              {selectedQuestion && (
-                <div className="border-t border-gray-200 p-4 bg-gray-50">
-                  <div className="flex justify-between items-center mb-4">
-                    <h4 className="font-bold text-gray-800">题目详情</h4>
-                    <button
-                      onClick={() => setSelectedQuestion(null)}
-                      className="text-gray-400 hover:text-gray-600"
-                    >
-                      <i className="fa-solid fa-times"></i>
-                    </button>
-                  </div>
-                  <div className="bg-white rounded-lg p-4 mb-4">
-                    <div className="font-medium text-gray-800 mb-4 question-rich-content">
-                      <div dangerouslySetInnerHTML={{ __html: sanitizeHtml(selectedQuestion.question.content) }} />
-                    </div>
-                    {selectedQuestion.question.options && (
-                      <div className="space-y-2 mb-4">
-                        {getOptions(selectedQuestion.question.options).map((option: string, idx: number) => {
-                          const letter = String.fromCharCode(65 + idx);
-                          return (
-                            <div key={idx} className="flex items-start gap-2">
-                              <span className="font-medium">{letter}.</span>
-                              <span className="question-rich-content" dangerouslySetInnerHTML={{ __html: sanitizeHtml(option) }} />
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                    <div className="border-t border-gray-200 pt-4">
-                      <p className="text-green-600 font-medium mb-2">
-                        正确答案: {getAnswers(selectedQuestion.question.answers).join(' / ')}
-                      </p>
-                      {selectedQuestion.question.explanation && (
-                        <div className="text-gray-600 text-sm question-rich-content">
-                          <span className="font-medium">解析：</span>
-                          <span dangerouslySetInnerHTML={{ __html: sanitizeHtml(selectedQuestion.question.explanation) }} />
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                  <div className="flex justify-between items-center text-sm">
-                    <span className="text-gray-600">
-                      正确率: <span className="font-bold text-purple-600">{selectedQuestion.stats.rate}%</span>
-                      ({selectedQuestion.stats.correct}/{selectedQuestion.stats.total} 人)
-                    </span>
-                    <button
-                      onClick={() => startExamExplain(selectedQuestion.question)}
-                      className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-white hover:bg-indigo-700"
-                    >
-                      <i className="fa-solid fa-volume-high"></i>
-                      AI 语音讲解
-                    </button>
-                  </div>
-                </div>
-              )}
 
               <div className="p-6 border-t border-gray-200">
                 <button
@@ -2017,6 +2363,181 @@ export const ExamManager: React.FC = () => {
         )}
       </AnimatePresence>
 
+      {/* 学生答卷详情（2026-11-17）：点姓名弹出，逐题看作答与对错 */}
+      <AnimatePresence>
+        {detailStudent && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4"
+            onClick={() => setDetailStudent(null)}
+          >
+            <motion.div
+              initial={{ scale: 0.95 }}
+              animate={{ scale: 1 }}
+              exit={{ scale: 0.95 }}
+              className="flex h-[85vh] w-full max-w-4xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
+                <div>
+                  <h3 className="text-lg font-bold text-gray-800">
+                    {detailStudent.name} 的答卷
+                  </h3>
+                  <p className="mt-0.5 text-xs text-gray-500">
+                    {selectedExam?.title} · 每题显示「得分 / 满分」与作答内容
+                  </p>
+                </div>
+                <button
+                  onClick={() => setDetailStudent(null)}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <i className="fa-solid fa-times text-lg"></i>
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-5">
+                {(() => {
+                  const items: any[] = (examAnalysis && examAnalysis.items) || [];
+                  const mine = new Map<string, any>(
+                    ((examAnalysis && examAnalysis.answers) || [])
+                      .filter((a: any) => a.student_id === detailStudent.id)
+                      .map((a: any) => [a.question_id, a])
+                  );
+                  if (!items.length) {
+                    return <p className="py-10 text-center text-gray-400">暂无数据</p>;
+                  }
+                  const totalScore = [...mine.values()].reduce((s, a) => s + (Number(a.credit) || 0), 0);
+                  const totalMax = [...mine.values()].reduce((s, a) => s + (Number(a.max) || 0), 0);
+                  return (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between rounded-lg bg-purple-50 px-4 py-2 text-sm text-purple-800">
+                        <span>
+                          已作答 <b>{mine.size}</b> / {items.length} 题
+                        </span>
+                        <span>
+                          作答部分合计 <b>{totalScore}</b> / {totalMax} 分
+                        </span>
+                      </div>
+
+                      {items.map((it, idx) => {
+                        const a = mine.get(it.item_id);
+                        const credit = a ? Number(a.credit) || 0 : 0;
+                        const ok = !!a && a.is_correct === true;
+                        let raw = '';
+                        try {
+                          const p = typeof a?.answer === 'string' ? JSON.parse(a.answer) : null;
+                          raw = p ? '' : String(a?.answer || '');
+                        } catch {
+                          raw = String(a?.answer || '');
+                        }
+                        return (
+                          <div
+                            key={it.item_id}
+                            className={`rounded-lg border p-3 ${
+                              !a ? 'border-gray-200 bg-gray-50' : ok ? 'border-green-200 bg-green-50/40' : 'border-red-200 bg-red-50/30'
+                            }`}
+                          >
+                            <div className="mb-1 flex flex-wrap items-center gap-2 text-xs">
+                              <span className="rounded bg-white px-1.5 py-0.5 font-medium text-purple-600">
+                                第 {idx + 1} 题
+                              </span>
+                              <span className="text-gray-500">
+                                {it.kind === 'composite' ? '综合题' : it.kind === 'python' ? '编程填空' : '选择题'}
+                              </span>
+                              <span className={`font-medium ${ok ? 'text-green-600' : a ? 'text-red-500' : 'text-gray-400'}`}>
+                                {a ? `${credit} / ${it.score} 分` : '未作答'}
+                              </span>
+                              {a && !ok && credit > 0 && (
+                                <span className="text-amber-600">（部分得分）</span>
+                              )}
+                            </div>
+                            <p className="mb-2 line-clamp-2 text-sm text-gray-700">
+                              {htmlToPlainText(it.content)}
+                            </p>
+
+                            {!a && <p className="text-xs text-gray-400">这一题没有作答记录</p>}
+
+                            {a && it.kind === 'choice' && (
+                              <p className="text-sm text-gray-800">
+                                选了 <b className={ok ? 'text-green-600' : 'text-red-500'}>{raw || '（空）'}</b>
+                                <span className="ml-2 text-xs text-gray-500">
+                                  正确答案 {it.correct_answer || '—'}
+                                </span>
+                              </p>
+                            )}
+
+                            {a && it.kind === 'composite' && (
+                              <div className="space-y-1">
+                                {((a.detail && a.detail.subs) || []).map((sub: any, si: number) => {
+                                  let shown = '';
+                                  try {
+                                    const p = JSON.parse(a.answer);
+                                    const c = (p.choice_answers || {})[si];
+                                    const b = (p.blank_answers || {})[si];
+                                    shown = c != null && c !== ''
+                                      ? String(c)
+                                      : Array.isArray(b) ? b.filter(Boolean).join(' | ') : String(b == null ? '' : b);
+                                  } catch { shown = ''; }
+                                  return (
+                                    <div key={si} className="flex items-center gap-2 text-xs">
+                                      <span className="text-gray-500">第 {sub.index} 小题</span>
+                                      <span className="flex-1 truncate font-mono text-gray-700">{shown || '（空）'}</span>
+                                      <span className="text-gray-400">{sub.score} 分</span>
+                                      <span className={sub.correct ? 'text-green-600' : 'text-red-500'}>
+                                        {sub.correct ? '✓' : '✗'}
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+
+                            {a && it.kind === 'python' && (
+                              <div className="space-y-1">
+                                {(() => {
+                                  let blanks: any[] = [];
+                                  try {
+                                    const p = JSON.parse(a.answer);
+                                    blanks = Array.isArray(p.blanks) ? p.blanks : [];
+                                  } catch { blanks = []; }
+                                  const detailBlanks: any[] = (a.detail && a.detail.blanks) || [];
+                                  return (detailBlanks.length ? detailBlanks : blanks.map((v, i) => ({ blank: i + 1, answer: v })))
+                                    .map((b: any, bi: number) => (
+                                      <div key={bi} className="flex items-center gap-2 text-xs">
+                                        <span className="text-gray-500">第 {b.blank ?? bi + 1} 空</span>
+                                        <span className="flex-1 truncate font-mono text-gray-700">{b.answer || '（空）'}</span>
+                                        {b.correct != null && (
+                                          <span className={b.correct ? 'text-green-600' : 'text-red-500'}>
+                                            {b.correct ? '✓' : '✗'}
+                                          </span>
+                                        )}
+                                      </div>
+                                    ));
+                                })()}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+              </div>
+
+              <div className="border-t border-gray-200 p-4">
+                <button
+                  onClick={() => setDetailStudent(null)}
+                  className="w-full rounded-lg bg-gray-200 py-2 text-gray-700 hover:bg-gray-300"
+                >
+                  关闭
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       {explainQueue && (
         <AiExplainPlayer
           questions={explainQueue}

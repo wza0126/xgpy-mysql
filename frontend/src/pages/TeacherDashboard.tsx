@@ -57,7 +57,7 @@ const MENU_GROUPS: { title: string; items: { id: string; title: string; icon: st
       { id: 'taskManager', title: '备课工作台', icon: 'fa-chalkboard-user' },
       { id: 'rollCall', title: '课堂点名', icon: 'fa-hand-pointer' },
       { id: 'analytics', title: '学情分析', icon: 'fa-chart-line' },
-      { id: 'tests', title: '考试管理', icon: 'fa-clipboard-check' },
+      { id: 'tests', title: '考试', icon: 'fa-clipboard-check' },
     ],
   },
   {

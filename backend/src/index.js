@@ -15,6 +15,12 @@ const {
   judgeCompositeSubResults, getCompositeCredit,
 } = require('./composite-score');
 const { registerAccessOp } = require('./access-op');
+// 试卷装载与判分（选择 2 / 综合 20 / 编程填空 10，绝对分制）
+const {
+  loadPaper, toPublicPaper, pickItemIds, judgeItem, hasAnswer, parseItemIds,
+  isPythonItem, pythonTaskIdOf, computePaperTotalFromIds,
+  CHOICE_SCORE, COMPOSITE_SCORE, PYTHON_SCORE,
+} = require('./exam-paper');
 const { registerGameTasks } = require('./game-task');
 const { registerFarm } = require('./farm');
 const { registerStudyGalaxy } = require('./study-galaxy');
@@ -1963,6 +1969,16 @@ app.post('/api/tables/:tableName', authenticate, async (req, res) => {
     const noteInsertErr = notesContentError(tableName, data);
     if (noteInsertErr) return res.status(400).json({ data: null, error: noteInsertErr });
 
+    // 保存试卷时顺手算好卷面满分（选择2/综合20/编程10）：
+    // 老师端列表要显示「满分 46」，靠这里落库，不在前端各算一遍（口径必须唯一）
+    if (tableName === 'tests' && data.question_ids !== undefined) {
+      try {
+        data.paper_total = await computePaperTotalFromIds(pool, data.question_ids);
+      } catch (e) {
+        console.warn('[tests] 计算卷面满分失败，按 0 存:', e.message);
+      }
+    }
+
     if (!data.id) {
       data.id = `local_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     }
@@ -2070,6 +2086,15 @@ app.put('/api/tables/:tableName/:id', authenticate, async (req, res) => {
 
     const noteUpdateErr = notesContentError(tableName, data);
     if (noteUpdateErr) return res.status(400).json({ data: null, error: noteUpdateErr });
+
+    // 试卷改动题目后重算卷面满分（同 POST 口径）
+    if (tableName === 'tests' && data.question_ids !== undefined) {
+      try {
+        data.paper_total = await computePaperTotalFromIds(pool, data.question_ids);
+      } catch (e) {
+        console.warn('[tests] 计算卷面满分失败，保持原值:', e.message);
+      }
+    }
 
     // ---- profiles 表写保护 ----
     // /api/tables 是通用表写接口，默认任何已登录用户都能改任意表任意字段。
@@ -5325,85 +5350,72 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
       }
     }
 
-    // 分母防作弊：考试题目是前端从 tests.question_ids 里随机抽 question_count 道，
-    // 不能采信前端传来的数组长度（否则只交 1 道题就能拿 100 分、拿走全额奖励）。
-    let configuredIds = [];
+    // 分母防作弊（2026-11-17 起强化）：分母现在一律取服务端在开考时写进
+    // exam_records.selected_question_ids 的抽题结果，前端数组只用来取答案，不参与分母。
+    // 老的 configuredIds/examPoolCount/submittedCount 计算已删除 —— 保留会和下面的
+    // const total 重复声明（TDZ/重复声明都是启动即崩）。
+
+
+    // ===== 判分（2026-11-17 吴老新口径：绝对分）=====
+    // 选择 2 分/题、综合 20 分/题（按小题分）、编程填空 10 分/题（按空权重）。
+    // 分母不再固定 100：卷面满分 = 各题分值之和，落库到 exam_records.paper_total。
+    // ⛔ 分母只信 exam_records.selected_question_ids（开考时服务端抽好并存的），
+    //    绝不采信前端传上来的 questions 数组长度 —— 否则只交 1 道题就能拿满分。
+    const paper = await loadPaper(connection, test_id);
+    const paperById = new Map(((paper && paper.items) || []).map((it) => [it.item_id, it]));
+    let paperItems = [];
     {
-      let parsedIds = testEarly.question_ids;
-      if (typeof parsedIds === 'string') {
-        try { parsedIds = JSON.parse(parsedIds); } catch { parsedIds = null; }
-      }
-      if (Array.isArray(parsedIds)) {
-        configuredIds = [...new Set(parsedIds.filter(x => typeof x === 'string' && x))];
-      }
-    }
-    let examPoolCount = 0;
-    if (configuredIds.length > 0) {
-      const [examPoolRows] = await connection.query(
-        'SELECT COUNT(*) n FROM questions WHERE id IN (?)',
-        [configuredIds]
+      const [[recRow]] = await connection.query(
+        `SELECT selected_question_ids FROM exam_records
+          WHERE test_id = ? AND student_id = ?
+          ORDER BY started_at DESC LIMIT 1`,
+        [test_id, student_id]
       );
-      examPoolCount = Number(examPoolRows[0]?.n || 0);
-    }
-    const submittedCount = new Set(
-      (Array.isArray(questions) ? questions : []).map(q => q && q.id).filter(Boolean)
-    ).size;
-    const expectedTotal = configuredIds.length > 0
-      ? Math.min(examPoolCount, Number(testEarly.question_count) || examPoolCount)
-      : submittedCount;
-    const total = Math.max(submittedCount, expectedTotal);
-    if (submittedCount < expectedTotal) {
-      console.warn(`[submit-exam] 提交题数 ${submittedCount} 少于按抽题规则应有的 ${expectedTotal}，分母按 ${expectedTotal} 计算`, { student_id, test_id });
+      let selectedIds = parseItemIds(recRow && recRow.selected_question_ids);
+      if (!selectedIds.length) {
+        // 老记录 / 开考没写：退回整卷，仍然不用前端数组决定分母
+        selectedIds = ((paper && paper.items) || []).map((it) => it.item_id);
+      }
+      paperItems = selectedIds.map((id) => paperById.get(id)).filter(Boolean);
+      if (!paperItems.length) {
+        await connection.rollback();
+        return res.status(400).json({
+          data: null,
+          error: '该考试没有可判分的题目（题目可能已被删除），请联系老师',
+        });
+      }
     }
 
     let correct = 0;
-    // 加权计分（2026-10-26）：综合题按小题数占分，答对几个小题得几分；
-    // 单题题型权重恒为 1，所以「纯选择题卷」的算法与改动前完全一致。
-    // ⛔ 下面 UPDATE/INSERT exam_records 用的是 totalWeight —— 少定义它就是
-    //    ReferenceError，整场考试所有学生交卷都返回 500（2026-10-26 高二5 就是这样挂的）。
-    let credit = 0;
-    let weightSum = 0;
-    let answeredCount = 0;
-
-    // 服务端判分数据源：题目类型与正确答案一律取自题库 questions 表。
-    // 前端传来的 questions[].answers 只是它自己的一份副本，不能作为判分依据
-    //（否则学生改一下请求体就能伪造满分，直接拿走全额奖励积分与装备掉落）。
-    const serverQuestionMap = new Map();
-    const submitQuestionIds = [...new Set((Array.isArray(questions) ? questions : []).map(q => q && q.id).filter(Boolean))];
-    if (submitQuestionIds.length > 0) {
-      const [serverQs] = await connection.query(
-        'SELECT id, type, answers, options, explanation FROM questions WHERE id IN (?)',
-        [submitQuestionIds]
-      );
-      serverQs.forEach(row => serverQuestionMap.set(row.id, row));
+    let creditPoints = 0;
+    let paperTotalPoints = 0;
+    const itemResults = [];
+    for (const item of paperItems) {
+      const raw = answers[item.item_id] !== undefined
+        ? answers[item.item_id]
+        : (item.question_id ? answers[item.question_id] : undefined);
+      const judged = judgeItem(item, raw);
+      paperTotalPoints += judged.max;
+      creditPoints += judged.credit;
+      if (judged.isCorrect) correct += 1;
+      itemResults.push({
+        item_id: item.item_id,
+        question_id: item.question_id || null,
+        kind: item.kind,
+        answer: raw,
+        answered: hasAnswer(item, raw),
+        credit: judged.credit,
+        max: judged.max,
+        is_correct: judged.isCorrect,
+        detail: judged.detail,
+      });
     }
 
-    for (const q of questions) {
-      const serverQ = serverQuestionMap.get(q.id);
-      const isComposite = !!serverQ && serverQ.type === 'composite';
-      // 权重按题型给：综合题 = 小题数，其它 = 1
-      weightSum += isComposite ? getCompositeCredit(serverQ.answers, '').weight : 1;
-
-      const userAnswer = answers[q.id];
-      if (!userAnswer) continue;
-      if (!serverQ) {
-        // 题库中查不到该题（异常数据）：按未答对处理，绝不采信前端给的"答案"
-        console.warn('[submit-test/exam] 题目不在题库中，按未答对处理:', q.id);
-        continue;
-      }
-      answeredCount += 1;
-      if (isComposite) {
-        credit += getCompositeCredit(serverQ.answers, userAnswer).credit;
-      } else if (judgeQuestionAnswer(serverQ, userAnswer).isCorrect) {
-        credit += 1;
-      }
-    }
-
-    // 漏交的题按单题权重补进分母：只交前几题拿不到高分
-    const missingCount = Math.max(0, total - answeredCount);
-    const totalWeight = weightSum + missingCount;
-    correct = Math.round(credit);
-    const score = totalWeight > 0 ? Math.round((credit / totalWeight) * 100) : 0;
+    const total = paperItems.length;
+    // ⛔ 下面 UPDATE/INSERT exam_records 用的是 totalWeight —— 少定义它就是 ReferenceError，
+    //    整场考试所有学生交卷都返回 500（2026-10-26 高二5 就是这样挂的）。
+    const totalWeight = total;
+    const score = Math.round(creditPoints);
 
     // 考试信息已在判分前加载（testEarly）
     const test = testEarly;
@@ -5416,9 +5428,15 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
       });
     }
     
-    const passingScore = test.passing_score || 60;
+    // 及格按**卷面绝对分**比（吴老 2026-11-17 定：不折算百分制）。
+    // ⛔ 不能写成 `test.passing_score || 60`：老师把及格线设成 0（全员及格）时
+    //    会被 `||` 吞成 60，反过来把全班判不及格。
+    const passingScore = test.passing_score == null ? 60 : Number(test.passing_score);
     const isPassed = score >= passingScore;
-    const pointsEarned = isPassed ? Math.round((score / 100) * (test.points_reward || 50)) : 0;
+    // 积分按「得几分给几点比例的奖励」发，分母是卷面满分而不是 100
+    const pointsEarned = isPassed && paperTotalPoints > 0
+      ? Math.round((score / paperTotalPoints) * (test.points_reward || 50))
+      : 0;
     let internetCodes = [];
 
     if (isPassed && test.allow_internet_code && test.internet_code_reward > 0) {
@@ -5464,16 +5482,42 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
       console.log(`[submit-exam] 本次应得 ${pointsEarned} ≤ 历史已发 ${alreadyAwarded}，按要求不重复发放积分`);
     }
     
+    // 离屏（切浏览器）统计：考试中由前端心跳累计在 exam_progress，交卷时一并结算
+    let inactiveCount = 0;
+    let inactiveSeconds = 0;
+    try {
+      const [[pgStat]] = await connection.query(
+        `SELECT inactive_count, inactive_seconds FROM exam_progress
+          WHERE test_id = ? AND student_id = ? ORDER BY updated_at DESC LIMIT 1`,
+        [test_id, student_id]
+      );
+      inactiveCount = Number(pgStat && pgStat.inactive_count) || 0;
+      inactiveSeconds = Number(pgStat && pgStat.inactive_seconds) || 0;
+    } catch (e) {
+      console.warn('[submit-exam] 读取离屏统计失败，按 0 处理:', e.message);
+    }
+
     if (examRecordId) {
       await connection.query(
-        'UPDATE exam_records SET score = ?, correct_count = ?, total_count = ?, points_earned = ?, internet_codes_earned = ?, is_passed = ?, completed_at = NOW() WHERE id = ?',
-        [score, correct, totalWeight, accumulatedPoints, internetCodes.length, isPassed ? 1 : 0, examRecordId]
+        `UPDATE exam_records
+            SET score = ?, correct_count = ?, total_count = ?, points_earned = ?,
+                internet_codes_earned = ?, is_passed = ?, paper_total = ?,
+                inactive_count = GREATEST(inactive_count, ?), inactive_seconds = GREATEST(inactive_seconds, ?),
+                completed_at = NOW()
+          WHERE id = ?`,
+        [score, correct, totalWeight, accumulatedPoints, internetCodes.length, isPassed ? 1 : 0,
+          paperTotalPoints, inactiveCount, inactiveSeconds, examRecordId]
       );
     } else {
       examRecordId = `er_${Date.now()}_${Math.random().toString(36).substr(2,9)}`;
       await connection.query(
-        'INSERT INTO exam_records (id, test_id, student_id, score, correct_count, total_count, points_earned, internet_codes_earned, is_passed, started_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())',
-        [examRecordId, test_id, student_id, score, correct, totalWeight, accumulatedPoints, internetCodes.length, isPassed ? 1 : 0]
+        `INSERT INTO exam_records
+           (id, test_id, student_id, score, correct_count, total_count, points_earned,
+            internet_codes_earned, is_passed, paper_total, inactive_count, inactive_seconds,
+            started_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        [examRecordId, test_id, student_id, score, correct, totalWeight, accumulatedPoints,
+          internetCodes.length, isPassed ? 1 : 0, paperTotalPoints, inactiveCount, inactiveSeconds]
       );
     }
 
@@ -5520,24 +5564,31 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
       }
     }
     
-    for (const q of questions) {
-      const userAnswer = (answers[q.id] || '').trim();
-      // 判分口径与上面的计分循环保持一致：一律以题库正确答案为准
-      const serverQ = serverQuestionMap.get(q.id);
-      const isCorrect = serverQ ? judgeQuestionAnswer(serverQ, userAnswer).isCorrect : false;
+    // 逐题落 student_answers（考试情况页的「按题目查看」全靠这里的原始作答）
+    for (const r of itemResults) {
+      if (!r.answered) continue;
+      // 选择题答案就是 "A"；综合题/编程题是 JSON 结构，统一序列化后存
+      const storedAnswer = typeof r.answer === 'string'
+        ? r.answer
+        : JSON.stringify(r.answer == null ? '' : r.answer);
+      const saId = `sa_${Date.now()}_${Math.random().toString(36).substr(2,9)}`;
+      await connection.query(
+        `INSERT INTO student_answers
+           (id, student_id, question_id, answer, is_correct, points_change, source, test_id, test_record_id, created_at)
+         VALUES (?, ?, ?, ?, ?, 0, 'exam', ?, ?, NOW())`,
+        [saId, student_id, r.item_id, storedAnswer.slice(0, 5000), r.is_correct ? 1 : 0, test_id, examRecordId]
+      );
 
-      if (userAnswer) {
-        const saId = `sa_${Date.now()}_${Math.random().toString(36).substr(2,9)}`;
-        await connection.query(
-          'INSERT INTO student_answers (id, student_id, question_id, answer, is_correct, points_change, source, test_id, test_record_id, created_at) VALUES (?, ?, ?, ?, ?, 0, \'exam\', ?, ?, NOW())',
-          [saId, student_id, q.id, userAnswer, isCorrect ? 1 : 0, test_id, examRecordId]
-        );
-      }
+      // ⛔ 编程填空题不进错题集：它的 id 带 py: 前缀，错题集页面按 questions 表查详情会查不到，
+      //    点进去就是空白页。它的作答明细留在 student_answers 里，考试情况页照样能看。
+      if (r.kind === 'python') continue;
 
-      if (!isCorrect) {
+      // 综合题只有「全对」才算不错；部分得分不记错题（否则学生会以为整题都不会）
+      const wrongForPool = !r.is_correct;
+      if (wrongForPool) {
         const [existingWrongs] = await connection.query(
           'SELECT * FROM wrong_questions WHERE student_id = ? AND question_id = ?',
-          [student_id, q.id]
+          [student_id, r.item_id]
         );
 
         if (existingWrongs.length > 0) {
@@ -5549,7 +5600,7 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
           const wqId = `wq_${Date.now()}_${Math.random().toString(36).substr(2,9)}`;
           await connection.query(
             'INSERT INTO wrong_questions (id, student_id, question_id, wrong_count, last_wrong_at, created_at) VALUES (?, ?, ?, 1, NOW(), NOW())',
-            [wqId, student_id, q.id]
+            [wqId, student_id, r.item_id]
           );
         }
       }
@@ -5584,6 +5635,9 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
       data: { 
         success: true, 
         score,
+        // 卷面满分（绝对分制）：结果页要显示「37 / 60 分」，不能只给一个 37
+        paper_total: paperTotalPoints,
+        passing_score: passingScore,
         correct,
         total,
         is_passed: isPassed,
@@ -5595,8 +5649,41 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
         internet_codes: internetCodes,
         exam_record_id: examRecordId,
         dropped_equipments: droppedEquipments,
-        // 交卷后下发本次题目的答案与解析，供结果页回顾（题目本身已对学生脱敏）
-        reveal_questions: buildRevealList(questions, serverQuestionMap),
+        inactive_count: inactiveCount,
+        // 交卷后下发本次题目的答案与解析，供结果页回顾（交卷后才有，考前绝不下发）
+        reveal_questions: itemResults.map((r) => {
+          const item = paperById.get(r.item_id) || {};
+          if (r.kind === 'python') {
+            let blanks = [];
+            let weights = [];
+            try {
+              blanks = typeof item.answer?.blank_answers === 'string'
+                ? JSON.parse(item.answer.blank_answers)
+                : (item.answer?.blank_answers || []);
+              weights = typeof item.answer?.blank_weights === 'string'
+                ? JSON.parse(item.answer.blank_weights)
+                : (item.answer?.blank_weights || []);
+            } catch { /* 数据坏了就只回明细，不影响交卷 */ }
+            return {
+              id: r.item_id,
+              kind: 'python',
+              blank_answers: blanks,
+              blank_weights: weights,
+              detail: r.detail,
+              credit: r.credit,
+              max: r.max,
+            };
+          }
+          return {
+            id: r.item_id,
+            kind: r.kind,
+            answers: item.answer,
+            explanation: item.explanation || '',
+            detail: r.detail,
+            credit: r.credit,
+            max: r.max,
+          };
+        }),
         student: formatRow(updatedStudent[0])
       }, 
       error: null 
@@ -5612,6 +5699,601 @@ app.post('/api/business/submit-exam', authenticate, async (req, res) => {
     connection.release();
   }
 });
+
+// ==================== 考试：取卷 / 心跳 / 强制开考结束（2026-11-17） ====================
+/**
+ * 下面这一组接口是「三题型试卷」的地基，几个约定必须一起看：
+ *   · 抽题在**服务端**做，结果写进 exam_records.selected_question_ids 固定住；
+ *     前端拿到什么题就做什么题，交卷时后端按这份 id 列表判分（前端改不动分母）。
+ *   · 取卷接口**绝不**下发标准答案：选择题/综合题只给 content+options+小题骨架，
+ *     编程题只给模板和空数，blank_answers 一律剥离。
+ *   · 强制开考/强制结束是「指令表」+「学生端心跳」组合：老师写 exam_force_controls，
+ *     学生端每 5 秒拉一次，看到 force_start 就弹考试窗口，看到 force_end 就 60 秒倒计时。
+ */
+
+/** 该生是否在这张卷的应考范围内（class_ids 为空 = 全校） */
+function examTargetsStudent(testRow, classId) {
+  const ids = parseItemIds(testRow.class_ids);
+  if (!ids.length) return true;
+  return !!classId && ids.includes(String(classId));
+}
+
+app.get('/api/business/exam-paper/:testId', authenticate, requireStudent, async (req, res) => {
+  const testId = String(req.params.testId || '').trim();
+  const studentId = req.user.userId || req.user.id;
+  const conn = await pool.getConnection();
+  try {
+    const [[test]] = await conn.query(
+      "SELECT * FROM tests WHERE id = ? AND type = 'exam' LIMIT 1",
+      [testId]
+    );
+    if (!test) return res.status(404).json({ data: null, error: '考试不存在' });
+    if (!test.is_active) return res.status(400).json({ data: null, error: '考试已结束，无法参加' });
+
+    const [[stu]] = await conn.query('SELECT class_id FROM profiles WHERE id = ?', [studentId]);
+    if (!examTargetsStudent(test, stu && stu.class_id)) {
+      return res.status(403).json({ data: null, error: '这场考试不面向你所在的班级' });
+    }
+
+    // 已有记录：交过卷就别再取
+    let [[rec]] = await conn.query(
+      'SELECT * FROM exam_records WHERE test_id = ? AND student_id = ? LIMIT 1',
+      [testId, studentId]
+    );
+    if (rec && rec.completed_at) {
+      return res.json({
+        data: { completed: true, score: Number(rec.score) || 0, paper_total: Number(rec.paper_total) || 100 },
+        error: null,
+      });
+    }
+
+    const paper = await loadPaper(conn, testId);
+    if (!paper || !paper.items.length) {
+      return res.status(400).json({ data: null, error: '该试卷还没有可用的题目，请联系老师' });
+    }
+
+    let selectedIds = parseItemIds(rec && rec.selected_question_ids);
+    const needPick = !selectedIds.length;
+
+    if (needPick) {
+      // ⛔ 只能抽一次：这里抽完同时用于 insert/update，抽两次会得到两套题，
+      //    写进库的和下发给学生的就不一样了，交卷必然判错。
+      selectedIds = pickItemIds(paper.items, test.question_count);
+    }
+
+    if (!rec) {
+      // ⛔ completed_at 必须显式写 NULL：表上默认值是 current_timestamp，
+      //    不写就会被当成「已交卷」，学生一进来就被告知考过了。
+      const newId = `er_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      await conn.query(
+        `INSERT INTO exam_records (id, test_id, student_id, selected_question_ids, score, is_passed, started_at, completed_at)
+         VALUES (?, ?, ?, ?, NULL, 0, NOW(), NULL)`,
+        [newId, testId, studentId, JSON.stringify(selectedIds)]
+      );
+      [[rec]] = await conn.query('SELECT * FROM exam_records WHERE id = ?', [newId]);
+    } else if (needPick) {
+      await conn.query(
+        'UPDATE exam_records SET selected_question_ids = ? WHERE id = ?',
+        [JSON.stringify(selectedIds), rec.id]
+      );
+    }
+
+    const byId = new Map(paper.items.map((it) => [it.item_id, it]));
+    const picked = selectedIds.map((id) => byId.get(id)).filter(Boolean);
+    const paperTotal = picked.reduce((s, it) => s + (it.score || 0), 0);
+
+    // 剩余时间按服务端 started_at 算，前端关窗口/改电脑都偷不到时间
+    const limitSec = (Number(test.time_limit) || 60) * 60;
+    const elapsed = rec.started_at
+      ? Math.floor((Date.now() - new Date(rec.started_at).getTime()) / 1000)
+      : 0;
+    const remaining = Math.max(0, limitSec - elapsed);
+
+    // 断点续答：优先用 exam_progress 里存的答案
+    let savedAnswers = {};
+    let savedIndex = 0;
+    const [[pg]] = await conn.query(
+      'SELECT answers, current_index FROM exam_progress WHERE exam_record_id = ? LIMIT 1',
+      [rec.id]
+    );
+    if (pg) {
+      try {
+        savedAnswers = typeof pg.answers === 'string' ? JSON.parse(pg.answers) : (pg.answers || {});
+      } catch { savedAnswers = {}; }
+      savedIndex = Number(pg.current_index) || 0;
+    }
+
+    res.json({
+      data: {
+        completed: false,
+        exam_record_id: rec.id,
+        paper_total: paperTotal,
+        remaining_seconds: remaining,
+        limit_seconds: limitSec,
+        saved_answers: savedAnswers,
+        saved_index: savedIndex,
+        paper: toPublicPaper({
+          test: { ...test, time_limit: test.time_limit },
+          items: picked,
+          paperTotal,
+          counts: {
+            choice: picked.filter((i) => i.kind === 'choice').length,
+            composite: picked.filter((i) => i.kind === 'composite').length,
+            python: picked.filter((i) => i.kind === 'python').length,
+          },
+        }),
+      },
+      error: null,
+    });
+  } catch (e) {
+    console.error('[exam-paper] 取卷失败:', e);
+    res.status(500).json({ data: null, error: e.message });
+  } finally {
+    conn.release();
+  }
+});
+
+/**
+ * 学生端考试心跳（每 5 秒一次）
+ * 作用有三：① 上报离屏次数/秒数 ② 拉老师的强制指令 ③ 让老师看到谁在线
+ */
+app.post('/api/business/exam-heartbeat', authenticate, requireStudent, async (req, res) => {
+  const studentId = req.user.userId || req.user.id;
+  const testId = String((req.body && req.body.test_id) || '').trim();
+  const addCount = Math.max(0, Math.min(999, Number(req.body && req.body.inactive_count) || 0));
+  const addSeconds = Math.max(0, Math.min(86400, Number(req.body && req.body.inactive_seconds) || 0));
+  try {
+    const [[stu]] = await pool.query('SELECT class_id FROM profiles WHERE id = ?', [studentId]);
+    const classId = stu && stu.class_id;
+
+    // ① 离屏累计（只累加增量，前端负责算增量）
+    if (testId) {
+      const [[pg]] = await pool.query(
+        'SELECT id FROM exam_progress WHERE test_id = ? AND student_id = ? ORDER BY updated_at DESC LIMIT 1',
+        [testId, studentId]
+      );
+      if (pg) {
+        await pool.query(
+          `UPDATE exam_progress
+              SET inactive_count = inactive_count + ?, inactive_seconds = inactive_seconds + ?,
+                  last_heartbeat_at = NOW()
+            WHERE id = ?`,
+          [addCount, addSeconds, pg.id]
+        );
+      } else {
+        const [[rec]] = await pool.query(
+          'SELECT id FROM exam_records WHERE test_id = ? AND student_id = ? AND completed_at IS NULL LIMIT 1',
+          [testId, studentId]
+        );
+        if (rec) {
+          await pool.query(
+            `INSERT INTO exam_progress
+               (id, exam_record_id, student_id, test_id, answers, current_index, time_remaining,
+                inactive_count, inactive_seconds, last_heartbeat_at)
+             VALUES (?, ?, ?, ?, '{}', 0, 0, ?, ?, NOW())`,
+            [`ep_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`, rec.id, studentId, testId, addCount, addSeconds]
+          );
+        }
+      }
+    }
+
+    // ② 强制指令：只看「还没交卷」的卷子
+    const [forces] = await pool.query(
+      `SELECT f.test_id, f.force_start, f.force_start_at, f.force_end, f.force_end_at, t.title, t.time_limit, t.class_ids
+         FROM exam_force_controls f
+         JOIN tests t ON t.id = f.test_id
+        WHERE (f.force_start = 1 OR f.force_end = 1) AND t.is_active = 1
+        ORDER BY GREATEST(COALESCE(f.force_start_at, '1970-01-01'), COALESCE(f.force_end_at, '1970-01-01')) DESC`
+    );
+    const [recs] = await pool.query(
+      'SELECT test_id, completed_at FROM exam_records WHERE student_id = ?',
+      [studentId]
+    );
+    const doneSet = new Set(recs.filter((r) => r.completed_at).map((r) => r.test_id));
+
+    let forceStart = null;
+    let forceEnd = null;
+    for (const f of forces) {
+      if (doneSet.has(f.test_id)) continue; // 已交卷的卷子不再强制
+      if (!examTargetsStudent(f, classId)) continue;
+      if (f.force_end) {
+        const at = f.force_end_at ? new Date(f.force_end_at).getTime() : Date.now();
+        const left = Math.max(0, 60 - Math.floor((Date.now() - at) / 1000));
+        forceEnd = {
+          test_id: f.test_id,
+          title: f.title,
+          seconds_left: left,
+          // 已经过了 60 秒还没交的，让学生端立刻交
+          expired: left <= 0,
+        };
+        // ⛔ 强制结束时**不要**再下发 force_start：那会让学生刚被拉进考试、
+        //    下一秒就进入倒计时，等于「先把人抓进来再赶出去」。
+        break;
+      }
+      if (f.force_start) {
+        forceStart = { test_id: f.test_id, title: f.title };
+        break;
+      }
+    }
+
+    res.json({
+      data: {
+        force_start: forceStart,
+        force_end: forceEnd,
+        server_time: Date.now(),
+      },
+      error: null,
+    });
+  } catch (e) {
+    // 心跳失败不能影响答题：返回空指令即可，前端按「没指令」处理
+    console.warn('[exam-heartbeat] 失败:', e.message);
+    res.json({ data: { force_start: null, force_end: null, server_time: Date.now() }, error: null });
+  }
+});
+
+/** 刷新/重新登录后恢复考试界面：返回该生所有未交卷的考试（通常 0 或 1 条） */
+app.get('/api/student/exam-active', authenticate, requireStudent, async (req, res) => {
+  try {
+    const studentId = req.user.userId || req.user.id;
+    const [rows] = await pool.query(
+      `SELECT r.id AS exam_record_id, r.test_id, r.started_at, r.selected_question_ids,
+              t.title, t.time_limit, t.paper_total
+         FROM exam_records r
+         JOIN tests t ON t.id = r.test_id
+        WHERE r.student_id = ? AND r.completed_at IS NULL AND t.is_active = 1 AND t.type = 'exam'
+        ORDER BY r.started_at ASC`,
+      [studentId]
+    );
+    const list = rows.map((r) => {
+      const limitSec = (Number(r.time_limit) || 60) * 60;
+      const elapsed = r.started_at
+        ? Math.floor((Date.now() - new Date(r.started_at).getTime()) / 1000)
+        : 0;
+      return {
+        exam_record_id: r.exam_record_id,
+        test_id: r.test_id,
+        title: r.title,
+        remaining_seconds: Math.max(0, limitSec - elapsed),
+        // 超时但没交的，也让学生进去交卷（服务端有 120 秒宽限）
+        over_time: elapsed > limitSec,
+      };
+    });
+    res.json({ data: { exams: list }, error: null });
+  } catch (e) {
+    console.error('[exam-active] 失败:', e);
+    res.status(500).json({ data: null, error: e.message });
+  }
+});
+
+/** 老师端：读/写强制开考、强制结束 */
+// 批量读：试卷列表要一眼看到哪些卷正在强制，逐个请求太慢（16 张卷 = 16 次往返）
+app.get('/api/teacher/exams-force', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT * FROM exam_force_controls');
+    res.json({
+      data: rows.map((r) => ({
+        test_id: r.test_id,
+        force_start: !!r.force_start,
+        force_end: !!r.force_end,
+        force_start_at: r.force_start_at,
+        force_end_at: r.force_end_at,
+      })),
+      error: null,
+    });
+  } catch (e) {
+    console.error('[exams-force] 失败:', e);
+    res.status(500).json({ data: null, error: e.message });
+  }
+});
+
+app.get('/api/teacher/exams/:testId/force', authenticate, requireTeachingRole, async (req, res) => {
+  try {
+    const [[row]] = await pool.query(
+      'SELECT * FROM exam_force_controls WHERE test_id = ?',
+      [req.params.testId]
+    );
+    res.json({
+      data: row
+        ? {
+            force_start: !!row.force_start,
+            force_end: !!row.force_end,
+            force_start_at: row.force_start_at,
+            force_end_at: row.force_end_at,
+          }
+        : { force_start: false, force_end: false, force_start_at: null, force_end_at: null },
+      error: null,
+    });
+  } catch (e) {
+    res.status(500).json({ data: null, error: e.message });
+  }
+});
+
+app.post('/api/teacher/exams/:testId/force', authenticate, requireTeachingRole, async (req, res) => {
+  const testId = String(req.params.testId || '').trim();
+  const action = String((req.body && req.body.action) || '').trim();
+  const teacherId = req.user.userId || req.user.id;
+  const allowed = ['start', 'cancel_start', 'end', 'cancel_end'];
+  if (!allowed.includes(action)) {
+    return res.status(400).json({ data: null, error: '未知操作' });
+  }
+  try {
+    const [[test]] = await pool.query('SELECT id, title FROM tests WHERE id = ?', [testId]);
+    if (!test) return res.status(404).json({ data: null, error: '试卷不存在' });
+
+    await pool.query(
+      `INSERT INTO exam_force_controls (test_id, updated_by) VALUES (?, ?)
+       ON DUPLICATE KEY UPDATE updated_by = VALUES(updated_by)`,
+      [testId, teacherId]
+    );
+    if (action === 'start') {
+      // 开始强制 = 同时清掉之前的强制结束，否则学生一进来就被要求交卷
+      await pool.query(
+        'UPDATE exam_force_controls SET force_start = 1, force_start_at = NOW(), force_end = 0, force_end_at = NULL WHERE test_id = ?',
+        [testId]
+      );
+    } else if (action === 'cancel_start') {
+      await pool.query(
+        'UPDATE exam_force_controls SET force_start = 0, force_start_at = NULL WHERE test_id = ?',
+        [testId]
+      );
+    } else if (action === 'end') {
+      await pool.query(
+        'UPDATE exam_force_controls SET force_end = 1, force_end_at = NOW() WHERE test_id = ?',
+        [testId]
+      );
+    } else {
+      await pool.query(
+        'UPDATE exam_force_controls SET force_end = 0, force_end_at = NULL WHERE test_id = ?',
+        [testId]
+      );
+    }
+    const [[row]] = await pool.query('SELECT * FROM exam_force_controls WHERE test_id = ?', [testId]);
+    res.json({
+      data: {
+        force_start: !!row.force_start,
+        force_end: !!row.force_end,
+        force_start_at: row.force_start_at,
+        force_end_at: row.force_end_at,
+      },
+      error: null,
+    });
+  } catch (e) {
+    console.error('[exam-force] 失败:', e);
+    res.status(500).json({ data: null, error: e.message });
+  }
+});
+
+/**
+ * 老师端：整场考试的逐题明细（考试情况页「按题目查看」全部靠它）
+ * 一次返回：试卷结构（卷面顺序）+ 每题统计 + 所有学生的原始作答。
+ * 数据量：一个班 50 人 × 30 题 = 1500 行，一次给完比前端再打 3 次请求快。
+ */
+app.get('/api/teacher/exams/:testId/analysis', authenticate, requireTeachingRole, async (req, res) => {
+  const testId = String(req.params.testId || '').trim();
+  const conn = await pool.getConnection();
+  try {
+    const paper = await loadPaper(conn, testId);
+    if (!paper) return res.status(404).json({ data: null, error: '试卷不存在' });
+    const byId = new Map(paper.items.map((it) => [it.item_id, it]));
+
+    const [rawAnswers] = await conn.query(
+      `SELECT student_id, question_id, answer, is_correct
+         FROM student_answers WHERE source = 'exam' AND test_id = ?`,
+      [testId]
+    );
+
+    // 每条作答重算一次得分（综合题/编程题有部分分，只看 is_correct 会把 3/4 个空
+    // 答对的学生显示成 0 分）。judgeItem 是纯函数，1500 条也就几毫秒。
+    const answers = rawAnswers.map((a) => {
+      const item = byId.get(a.question_id);
+      const judged = item
+        ? judgeItem(item, a.answer)
+        : { credit: 0, max: 0, isCorrect: false, detail: {} };
+      return {
+        student_id: a.student_id,
+        question_id: a.question_id,
+        answer: a.answer,
+        is_correct: judged.isCorrect ? 1 : 0,
+        credit: judged.credit,
+        max: judged.max,
+        detail: judged.detail,
+      };
+    });
+
+    // 按题聚合
+    const perItem = new Map();
+    for (const it of paper.items) {
+      perItem.set(it.item_id, { item: it, rows: [] });
+    }
+    const orphan = [];
+    for (const a of answers) {
+      const hit = perItem.get(a.question_id);
+      if (hit) hit.rows.push(a);
+      else orphan.push(a);
+    }
+
+    const items = paper.items.map((it) => {
+      const rows = (perItem.get(it.item_id) || { rows: [] }).rows;
+      const total = rows.length;
+      const correctRows = rows.filter((r) => Number(r.is_correct) === 1);
+      const base = {
+        item_id: it.item_id,
+        kind: it.kind,
+        type: it.type,
+        content: it.content,
+        options: it.options || [],
+        sub_questions: it.sub_questions || null,
+        blank_template: it.blank_template || '',
+        blank_count: it.blank_count || 0,
+        score: it.score,
+        answered: total,
+        correct: correctRows.length,
+        rate: total ? Math.round((correctRows.length / total) * 100) : 0,
+        avg_score: total
+          ? Math.round((rows.reduce((s, r) => s + (Number(r.credit) || 0), 0) / total) * 10) / 10
+          : 0,
+      };
+
+      if (it.kind === 'choice') {
+        // 每个选项被选了多少人 —— 老师最想看的就是「这个干扰项骗了多少人」
+        const counter = new Map();
+        let parsedCorrect = '';
+        try {
+          const p = typeof it.answer === 'string' ? JSON.parse(it.answer) : it.answer;
+          const arr = Array.isArray(p?.answers) ? p.answers : (Array.isArray(p) ? p : [p]);
+          parsedCorrect = String(arr[0] || '').trim().toUpperCase();
+        } catch { parsedCorrect = ''; }
+        for (const r of rows) {
+          const letter = String(r.answer || '').trim().toUpperCase().slice(0, 1);
+          if (!letter) continue;
+          counter.set(letter, (counter.get(letter) || 0) + 1);
+        }
+        base.options_stats = (it.options || []).map((opt, idx) => {
+          const letter = String.fromCharCode(65 + idx);
+          const n = counter.get(letter) || 0;
+          return {
+            letter,
+            text: String(opt || '').replace(/<[^>]+>/g, '').slice(0, 60),
+            count: n,
+            ratio: total ? Math.round((n / total) * 1000) / 10 : 0,
+            is_correct: letter === parsedCorrect,
+          };
+        });
+        base.correct_answer = parsedCorrect;
+      }
+
+      if (it.kind === 'composite') {
+        // 每个小题的对错分布
+        const subs = it.sub_questions || [];
+        base.subs_stats = subs.map((sq, idx) => {
+          let subTotal = 0;
+          let subCorrect = 0;
+          const choiceCounter = new Map();
+          const blankSamples = [];
+          for (const r of rows) {
+            let parsed = {};
+            try {
+              parsed = typeof r.answer === 'string' ? JSON.parse(r.answer) : (r.answer || {});
+            } catch { parsed = {}; }
+            const has = (parsed.blank_answers && parsed.blank_answers[idx] !== undefined)
+              || (parsed.choice_answers && parsed.choice_answers[idx] !== undefined);
+            if (!has) continue;
+            subTotal += 1;
+            if (sq.type === 'choice') {
+              const v = String((parsed.choice_answers || {})[idx] || '').trim().toUpperCase();
+              if (v) choiceCounter.set(v, (choiceCounter.get(v) || 0) + 1);
+            } else {
+              const arr = (parsed.blank_answers || {})[idx];
+              const text = Array.isArray(arr) ? arr.join(' | ') : String(arr == null ? '' : arr);
+              if (text.trim()) blankSamples.push(text);
+            }
+          }
+          // 小题对错：直接用判分时留下的 detail.subs（综合题按小题结分，逐小题有对错）
+          for (const r of rows) {
+            const sub = (r.detail && r.detail.subs) ? r.detail.subs[idx] : null;
+            if (sub && sub.correct) subCorrect += 1;
+          }
+          const stat = {
+            index: sq.index,
+            type: sq.type,
+            content: sq.content,
+            options: sq.options,
+            score: sq.score,
+            answered: subTotal,
+            correct: subCorrect,
+          };
+          if (sq.type === 'choice') {
+            stat.options_stats = (sq.options || []).map((opt, oIdx) => {
+              const letter = String.fromCharCode(65 + oIdx);
+              const n = choiceCounter.get(letter) || 0;
+              return { letter, count: n, ratio: subTotal ? Math.round((n / subTotal) * 1000) / 10 : 0 };
+            });
+          } else {
+            stat.answers = summarizeTexts(blankSamples);
+          }
+          return stat;
+        });
+      }
+
+      if (it.kind === 'python') {
+        // 每一空：不同答案的个数（不管对错），这是吴老明确要的
+        const blanks = [];
+        for (let i = 0; i < (it.blank_count || 1); i += 1) {
+          const samples = [];
+          for (const r of rows) {
+            let arr = [];
+            try {
+              const p = typeof r.answer === 'string' ? JSON.parse(r.answer) : r.answer;
+              arr = Array.isArray(p) ? p : (p && Array.isArray(p.blanks) ? p.blanks : []);
+            } catch { arr = []; }
+            const v = arr[i] == null ? '' : String(arr[i]).trim();
+            if (v) samples.push(v);
+          }
+          let accept = [];
+          try {
+            const ba = typeof it.answer?.blank_answers === 'string'
+              ? JSON.parse(it.answer.blank_answers) : it.answer?.blank_answers;
+            accept = Array.isArray(ba) && Array.isArray(ba[i]) ? ba[i] : [];
+          } catch { accept = []; }
+          blanks.push({
+            index: i + 1,
+            answered: samples.length,
+            distinct: new Set(samples.map((s) => s.toLowerCase())).size,
+            answers: summarizeTexts(samples),
+            accept,
+          });
+        }
+        base.blanks_stats = blanks;
+      }
+
+      return base;
+    });
+
+    res.json({
+      data: {
+        test: { id: paper.test.id, title: paper.test.title, paper_total: paper.test.paper_total },
+        paper_total: paper.items.reduce((s, it) => s + (it.score || 0), 0),
+        counts: {
+          choice: paper.items.filter((i) => i.kind === 'choice').length,
+          composite: paper.items.filter((i) => i.kind === 'composite').length,
+          python: paper.items.filter((i) => i.kind === 'python').length,
+        },
+        items,
+        // 前端「按学生查看」直接复用这份作答，不用再发请求
+        answers: answers.map((a) => ({
+          student_id: a.student_id,
+          question_id: a.question_id,
+          answer: a.answer,
+          is_correct: Number(a.is_correct) === 1,
+          credit: a.credit,
+          max: a.max,
+          detail: a.detail,
+        })),
+        orphan_count: orphan.length,
+      },
+      error: null,
+    });
+  } catch (e) {
+    console.error('[exam-analysis] 失败:', e);
+    res.status(500).json({ data: null, error: e.message });
+  } finally {
+    conn.release();
+  }
+});
+
+/** 把一堆学生答案汇总成「答案 → 人数」，按人数降序，最多 12 条（防止一屏塞满） */
+function summarizeTexts(list) {
+  const counter = new Map();
+  for (const raw of list) {
+    const key = String(raw == null ? '' : raw).trim();
+    if (!key) continue;
+    const lower = key.toLowerCase();
+    const hit = counter.get(lower);
+    if (hit) hit.count += 1;
+    else counter.set(lower, { text: key.slice(0, 120), count: 1 });
+  }
+  return [...counter.values()].sort((a, b) => b.count - a.count).slice(0, 12);
+}
 
 // ============== 教师端：让指定学生重考某场考试 ==============
 /**
@@ -5790,7 +6472,8 @@ app.post('/api/business/close-exam', authenticate, async (req, res) => {
     }
 
     const test = testRows[0];
-    const passingScore = test.passing_score || 60;
+    // 绝对分制：及格线就是卷面分（不能 `|| 60`，老师设 0 = 全员及格）
+    const passingScore = test.passing_score == null ? 60 : Number(test.passing_score);
 
     // 2. 获取考试题目
     let questionIds = [];
@@ -5912,6 +6595,15 @@ app.post('/api/business/close-exam', authenticate, async (req, res) => {
     const progressByStudent = new Map();
     progressRows.forEach((p) => progressByStudent.set(p.student_id, p));
 
+    // 整卷结构只装一次，循环里按每个学生的 selected_question_ids 取子集
+    // （三题型试卷必须走 exam-paper，旧代码用 questions 表判分，编程题必然是 0 分）
+    const closeExamPaper = await loadPaper(connection, test_id);
+    const closeExamPaperById = new Map(((closeExamPaper && closeExamPaper.items) || []).map((it) => [it.item_id, it]));
+    if (!closeExamPaper || !closeExamPaper.items.length) {
+      await connection.rollback();
+      return res.status(400).json({ data: null, error: '该试卷没有可用题目，无法结束考试' });
+    }
+
     let forcedSubmitCount = 0;
     let noAttendCount = 0;
 
@@ -5938,80 +6630,63 @@ app.post('/api/business/close-exam', authenticate, async (req, res) => {
           }
         }
 
-        // 计算得分（综合题按小题结算：答对几个小题就得几分，不再全对才得分）
-        let credit = 0;
-        let totalWeight = 0;
-        for (const q of questions) {
-          const isComposite = q.type === 'composite';
-          totalWeight += isComposite ? getCompositeCredit(q.answers, '').weight : 1;
-          const userAnswer = answers[q.id];
-          if (!userAnswer) continue;
-          if (isComposite) {
-            credit += getCompositeCredit(q.answers, userAnswer).credit;
-          } else {
-            const correctAnswers = getAnswersArray(q.answers);
-            const isCorrect = correctAnswers.some(
-              (ans) => normalizeAnswer(ans) === normalizeAnswer(userAnswer)
-            );
-            if (isCorrect) credit += 1;
-          }
+        // 判分（2026-11-17 新口径：绝对分，按该生**实际抽到的题**算）
+        // ⛔ 以前这里按「整卷 questions」判，有两个错：
+        //    ① 抽题考试里学生没做的题也被算进分母；
+        //    ② 编程题 id 带 py: 前缀，根本不在 questions 表里，一律判 0。
+        const selIds = parseItemIds(existingRecord.selected_question_ids);
+        const useIds = selIds.length ? selIds : closeExamPaper.items.map((it) => it.item_id);
+        let creditPoints = 0;
+        let paperTotalPoints = 0;
+        let correct = 0;
+        const closureResults = [];
+        for (const itemId of useIds) {
+          const item = closeExamPaperById.get(itemId);
+          if (!item) continue;
+          const raw = answers[itemId] !== undefined
+            ? answers[itemId]
+            : (item.question_id ? answers[item.question_id] : undefined);
+          const judged = judgeItem(item, raw);
+          paperTotalPoints += judged.max;
+          creditPoints += judged.credit;
+          if (judged.isCorrect) correct += 1;
+          closureResults.push({ item, raw, judged, answered: hasAnswer(item, raw) });
         }
-        const correct = Math.round(credit);
-
-        const score = totalWeight > 0 ? Math.round((credit / totalWeight) * 100) : 0;
+        const totalWeight = closureResults.length;
+        const score = Math.round(creditPoints);
         const isPassed = score >= passingScore;
-        const pointsEarned = isPassed ? Math.round((score / 100) * (test.points_reward || 50)) : 0;
+        const pointsEarned = isPassed && paperTotalPoints > 0
+          ? Math.round((score / paperTotalPoints) * (test.points_reward || 50))
+          : 0;
 
         await connection.query(
           `UPDATE exam_records 
            SET score = ?, correct_count = ?, total_count = ?, 
                points_earned = ?, internet_codes_earned = 0, is_passed = ?, 
-               completed_at = NOW()
+               paper_total = ?, completed_at = NOW()
            WHERE id = ?`,
-          [score, correct, totalWeight, pointsEarned, isPassed ? 1 : 0, existingRecord.id]
+          [score, correct, totalWeight, pointsEarned, isPassed ? 1 : 0, paperTotalPoints, existingRecord.id]
         );
 
-        // 记录学生答案
-        for (const q of questions) {
-          const userAnswer = (answers[q.id] || '').trim();
-          if (!userAnswer) continue;
-
-          let isCorrect = false;
-          if (q.type === 'composite') {
-            try {
-              const parsed = JSON.parse(userAnswer);
-              const subQs = getCompositeSubQuestions(q.answers);
-              isCorrect = subQs.every((sq, idx) => {
-                if (sq.type === 'choice') {
-                  const ans = parsed.choice_answers?.[idx] || '';
-                  return checkChoiceAnswer(ans, sq.answers || [], sq.multiple || false);
-                } else if (sq.type === 'fill_blank') {
-                  const ans = parsed.blank_answers?.[idx] || [];
-                  return checkFillBlankAnswer(ans, sq.answers || []);
-                }
-                return false;
-              });
-            } catch {
-              isCorrect = false;
-            }
-          } else {
-            const correctAnswers = getAnswersArray(q.answers);
-            isCorrect = correctAnswers.some(
-              (ans) => normalizeAnswer(ans) === normalizeAnswer(userAnswer)
-            );
-          }
-
-          const answerId = `sa_${student.id.substring(0, 10)}_${q.id.substring(0, 10)}_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+        // 记录学生答案（判分结果直接复用上面的 closureResults，绝不重算一遍）
+        for (const r of closureResults) {
+          if (!r.answered) continue;
+          const itemId = r.item.item_id;
+          const storedAnswer = typeof r.raw === 'string' ? r.raw : JSON.stringify(r.raw == null ? '' : r.raw);
+          const answerId = `sa_${student.id.substring(0, 10)}_${itemId.replace(/[^a-zA-Z0-9_]/g, '').substring(0, 10)}_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
           await connection.query(
             `INSERT INTO student_answers (id, student_id, question_id, answer, is_correct, points_change, source, test_id, test_record_id, created_at) 
              VALUES (?, ?, ?, ?, ?, 0, 'exam', ?, ?, NOW())`,
-            [answerId, student.id, q.id, userAnswer, isCorrect ? 1 : 0, test_id, existingRecord.id]
+            [answerId, student.id, itemId, storedAnswer.slice(0, 5000), r.judged.isCorrect ? 1 : 0, test_id, existingRecord.id]
           );
 
-          if (!isCorrect) {
+          // 编程题不进错题集（py: 前缀在 questions 表里查不到详情）
+          if (r.item.kind === 'python') continue;
+
+          if (!r.judged.isCorrect) {
             const [existingWrongs] = await connection.query(
               'SELECT * FROM wrong_questions WHERE student_id = ? AND question_id = ?',
-              [student.id, q.id]
+              [student.id, itemId]
             );
             if (existingWrongs.length > 0) {
               await connection.query(
@@ -6019,10 +6694,10 @@ app.post('/api/business/close-exam', authenticate, async (req, res) => {
                 [existingWrongs[0].id]
               );
             } else {
-              const wrongId = `wq_${student.id.substring(0, 10)}_${q.id.substring(0, 10)}_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+              const wrongId = `wq_${student.id.substring(0, 10)}_${itemId.replace(/[^a-zA-Z0-9_]/g, '').substring(0, 10)}_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
               await connection.query(
                 'INSERT INTO wrong_questions (id, student_id, question_id, wrong_count, last_wrong_at, created_at) VALUES (?, ?, ?, 1, NOW(), NOW())',
-                [wrongId, student.id, q.id]
+                [wrongId, student.id, itemId]
               );
             }
           }
@@ -6071,10 +6746,12 @@ app.post('/api/business/close-exam', authenticate, async (req, res) => {
       // 6.3 未参加考试的学生：创建 0 分记录
       if (!existingRecord) {
         const recordId = `rec_${test_id.substring(0, 10)}_${student.id.substring(0, 10)}_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+        // 卷面满分按整卷算：缺考学生的「0 / 满分」也要能正常显示
+        const fullTotal = closeExamPaper.items.reduce((s, it) => s + (it.score || 0), 0);
         await connection.query(
-          `INSERT INTO exam_records (id, test_id, student_id, selected_question_ids, score, correct_count, total_count, points_earned, internet_codes_earned, is_passed, started_at, completed_at)
-           VALUES (?, ?, ?, ?, 0, 0, ?, 0, 0, 0, NOW(), NOW())`,
-          [recordId, test_id, student.id, JSON.stringify(questionIds), totalCount]
+          `INSERT INTO exam_records (id, test_id, student_id, selected_question_ids, score, correct_count, total_count, points_earned, internet_codes_earned, is_passed, paper_total, started_at, completed_at)
+           VALUES (?, ?, ?, ?, 0, 0, ?, 0, 0, 0, ?, NOW(), NOW())`,
+          [recordId, test_id, student.id, JSON.stringify(questionIds), totalCount, fullTotal]
         );
         noAttendCount++;
       }

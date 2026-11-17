@@ -24,6 +24,7 @@ import { PetModule } from '../components/student/PetModule';
 import { ExchangeModule } from '../components/student/ExchangeModule';
 // 游戏时长看守：按时长应用在前台时每 30 秒扣时（挂在页面级，关掉应用中心也照扣）
 import { PlayTimeWatcher } from '../components/student/PlayTimeWatcher';
+import { ExamWatcher } from '../components/student/ExamWatcher';
 import { Leaderboard } from '../components/student/Leaderboard';
 import { ProfileModule } from '../components/student/ProfileModule';
 import { AppCenter } from '../components/student/AppCenter';
@@ -121,10 +122,42 @@ const MODULE_GUARD_MAP: Record<string, ModuleGuardKey> = {
 
 export const Desktop: React.FC = () => {
   const { profile, signOut, checkAndEnforceLoginRestriction, isProxyMode, loading, proxyError } = useAuth();
-  const { windows, background, openWindow, activateWindow, setBackground } = useDesktopStore();
+  const { windows, background, openWindow, activateWindow, setBackground, lockWindow, setPendingExam } = useDesktopStore();
   const { setActiveSkin } = useSkinStore();
   const { checkForNewNotifications } = useNotificationStore();
   const siteConfig = useSiteConfig();
+
+  /**
+   * 考试窗口恢复（2026-11-17 吴老需求）
+   * 学生刷新页面、关掉标签重新登录后，只要还有「没交卷的考试」，
+   * 就自动把测试窗口拉起来并锁死（不能关、不能最小化、强制最大化）。
+   * ⛔ 这是「考试不能中途退出」的最后一道防线 —— 没有它，学生按一下 F5 就跳出考试界面了。
+   */
+  useEffect(() => {
+    if (!profile) return;
+    let alive = true;
+    (async () => {
+      try {
+        const r: any = await backendClient.getActiveExams();
+        const list: any[] = (r && r.data && r.data.exams) || [];
+        if (!alive || !list.length) return;
+        // 先记下要进哪场考试，TestModule 挂载后会自己取卷
+        setPendingExam(list[0].test_id);
+        openWindow({
+          id: 'test',
+          title: '测试',
+          icon: 'fa-clipboard-check',
+          isMinimized: false,
+          isMaximized: false,
+          component: moduleComponents.test,
+        });
+        lockWindow('test');
+      } catch {
+        /* 拉不到就当没有进行中的考试：不能因为网络抖动把学生挡在桌面外 */
+      }
+    })();
+    return () => { alive = false; };
+  }, [profile?.id, openWindow, lockWindow, setPendingExam]);
   const [focusModeConfig, setFocusModeConfig] = useState<FocusModeConfig | null>(null);
   const [quickAccessOpen, setQuickAccessOpen] = useState(false);
   const [isFocusModeActive, setIsFocusModeActive] = useState(false);
@@ -1048,6 +1081,8 @@ export const Desktop: React.FC = () => {
       />
 
       <PlayTimeWatcher />
+      {/* 考试看守：没打开考试窗口也要收得到「强制开始/结束」指令 */}
+      <ExamWatcher testComponent={moduleComponents.test} />
 
       <div className="absolute top-4 left-4 z-[9998] flex items-center gap-2">
         {/* 代理模式下不显示退出登录按钮 */}
@@ -1288,6 +1323,7 @@ export const Desktop: React.FC = () => {
               title={window.title}
               isMaximized={window.isMaximized}
               isMinimized={window.isMinimized}
+              isLocked={window.isLocked}
               zIndex={window.zIndex}
             >
               {window.component}

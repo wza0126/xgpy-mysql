@@ -254,6 +254,43 @@ class MariaDBClient {
     return fetchApi(`/api/business/exam-is-closed/${testId}`);
   }
 
+  // 2026-11-17 三题型试卷：开考取卷（服务端抽题并固定，答案不下发）
+  async getExamPaper(testId) {
+    return fetchApi(`/api/business/exam-paper/${testId}`);
+  }
+
+  // 考试心跳：上报离屏次数、拉老师的强制开考/强制结束指令
+  async examHeartbeat(data: { test_id?: string; inactive_count?: number; inactive_seconds?: number }) {
+    return fetchApi('/api/business/exam-heartbeat', {
+      method: 'POST',
+      body: JSON.stringify(data || {}),
+    });
+  }
+
+  // 刷新/重新登录后恢复考试界面：查未交卷的考试
+  async getActiveExams() {
+    return fetchApi('/api/student/exam-active');
+  }
+
+  // 教师端：读/写强制开考、强制结束
+  async getAllExamForce() {
+    return fetchApi('/api/teacher/exams-force');
+  }
+  async getExamForce(testId: string) {
+    return fetchApi(`/api/teacher/exams/${testId}/force`);
+  }
+  async setExamForce(testId: string, action: 'start' | 'cancel_start' | 'end' | 'cancel_end') {
+    return fetchApi(`/api/teacher/exams/${testId}/force`, {
+      method: 'POST',
+      body: JSON.stringify({ action }),
+    });
+  }
+
+  // 教师端：整场考试的逐题明细（选项分布 / 小题 / 每空答案分布）
+  async getExamAnalysis(testId: string) {
+    return fetchApi(`/api/teacher/exams/${testId}/analysis`);
+  }
+
   async rpc(functionName, params = {}) {
     // 简单的 rpc 支持 - 对于特定函数我们提供模拟实现
     if (functionName === 'cleanup_old_used_codes') {
@@ -770,6 +807,13 @@ export interface BackendClient {
   getExamProgress(examRecordId: string): Promise<any>;
   deleteExamProgress(examRecordId: string): Promise<any>;
   isExamClosed(testId: string): Promise<any>;
+  getExamPaper(testId: string): Promise<any>;
+  examHeartbeat(data: { test_id?: string; inactive_count?: number; inactive_seconds?: number }): Promise<any>;
+  getActiveExams(): Promise<any>;
+  getExamForce(testId: string): Promise<any>;
+  getAllExamForce(): Promise<any>;
+  setExamForce(testId: string, action: 'start' | 'cancel_start' | 'end' | 'cancel_end'): Promise<any>;
+  getExamAnalysis(testId: string): Promise<any>;
   closeExam(data: { test_id: string }): Promise<any>;
 }
 

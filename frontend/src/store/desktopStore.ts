@@ -7,13 +7,33 @@ interface DesktopState {
   zIndexCounter: number;
   background: string;
   setBackground: (url: string) => void;
-  openWindow: (window: Omit<WindowState, 'zIndex' | 'isOpen'>) => void;
+  openWindow: (window: Omit<WindowState, 'zIndex' | 'isOpen'>, opts?: { force?: boolean }) => void;
   closeWindow: (id: string) => void;
   minimizeWindow: (id: string) => void;
   minimizeAllWindows: () => void;
   maximizeWindow: (id: string) => void;
   restoreWindow: (id: string) => void;
   activateWindow: (id: string) => void;
+  /** 锁定窗口：考试期间强制最大化，且不能关闭/最小化（2026-11-17） */
+  lockWindow: (id: string) => void;
+  /** 解锁：交卷后调用，之后才能正常关闭 */
+  unlockWindow: (id: string) => void;
+  /**
+   * 待自动进入的考试（刷新页面 / 重新登录后恢复考试界面用）。
+   * Desktop 查到未交卷的考试时写这里，TestModule 读到就自己 startExam 并清空。
+   */
+  pendingExamTestId: string | null;
+  setPendingExam: (testId: string | null) => void;
+  /**
+   * 当前正在进行的考试（2026-11-17）。
+   * TestModule 进入考试时写、交卷时清；全局的 ExamWatcher 靠它决定
+   * 「心跳报哪一场」「离屏算谁的」。⛔ 不要用它判断窗口是否该锁。
+   */
+  examContext: { testId: string; title: string } | null;
+  setExamContext: (ctx: { testId: string; title: string } | null) => void;
+  /** 老师点了「强制结束」后的截止时间戳（ms）；ExamWatcher 写，TestModule 倒计时并交卷 */
+  forceEndAt: number | null;
+  setForceEndAt: (at: number | null) => void;
 }
 
 export const desktopIcons: DesktopIcon[] = [
@@ -58,9 +78,10 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
 
   setBackground: (url) => set({ background: url }),
 
-  openWindow: (window) => {
+  openWindow: (window, opts) => {
     // 守卫必须在一切之前：被拦的模块连窗口都不创建，避免「开一半又关」的闪动
-    if (moduleGuard) {
+    // ⛔ force=true 只给「老师强制开考」用：那一刻模块开关不能挡住考试。
+    if (moduleGuard && !opts?.force) {
       const reason = moduleGuard(window.id);
       if (reason) {
         globalThis.alert?.(reason);
@@ -107,6 +128,8 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
 
   closeWindow: (id) => {
     const { windows } = get();
+    // 锁定的窗口（考试中）不允许关闭：交卷前学生只能留在考试界面
+    if (windows.some((w) => w.id === id && w.isLocked)) return;
     set({
       windows: windows.filter((w) => w.id !== id),
       activeWindowId: null,
@@ -115,6 +138,8 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
 
   minimizeWindow: (id) => {
     const { windows } = get();
+    // 锁定窗口不允许最小化（否则等于「关掉考试去干别的」）
+    if (windows.some((w) => w.id === id && w.isLocked)) return;
     set({
       windows: windows.map((w) =>
         w.id === id ? { ...w, isMinimized: true } : w
@@ -126,7 +151,8 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   minimizeAllWindows: () => {
     const { windows } = get();
     set({
-      windows: windows.map((w) => ({ ...w, isMinimized: true })),
+      // 「显示桌面」也要跳过锁定窗口
+      windows: windows.map((w) => (w.isLocked ? w : { ...w, isMinimized: true })),
       activeWindowId: null,
     });
   },
@@ -136,7 +162,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
     set({
       windows: windows.map((w) =>
         w.id === id
-          ? { ...w, isMaximized: true, zIndex: zIndexCounter + 1 }
+          ? { ...w, isMaximized: true, isMinimized: false, zIndex: zIndexCounter + 1 }
           : w
       ),
       activeWindowId: id,
@@ -146,6 +172,11 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
 
   restoreWindow: (id) => {
     const { windows, zIndexCounter } = get();
+    // 锁定窗口不允许还原成小窗
+    if (windows.some((w) => w.id === id && w.isLocked)) {
+      set({ activeWindowId: id, zIndexCounter: zIndexCounter + 1 });
+      return;
+    }
     set({
       windows: windows.map((w) =>
         w.id === id
@@ -156,6 +187,35 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       zIndexCounter: zIndexCounter + 1,
     });
   },
+
+  lockWindow: (id) => {
+    const { windows, zIndexCounter } = get();
+    set({
+      windows: windows.map((w) =>
+        w.id === id
+          ? { ...w, isLocked: true, isMaximized: true, isMinimized: false, isOpen: true, zIndex: zIndexCounter + 1 }
+          : w
+      ),
+      activeWindowId: id,
+      zIndexCounter: zIndexCounter + 1,
+    });
+  },
+
+  unlockWindow: (id) => {
+    const { windows } = get();
+    set({
+      windows: windows.map((w) => (w.id === id ? { ...w, isLocked: false } : w)),
+    });
+  },
+
+  pendingExamTestId: null,
+  setPendingExam: (testId) => set({ pendingExamTestId: testId }),
+
+  examContext: null,
+  setExamContext: (ctx) => set({ examContext: ctx }),
+
+  forceEndAt: null,
+  setForceEndAt: (at) => set({ forceEndAt: at }),
 
   activateWindow: (id) => {
     const { windows, zIndexCounter } = get();

@@ -13,6 +13,7 @@ import { API_CONFIG } from '../../api/config';
 import { getAuthToken } from '../../utils/authToken';
 import { EquipmentDropEffect } from './game/EquipmentDropEffect';
 import { useGameEventStore } from '../../store/gameEventStore';
+import { useDesktopStore } from '../../store/desktopStore';
 import { SurvivalGame } from './SurvivalGame';
 
 // PK 对战组件懒加载（避免影响主模块首屏）
@@ -54,6 +55,34 @@ interface ExamSession {
 }
 
 type TestSession = ExamSession;
+
+/**
+ * 考试题是否真的作答了（2026-11-17）
+ * 综合题/编程题的答案存成 JSON 串（{"choice_answers":…} / {"blanks":[…]})，
+ * 只要对象存在就算「已答」是不对的 —— 打开题目什么都没填也会显示已答。
+ * 这里按内容判断：至少有一个非空选项或非空填空才算。
+ */
+const examAnswerFilled = (raw: any): boolean => {
+  if (raw === undefined || raw === null) return false;
+  const s = String(raw).trim();
+  if (!s) return false;
+  if (!s.startsWith('{')) return true; // 选择题，答案是 'A'
+  try {
+    const p = JSON.parse(s);
+    if (Array.isArray(p.blanks)) {
+      return p.blanks.some((x: any) => String(x == null ? '' : x).trim() !== '');
+    }
+    const cs = p.choice_answers ? Object.values(p.choice_answers) : [];
+    const bs = p.blank_answers ? Object.values(p.blank_answers) : [];
+    const anyChoice = (cs as any[]).some((v) => String(v == null ? '' : v).trim() !== '');
+    const anyBlank = (bs as any[]).some((arr) => Array.isArray(arr)
+      ? arr.some((x) => String(x == null ? '' : x).trim() !== '')
+      : String(arr == null ? '' : arr).trim() !== '');
+    return anyChoice || anyBlank;
+  } catch {
+    return true;
+  }
+};
 
 const parseJsonField = (field: any) => {
   if (typeof field === 'string') {
@@ -150,7 +179,7 @@ export const TestModule: React.FC = () => {
   const [activeTest, setActiveTest] = useState<TestSession | null>(null);
   const [activeExam, setActiveExam] = useState<ExamSession | null>(null);
   const [showResult, setShowResult] = useState(false);
-  const [examResult, setExamResult] = useState<{ score: number; correct: number; points: number; diamonds?: number; diamondReason?: string | null; internetCodes: number; codes: string[]; questions: Question[]; answers: Record<string, string>; isPassed: boolean } | null>(null);
+  const [examResult, setExamResult] = useState<{ score: number; paperTotal?: number; correct: number; points: number; diamonds?: number; diamondReason?: string | null; internetCodes: number; codes: string[]; questions: Question[]; answers: Record<string, string>; isPassed: boolean } | null>(null);
   const [testResult, setTestResult] = useState<{ score: number; correct: number; points: number; diamonds?: number; diamondReason?: string | null; internetCode?: string; internetCodeReason?: string | null; internetCodeReward?: number; allowInternetCode?: boolean; passingScore?: number; questions: Question[]; answers: Record<string, string>; droppedEquipments?: any[] } | null>(null);
   const [showTestDetail, setShowTestDetail] = useState(false);
   const [selectedTestRecord, setSelectedTestRecord] = useState<TestRecord | null>(null);
@@ -176,6 +205,8 @@ export const TestModule: React.FC = () => {
   const [examTimeUp, setExamTimeUp] = useState(false);
   const examTimeUpRef = useRef(false);
   const { profile, refreshProfile } = useAuth();
+  // 考试期间的窗口锁定与「刷新后恢复考试」（2026-11-17）
+  const { pendingExamTestId, setPendingExam, lockWindow, unlockWindow, setExamContext, setForceEndAt } = useDesktopStore();
   const { updatePoints } = usePoints();
   /** 测试资格明细：test_id -> { passed, correct:{...}, mastered:{...} }（服务端裁定，口径唯一） */
   const [qualificationMap, setQualificationMap] = useState<Record<string, any>>({});
@@ -440,148 +471,114 @@ export const TestModule: React.FC = () => {
     }
   };
 
-  const startExam = async (exam: Test) => {    if (!profile) return;
+  /** 服务端下发的试卷题 → 前端渲染用的 Question 结构（2026-11-17 三题型） */
+  const normalizePaperItem = (item: any): Question => {
+    const type = item.kind === 'python' ? 'python_fill' : (item.type || 'choice');
+    let answers = '';
+    if (item.kind === 'composite') {
+      // 服务端只给小题骨架（正确答案已剥离）。渲染要按「空数」画输入框，
+      // 所以给每空塞一个空占位数组，长度 = blank_count。
+      const subs = (item.sub_questions || []).map((sq: any) => ({
+        ...sq,
+        answers: sq.type === 'fill_blank'
+          ? Array.from({ length: Math.max(1, Number(sq.blank_count) || 1) }, () => [])
+          : [],
+      }));
+      answers = JSON.stringify({ answers: subs });
+    } else if (item.kind === 'choice') {
+      answers = JSON.stringify({ answers: [] });
+    }
+    return {
+      id: item.id,
+      type,
+      kind: item.kind,
+      content: item.content || '',
+      options: JSON.stringify(item.options || []),
+      answers,
+      explanation: '',
+      score: item.score,
+      sub_questions: item.sub_questions || undefined,
+      blank_template: item.blank_template || undefined,
+      blank_count: item.blank_count || undefined,
+    } as unknown as Question;
+  };
 
-    // 检查考试是否已结束
+  /**
+   * 开始考试（2026-11-17 改为走服务端取卷）
+   *
+   * ⛔ 为什么要改：题目以前是前端从 tests.question_ids 里自己随机抽、还直接从
+   *    questions 表 select('*')（含标准答案）。三题型试卷里编程填空题不在 questions 表，
+   *    前端根本取不到；而且「抽几道」由前端决定 = 学生改一下请求就能只做 1 道题拿满分。
+   *    现在服务端抽题、写进 exam_records.selected_question_ids 固定住，交卷按这份判分。
+   */
+  const startExam = async (exam: Test, opts?: { silent?: boolean }) => {
+    if (!profile) return;
+    let payload: any = null;
     try {
-      const isClosedResult = await backendClient.isExamClosed(exam.id);
-      if (isClosedResult?.data?.isClosed) {
-        alert('考试已结束，无法参加');
-        fetchExams();
+      const r: any = await backendClient.getExamPaper(exam.id);
+      if (r?.error) {
+        if (!opts?.silent) alert(r.error);
         return;
       }
-    } catch (e) {
-      console.warn('检查考试状态失败:', e);
+      payload = r?.data;
+    } catch (e: any) {
+      if (!opts?.silent) alert(e?.message || '无法开始考试，请检查网络后重试');
+      return;
     }
-
-    let questionIds: string[] = [];
-    if (exam.question_ids) {
-      questionIds = parseJsonField(exam.question_ids) || [];
+    if (!payload) {
+      if (!opts?.silent) alert('无法开始考试，请重试');
+      return;
     }
-
-    if (questionIds.length === 0) {
-      alert('该考试暂无题目');
+    if (payload.completed) {
+      if (!opts?.silent) {
+        alert(`你已完成这场考试：${payload.score} 分（满分 ${payload.paper_total}）`);
+      }
+      fetchExams();
       return;
     }
 
-    const shuffledIds = questionIds.sort(() => Math.random() - 0.5);
-    const selectedCount = Math.min(shuffledIds.length, (exam as any).question_count || shuffledIds.length);
-    const selectedIds = shuffledIds.slice(0, selectedCount);
-
-    const { data: questionsData } = await backendClient
-      .from('questions')
-      .select('*')
-      .in('id', selectedIds);
-
-    if (questionsData && questionsData.length > 0) {
-      const shuffledQuestions = (questionsData as Question[]).sort(() => Math.random() - 0.5);
-      
-      // 直接从后端查询该学生是否有此考试的未完成记录
-      const { data: existingRecords } = await backendClient
-        .from('exam_records')
-        .select('*')
-        .eq('test_id', exam.id)
-        .eq('student_id', profile.id)
-        .is('completed_at', null);
-      
-      const existingRecord = existingRecords && existingRecords.length > 0 ? existingRecords[0] : null;
-      let examRecordId = existingRecord?.id;
-      let savedProgress = null;
-      
-      // 如果有未完成的考试记录，尝试获取保存的进度
-      if (examRecordId) {
-        try {
-          console.log('找到未完成考试记录, examRecordId:', examRecordId);
-          const progressResult = await backendClient.getExamProgress(examRecordId);
-          console.log('获取进度结果:', progressResult);
-          if (progressResult?.data) {
-            savedProgress = progressResult.data;
-            console.log('已恢复进度, answers:', savedProgress.answers);
-          } else {
-            console.log('没有找到保存的进度');
-          }
-        } catch (e) {
-          console.warn('获取考试进度失败:', e);
-        }
-      } else {
-        console.log('没有找到未完成的考试记录');
-      }
-      
-      // 如果没有未完成的记录，创建新的
-      if (!examRecordId) {
-        const now = new Date();
-        const { data: newRecord } = await backendClient
-          .from('exam_records')
-          .insert({
-            test_id: exam.id,
-            student_id: profile.id,
-            selected_question_ids: selectedIds,
-            started_at: toDatabaseDateTime(now),
-            completed_at: null,  // 显式设置为null，避免默认值
-            score: null,
-            is_passed: false,
-          });
-        if (newRecord && newRecord[0]) {
-          examRecordId = newRecord[0].id;
-        }
-      }
-
-      if (!examRecordId) {
-        alert('创建考试记录失败，请重试');
-        return;
-      }
-
-      const examWithExtra = exam as any;
-      setCurrentExamTest(examWithExtra);
-
-      // 解析保存进度中的综合题答案
-      const savedAnswers = savedProgress?.answers || {};
-      const examChoices: Record<string, Record<number, string>> = {};
-      const examBlanks: Record<string, Record<number, string[]>> = {};
-      for (const [qId, ans] of Object.entries(savedAnswers)) {
-        if (typeof ans === 'string' && ans.startsWith('{')) {
-          try {
-            const parsed = JSON.parse(ans);
-            if (parsed.choice_answers) examChoices[qId] = parsed.choice_answers;
-            if (parsed.blank_answers) examBlanks[qId] = parsed.blank_answers;
-          } catch {}
-        }
-      }
-      setExamCompositeChoiceAnswers(examChoices);
-      setExamCompositeBlankAnswers(examBlanks);
-
-      // 进入考试：重置「已到点」标记，否则第二场考试会一进去就被判超时
-      examTimeUpRef.current = false;
-      setExamTimeUp(false);
-
-      // 设置考试状态，如果有保存的进度则恢复
-      setActiveExam({
-        test: exam,
-        questions: shuffledQuestions,
-        answers: savedAnswers,
-        currentIndex: savedProgress?.current_index || 0,
-        // ⛔ 剩余时间以服务端算的为准（v3.1.17）：
-        //    前端 savedProgress.time_remaining 只在考试界面挂着时才递减，
-        //    学生关掉窗口再开就能白得一段时间。后端用 exam_progress.started_at
-        //    （MySQL 写入的时间戳）算出的 authoritative_remaining 才是真实的。
-        timeRemaining: (() => {
-          const fallback = (Number(exam.time_limit) || 60) * 60;
-          const serverRemain = (savedProgress as any)?.authoritative_remaining;
-          if (typeof serverRemain === 'number' && Number.isFinite(serverRemain)) {
-            return Math.max(0, serverRemain);
-          }
-          const saved = savedProgress?.time_remaining;
-          return typeof saved === 'number' && saved > 0 ? saved : fallback;
-        })(),
-        startedAt: new Date(),
-      });
-
-      // 保存 examRecordId 到 state 以便后续使用
-      setCurrentExamRecordId(examRecordId);
-      
-      // 更新本地 examRecords 列表
-      fetchExams();
+    const paperQuestions: any[] = (payload.paper && payload.paper.questions) || [];
+    if (!paperQuestions.length) {
+      if (!opts?.silent) alert('该考试暂无题目，请联系老师');
+      return;
     }
+    const questions = paperQuestions.map(normalizePaperItem);
+    const savedAnswers: Record<string, string> = payload.saved_answers || {};
+
+    // 恢复综合题的分小题答案（选择题/编程题的答案本来就是整串，直接从 savedAnswers 用）
+    const examChoices: Record<string, Record<number, string>> = {};
+    const examBlanks: Record<string, Record<number, string[]>> = {};
+    for (const [qId, ans] of Object.entries(savedAnswers)) {
+      if (typeof ans !== 'string' || !ans.startsWith('{')) continue;
+      try {
+        const parsed = JSON.parse(ans);
+        if (parsed.choice_answers) examChoices[qId] = parsed.choice_answers;
+        if (parsed.blank_answers) examBlanks[qId] = parsed.blank_answers;
+      } catch { /* 脏数据忽略 */ }
+    }
+    setExamCompositeChoiceAnswers(examChoices);
+    setExamCompositeBlankAnswers(examBlanks);
+
+    examTimeUpRef.current = false;
+    setExamTimeUp(false);
+    setCurrentExamTest({ ...(exam as any), paper_total: payload.paper_total });
+    setCurrentExamRecordId(payload.exam_record_id);
+    setActiveExam({
+      test: { ...(exam as any), paper_total: payload.paper_total } as any,
+      questions,
+      answers: savedAnswers,
+      currentIndex: Math.min(
+        Math.max(0, Number(payload.saved_index) || 0),
+        Math.max(0, questions.length - 1)
+      ),
+      // 剩余时间只认服务端算的（按 exam_records.started_at），前端关窗口偷不到时间
+      timeRemaining: Number.isFinite(Number(payload.remaining_seconds))
+        ? Math.max(0, Number(payload.remaining_seconds))
+        : (Number((exam as any).time_limit) || 60) * 60,
+      startedAt: new Date(),
+    });
+    setShowExamList(false);
+    fetchExams();
   };
 
   const handleAnswerExam = (answer: string) => {
@@ -711,6 +708,75 @@ export const TestModule: React.FC = () => {
     }
   };
 
+  /** 编程填空题：填第 blankIndex 空（答案存成 {"blanks":[...]}，与判分口径一致） */
+  const handleExamPythonBlank = (itemId: string, blankIndex: number, value: string) => {
+    if (!activeExam) return;
+    let blanks: string[] = [];
+    try {
+      const cur = JSON.parse(activeExam.answers[itemId] || '{}');
+      blanks = Array.isArray(cur.blanks) ? [...cur.blanks] : [];
+    } catch { blanks = []; }
+    blanks[blankIndex] = value;
+    const newAnswers = { ...activeExam.answers, [itemId]: JSON.stringify({ blanks }) };
+    setActiveExam({ ...activeExam, answers: newAnswers });
+    if (profile && currentExamRecordId) {
+      backendClient.saveExamProgress({
+        exam_record_id: currentExamRecordId,
+        student_id: profile.id,
+        test_id: activeExam.test.id,
+        answers: newAnswers,
+        current_index: activeExam.currentIndex,
+        time_remaining: activeExam.timeRemaining,
+      }).catch((e) => console.warn('保存答题进度失败:', e));
+    }
+  };
+
+  /**
+   * 渲染编程填空题模板：①②③ 就地换成输入框。
+   * 和「Python编程」模块的 renderFillBlankEditor 同一套占位符口径，
+   * 只是配色换成浅色（考试界面是白底，深色输入框在投影仪上看不清）。
+   */
+  const renderExamPythonTemplate = (
+    template: string,
+    values: string[],
+    onChange: (index: number, value: string) => void
+  ) => {
+    const lines = String(template || '').split('\n');
+    let answerIdx = 0;
+    return lines.map((line, lineIdx) => {
+      const parts: React.ReactNode[] = [];
+      let lastIdx = 0;
+      const re = /[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]/g;
+      let match: RegExpExecArray | null;
+      while ((match = re.exec(line)) !== null) {
+        if (match.index > lastIdx) {
+          parts.push(<span key={`t-${lineIdx}-${lastIdx}`}>{line.slice(lastIdx, match.index)}</span>);
+        }
+        const cur = answerIdx;
+        parts.push(
+          <input
+            key={`b-${lineIdx}-${match.index}`}
+            value={values[cur] || ''}
+            onChange={(e) => onChange(cur, e.target.value)}
+            className="mx-0.5 inline-block rounded border border-slate-300 bg-white px-1 py-0 text-center font-mono text-[13px] text-slate-800 focus:border-purple-400 focus:outline-none focus:ring-1 focus:ring-purple-300"
+            style={{ width: `${Math.min(22, Math.max(5, (values[cur]?.length || 3) + 2))}ch` }}
+            spellCheck={false}
+          />
+        );
+        answerIdx += 1;
+        lastIdx = match.index + match[0].length;
+      }
+      if (lastIdx < line.length) {
+        parts.push(<span key={`t-${lineIdx}-end`}>{line.slice(lastIdx)}</span>);
+      }
+      return (
+        <div key={lineIdx} className="whitespace-pre">
+          {parts.length ? parts : '\u00a0'}
+        </div>
+      );
+    });
+  };
+
   const handleNextExam = () => {
     if (!activeExam) return;
     if (activeExam.currentIndex < activeExam.questions.length - 1) {
@@ -811,6 +877,8 @@ export const TestModule: React.FC = () => {
 
       setExamResult({ 
         score, 
+        // 卷面满分（绝对分制）：结果页要显示「37 / 60」，不能只给一个 37
+        paperTotal: (result.data as any)?.paper_total ?? 100,
         correct, 
         points: points_earned, 
         // 2026-11-08：考试及格首次发放钻石（重考不再发），0 表示本次没有
@@ -839,6 +907,67 @@ export const TestModule: React.FC = () => {
     }
   };
 
+  // ==================== 考试窗口锁定 / 刷新恢复（2026-11-17） ====================
+  // ⛔ 心跳与「强制开始/强制结束」指令由 Desktop 上的 ExamWatcher 统一处理：
+  //    学生没打开考试窗口时也要收得到指令（只在考试窗口里心跳 = 停在桌面就永远被漏掉）。
+  const forceEndAt = useDesktopStore((s) => s.forceEndAt);
+  const [forceCountdown, setForceCountdown] = useState(0);
+  const submitExamRef = useRef<(() => void) | null>(null);
+  // 给「强制结束倒计时」用的间接引用：倒计时归零时调它交卷
+  useEffect(() => {
+    submitExamRef.current = () => { void handleSubmitExam(); };
+  }, [handleSubmitExam]);
+
+  /**
+   * 刷新页面 / 重新登录后自动回到考试界面。
+   * Desktop 查到未交卷的考试后会写 pendingExamTestId，这里等考试列表拉回来就进。
+   */
+  useEffect(() => {
+    if (!pendingExamTestId) return;
+    // ⛔ 不要「找不到就等」：强制开考时考试列表可能还没拉回来，
+    //    等下去学生就永远停在空列表上。只带 id 也能取卷（服务端按 id 装卷）。
+    const target = exams.find((e) => e.id === pendingExamTestId)
+      || ({ id: pendingExamTestId, title: '' } as any);
+    setPendingExam(null);
+    startExam(target, { silent: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingExamTestId]);
+
+  /** 考试进行中：锁死窗口（进入即最大化，不能关闭/最小化），并登记给 ExamWatcher 做离屏统计 */
+  const examRunning = !!activeExam;
+  const examIdForContext = activeExam?.test?.id || '';
+  const examTitleForContext = ((activeExam?.test as any)?.title as string) || '';
+  useEffect(() => {
+    if (examRunning) {
+      lockWindow('test');
+      setExamContext({ testId: examIdForContext, title: examTitleForContext });
+    } else {
+      unlockWindow('test');
+      setExamContext(null);
+      // 交卷后把强制结束标记清掉，否则下一场一进去就被倒计时
+      setForceEndAt(null);
+    }
+  }, [examRunning, examIdForContext, examTitleForContext, lockWindow, unlockWindow, setExamContext, setForceEndAt]);
+
+  /** 「老师强制结束」倒计时归零 → 自动交卷 */
+  useEffect(() => {
+    if (!forceEndAt) {
+      setForceCountdown(0);
+      return;
+    }
+    const update = () => {
+      const left = Math.max(0, Math.ceil((forceEndAt - Date.now()) / 1000));
+      setForceCountdown(left);
+      if (left <= 0) {
+        setForceEndAt(null);
+        // 用 ref 调，避免把 handleSubmitExam 放进依赖后每秒重建定时器
+        submitExamRef.current?.();
+      }
+    };
+    update();
+    const timer = setInterval(update, 1000);
+    return () => clearInterval(timer);
+  }, [forceEndAt, setForceEndAt]);
   const [examInternetCodes, setExamInternetCodes] = useState<string[]>([]);
 
   const fetchExamDetail = async (record: ExamRecord) => {
@@ -925,9 +1054,34 @@ export const TestModule: React.FC = () => {
         .select('*')
         .in('id', questionIds);
       
+      // 编程填空题不在 questions 表，按 py: 前缀单独取（2026-11-17 三题型试卷）
+      const pyIds = questionIds
+        .filter((id: any) => String(id).startsWith('py:'))
+        .map((id: any) => String(id).slice(3));
+      let extraPython: any[] = [];
+      if (pyIds.length) {
+        try {
+          const r: any = await backendClient
+            .from('python_tasks')
+            .selectExact('id, title, blank_template, blank_answers, blank_weights')
+            .in('id', pyIds);
+          extraPython = ((r && r.data) || []).map((t: any) => ({
+            id: `py:${t.id}`,
+            type: 'python_fill',
+            content: t.title || '编程填空',
+            options: '[]',
+            answers: JSON.stringify({ blank_answers: t.blank_answers, blank_weights: t.blank_weights }),
+            blank_template: t.blank_template || '',
+            explanation: '',
+          }));
+        } catch (e) {
+          console.warn('编程填空题详情加载失败:', e);
+        }
+      }
+      const allQuestions: any[] = [...((questionsData as any[]) || []), ...extraPython];
       console.log('questionsData:', questionsData);
       
-      if (questionsData && questionsData.length > 0) {
+      if (allQuestions.length > 0) {
         // 同时获取答案数据
         const answers: Record<string, string> = {};
         try {
@@ -964,14 +1118,14 @@ export const TestModule: React.FC = () => {
         let revealedList: any[] = [];
         try {
           const reveal = await backendClient.post('/api/practice/reveal-answers', {
-            question_ids: questionsData.map((q: any) => q.id),
+            question_ids: allQuestions.map((q: any) => q.id),
           });
           revealedList = (reveal as any)?.data?.questions || [];
         } catch (e) {
           console.warn('获取历史试卷答案失败:', e);
         }
-        const questions: Question[] = mergeRevealIntoQuestions(questionsData as Question[], revealedList);
-        questionsData.forEach((q: any) => {
+        const questions: Question[] = mergeRevealIntoQuestions(allQuestions as Question[], revealedList);
+        allQuestions.forEach((q: any) => {
           if (!answers[q.id]) {
             answers[q.id] = '';
           }
@@ -1371,7 +1525,12 @@ export const TestModule: React.FC = () => {
             <div className="grid grid-cols-3 gap-4 my-6 max-w-lg mx-auto">
               <div className="bg-blue-50 rounded-lg p-4">
                 <p className="text-sm text-gray-600">得分</p>
-                <p className="text-3xl font-bold text-blue-600">{examResult.score}</p>
+                <p className="text-3xl font-bold text-blue-600">
+                  {examResult.score}
+                  <span className="ml-1 text-base font-normal text-blue-400">
+                    / {examResult.paperTotal ?? 100}
+                  </span>
+                </p>
               </div>
               <div className="bg-green-50 rounded-lg p-4">
                 <p className="text-sm text-gray-600">正确</p>
@@ -1875,13 +2034,17 @@ export const TestModule: React.FC = () => {
     const progress = ((activeExam.currentIndex + 1) / activeExam.questions.length) * 100;
 
     // 计算已答题目数量
-    const answeredCount = Object.keys(activeExam.answers).filter(qId => {
-      const answer = activeExam.answers[qId];
-      return answer !== undefined && answer !== null && answer.toString().trim() !== '';
-    }).length;
+    const answeredCount = Object.keys(activeExam.answers).filter(qId => examAnswerFilled(activeExam.answers[qId])).length;
 
     return (
       <div className="p-6 select-none flex gap-4 relative" style={{ userSelect: 'none', WebkitUserSelect: 'none' }}>
+        {/* 老师强制结束（2026-11-17）：1 分钟倒计时，到点自动交卷 */}
+        {forceEndAt && (
+          <div className="fixed inset-x-0 top-0 z-[10001] bg-red-600 py-2 text-center text-sm font-medium text-white shadow-lg">
+            <i className="fa-solid fa-triangle-exclamation mr-2"></i>
+            老师已结束本场考试，<b>{forceCountdown}</b> 秒后自动交卷（已作答的内容会正常保存）
+          </div>
+        )}
         {/* 限时到点遮罩（v3.1.17）：倒计时归零后立即盖住整屏，防止继续作答。
             自动交卷成功后 activeExam 会被清空、遮罩自然消失；
             若后端拒绝（超时太久），handleSubmitExam 会解除遮罩并弹出原因。 */}
@@ -1983,6 +2146,36 @@ export const TestModule: React.FC = () => {
                     />
                   </div>
                 )}
+
+              {currentQuestion.type === 'python_fill' && (
+                <div className="mt-4">
+                  <div className="mb-3 flex flex-wrap items-center gap-2 text-sm text-gray-500">
+                    <span className="rounded-full bg-purple-100 px-2.5 py-0.5 text-xs font-medium text-purple-700">
+                      编程填空 · {currentQuestion.score || 10} 分
+                    </span>
+                    <span>按 ①②③ 的顺序，把空缺处的代码填进去</span>
+                  </div>
+                  {(currentQuestion as any).description && (
+                    <div className="mb-3 text-sm text-gray-600 question-rich-content">
+                      <div dangerouslySetInnerHTML={{ __html: sanitizeHtml((currentQuestion as any).description) }} />
+                    </div>
+                  )}
+                  <div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50 p-4 font-mono text-[13px] leading-7 text-slate-800">
+                    {renderExamPythonTemplate(
+                      (currentQuestion as any).blank_template || '',
+                      (() => {
+                        try {
+                          const p = JSON.parse(activeExam.answers[currentQuestion.id] || '{}');
+                          return Array.isArray(p.blanks) ? p.blanks : [];
+                        } catch {
+                          return [];
+                        }
+                      })(),
+                      (idx, val) => handleExamPythonBlank(currentQuestion.id, idx, val)
+                    )}
+                  </div>
+                </div>
+              )}
 
                 {currentQuestion.type === 'composite' && (
                   <div className="mt-4 space-y-4">
@@ -2106,9 +2299,7 @@ export const TestModule: React.FC = () => {
             
             <div className="grid grid-cols-5 gap-2">
               {activeExam.questions.map((q, index) => {
-                const isAnswered = activeExam.answers[q.id] !== undefined && 
-                                   activeExam.answers[q.id] !== null && 
-                                   activeExam.answers[q.id].toString().trim() !== '';
+                const isAnswered = examAnswerFilled(activeExam.answers[q.id]);
                 const isCurrent = index === activeExam.currentIndex;
                 return (
                   <button
@@ -2878,16 +3069,62 @@ export const TestModule: React.FC = () => {
                   const normalizeAnswer = (ans: string) => {
                     return ans.toLowerCase().trim();
                   };
-                  const isAnswered = userAnswer && userAnswer.trim() !== '';
-                  const isCorrect = isAnswered && correctAnswers.some((ans) => normalizeAnswer(ans) === normalizeAnswer(userAnswer));
+                  // 综合题/编程题前端拿不到标准答案（服务端判分），这里只回顾作答，不打对错
+                  const isStructured = q.type === 'composite' || q.type === 'python_fill';
+                  const isAnswered = !!userAnswer && userAnswer.trim() !== '';
+                  const isCorrect = !isStructured && isAnswered && correctAnswers.some((ans) => normalizeAnswer(ans) === normalizeAnswer(userAnswer));
+                  const badgeClass = isStructured
+                    ? 'bg-gray-400 text-white'
+                    : isAnswered
+                      ? (isCorrect ? 'bg-green-500 text-white' : 'bg-red-500 text-white')
+                      : 'bg-gray-400 text-white';
+
+                  // 结构化作答展开：综合题按小题、编程题按空
+                  let structuredRows: { label: string; value: string; extra?: string }[] = [];
+                  if (q.type === 'composite') {
+                    let p: any = {};
+                    try { p = JSON.parse(userAnswer || '{}'); } catch { p = {}; }
+                    const subs = getCompositeSubQuestions(q.answers);
+                    structuredRows = subs.map((sq: any, i: number) => {
+                      const c = (p.choice_answers || {})[i];
+                      const b = (p.blank_answers || {})[i];
+                      const shown = c != null && c !== ''
+                        ? String(c)
+                        : Array.isArray(b) ? b.filter(Boolean).join(' | ') : String(b == null ? '' : b);
+                      return { label: `第${i + 1}小题`, value: shown || '（空）', extra: sq.score ? `${sq.score} 分` : '' };
+                    });
+                  } else if (q.type === 'python_fill') {
+                    let arr: string[] = [];
+                    try {
+                      const p = JSON.parse(userAnswer || '{}');
+                      arr = Array.isArray(p.blanks) ? p.blanks : [];
+                    } catch { arr = []; }
+                    let weights: number[] = [];
+                    try {
+                      const a = JSON.parse(q.answers || '{}');
+                      weights = Array.isArray(a.blank_weights) ? a.blank_weights : [];
+                    } catch { weights = []; }
+                    structuredRows = arr.length
+                      ? arr.map((v, i) => ({ label: `第${i + 1}空`, value: v || '（空）', extra: weights[i] ? `${weights[i]} 分` : '' }))
+                      : [{ label: '', value: '这一题没有作答记录' }];
+                  }
+
                   return (
-                    <div key={q.id} className={`p-4 rounded-lg border ${isAnswered ? (isCorrect ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200') : 'bg-gray-50 border-gray-200'}`}>
+                    <div key={q.id} className={`p-4 rounded-lg border ${isStructured ? 'bg-gray-50 border-gray-200' : isAnswered ? (isCorrect ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200') : 'bg-gray-50 border-gray-200'}`}>
                       <div className="flex items-start gap-3">
-                        <span className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-lg ${isAnswered ? (isCorrect ? 'bg-green-500 text-white' : 'bg-red-500 text-white') : 'bg-gray-400 text-white'}`}>
-                          {isAnswered ? (isCorrect ? <i className="fa-solid fa-check"></i> : <i className="fa-solid fa-xmark"></i>) : <i className="fa-solid fa-minus"></i>}
+                        <span className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-lg ${badgeClass}`}>
+                          {isStructured
+                            ? <i className="fa-solid fa-list-check"></i>
+                            : isAnswered ? (isCorrect ? <i className="fa-solid fa-check"></i> : <i className="fa-solid fa-xmark"></i>) : <i className="fa-solid fa-minus"></i>}
                         </span>
-                        <div className="flex-1">
-                          <div className={`font-medium mb-2 question-rich-content ${isAnswered ? (isCorrect ? 'text-gray-800' : 'text-red-600') : 'text-gray-800'}`}>
+                        <div className="flex-1 min-w-0">
+                          <div className="mb-1 flex flex-wrap items-center gap-2 text-xs">
+                            <span className="rounded bg-white px-1.5 py-0.5 font-medium text-purple-600">第 {index + 1} 题</span>
+                            <span className="text-gray-500">
+                              {q.type === 'composite' ? '综合题' : q.type === 'python_fill' ? '编程填空' : '选择题'}
+                            </span>
+                          </div>
+                          <div className={`font-medium mb-2 question-rich-content ${!isStructured && isAnswered && !isCorrect ? 'text-red-600' : 'text-gray-800'}`}>
                             <div dangerouslySetInnerHTML={{ __html: sanitizeHtml(q.content) }} />
                           </div>
                           {q.type === 'choice' && q.options && (
@@ -2900,22 +3137,34 @@ export const TestModule: React.FC = () => {
                               ))}
                             </div>
                           )}
-                          <div className="text-sm space-y-1">
-                            <p className={isAnswered ? (isCorrect ? 'text-green-700' : 'text-red-700') : 'text-gray-500'}>
-                              <span className="font-medium">你的答案:</span> {userAnswer || '未作答'}
-                            </p>
-                            {!isCorrect && (
-                              <p className="text-green-700">
-                                <span className="font-medium">正确答案:</span> {correctAnswers.join(' / ')}
+                          {isStructured ? (
+                            <div className="text-sm space-y-1">
+                              {structuredRows.map((r, ri) => (
+                                <div key={ri} className="flex items-baseline gap-2">
+                                  {r.label && <span className="flex-shrink-0 text-gray-500">{r.label}</span>}
+                                  <span className="flex-1 break-all font-mono text-gray-800">{r.value}</span>
+                                  {r.extra && <span className="flex-shrink-0 text-xs text-gray-400">{r.extra}</span>}
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="text-sm space-y-1">
+                              <p className={isAnswered ? (isCorrect ? 'text-green-700' : 'text-red-700') : 'text-gray-500'}>
+                                <span className="font-medium">你的答案:</span> {userAnswer || '未作答'}
                               </p>
-                            )}
-                            {q.explanation && (
-                              <div className="text-gray-600 mt-2 pt-2 border-t border-gray-200 question-rich-content">
-                                <span className="font-medium">解析:</span>
-                                <span dangerouslySetInnerHTML={{ __html: sanitizeHtml(q.explanation) }} />
-                              </div>
-                            )}
-                          </div>
+                              {!isCorrect && (
+                                <p className="text-green-700">
+                                  <span className="font-medium">正确答案:</span> {correctAnswers.join(' / ')}
+                                </p>
+                              )}
+                              {q.explanation && (
+                                <div className="text-gray-600 mt-2 pt-2 border-t border-gray-200 question-rich-content">
+                                  <span className="font-medium">解析:</span>
+                                  <span dangerouslySetInnerHTML={{ __html: sanitizeHtml(q.explanation) }} />
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>

@@ -10,6 +10,8 @@ interface WindowFrameProps {
   isMaximized: boolean;
   isMinimized: boolean;
   zIndex: number;
+  /** 考试期间锁定：不显示最小化/最大化/关闭，也不能拖动（2026-11-17） */
+  isLocked?: boolean;
 }
 
 const MIN_WIDTH = 280;
@@ -98,6 +100,7 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({
   isMaximized,
   isMinimized,
   zIndex,
+  isLocked,
 }) => {
   const { closeWindow, minimizeWindow, maximizeWindow, restoreWindow, activateWindow } = useDesktopStore();
   const skin = useSkinStore((s) => s.activeSkin);
@@ -125,7 +128,7 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({
   });
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    if (isMaximized) return;
+    if (isMaximized || isLocked) return;
     if (e.button !== 0) return;
     dragState.current = {
       ...dragState.current,
@@ -138,7 +141,7 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({
     };
     setIsDragging(true);
     activateWindow(id);
-  }, [isMaximized, position.x, position.y, id, activateWindow]);
+  }, [isMaximized, isLocked, position.x, position.y, id, activateWindow]);
 
   const handleResizeStart = useCallback((direction: string, e: React.MouseEvent) => {
     if (isMaximized) return;
@@ -159,7 +162,7 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({
     setIsResizing(true);
     setResizeDirection(direction);
     activateWindow(id);
-  }, [isMaximized, position.x, position.y, size.width, size.height, id, activateWindow]);
+  }, [isMaximized, isLocked, position.x, position.y, size.width, size.height, id, activateWindow]);
 
   useEffect(() => {
     if (!isDragging && !isResizing) return;
@@ -315,35 +318,44 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({
 
         <div className="relative flex items-center gap-2 z-10">
           <span className={`${skin.titleTextClass} font-medium`}>{title}</span>
+          {isLocked && (
+            <span className={`${skin.titleTextClass} flex items-center gap-1 text-[11px] opacity-80`}>
+              <i className="fa-solid fa-lock"></i>考试进行中 · 交卷后才能关闭
+            </span>
+          )}
         </div>
         <div className="relative flex items-center gap-2 z-10">
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              minimizeWindow(id);
-            }}
-            className={`w-6 h-6 flex items-center justify-center rounded ${skin.buttonHoverClass} transition-colors`}
-          >
-            <i className={`fa-solid fa-minus ${skin.titleTextClass} text-xs`}></i>
-          </button>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              isMaximized ? restoreWindow(id) : maximizeWindow(id);
-            }}
-            className={`w-6 h-6 flex items-center justify-center rounded ${skin.buttonHoverClass} transition-colors`}
-          >
-            <i className={`fa-solid ${isMaximized ? 'fa-compress' : 'fa-expand'} ${skin.titleTextClass} text-xs`}></i>
-          </button>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              closeWindow(id);
-            }}
-            className={`w-6 h-6 flex items-center justify-center rounded ${skin.closeButtonClass} transition-colors`}
-          >
-            <i className={`fa-solid fa-xmark ${skin.titleTextClass} text-xs`}></i>
-          </button>
+          {!isLocked && (
+            <>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  minimizeWindow(id);
+                }}
+                className={`w-6 h-6 flex items-center justify-center rounded ${skin.buttonHoverClass} transition-colors`}
+              >
+                <i className={`fa-solid fa-minus ${skin.titleTextClass} text-xs`}></i>
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  isMaximized ? restoreWindow(id) : maximizeWindow(id);
+                }}
+                className={`w-6 h-6 flex items-center justify-center rounded ${skin.buttonHoverClass} transition-colors`}
+              >
+                <i className={`fa-solid ${isMaximized ? 'fa-compress' : 'fa-expand'} ${skin.titleTextClass} text-xs`}></i>
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  closeWindow(id);
+                }}
+                className={`w-6 h-6 flex items-center justify-center rounded ${skin.closeButtonClass} transition-colors`}
+              >
+                <i className={`fa-solid fa-xmark ${skin.titleTextClass} text-xs`}></i>
+              </button>
+            </>
+          )}
         </div>
       </div>
       <div className={`h-[calc(100%-40px)] overflow-auto ${skin.contentBgClass}`}>

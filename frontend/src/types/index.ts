@@ -37,6 +37,12 @@ export interface WindowState {
   zIndex: number;
   component: React.ReactNode;
   initialData?: any;
+  /**
+   * 锁定窗口（2026-11-17）：考试进行中由学生端置为 true。
+   * 锁定后不能关闭、不能最小化、不能还原，标题栏也只剩标题（隐藏三个按钮）。
+   * ⛔ 解锁必须走桌面 store 的 unlockWindow()，不要在业务里直接改 isOpen。
+   */
+  isLocked?: boolean;
 }
 
 export interface DesktopIcon {
